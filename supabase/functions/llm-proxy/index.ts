@@ -32,6 +32,7 @@ type ErrorCode =
   | "forbidden"
   | "key_missing"
   | "credential_unreadable"
+  | "provider_credential_rejected"
   | "unsupported_provider"
   | "upstream_error"
   | "internal";
@@ -73,6 +74,13 @@ function mapUpstreamError(error: unknown): Response {
     );
   }
   if (error instanceof UpstreamFailure) {
+    if (error.kind === "http" && (error.status === 401 || error.status === 403)) {
+      return errResponse(
+        502,
+        "provider_credential_rejected",
+        "The saved model provider credential was rejected. Reconnect it in Marketplace.",
+      );
+    }
     const statusDetail = error.kind === "http" && error.status
       ? ` (HTTP ${error.status})`
       : "";

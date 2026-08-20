@@ -52,6 +52,7 @@ import {
   buildSwanbotToolTurnBody,
   buildOpenSwanTerminalReceipt,
   createLegacyRoundNudgeHook,
+  hasSwanbotRoutingFallback,
   needsCapExhaustionFinalization,
   parseSwanbotToolTurnData,
   shapeLegacyToolHandlerResult,
@@ -609,6 +610,9 @@ async function runTypedCoreSubagentToolLoop(args: {
       }
       const parsed = parseSwanbotToolTurnData(data);
       if (!routing && parsed.routing) routing = parsed.routing;
+      if (hasSwanbotRoutingFallback(parsed.routing)) {
+        edgeFailed = true;
+      }
       return parsed.turn;
     },
   };

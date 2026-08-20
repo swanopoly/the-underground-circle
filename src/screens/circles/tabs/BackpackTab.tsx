@@ -9,7 +9,7 @@
  * and Giza's dark depth aesthetic.
  */
 
-import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
+import React, { useEffect, useRef, useState, Suspense, lazy } from 'react';
 import CompartmentErrorBoundary from '../../../components/CompartmentErrorBoundary';
 import {
   View,
@@ -17,40 +17,39 @@ import {
   StyleSheet,
   Pressable,
   ScrollView,
-  Animated,
   Platform,
   useWindowDimensions,
 } from 'react-native';
 import { useBackpackData } from '../../../hooks/useBackpackData';
+import { GRID } from '../../../lib/pixelDesign';
 import {
-  PIXEL_COLORS, PIXEL_ICONS, GRID, PX,
-  pixelCard, pixelInset, pixelHeader, pixelLabel, pixelBody, pixelMuted,
-  iconBoxStyle,
-} from '../../../lib/pixelDesign';
+  BACKPACK_COMPARTMENTS,
+  isBackpackCompartmentKey,
+  type BackpackCompartmentKey,
+} from '../../../lib/backpackCompartments';
 import { LoadingScreen } from '../../../components/LoadingWave';
-// Lightweight panels that are cheap to ship on the initial bundle.
-import CostDashboard from '../../../components/CostDashboard';
-import AgentPerformanceMetrics from '../../../components/AgentPerformanceMetrics';
-import FarmHealthDashboard from '../../../components/FarmHealthDashboard';
-import OfficeAnalyticsPanel from '../../../components/OfficeAnalyticsPanel';
-import OfficeTerminal from '../../../components/OfficeTerminal';
-import SessionTagsDashboard from '../../../components/SessionTagsDashboard';
-import SharedMemoryPanel from '../../../components/SharedMemoryPanel';
-import ProjectRoomsPanel from '../../../components/ProjectRoomsPanel';
-import PromptManagerPanel from './office/PromptManagerPanel';
-import TraceViewer from '../../../components/TraceViewer';
-import DevicePanel from '../../../components/DevicePanel';
-import SecondBrainDashboard from '../../../components/SecondBrainDashboard';
+import InteractiveBackpack2D from '../../../components/backpack2d/InteractiveBackpack2D';
+import { getAllCompartmentStats } from '../../../components/backpack3d/compartmentActivity';
 
-// Heavy / niche compartments — deferred. These panels (TradingBotPanel ~3.5K
-// lines with Solana deps, ModelLabPanel, LLMBenchmarkPanel, PixelOfficeCanvas)
-// are only rendered when the user taps their Backpack compartment. Code-split
-// them so they don't weigh down the initial bundle for users who never open
-// the Backpack — or who only use cost / terminal / traces.
+// Every compartment is deferred. The overview only needs the shared registry,
+// activity snapshot, and semantic 2.5D launcher; loading all 14 panel trees up
+// front would make the primary Backpack interaction pay for unopened tools.
+const CostDashboard = lazy(() => import('../../../components/CostDashboard'));
+const AgentPerformanceMetrics = lazy(() => import('../../../components/AgentPerformanceMetrics'));
+const FarmHealthDashboard = lazy(() => import('../../../components/FarmHealthDashboard'));
+const OfficeAnalyticsPanel = lazy(() => import('../../../components/OfficeAnalyticsPanel'));
+const OfficeTerminal = lazy(() => import('../../../components/OfficeTerminal'));
+const SessionTagsDashboard = lazy(() => import('../../../components/SessionTagsDashboard'));
+const SharedMemoryPanel = lazy(() => import('../../../components/SharedMemoryPanel'));
+const ProjectRoomsPanel = lazy(() => import('../../../components/ProjectRoomsPanel'));
+const PromptManagerPanel = lazy(() => import('./office/PromptManagerPanel'));
+const TraceViewer = lazy(() => import('../../../components/TraceViewer'));
+const DevicePanel = lazy(() => import('../../../components/DevicePanel'));
 const TradingBotPanel = lazy(() => import('../../../components/TradingBotPanel'));
 const ModelLabPanel = lazy(() => import('../../../components/ModelLabPanel'));
 const LLMBenchmarkPanel = lazy(() => import('../../../components/LLMBenchmarkPanel'));
 const PixelOfficeCanvas = lazy(() => import('../../../components/PixelOfficeCanvas'));
+const SecondBrainDashboard = lazy(() => import('../../../components/SecondBrainDashboard'));
 
 function CompartmentSuspenseFallback() {
   return (
@@ -60,59 +59,102 @@ function CompartmentSuspenseFallback() {
   );
 }
 
-type Compartment = 'none' | 'cost' | 'terminal' | 'farm' | 'performance' | 'projects' | 'analytics' | 'canvas' | 'prompts' | 'traces' | 'llm-bench' | 'model-lab' | 'trading' | 'devices';
+function BackpackLoadFailure({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <View style={styles.loadFailure} accessibilityRole="alert">
+      <View style={styles.loadFailureMark}>
+        <Text style={styles.loadFailureMarkText}>!</Text>
+      </View>
+      <Text style={styles.loadFailureTitle}>Backpack unavailable</Text>
+      <Text style={styles.loadFailureText}>{message}</Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Retry loading Backpack"
+        onPress={onRetry}
+        style={({ hovered, pressed, focused }: any) => [
+          styles.loadFailureButton,
+          hovered && Platform.OS === 'web' ? styles.loadFailureButtonHover : null,
+          focused ? styles.loadFailureButtonFocused : null,
+          pressed ? styles.loadFailureButtonPressed : null,
+        ]}
+      >
+        <Text style={styles.loadFailureButtonText}>Try again</Text>
+      </Pressable>
+    </View>
+  );
+}
 
-// Pixel-art icon blocks instead of emoji
-const COMPARTMENTS: {
-  key: Compartment;
-  label: string;
-  iconLabel: string;   // Text rendered inside pixel block
-  color: string;
-  description: string;
-}[] = [
-  { key: 'cost',        label: 'Cost Tracker',   iconLabel: '$',  color: '#f59e0b', description: 'Spending analytics & budget alerts' },
-  { key: 'terminal',    label: 'Command Center',  iconLabel: '>_', color: '#22c55e', description: 'Terminal & agent commands' },
-  { key: 'traces',      label: 'Traces',          iconLabel: '?',  color: '#3b82f6', description: 'Request traces & replay' },
-  { key: 'farm',        label: 'Agent Farm',       iconLabel: '+',  color: '#22c55e', description: 'Health monitoring & status' },
-  { key: 'performance', label: 'Performance',      iconLabel: '#',  color: '#fbbf24', description: 'Top performers & metrics' },
-  { key: 'projects',    label: 'Projects',         iconLabel: '[]', color: '#6366f1', description: 'Tags, memory & project rooms' },
-  { key: 'analytics',   label: 'Analytics',        iconLabel: '//', color: '#a855f7', description: 'Deep office analytics' },
-  { key: 'canvas',      label: 'Canvas',           iconLabel: '::',  color: '#6366f1', description: 'Pixel agent visualization' },
-  { key: 'prompts',     label: 'Prompts',          iconLabel: 'P',  color: '#f43f5e', description: 'Prompt library & management' },
-  { key: 'llm-bench',   label: 'LLM Bench',        iconLabel: '|=|', color: '#3b82f6', description: 'BlackSwan vs industry models' },
-  { key: 'model-lab',   label: 'Model Lab',        iconLabel: '🧬',  color: '#8b5cf6', description: 'Train, optimize & deploy custom LLMs' },
-  { key: 'trading',     label: 'Trading Bot',      iconLabel: '◎',   color: '#6366f1', description: 'Solana trading, DCA, alerts & P&L' },
-  { key: 'devices',     label: 'Devices',          iconLabel: '🖨',   color: '#a855f7', description: 'Printers, 3D printers, serial & USB' },
-];
+type FocusablePressable = { focus?: () => void };
+type SummaryMetricId = 'spend' | 'agents' | 'tokens' | 'health';
+type ReturnFocusOrigin =
+  | { kind: 'pocket'; key: BackpackCompartmentKey }
+  | { kind: 'metric'; id: SummaryMetricId };
 
 interface Props {
   circleId: string;
   accentColor?: string;
+  onOpenOffice: () => void;
 }
 
-export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props) {
+export default function BackpackTab({ circleId, accentColor = '#6366f1', onOpenOffice }: Props) {
   const data = useBackpackData(circleId);
-  const [activeCompartment, setActiveCompartment] = useState<Compartment>('none');
+  const [activeCompartment, setActiveCompartment] = useState<BackpackCompartmentKey | null>(null);
+  const returnFocusOrigin = useRef<ReturnFocusOrigin | null>(null);
+  const backButtonRef = useRef<FocusablePressable | null>(null);
+  const summaryMetricRefs = useRef<Partial<Record<SummaryMetricId, FocusablePressable | null>>>({});
   const { width } = useWindowDimensions();
   const isDesktop = width > 768;
 
-  // Terminal shared state — must match OfficeTerminal's expected defaults
-  const [terminalInput, setTerminalInput] = useState('');
-  const [terminalTargetId, setTerminalTargetId] = useState<string | null>(null);
-  const [terminalTargetName, setTerminalTargetName] = useState('@all');
-  const [terminalModel, setTerminalModel] = useState<string | null>(null);
-  const [terminalTargetIds, setTerminalTargetIds] = useState<string[] | null>(null);
+  const openCompartment = (
+    key: BackpackCompartmentKey,
+    origin: ReturnFocusOrigin = { kind: 'pocket', key },
+  ) => {
+    returnFocusOrigin.current = origin;
+    setActiveCompartment(key);
+  };
 
-  const handleBack = () => setActiveCompartment('none');
+  const handleBack = () => setActiveCompartment(null);
+
+  const handleNestedCompartmentOpen = (key: string) => {
+    if (isBackpackCompartmentKey(key)) openCompartment(key);
+  };
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const frame = requestAnimationFrame(() => {
+      if (activeCompartment) {
+        backButtonRef.current?.focus?.();
+        return;
+      }
+      const origin = returnFocusOrigin.current;
+      if (origin?.kind === 'metric') summaryMetricRefs.current[origin.id]?.focus?.();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [activeCompartment]);
 
   // ─── Expanded compartment view ─────────────────────────────────
-  if (activeCompartment !== 'none') {
-    const meta = COMPARTMENTS.find(c => c.key === activeCompartment)!;
+  if (activeCompartment) {
+    const meta = BACKPACK_COMPARTMENTS.find(c => c.key === activeCompartment);
+    if (!meta) return null;
     return (
-      <View style={styles.container}>
-        <Pressable onPress={handleBack} style={styles.backRow}>
-          <Text style={[styles.backArrow, { color: meta.color }]}>{'<-'}</Text>
-          <Text style={styles.backText}>BACKPACK</Text>
+      <View style={styles.container} testID={`backpack-panel-${activeCompartment}`}>
+        <Pressable
+          ref={(node) => {
+            backButtonRef.current = node as unknown as FocusablePressable | null;
+          }}
+          accessibilityRole="button"
+          accessibilityLabel="Back to Backpack"
+          accessibilityHint="Return to the interactive Backpack overview"
+          onPress={handleBack}
+          style={({ hovered, pressed, focused }: any) => [
+            styles.backRow,
+            hovered && Platform.OS === 'web' ? styles.backRowHover : null,
+            focused ? styles.backRowFocused : null,
+            pressed ? styles.backRowPressed : null,
+          ]}
+        >
+          <Text style={[styles.backArrow, { color: meta.color }]}>←</Text>
+          <Text style={styles.backText}>Backpack</Text>
           <View style={[styles.compartmentBadge, { backgroundColor: meta.color + '20', borderColor: meta.color + '30' }]}>
             <View style={[styles.badgePixelIcon, { backgroundColor: meta.color + '20', borderColor: meta.color + '40' }]}>
               <Text style={[styles.badgePixelChar, { color: meta.color }]}>{meta.iconLabel}</Text>
@@ -123,34 +165,69 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
 
         <View style={styles.compartmentContent}>
           <CompartmentErrorBoundary name={meta.label} color={meta.color} onBack={handleBack}>
+          <Suspense fallback={<CompartmentSuspenseFallback />}>
+          {activeCompartment === 'knowledge' && (
+            <ScrollView
+              style={styles.knowledgeScroll}
+              contentContainerStyle={styles.knowledgeScrollContent}
+              nestedScrollEnabled
+            >
+              <SecondBrainDashboard
+                circleId={circleId}
+                userId={data.currentUserId}
+                accentColor={accentColor}
+                onOpenCompartment={handleNestedCompartmentOpen}
+              />
+            </ScrollView>
+          )}
           {activeCompartment === 'cost' && (
             <CostDashboard
               sessions={data.enrichedSessions}
               agents={data.enrichedAgents}
               sessionTags={data.sessionTags}
               accentColor={accentColor}
+              costAuthority="estimated"
             />
           )}
           {activeCompartment === 'terminal' && (
-            <OfficeTerminal
-              circleId={circleId}
-              userId={data.currentUserId}
-              userDisplayName={data.currentUserName}
-              agents={data.mergedCircleAgents}
-              myAgentIds={data.mergedCircleAgents.filter(a => a.isOwn).map(a => a.id)}
-              sharedInput={terminalInput}
-              onSharedInputChange={setTerminalInput}
-              sharedTargetId={terminalTargetId}
-              sharedTargetName={terminalTargetName}
-              onSharedSelectTarget={(id: string | null, name: string) => {
-                setTerminalTargetId(id);
-                setTerminalTargetName(name);
-              }}
-              sharedModel={terminalModel}
-              onSharedModelChange={setTerminalModel}
-              sharedTargetIds={terminalTargetIds}
-              onSharedSelectTargets={(ids, _names) => setTerminalTargetIds(ids)}
-            />
+            <View style={styles.terminalCompartment}>
+              <View style={styles.terminalOwnerNotice} accessibilityRole="summary">
+                <View style={styles.terminalOwnerCopy}>
+                  <Text style={styles.terminalOwnerTitle}>Dispatch from the Office</Text>
+                  <Text style={styles.terminalOwnerText}>
+                    Recorded command history is available here in read-only mode. Commands, automations,
+                    local shell, training, and agent creation stay in the Office's live exact-authority surface.
+                  </Text>
+                </View>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Open the Office Command Center"
+                  accessibilityHint="Switch to the canonical live terminal and command dispatcher"
+                  testID="backpack-open-office-terminal"
+                  onPress={onOpenOffice}
+                  style={({ hovered, pressed, focused }: any) => [
+                    styles.openOfficeButton,
+                    hovered && Platform.OS === 'web' ? styles.openOfficeButtonHover : null,
+                    focused ? styles.openOfficeButtonFocused : null,
+                    pressed ? styles.openOfficeButtonPressed : null,
+                  ]}
+                >
+                  <Text style={styles.openOfficeButtonText}>Open Office</Text>
+                  <Text style={styles.openOfficeButtonArrow}>→</Text>
+                </Pressable>
+              </View>
+              <View style={styles.terminalReadSurface}>
+                <OfficeTerminal
+                  circleId={circleId}
+                  userId={data.currentUserId}
+                  userDisplayName={data.currentUserName}
+                  agents={data.mergedCircleAgents}
+                  myAgentIds={data.mergedCircleAgents.filter(a => a.isOwn).map(a => a.id)}
+                  readOnly
+                  readOnlyReason="Backpack shows recorded history only. Open the Office to run commands or tools."
+                />
+              </View>
+            </View>
           )}
           {activeCompartment === 'traces' && (
             <TraceViewer
@@ -190,12 +267,10 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
             />
           )}
           {activeCompartment === 'canvas' && (
-            <Suspense fallback={<CompartmentSuspenseFallback />}>
-              <PixelOfficeCanvas
-                agents={data.mergedCircleAgents}
-                currentUserId={data.currentUserId}
-              />
-            </Suspense>
+            <PixelOfficeCanvas
+              agents={data.mergedCircleAgents}
+              currentUserId={data.currentUserId}
+            />
           )}
           {activeCompartment === 'prompts' && (
             <PromptManagerPanel
@@ -205,31 +280,26 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
             />
           )}
           {activeCompartment === 'llm-bench' && (
-            <Suspense fallback={<CompartmentSuspenseFallback />}>
-              <LLMBenchmarkPanel
-                accentColor={accentColor}
-              />
-            </Suspense>
+            <LLMBenchmarkPanel
+              accentColor={accentColor}
+            />
           )}
           {activeCompartment === 'model-lab' && (
-            <Suspense fallback={<CompartmentSuspenseFallback />}>
-              <ModelLabPanel circleId={circleId} />
-            </Suspense>
+            <ModelLabPanel circleId={circleId} />
           )}
           {activeCompartment === 'trading' && (
-            <Suspense fallback={<CompartmentSuspenseFallback />}>
-              <TradingBotPanel
-                circleId={circleId}
-                userId={data.currentUserId}
-                accentColor={accentColor}
-              />
-            </Suspense>
+            <TradingBotPanel
+              circleId={circleId}
+              userId={data.currentUserId}
+              accentColor={accentColor}
+            />
           )}
           {activeCompartment === 'devices' && (
             <DevicePanel
               circleId={circleId}
             />
           )}
+          </Suspense>
           </CompartmentErrorBoundary>
         </View>
       </View>
@@ -241,29 +311,43 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
     return <LoadingScreen />;
   }
 
+  if (data.error && !data.lastRefreshed) {
+    return (
+      <BackpackLoadFailure
+        message={data.error}
+        onRetry={() => { void data.refresh(); }}
+      />
+    );
+  }
+
   // Compute quick stats
   const activeAgents = data.enrichedAgents.filter(a => a.status === 'active').length;
-  const healthyAgents = data.enrichedAgents.filter(a => a.status !== 'error').length;
+  const healthyAgents = data.enrichedAgents.filter(
+    a => a.status === 'active' || a.status === 'idle',
+  ).length;
   const healthPct = data.enrichedAgents.length > 0
     ? Math.round((healthyAgents / data.enrichedAgents.length) * 100)
-    : 100;
+    : null;
   // Format tokens
   const fmtTokens = (n: number) => n >= 1_000_000 ? `${(n/1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n/1000).toFixed(1)}K` : String(n);
   const summaryMetrics: Array<{
+    id: SummaryMetricId;
     label: string;
     value: string;
     detail: string;
     color: string;
-    target: Compartment;
+    target: BackpackCompartmentKey;
   }> = [
     {
-      label: 'Spend today',
-      value: `$${data.periodCosts.today.toFixed(2)}`,
-      detail: `$${data.periodCosts.week.toFixed(2)} this week`,
+      id: 'spend',
+      label: 'Estimated spend today',
+      value: `~$${data.periodCosts.today.toFixed(2)}`,
+      detail: `~$${data.periodCosts.week.toFixed(2)} across 7 days`,
       color: '#f59e0b',
       target: 'cost',
     },
     {
+      id: 'agents',
       label: 'Agents',
       value: String(data.agentCount),
       detail: `${activeAgents} active`,
@@ -271,20 +355,57 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
       target: 'farm',
     },
     {
+      id: 'tokens',
       label: 'Tokens today',
       value: fmtTokens(data.totalTokensToday),
-      detail: `${data.totalMessagesToday} messages`,
+      detail: `${data.totalMessagesToday} terminal responses`,
       color: '#3b82f6',
       target: 'traces',
     },
     {
-      label: 'Health',
-      value: `${healthPct}%`,
-      detail: `${healthyAgents}/${data.enrichedAgents.length || 1} healthy`,
-      color: healthPct >= 90 ? '#22c55e' : healthPct >= 70 ? '#f59e0b' : '#ef4444',
+      id: 'health',
+      label: 'Agents available',
+      value: healthPct == null ? '—' : `${healthPct}%`,
+      detail: healthPct == null
+        ? 'No verified agent data'
+        : `${healthyAgents}/${data.enrichedAgents.length} active or idle`,
+      color: healthPct == null
+        ? '#64748b'
+        : healthPct >= 90 ? '#22c55e' : healthPct >= 70 ? '#f59e0b' : '#ef4444',
       target: 'farm',
     },
   ];
+
+  const summaryBar = (
+    <View style={[styles.summaryBar, !isDesktop && styles.summaryBarCompact]}>
+      {summaryMetrics.map(metric => (
+        <Pressable
+          key={metric.id}
+          ref={(node) => {
+            summaryMetricRefs.current[metric.id] = node as unknown as FocusablePressable | null;
+          }}
+          accessibilityRole="button"
+          accessibilityLabel={`Open ${metric.label} details`}
+          accessibilityHint={`Open the ${BACKPACK_COMPARTMENTS.find(item => item.key === metric.target)?.label || 'related'} compartment`}
+          onPress={() => openCompartment(metric.target, { kind: 'metric', id: metric.id })}
+          style={({ hovered, pressed, focused }: any) => [
+            styles.summaryMetric,
+            !isDesktop && styles.summaryMetricCompact,
+            hovered && Platform.OS === 'web' ? styles.summaryMetricHover : null,
+            focused ? styles.summaryMetricFocused : null,
+            pressed ? styles.summaryMetricPressed : null,
+          ]}
+        >
+          <View style={styles.summaryMetricLabelRow}>
+            <View style={[styles.summaryMetricDot, { backgroundColor: metric.color }]} />
+            <Text style={styles.summaryMetricLabel}>{metric.label}</Text>
+          </View>
+          <Text style={styles.summaryMetricValue}>{metric.value}</Text>
+          <Text style={styles.summaryMetricDetail}>{metric.detail}</Text>
+        </Pressable>
+      ))}
+    </View>
+  );
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.scrollContent}>
@@ -292,7 +413,7 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
       <View style={styles.header}>
         <View style={styles.headerCopy}>
           <Text style={styles.headerEyebrow}>PRIVATE WORKSPACE</Text>
-          <Text style={styles.headerTitle}>Backpack</Text>
+          <Text style={styles.headerTitle} accessibilityRole="header">Backpack</Text>
           <Text style={styles.headerSubtitle}>
             {data.lastRefreshed
               ? `Your circle snapshot, updated ${new Date(data.lastRefreshed).toLocaleTimeString()}`
@@ -302,61 +423,68 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Refresh Backpack data"
+          accessibilityState={{ busy: data.refreshing, disabled: data.refreshing }}
+          disabled={data.refreshing}
           onPress={data.refresh}
-          style={({ hovered, pressed }: any) => [
+          style={({ hovered, pressed, focused }: any) => [
             styles.refreshBtn,
+            data.refreshing && styles.refreshBtnDisabled,
             hovered && Platform.OS === 'web' ? styles.refreshBtnHover : null,
+            focused ? styles.refreshBtnFocused : null,
             pressed ? styles.refreshBtnPressed : null,
           ]}
         >
           <Text style={styles.refreshIcon}>↻</Text>
-          <Text style={styles.refreshText}>Refresh</Text>
+          <Text style={styles.refreshText}>{data.refreshing ? 'Refreshing' : 'Refresh'}</Text>
         </Pressable>
       </View>
 
-      <View style={[styles.summaryBar, !isDesktop && styles.summaryBarCompact]}>
-        {summaryMetrics.map(metric => (
-          <Pressable
-            key={metric.label}
-            accessibilityRole="button"
-            onPress={() => setActiveCompartment(metric.target)}
-            style={({ hovered, pressed }: any) => [
-              styles.summaryMetric,
-              !isDesktop && styles.summaryMetricCompact,
-              hovered && Platform.OS === 'web' ? styles.summaryMetricHover : null,
-              pressed ? styles.summaryMetricPressed : null,
-            ]}
-          >
-            <View style={styles.summaryMetricLabelRow}>
-              <View style={[styles.summaryMetricDot, { backgroundColor: metric.color }]} />
-              <Text style={styles.summaryMetricLabel}>{metric.label}</Text>
-            </View>
-            <Text style={styles.summaryMetricValue}>{metric.value}</Text>
-            <Text style={styles.summaryMetricDetail}>{metric.detail}</Text>
-          </Pressable>
-        ))}
-      </View>
+      {data.error && data.lastRefreshed ? (
+        <View style={styles.staleBanner} accessibilityRole="alert">
+          <View style={styles.staleDot} />
+          <Text style={styles.staleText}>{data.error}</Text>
+          <Text style={styles.staleMeta}>Showing the snapshot from {new Date(data.lastRefreshed).toLocaleTimeString()}.</Text>
+        </View>
+      ) : null}
+
+      {data.budgetConfigNotice ? (
+        <View style={styles.partialNotice} accessibilityRole="alert">
+          <View style={styles.partialNoticeMark}>
+            <Text style={styles.partialNoticeMarkText}>!</Text>
+          </View>
+          <View style={styles.partialNoticeCopy}>
+            <Text style={styles.partialNoticeTitle}>Budget alerts unavailable</Text>
+            <Text style={styles.partialNoticeText}>{data.budgetConfigNotice}</Text>
+          </View>
+        </View>
+      ) : null}
+
+      {isDesktop ? summaryBar : null}
 
       {data.budgetAlerts.length > 0 && (
-        <View style={[styles.alertBanner, {
-          borderColor: data.budgetAlerts[0].level === 'critical' ? '#ef4444' :
-                        data.budgetAlerts[0].level === 'danger' ? '#f59e0b' : '#ffffff15',
-          backgroundColor: data.budgetAlerts[0].level === 'critical' ? '#ef444415' :
-                            data.budgetAlerts[0].level === 'danger' ? '#f59e0b15' : '#ffffff08',
-        }]}>
+        <View
+          accessibilityRole="alert"
+          style={[styles.alertBanner, {
+            borderColor: data.budgetAlerts[0].level === 'critical' ? '#ef4444' :
+                          data.budgetAlerts[0].level === 'danger' ? '#f59e0b' : '#ffffff15',
+            backgroundColor: data.budgetAlerts[0].level === 'critical' ? '#ef444415' :
+                              data.budgetAlerts[0].level === 'danger' ? '#f59e0b15' : '#ffffff08',
+          }]}
+        >
           <Text style={styles.alertIcon}>!</Text>
           <Text style={styles.alertText}>{data.budgetAlerts[0].message}</Text>
         </View>
       )}
 
-      <SecondBrainDashboard
-        circleId={circleId}
-        userId={data.currentUserId}
-        accentColor={accentColor}
-        onOpenCompartment={(key) => setActiveCompartment(key as Compartment)}
+      <InteractiveBackpack2D
+        onOpenCompartment={(key) => openCompartment(key, { kind: 'pocket', key })}
+        restoreFocusKey={returnFocusOrigin.current?.kind === 'pocket' ? returnFocusOrigin.current.key : null}
+        stats={getAllCompartmentStats(data)}
       />
 
-      <View style={[styles.secondaryGrid, isDesktop && styles.secondaryGridDesktop]}>
+      {!isDesktop ? summaryBar : null}
+
+      <View style={styles.secondaryGrid}>
         {data.recentActivity.length > 0 && (
           <View style={styles.activitySection}>
             <View style={styles.sectionHeaderRow}>
@@ -372,95 +500,8 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
             ))}
           </View>
         )}
-
-        <View style={styles.bottomTabs}>
-          <View style={styles.sectionHeaderRow}>
-            <Text style={styles.sectionLabel}>Tools</Text>
-            <Text style={styles.sectionMeta}>{COMPARTMENTS.length} available</Text>
-          </View>
-          <Text style={styles.sectionHint}>Open a focused workspace without leaving your Backpack.</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.bottomTabsRow}>
-            {COMPARTMENTS.map((comp) => (
-              <Pressable
-                key={comp.key}
-                accessibilityRole="button"
-                onPress={() => setActiveCompartment(comp.key)}
-                style={({ hovered, pressed }: any) => [
-                  styles.bottomTab,
-                  hovered && Platform.OS === 'web' ? styles.bottomTabHover : null,
-                  pressed ? styles.bottomTabPressed : null,
-                ]}
-              >
-                <View style={[styles.bottomTabDot, { backgroundColor: comp.color }]} />
-                <Text style={styles.bottomTabLabel}>{comp.label}</Text>
-              </Pressable>
-            ))}
-          </ScrollView>
-        </View>
       </View>
     </ScrollView>
-  );
-}
-
-// ─── Compartment Card ─────────────────────────────────────────────
-
-function CompartmentCard({
-  iconLabel, label, description, color, miniStat, hasActivity, delay, onPress, isDesktop,
-}: {
-  iconLabel: string;
-  label: string;
-  description: string;
-  color: string;
-  miniStat: string;
-  hasActivity?: boolean;
-  delay: number;
-  onPress: () => void;
-  isDesktop: boolean;
-}) {
-  const fadeAnim = useRef(new Animated.Value(0)).current;
-  const slideAnim = useRef(new Animated.Value(12)).current;
-
-  useEffect(() => {
-    Animated.parallel([
-      Animated.timing(fadeAnim, { toValue: 1, duration: 400, delay, useNativeDriver: true }),
-      Animated.timing(slideAnim, { toValue: 0, duration: 400, delay, useNativeDriver: true }),
-    ]).start();
-  }, []);
-
-  return (
-    <Animated.View style={[
-      styles.compCardWrap,
-      isDesktop && styles.compCardWrapDesktop,
-      { opacity: fadeAnim, transform: [{ translateY: slideAnim }] },
-    ]}>
-      <Pressable onPress={onPress} style={[styles.compCard, { borderColor: color + '25' }]}>
-        {/* Left accent stripe — pixel-thick */}
-        <View style={[styles.compStripe, { backgroundColor: color }]} />
-
-        <View style={styles.compBody}>
-          <View style={styles.compTop}>
-            {/* Pixel icon block instead of emoji */}
-            <View style={[styles.compIconWrap, { backgroundColor: color + '12', borderColor: color + '30' }]}>
-              <Text style={[styles.compIconChar, { color }]}>{iconLabel}</Text>
-              {/* Activity pulse */}
-              {hasActivity && (
-                <View style={[styles.activityPulse, { backgroundColor: color }]} />
-              )}
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.compLabel, { color }]}>{label}</Text>
-              <Text style={styles.compDesc}>{description}</Text>
-            </View>
-            <Text style={styles.compArrow}>{'->'}</Text>
-          </View>
-
-          {/* Mini stat bar */}
-          <View style={[styles.compStatBar, { backgroundColor: color + '08', borderTopColor: color + '15' }]}>
-            <Text style={[styles.compStatText, { color: color + 'cc' }]}>{miniStat}</Text>
-          </View>
-        </View>
-      </Pressable>
-    </Animated.View>
   );
 }
 
@@ -469,10 +510,46 @@ function CompartmentCard({
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#07090d' },
   scrollContent: { paddingBottom: 48 },
-  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 12 },
-  loadingText: { color: PIXEL_COLORS.text2, fontSize: 12, fontFamily: 'monospace' },
-
-  // Overview header
+  loadFailure: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    padding: 28,
+    backgroundColor: '#07090d',
+  },
+  loadFailureMark: {
+    width: 42,
+    height: 42,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#f59e0b55',
+    borderRadius: 14,
+    backgroundColor: '#f59e0b14',
+  },
+  loadFailureMarkText: { color: '#fbbf24', fontSize: 20, fontWeight: '800' },
+  loadFailureTitle: { color: '#f2f4f8', fontSize: 18, fontWeight: '700' },
+  loadFailureText: { maxWidth: 440, color: '#8f9aae', fontSize: 13, lineHeight: 19, textAlign: 'center' },
+  loadFailureButton: {
+    minHeight: 44,
+    minWidth: 112,
+    marginTop: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+    borderWidth: 1,
+    borderColor: '#3a4763',
+    borderRadius: 10,
+    backgroundColor: '#141a29',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  loadFailureButtonHover: { backgroundColor: '#1a2133', borderColor: '#4c5a7c' },
+  loadFailureButtonFocused: {
+    ...Platform.select({ web: { outlineStyle: 'none', boxShadow: '0 0 0 3px rgba(99,102,241,0.5)' } as any, default: {} }),
+  },
+  loadFailureButtonPressed: { opacity: 0.78 },
+  loadFailureButtonText: { color: '#eef2f7', fontSize: 12, fontWeight: '700' },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -480,81 +557,109 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: GRID.md,
     paddingHorizontal: GRID.lg,
-    paddingTop: 28,
+    paddingTop: 30,
     paddingBottom: 18,
   },
   headerCopy: { flex: 1, minWidth: 240 },
   headerEyebrow: {
-    color: '#788398',
+    color: '#7c87b8',
     fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 1.5,
-    marginBottom: 6,
+    fontWeight: '800',
+    letterSpacing: 2,
+    marginBottom: 7,
   },
   headerTitle: {
-    color: '#f7f8fb',
-    fontSize: 30,
-    lineHeight: 35,
-    fontWeight: '700',
-    letterSpacing: -0.8,
+    color: '#f4f6fb',
+    fontSize: 32,
+    lineHeight: 37,
+    fontWeight: '800',
+    letterSpacing: -1,
   },
-  headerSubtitle: { color: '#8f9aae', fontSize: 13, lineHeight: 19, marginTop: 4 },
+  headerSubtitle: { color: '#8b96b0', fontSize: 13, lineHeight: 19, marginTop: 5 },
   refreshBtn: {
-    minHeight: 40,
-    borderRadius: 10,
-    backgroundColor: '#0f131c',
+    minHeight: 44,
+    borderRadius: 11,
+    backgroundColor: '#10141e',
     borderWidth: 1,
-    borderColor: '#242b38',
-    paddingHorizontal: 14,
+    borderColor: '#2a3346',
+    paddingHorizontal: 15,
     flexDirection: 'row',
     gap: 7,
     justifyContent: 'center',
     alignItems: 'center',
-    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.16s ease' } as any : {}),
+    ...(Platform.OS === 'web' ? {
+      cursor: 'pointer',
+      transition: 'background-color 0.16s ease, border-color 0.16s ease',
+    } as any : {}),
   },
-  refreshBtnHover: { backgroundColor: '#151a25', borderColor: '#343d4e' },
-  refreshBtnPressed: { opacity: 0.78, transform: [{ scale: 0.98 }] },
-  refreshIcon: { color: '#aab4c6', fontSize: 15 },
-  refreshText: { color: '#dce2ec', fontSize: 12, fontWeight: '600' },
+  refreshBtnHover: { backgroundColor: '#161c2b', borderColor: '#3d4a68' },
+  refreshBtnFocused: {
+    ...Platform.select({ web: { outlineStyle: 'none', boxShadow: '0 0 0 3px rgba(99,102,241,0.5)' } as any, default: {} }),
+  },
+  refreshBtnDisabled: { opacity: 0.58 },
+  refreshBtnPressed: { opacity: 0.78, backgroundColor: '#1b2233' },
+  refreshIcon: { color: '#9aa6c4', fontSize: 15 },
+  refreshText: { color: '#dde3f0', fontSize: 12, fontWeight: '700', letterSpacing: 0.2 },
 
   // Circle snapshot
   summaryBar: {
     marginHorizontal: GRID.lg,
     marginBottom: 18,
-    padding: 4,
+    padding: 5,
     flexDirection: 'row',
-    gap: 4,
+    gap: 5,
     borderWidth: 1,
-    borderColor: '#1b2230',
-    borderRadius: 16,
-    backgroundColor: '#0b0f16',
+    borderColor: '#232c3f',
+    borderRadius: 18,
+    backgroundColor: '#0b0f18',
+    ...Platform.select({
+      web: { boxShadow: 'inset 0 1px 0 rgba(164,178,222,0.07)' } as any,
+      default: {},
+    }),
   },
   summaryBarCompact: { flexWrap: 'wrap' },
   summaryMetric: {
     flex: 1,
     minWidth: 120,
-    borderRadius: 12,
+    borderRadius: 13,
     paddingHorizontal: 14,
     paddingVertical: 13,
     gap: 3,
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'background-color 0.16s ease' } as any : {}),
   },
   summaryMetricCompact: { flexBasis: '46%' },
-  summaryMetricHover: { backgroundColor: '#121722' },
-  summaryMetricPressed: { backgroundColor: '#161c28', opacity: 0.86 },
+  summaryMetricHover: { backgroundColor: '#131927' },
+  summaryMetricFocused: {
+    ...Platform.select({ web: { outlineStyle: 'none', boxShadow: 'inset 0 0 0 2px rgba(99,102,241,0.6)' } as any, default: {} }),
+  },
+  summaryMetricPressed: { backgroundColor: '#171e2f', opacity: 0.88 },
   summaryMetricLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 7 },
-  summaryMetricDot: { width: 6, height: 6, borderRadius: 999 },
-  summaryMetricLabel: { color: '#8d98ab', fontSize: 11, fontWeight: '600' },
-  summaryMetricValue: { color: '#f2f4f8', fontSize: 22, lineHeight: 27, fontWeight: '700', letterSpacing: -0.35 },
-  summaryMetricDetail: { color: '#667186', fontSize: 10, lineHeight: 15 },
+  summaryMetricDot: { width: 6, height: 6, borderRadius: 2 },
+  summaryMetricLabel: {
+    color: '#8791ad',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.7,
+    textTransform: 'uppercase',
+  },
+  summaryMetricValue: {
+    color: '#f2f4fa',
+    fontSize: 24,
+    lineHeight: 29,
+    fontWeight: '800',
+    letterSpacing: -0.5,
+    fontVariant: ['tabular-nums'],
+  },
+  summaryMetricDetail: { color: '#66718e', fontSize: 10, lineHeight: 15 },
 
   sectionLabel: {
-    color: '#e5e9f0',
+    color: '#e8ecf5',
     fontSize: 13,
-    fontWeight: '600',
+    fontWeight: '700',
+    letterSpacing: -0.1,
   },
   sectionHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: GRID.sm },
-  sectionMeta: { color: '#657086', fontSize: 10, fontWeight: '500' },
+  sectionMeta: { color: '#5f6a88', fontSize: 10, fontWeight: '600', letterSpacing: 0.4 },
 
   // Budget alert
   alertBanner: {
@@ -565,7 +670,7 @@ const styles = StyleSheet.create({
     marginBottom: GRID.lg,
     padding: GRID.md,
     borderWidth: 1,
-    borderRadius: 12,
+    borderRadius: 13,
   },
   alertIcon: {
     color: '#f59e0b',
@@ -576,196 +681,158 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   alertText: { flex: 1, color: '#dce2eb', fontSize: 12, lineHeight: 18 },
-
-  // Compartments
-  compartmentsSection: { paddingHorizontal: GRID.lg },
-  compartmentHeader: {
+  staleBanner: {
+    maxWidth: 900,
+    width: 'auto',
+    alignSelf: 'center',
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: GRID.sm,
-  },
-  sectionHint: { color: '#748096', fontSize: 11, lineHeight: 16 },
-  viewToggle: {
-    paddingVertical: 4,
-    paddingHorizontal: GRID.sm,
-    borderRadius: 2,
-    borderWidth: 2,
-    borderColor: PIXEL_COLORS.border1,
-    backgroundColor: PIXEL_COLORS.bg2,
-  },
-  viewToggleActive: {
-    borderColor: '#6366f1',
-    backgroundColor: '#6366f115',
-  },
-  viewToggleText: {
-    fontSize: 10,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-    color: PIXEL_COLORS.text2,
-    letterSpacing: 1,
-  },
-  viewToggleTextActive: {
-    color: '#6366f1',
-  },
-  scene3dLoading: {
-    height: 500,
-    justifyContent: 'center',
     alignItems: 'center',
-    gap: 12,
-    backgroundColor: '#0a0a0a',
-    borderRadius: 4,
-  },
-  compartmentGrid: { gap: GRID.sm },
-  compartmentGridDesktop: {
-    flexDirection: 'row',
     flexWrap: 'wrap',
+    gap: 8,
+    marginHorizontal: GRID.lg,
+    marginBottom: GRID.lg,
+    paddingHorizontal: 13,
+    paddingVertical: 11,
+    borderWidth: 1,
+    borderColor: '#f59e0b42',
+    borderRadius: 12,
+    backgroundColor: '#f59e0b0f',
   },
-
-  // Compartment Card — pixel-art style
-  compCardWrap: {},
-  compCardWrapDesktop: { flexBasis: '48.5%' },
-  compCard: {
-    backgroundColor: PIXEL_COLORS.bg2,
-    borderWidth: 2,
-    borderRadius: 2,
-    flexDirection: 'row',
-    overflow: 'hidden',
-    height: 104,
-    ...Platform.select({
-      web: { boxShadow: `${PX}px ${PX}px 0px ${PIXEL_COLORS.bg0}` } as any,
-      default: {
-        shadowColor: PIXEL_COLORS.bg0,
-        shadowOffset: { width: PX, height: PX },
-        shadowOpacity: 1,
-        shadowRadius: 0,
-        elevation: 4,
-      },
-    }),
-  },
-  compStripe: { width: 4 },
-  compBody: { flex: 1, justifyContent: 'space-between' },
-  compTop: {
+  staleDot: { width: 7, height: 7, borderRadius: 999, backgroundColor: '#f59e0b' },
+  staleText: { flexShrink: 1, color: '#e8d6ae', fontSize: 11, lineHeight: 16 },
+  staleMeta: { color: '#927f5a', fontSize: 10, lineHeight: 15 },
+  partialNotice: {
+    maxWidth: 900,
+    width: 'auto',
+    alignSelf: 'center',
     flexDirection: 'row',
     alignItems: 'center',
-    padding: GRID.md,
-    gap: GRID.md,
+    gap: 10,
+    marginHorizontal: GRID.lg,
+    marginBottom: GRID.lg,
+    paddingHorizontal: 13,
+    paddingVertical: 11,
+    borderWidth: 1,
+    borderColor: '#f59e0b3d',
+    borderRadius: 11,
+    backgroundColor: '#f59e0b0d',
   },
-  compIconWrap: {
-    width: 36,
-    height: 36,
-    borderRadius: 2,
-    borderWidth: 2,
+  partialNoticeMark: {
+    width: 24,
+    height: 24,
+    alignItems: 'center',
     justifyContent: 'center',
-    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#f59e0b55',
+    borderRadius: 8,
   },
-  compIconChar: {
-    fontSize: 12,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-  },
-  compLabel: { fontSize: 12, fontWeight: '700', fontFamily: 'monospace', letterSpacing: 1 },
-  compDesc: { color: PIXEL_COLORS.text2, fontSize: 10, fontFamily: 'monospace', marginTop: 2 },
-  compArrow: { color: PIXEL_COLORS.text3, fontSize: 12, fontFamily: 'monospace', fontWeight: '700' },
-  compStatBar: {
-    paddingVertical: 5,
-    paddingHorizontal: GRID.md,
-    borderTopWidth: 2,
-    marginLeft: 4,
-  },
-  compStatText: { fontSize: 10, fontFamily: 'monospace', fontWeight: '600' },
-
-  // Back navigation
+  partialNoticeMarkText: { color: '#fbbf24', fontSize: 12, fontWeight: '800' },
+  partialNoticeCopy: { flex: 1, minWidth: 0 },
+  partialNoticeTitle: { color: '#e8d6ae', fontSize: 11, fontWeight: '700', marginBottom: 2 },
+  partialNoticeText: { color: '#927f5a', fontSize: 10, lineHeight: 15 },
   backRow: {
+    minHeight: 54,
     flexDirection: 'row',
     alignItems: 'center',
     gap: GRID.sm,
     paddingHorizontal: GRID.lg,
-    paddingVertical: GRID.md,
-    borderBottomWidth: 2,
-    borderBottomColor: PIXEL_COLORS.border0,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1f2737',
+    backgroundColor: '#0a0e15',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'background-color 0.15s ease' } as any : {}),
   },
-  backArrow: { fontSize: 14, fontWeight: '900', fontFamily: 'monospace' },
-  backText: { color: PIXEL_COLORS.text2, fontSize: 12, fontFamily: 'monospace', letterSpacing: 1 },
+  backRowHover: { backgroundColor: '#101623' },
+  backRowFocused: {
+    borderBottomColor: '#818cf8',
+    ...Platform.select({ web: { outlineStyle: 'none', boxShadow: 'inset 0 0 0 2px rgba(99,102,241,0.55)' } as any, default: {} }),
+  },
+  backRowPressed: { opacity: 0.78 },
+  backArrow: { fontSize: 18, lineHeight: 22, fontWeight: '600' },
+  backText: { color: '#a9b3c9', fontSize: 12, fontWeight: '700', letterSpacing: 0.2 },
   compartmentBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: PX,
-    paddingHorizontal: GRID.sm,
-    paddingVertical: PX,
-    borderRadius: 2,
+    gap: 6,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 999,
     borderWidth: 1,
-    marginLeft: PX,
+    marginLeft: 4,
   },
   badgePixelIcon: {
-    width: 20,
-    height: 20,
-    borderRadius: 2,
+    width: 22,
+    height: 22,
+    borderRadius: 7,
     borderWidth: 1,
     justifyContent: 'center',
     alignItems: 'center',
   },
   badgePixelChar: {
     fontSize: 9,
-    fontWeight: '900',
-    fontFamily: 'monospace',
+    fontWeight: '800',
   },
-  compartmentBadgeText: { fontSize: 11, fontWeight: '700', fontFamily: 'monospace' },
-  compartmentContent: { flex: 1 },
-
-  // Quick Actions
-  quickActions: { paddingHorizontal: GRID.lg, marginBottom: GRID.lg },
-  quickActionsRow: { flexDirection: 'row', gap: GRID.sm },
-  quickActionBtn: {
-    paddingVertical: GRID.md,
-    paddingHorizontal: GRID.lg,
-    borderRadius: 2,
-    borderWidth: 2,
-    backgroundColor: PIXEL_COLORS.bg2,
+  compartmentBadgeText: { fontSize: 11, fontWeight: '700', letterSpacing: 0.1 },
+  compartmentContent: { flex: 1, minHeight: 0 },
+  terminalCompartment: { flex: 1, minHeight: 0 },
+  terminalOwnerNotice: {
+    flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    minWidth: 70,
-  },
-  quickActionIcon: {
-    fontSize: 14,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-  },
-  quickActionLabel: {
-    fontSize: 9,
-    fontWeight: '700',
-    fontFamily: 'monospace',
-    color: PIXEL_COLORS.text2,
-    letterSpacing: 0.5,
-  },
-
-  // Activity pulse dot
-  activityPulse: {
-    position: 'absolute',
-    top: -2,
-    right: -2,
-    width: 7,
-    height: 7,
-    borderRadius: 4,
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 12,
+    margin: 12,
+    marginBottom: 0,
+    padding: 13,
     borderWidth: 1,
-    borderColor: PIXEL_COLORS.bg0,
+    borderColor: '#34d39933',
+    borderRadius: 13,
+    backgroundColor: '#0d1a15',
   },
-
-  // Secondary dashboard content
+  terminalOwnerCopy: { flex: 1, minWidth: 220 },
+  terminalOwnerTitle: { color: '#dcebe4', fontSize: 12, fontWeight: '700', marginBottom: 3 },
+  terminalOwnerText: { color: '#84978d', fontSize: 10, lineHeight: 15 },
+  openOfficeButton: {
+    minHeight: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+    paddingHorizontal: 15,
+    borderWidth: 1,
+    borderColor: '#34d3994d',
+    borderRadius: 11,
+    backgroundColor: '#0f231b',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  openOfficeButtonHover: { backgroundColor: '#153024', borderColor: '#34d39980' },
+  openOfficeButtonFocused: {
+    ...Platform.select({ web: { outlineStyle: 'none', boxShadow: '0 0 0 3px rgba(52,211,153,0.3)' } as any, default: {} }),
+  },
+  openOfficeButtonPressed: { opacity: 0.78 },
+  openOfficeButtonText: { color: '#b9ebd5', fontSize: 11, fontWeight: '700', letterSpacing: 0.2 },
+  openOfficeButtonArrow: { color: '#34d399', fontSize: 15, fontWeight: '700' },
+  terminalReadSurface: { flex: 1, minHeight: 0 },
+  knowledgeScroll: { flex: 1 },
+  knowledgeScrollContent: { paddingBottom: 32 },
   secondaryGrid: {
     marginHorizontal: GRID.lg,
     gap: GRID.md,
   },
-  secondaryGridDesktop: { flexDirection: 'row', alignItems: 'stretch' },
   activitySection: {
-    flex: 1,
-    minWidth: 280,
+    width: '100%',
+    maxWidth: 900,
+    alignSelf: 'center',
     padding: GRID.md,
     borderWidth: 1,
-    borderColor: '#1b2230',
-    borderRadius: 14,
-    backgroundColor: '#0b0f16',
+    borderColor: '#212a3d',
+    borderRadius: 16,
+    backgroundColor: '#0b0f18',
     gap: 4,
+    ...Platform.select({
+      web: { boxShadow: 'inset 0 1px 0 rgba(164,178,222,0.06)' } as any,
+      default: {},
+    }),
   },
   activityRow: {
     flexDirection: 'row',
@@ -773,7 +840,7 @@ const styles = StyleSheet.create({
     gap: GRID.sm,
     paddingVertical: 9,
     borderBottomWidth: 1,
-    borderBottomColor: '#171d28',
+    borderBottomColor: '#161d2c',
   },
   activityDot: {
     width: 6,
@@ -783,51 +850,11 @@ const styles = StyleSheet.create({
   activityText: {
     flex: 1,
     fontSize: 11,
-    color: '#b8c1cf',
+    color: '#b6c0d4',
   },
   activityTime: {
     fontSize: 10,
-    color: '#687388',
-  },
-
-  // Focused tool launcher
-  bottomTabs: {
-    flex: 1.5,
-    minWidth: 280,
-    padding: GRID.md,
-    gap: 7,
-    borderWidth: 1,
-    borderColor: '#1b2230',
-    borderRadius: 14,
-    backgroundColor: '#0b0f16',
-  },
-  bottomTabsRow: {
-    flexDirection: 'row',
-    gap: 7,
-    paddingRight: GRID.sm,
-    paddingTop: 3,
-  },
-  bottomTab: {
-    minHeight: 36,
-    borderWidth: 1,
-    borderColor: '#232b39',
-    borderRadius: 999,
-    backgroundColor: '#10151e',
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 7,
-    ...(Platform.OS === 'web' ? { transition: 'all 0.16s ease', cursor: 'pointer' } as any : {}),
-  },
-  bottomTabHover: { backgroundColor: '#171d28', borderColor: '#343d4d' },
-  bottomTabPressed: { opacity: 0.78, transform: [{ scale: 0.98 }] },
-  bottomTabDot: { width: 6, height: 6, borderRadius: 999 },
-  bottomTabLabel: {
-    color: '#b8c1cf',
-    fontSize: 10,
-    fontWeight: '600',
-    textAlign: 'center',
+    color: '#66718e',
+    fontVariant: ['tabular-nums'],
   },
 });

@@ -8,6 +8,11 @@ import { supabase } from '../../../../lib/supabase';
 import { subscribeWithReconnect } from '../../../../lib/subscribeWithReconnect';
 import { isUuidLike } from '../../../../lib/agentRuntimeSubject';
 import { getMemorySoulKey } from './agentSoulMemory';
+import {
+  createAgentMemoryCasRequest,
+  executeAgentMemoryCasMutation,
+  type AgentMemoryMutationOutcome,
+} from './agentMemoryMutationCore';
 import { MONO, formatMsgTime } from './AgentPanelShared';
 
 export type AgentMemoryPanelAuthority = OfficeConnectionExactAuthority;
@@ -49,32 +54,6 @@ function normalizeMemoryAuthority(
     accessToken,
     generation,
   };
-}
-
-function requireOneMemoryReceipt(
-  data: unknown,
-  expected: {
-    id: string;
-    circleId: string;
-    userId: string;
-    scope: string;
-    verify: (row: any) => boolean;
-  },
-): any {
-  if (!Array.isArray(data) || data.length !== 1) {
-    throw new Error('The memory change did not return exactly one receipt.');
-  }
-  const row = data[0];
-  if (
-    String(row?.id || '') !== expected.id
-    || String(row?.circle_id || '') !== expected.circleId
-    || String(row?.user_id || '') !== expected.userId
-    || String(row?.scope || '') !== expected.scope
-    || !expected.verify(row)
-  ) {
-    throw new Error('The memory change returned a mismatched receipt.');
-  }
-  return row;
 }
 
 function getMemoryTimestamp(mem: any): string {
@@ -261,6 +240,7 @@ export default function AgentMemoryPanel({
   const [mutatingMemoryId, setMutatingMemoryId] = useState<string | null>(null);
   const [memoryActionStatus, setMemoryActionStatus] = useState<string | null>(null);
   const memoryMutationLockRef = useRef<string | null>(null);
+  const editingMemorySnapshotRef = useRef<Record<string, unknown> | null>(null);
   const loadRequestGenerationRef = useRef(0);
   const verifiedScopeKeyRef = useRef<string | null>(null);
   const exactMemoryAuthority = normalizeMemoryAuthority(circleId, userId, identityAuthority);
@@ -513,6 +493,12 @@ export default function AgentMemoryPanel({
   }, [load]);
 
   useEffect(() => {
+    editingMemorySnapshotRef.current = null;
+    setEditingId(null);
+    setEditContent('');
+  }, [memoryLoadScopeKey]);
+
+  useEffect(() => {
     const handle = subscribeWithReconnect({
       channelName: `agent-memory-panel:${circleId}:${agentId}`,
       setup: (channel) => channel
@@ -628,44 +614,82 @@ export default function AgentMemoryPanel({
   const filteredCount = visibleSections.reduce((sum, section) => sum + section.items.length, 0);
 
   const mutateMemoryExact = async (
-    mem: any,
+    mem: Record<string, unknown>,
     patch: Record<string, unknown>,
-    verify: (row: any) => boolean,
-  ): Promise<any> => {
+  ): Promise<AgentMemoryMutationOutcome> => {
     const authority = normalizeMemoryAuthority(circleId, userId, identityAuthority);
-    const memoryId = String(mem?.id || '').trim();
-    const memoryScope = String(mem?.scope || '').trim();
+    const capturedScopeKey = memoryLoadScopeKey;
+    const request = createAgentMemoryCasRequest(mem, patch);
     if (
       !authority
       || !isIdentityAuthorityCurrent(authority)
-      || !memoryId
-      || !['agent', 'user', 'session'].includes(memoryScope)
-      || String(mem?.circle_id || '') !== authority.circleId
-      || String(mem?.user_id || '') !== authority.userId
+      || verifiedScopeKeyRef.current !== capturedScopeKey
+      || !request
+      || request.circleId !== authority.circleId
+      || request.userId !== authority.userId
     ) {
-      throw new Error('This memory is not writable under the current Office authority.');
+      return { kind: 'failure', reason: 'invalid_request' };
     }
-    const { data, error } = await supabase
-      .from('memory_entries')
-      .update({ ...patch, updated_at: new Date().toISOString() })
-      .eq('id', memoryId)
-      .eq('circle_id', authority.circleId)
-      .eq('user_id', authority.userId)
-      .eq('scope', memoryScope)
-      .eq('is_active', true)
-      .setHeader('Authorization', `Bearer ${authority.accessToken}`)
-      .select('id, circle_id, user_id, scope, content, is_active, pinned, retrieval_mode, importance');
-    if (error) throw error;
-    if (!isIdentityAuthorityCurrent(authority)) {
-      throw new Error('The Office session changed before the memory receipt was verified.');
+    const isCapturedMutationCurrent = () => (
+      currentMemoryLoadScopeKeyRef.current === capturedScopeKey
+      && verifiedScopeKeyRef.current === capturedScopeKey
+      && isIdentityAuthorityCurrent(authority)
+    );
+    return executeAgentMemoryCasMutation(
+      request,
+      async exactRequest => {
+        const result = await supabase
+          .from('memory_entries')
+          .update(exactRequest.patch)
+          .eq('id', exactRequest.id)
+          .eq('circle_id', exactRequest.circleId)
+          .eq('user_id', exactRequest.userId)
+          .eq('scope', exactRequest.scope)
+          .eq('visibility', exactRequest.visibility)
+          .eq('is_active', true)
+          .eq('updated_at', exactRequest.expectedUpdatedAt)
+          .setHeader('Authorization', `Bearer ${authority.accessToken}`)
+          .select('*');
+        return { data: result.data, error: result.error, status: result.status };
+      },
+      isCapturedMutationCurrent,
+    );
+  };
+
+  const publishSuccessfulMemoryReceipt = (row: Record<string, unknown>) => {
+    const id = String(row.id || '');
+    setMemories(current => (
+      row.is_active === false
+        ? current.filter(memory => String(memory.id || '') !== id)
+        : current.map(memory => String(memory.id || '') === id ? row : memory)
+    ));
+  };
+
+  const reconcileMemoryMutation = async (
+    outcome: AgentMemoryMutationOutcome,
+    successMessage: string,
+    conflictMessage: string,
+    failureMessage: string,
+  ): Promise<boolean> => {
+    if (!canPublishMemoryMutation()) return false;
+    if (outcome.kind === 'success') {
+      publishSuccessfulMemoryReceipt(outcome.row);
+      setMemoryActionStatus(successMessage);
+      await load();
+      return true;
     }
-    return requireOneMemoryReceipt(data, {
-      id: memoryId,
-      circleId: authority.circleId,
-      userId: authority.userId,
-      scope: memoryScope,
-      verify,
-    });
+    if (outcome.kind === 'conflict') {
+      setMemoryActionStatus(`CONFLICT: ${conflictMessage}`);
+      await load();
+      return false;
+    }
+    if (outcome.kind === 'outcome_unknown') {
+      setMemoryActionStatus('OUTCOME UNKNOWN: The memory change did not return a trustworthy receipt. Reloading the verified snapshot; inspect it before retrying.');
+      await load();
+      return false;
+    }
+    setMemoryActionStatus(`ERROR: ${failureMessage}`);
+    return false;
   };
 
   const beginMemoryMutation = (memoryId: string): boolean => {
@@ -679,29 +703,46 @@ export default function AgentMemoryPanel({
   const finishMemoryMutation = (memoryId: string) => {
     if (memoryMutationLockRef.current === memoryId) memoryMutationLockRef.current = null;
     const authority = normalizeMemoryAuthority(circleId, userId, identityAuthority);
-    if (authority && isIdentityAuthorityCurrent(authority)) {
+    if (
+      authority
+      && isIdentityAuthorityCurrent(authority)
+      && currentMemoryLoadScopeKeyRef.current === memoryLoadScopeKey
+    ) {
       setMutatingMemoryId(current => current === memoryId ? null : current);
     }
   };
 
-  const canPublishMemoryMutation = (): boolean => {
+  const hasCurrentMemoryAuthority = (): boolean => {
     const authority = normalizeMemoryAuthority(circleId, userId, identityAuthority);
     return !!authority && isIdentityAuthorityCurrent(authority);
   };
 
-  const handleSave = async (mem: any) => {
+  const canPublishMemoryMutation = (): boolean => {
+    return hasCurrentMemoryAuthority()
+      && currentMemoryLoadScopeKeyRef.current === memoryLoadScopeKey
+      && verifiedScopeKeyRef.current === memoryLoadScopeKey;
+  };
+
+  const handleSave = async () => {
+    const mem = editingMemorySnapshotRef.current;
     const id = String(mem?.id || '');
     if (!beginMemoryMutation(id)) return;
     try {
-      await mutateMemoryExact(mem, { content: editContent, embedding: null }, row => row.content === editContent);
-      if (!canPublishMemoryMutation()) return;
-      setEditingId(null);
-      setMemoryActionStatus(`Updated memory: ${String(mem?.title || 'Untitled memory')}`);
-      await load();
+      const saved = await reconcileMemoryMutation(
+        await mutateMemoryExact(mem || {}, { content: editContent, embedding: null }),
+        `Updated memory: ${String(mem?.title || 'Untitled memory')}`,
+        'This memory changed or was removed elsewhere. Your draft remains open; review the refreshed entry, then cancel and reopen Edit to rebase before saving.',
+        'The memory update was rejected; no successful save was confirmed.',
+      );
+      if (saved && canPublishMemoryMutation()) {
+        editingMemorySnapshotRef.current = null;
+        setEditingId(null);
+      }
     } catch (err) {
       console.warn('[AgentMemoryPanel] Failed to save memory:', err);
       if (canPublishMemoryMutation()) {
-        setMemoryActionStatus(`ERROR: Could not update memory: ${String(mem?.title || 'Untitled memory')}`);
+        setMemoryActionStatus('OUTCOME UNKNOWN: The memory update was interrupted. Reloading is required before retrying.');
+        await load();
       }
     } finally {
       finishMemoryMutation(id);
@@ -713,14 +754,24 @@ export default function AgentMemoryPanel({
     if (!beginMemoryMutation(id)) return;
     setDeletingMemoryId(id);
     try {
-      await mutateMemoryExact(mem, { is_active: false }, row => row.is_active === false);
-      if (!canPublishMemoryMutation()) return;
-      setEditingId(current => current === id ? null : current);
-      setMemoryActionStatus(`Deleted memory: ${title}`);
-      await load();
+      const deleted = await reconcileMemoryMutation(
+        await mutateMemoryExact(mem, { is_active: false }),
+        `Deleted memory: ${title}`,
+        'This memory changed or was removed elsewhere. The latest verified snapshot is reloading; review it before trying again.',
+        `Could not delete memory: ${title}. No successful deletion was confirmed.`,
+      );
+      if (deleted && canPublishMemoryMutation()) {
+        if (String(editingMemorySnapshotRef.current?.id || '') === id) {
+          editingMemorySnapshotRef.current = null;
+        }
+        setEditingId(current => current === id ? null : current);
+      }
     } catch (err) {
       console.warn('[AgentMemoryPanel] Failed to delete memory:', err);
-      if (canPublishMemoryMutation()) setMemoryActionStatus(`ERROR: Could not delete memory: ${title}`);
+      if (canPublishMemoryMutation()) {
+        setMemoryActionStatus('OUTCOME UNKNOWN: The memory deletion was interrupted. Reloading is required before retrying.');
+        await load();
+      }
     } finally {
       if (canPublishMemoryMutation()) {
         setDeletingMemoryId(current => current === id ? null : current);
@@ -751,14 +802,17 @@ export default function AgentMemoryPanel({
     if (!beginMemoryMutation(id)) return;
     const nextPinned = !mem.pinned;
     try {
-      await mutateMemoryExact(mem, { pinned: nextPinned }, row => row.pinned === nextPinned);
-      if (!canPublishMemoryMutation()) return;
-      setMemoryActionStatus(`${nextPinned ? 'Pinned' : 'Unpinned'} memory: ${String(mem?.title || 'Untitled memory')}`);
-      await load();
+      await reconcileMemoryMutation(
+        await mutateMemoryExact(mem, { pinned: nextPinned }),
+        `${nextPinned ? 'Pinned' : 'Unpinned'} memory: ${String(mem?.title || 'Untitled memory')}`,
+        'This memory changed or was removed elsewhere. The latest verified snapshot is reloading; review it before trying again.',
+        `Could not ${nextPinned ? 'pin' : 'unpin'} memory: ${String(mem?.title || 'Untitled memory')}. No successful change was confirmed.`,
+      );
     } catch (err) {
       console.warn('[AgentMemoryPanel] Failed to update memory pin:', err);
       if (canPublishMemoryMutation()) {
-        setMemoryActionStatus(`ERROR: Could not ${nextPinned ? 'pin' : 'unpin'} memory: ${String(mem?.title || 'Untitled memory')}`);
+        setMemoryActionStatus('OUTCOME UNKNOWN: The memory pin change was interrupted. Reloading is required before retrying.');
+        await load();
       }
     } finally {
       finishMemoryMutation(id);
@@ -769,22 +823,21 @@ export default function AgentMemoryPanel({
     const id = String(mem?.id || '');
     if (!beginMemoryMutation(id)) return;
     try {
-      await mutateMemoryExact(mem, {
-        importance: 0.95,
-        retrieval_mode: 'startup',
-        pinned: true,
-      }, row => (
-        row.pinned === true
-        && row.retrieval_mode === 'startup'
-        && Number(row.importance) === 0.95
-      ));
-      if (!canPublishMemoryMutation()) return;
-      setMemoryActionStatus(`Promoted memory: ${String(mem?.title || 'Untitled memory')}`);
-      await load();
+      await reconcileMemoryMutation(
+        await mutateMemoryExact(mem, {
+          importance: 0.95,
+          retrieval_mode: 'startup',
+          pinned: true,
+        }),
+        `Promoted memory: ${String(mem?.title || 'Untitled memory')}`,
+        'This memory changed or was removed elsewhere. The latest verified snapshot is reloading; review it before trying again.',
+        `Could not promote memory: ${String(mem?.title || 'Untitled memory')}. No successful promotion was confirmed.`,
+      );
     } catch (err) {
       console.warn('[AgentMemoryPanel] Failed to promote memory:', err);
       if (canPublishMemoryMutation()) {
-        setMemoryActionStatus(`ERROR: Could not promote memory: ${String(mem?.title || 'Untitled memory')}`);
+        setMemoryActionStatus('OUTCOME UNKNOWN: The memory promotion was interrupted. Reloading is required before retrying.');
+        await load();
       }
     } finally {
       finishMemoryMutation(id);
@@ -796,7 +849,7 @@ export default function AgentMemoryPanel({
   // panel truthful: existing rows can be managed exactly here; new durable
   // memory is created through Chat until that transport is exact end-to-end.
   const continueMemoryWriteInChat = (kind: 'memory' | 'instruction') => {
-    if (!canPublishMemoryMutation() || !onOpenInChat) {
+    if (!hasCurrentMemoryAuthority() || !onOpenInChat) {
       setAddError('Continue in Chat to add new memory. This panel only enables mutations that return an exact row receipt.');
       return;
     }
@@ -812,7 +865,7 @@ export default function AgentMemoryPanel({
   };
 
   const continueReasoningStandardInChat = () => {
-    if (!canPublishMemoryMutation() || !onOpenInChat) {
+    if (!hasCurrentMemoryAuthority() || !onOpenInChat) {
       setSaveResult('Continue in Chat to add the reasoning standard.');
       return;
     }
@@ -835,11 +888,31 @@ export default function AgentMemoryPanel({
   // Likewise, agent/user/session memories owned by someone else are read-only.
   const canEditMemory = (mem: any): boolean => {
     if (!exactMemoryAuthority || !isIdentityAuthorityCurrent(exactMemoryAuthority)) return false;
-    if (mem.scope === 'circle') return false;
-    // user_id is the canonical owner for agent/user/session scopes
+    // Every circle-shared lane stays read-only here, including shared session
+    // memory. This panel mutates only exact owner-private rows.
+    if (mem.visibility !== 'private') return false;
+    // user_id is the canonical owner for agent/user/session scopes, and a
+    // usable updated_at value is the compare-and-swap version.
     return !!mem.user_id
       && mem.user_id === exactMemoryAuthority.userId
-      && mem.circle_id === exactMemoryAuthority.circleId;
+      && mem.circle_id === exactMemoryAuthority.circleId
+      && !!createAgentMemoryCasRequest(mem, { pinned: !!mem.pinned });
+  };
+
+  const beginEditingMemory = (mem: Record<string, unknown>) => {
+    // Keep the exact version that was visible when Edit began. A Realtime
+    // refresh may replace the rendered row while the draft stays open; Save
+    // must still compare against this captured version to avoid lost updates.
+    editingMemorySnapshotRef.current = { ...mem };
+    setEditingId(String(mem.id || ''));
+    setEditContent(String(mem.content || ''));
+    setMemoryActionStatus(null);
+  };
+
+  const cancelEditingMemory = () => {
+    editingMemorySnapshotRef.current = null;
+    setEditingId(null);
+    setEditContent('');
   };
 
   const renderMemoryCard = (mem: any) => {
@@ -909,7 +982,7 @@ export default function AgentMemoryPanel({
               accessibilityLabel={`Save changes to ${String(mem.title || 'memory')}`}
               accessibilityState={{ disabled: mutatingMemoryId !== null, busy: mutatingMemoryId === mem.id }}
               disabled={mutatingMemoryId !== null}
-              onPress={() => { void handleSave(mem); }}
+              onPress={() => { void handleSave(); }}
               style={{ backgroundColor: '#22c55e20', paddingHorizontal: 10, borderRadius: 2, borderWidth: 1, borderColor: '#22c55e40', minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center', opacity: mutatingMemoryId !== null ? 0.5 : 1 }}
             >
               <Text style={{ color: '#22c55e', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{mutatingMemoryId === mem.id ? 'Saving…' : 'Save'}</Text>
@@ -917,7 +990,7 @@ export default function AgentMemoryPanel({
             <Pressable
               accessibilityRole="button"
               accessibilityLabel={`Cancel editing ${String(mem.title || 'memory')}`}
-              onPress={() => setEditingId(null)}
+              onPress={cancelEditingMemory}
               style={{ backgroundColor: '#1a1a28', paddingHorizontal: 10, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e', minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center' }}
             >
               <Text style={{ color: '#909098', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>Cancel</Text>
@@ -934,7 +1007,7 @@ export default function AgentMemoryPanel({
                 accessibilityLabel={`Edit memory: ${String(mem.title || 'Untitled memory')}`}
                 disabled={mutatingMemoryId !== null}
                 accessibilityState={{ disabled: mutatingMemoryId !== null }}
-                onPress={() => { setEditingId(mem.id); setEditContent(mem.content); }}
+                onPress={() => beginEditingMemory(mem)}
                 style={[{ paddingHorizontal: 10, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e', minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center', opacity: mutatingMemoryId !== null ? 0.45 : 1 }, Platform.OS === 'web' && { cursor: mutatingMemoryId !== null ? 'default' : 'pointer' } as any]}
               >
                 <Text style={{ color: '#a0a0b0', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>Edit</Text>
@@ -976,7 +1049,11 @@ export default function AgentMemoryPanel({
                 <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', fontFamily: MONO, letterSpacing: 0.5 }}>READ-ONLY</Text>
               </View>
               <Text style={{ color: '#505060', fontSize: 10, fontFamily: MONO, fontStyle: 'italic' }}>
-                {mem.scope === 'circle' ? 'shared across the circle' : 'owned by another user'}
+                {mem.visibility !== 'private' || mem.scope === 'circle'
+                  ? 'shared across the circle'
+                  : !mem.updated_at
+                    ? 'missing a verified write version'
+                    : 'owned by another user'}
               </Text>
             </View>
           )}
@@ -1020,7 +1097,7 @@ export default function AgentMemoryPanel({
         <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ color: saveResult.startsWith('ERROR') || saveResult.startsWith('EXCEPTION') ? '#ef4444' : '#22c55e', fontSize: 11, fontFamily: MONO }}>{saveResult}</Text>
       )}
       {memoryActionStatus ? (
-        <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ color: memoryActionStatus.startsWith('ERROR') ? '#ef4444' : '#22c55e', fontSize: 11, fontFamily: MONO }}>
+        <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ color: memoryActionStatus.startsWith('ERROR') || memoryActionStatus.startsWith('OUTCOME UNKNOWN') ? '#ef4444' : memoryActionStatus.startsWith('CONFLICT') ? '#f59e0b' : '#22c55e', fontSize: 11, fontFamily: MONO }}>
           {memoryActionStatus}
         </Text>
       ) : null}

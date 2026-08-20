@@ -131,7 +131,21 @@ const transpiled = ts.transpileModule(runSystemSource, {
 }).outputText;
 
 const mockRequire = (specifier: string): unknown => {
-  if (specifier === './supabase') return { supabase: mockSupabase };
+  if (specifier === './supabase') {
+    return {
+      supabase: mockSupabase,
+      getSupabaseClientForAccessToken: () => {
+        throw new Error('strict bearer-scoped reads are outside the replay-summary smoke scope');
+      },
+    };
+  }
+  if (specifier === './authSession') {
+    return {
+      safeGetUserForAccessToken: async () => {
+        throw new Error('strict bearer verification is outside the replay-summary smoke scope');
+      },
+    };
+  }
   if (specifier === './devLog') return { devLog: () => undefined };
   if (specifier === './agentRunLedgerPersistence') {
     return {
@@ -185,6 +199,26 @@ const mockRequire = (specifier: string): unknown => {
     return {
       buildConnectedAgentAcceptedRunProjection: () => {
         throw new Error('connected-agent handoff projection is outside the replay-summary smoke scope');
+      },
+    };
+  }
+  if (specifier === './runHistoryFilterCore') {
+    return {
+      bucketRunForHistory: () => {
+        throw new Error('run-history bucketing is outside the replay-summary smoke scope');
+      },
+      classifyRunHistoryRealtimeStatus: () => {
+        throw new Error('run-history realtime classification is outside the replay-summary smoke scope');
+      },
+      classifyStaleRunCancelReceipt: () => {
+        throw new Error('stale-run cancellation is outside the replay-summary smoke scope');
+      },
+    };
+  }
+  if (specifier === './officeOpsBoard') {
+    return {
+      isAwaitingConnectedAgentResultMetadata: () => {
+        throw new Error('Office connected-agent state is outside the replay-summary smoke scope');
       },
     };
   }

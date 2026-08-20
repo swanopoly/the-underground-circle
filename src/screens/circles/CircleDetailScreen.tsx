@@ -505,7 +505,12 @@ export default function CircleDetailScreen({ route, navigation }: any) {
       {/* BACKPACK — owner-only (OWNER_EMAIL); content never mounts for others */}
       {isOwnerAccount === true && (
         <LazyTab tabKey="BACKPACK" activeTab={activeTab}>
-          <BackpackTab circleId={circleId} accentColor={accentColor} />
+          <BackpackTab
+            key={circleId}
+            circleId={circleId}
+            accentColor={accentColor}
+            onOpenOffice={() => setActiveTab('OFFICE')}
+          />
         </LazyTab>
       )}
       <LazyTab tabKey="FEED" activeTab={activeTab}>

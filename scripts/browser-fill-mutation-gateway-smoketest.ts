@@ -116,8 +116,8 @@ assert(
 const executeStart = runtimeSource.indexOf('export async function executeOpenSwanRuntimeTool');
 const executeSource = runtimeSource.slice(executeStart, runtimeSource.indexOf('/**\n * Coordination-domain', executeStart));
 assert(
-  executeSource.indexOf('prepareGuardedBrowserFill(args, context)')
-    < executeSource.indexOf('maybeRequestToolApproval(tool, approvalArgs, context)'),
+  executeSource.indexOf('prepareGuardedBrowserFill(runtimeArgs, context)')
+    < executeSource.indexOf('maybeAuthorizeToolWithWorkflowReview('),
   'fresh browser identity is prepared before the exact approval lookup/request',
 );
 assert(
@@ -184,12 +184,19 @@ assert(
   runtimeSource.includes("approvalReceipt.approvalKey !== expectedRuntimeApprovalKey"),
   'the grounding policy checks the genuine OpenSwan receipt against the exact prepared call',
 );
+const fillExecutionStart = runtimeSource.indexOf('async function executeGuardedBrowserFill(');
+const fillExecutionEnd = runtimeSource.indexOf('async function executeGuardedBrowserToggle(', fillExecutionStart);
+const fillExecutionSource = runtimeSource.slice(fillExecutionStart, fillExecutionEnd);
 assert(
-  runtimeSource.includes('dispatchAuthorizedComputerAppMutation({')
-    && runtimeSource.includes('normalizedArgs: prepared.dispatchArgs')
-    && runtimeSource.includes('handler: async (sealedArgs)')
-    && runtimeSource.includes('fillGuardedNonSecretField({ ...sealedArgs })')
-    && !runtimeSource.includes('fillGuardedNonSecretField(prepared.dispatchArgs)'),
+  fillExecutionStart >= 0
+    && fillExecutionEnd > fillExecutionStart
+    && runtimeSource.includes('const dispatched = await dispatchAuthorizedComputerAppMutation({')
+    && runtimeSource.includes('normalizedArgs: input.normalizedArgs')
+    && fillExecutionSource.includes('const dispatched = await dispatchDurableComputerAppMutation({')
+    && fillExecutionSource.includes('normalizedArgs: prepared.dispatchArgs')
+    && fillExecutionSource.includes('handler: async (sealedArgs)')
+    && fillExecutionSource.includes('fillGuardedNonSecretField({\n        ...sealedArgs,')
+    && !fillExecutionSource.includes('fillGuardedNonSecretField(prepared.dispatchArgs)'),
   'handler entry recomputes the exact args binding and uses only dispatcher-sealed arguments',
 );
 assert(

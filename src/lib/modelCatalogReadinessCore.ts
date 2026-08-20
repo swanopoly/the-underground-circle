@@ -19,6 +19,7 @@ export type ProviderModelCatalogFailureCode =
   | 'forbidden'
   | 'key_missing'
   | 'credential_unreadable'
+  | 'provider_credential_rejected'
   | 'unsupported_provider'
   | 'upstream_error'
   | 'internal';
@@ -74,17 +75,29 @@ export interface ModelSelectionReadiness {
   message: string;
 }
 
-function normalizeCatalogProvider(provider: string): string {
-  if (provider === 'hugging_face' || provider === 'huggingface_endpoint') return 'huggingface';
+export interface ModelRouteIdentity {
+  provider: string;
+  /** Provider-native model id. Case is preserved and remains authoritative. */
+  model: string;
+}
+
+function normalizeCatalogProvider(provider: string, modelId?: string): string {
+  if (provider === 'blackswan' || provider === 'huggingface_endpoint') return 'huggingface_endpoint';
+  if (provider === 'hugging_face') return 'huggingface';
   if (provider === 'z_ai') return 'zai';
+  if (provider === 'huggingface' && String(modelId || '').trim().startsWith('huggingface_endpoint/')) {
+    return 'huggingface_endpoint';
+  }
   return provider;
 }
 
 function canonicalProviderModelId(provider: string, modelId: string): string {
   const normalizedProvider = normalizeCatalogProvider(provider);
   const raw = String(modelId || '').trim();
-  const prefixes = normalizedProvider === 'huggingface'
-    ? ['huggingface_endpoint/', 'huggingface/', 'hugging_face/', 'hf:']
+  const prefixes = normalizedProvider === 'huggingface_endpoint'
+    ? ['huggingface_endpoint/']
+    : normalizedProvider === 'huggingface'
+    ? ['huggingface/', 'hugging_face/', 'hf:']
     : normalizedProvider === 'zai'
       ? ['zai/', 'z_ai/']
       : [`${normalizedProvider}/`];
@@ -92,6 +105,18 @@ function canonicalProviderModelId(provider: string, modelId: string): string {
     if (raw.startsWith(prefix)) return raw.slice(prefix.length);
   }
   return raw;
+}
+
+/** Canonical execution identity shared by readiness and pre-dispatch fallback. */
+export function resolveModelRouteIdentity(
+  route: { provider: string; model: string } | null,
+): ModelRouteIdentity | null {
+  if (!route) return null;
+  const provider = normalizeCatalogProvider(route.provider, route.model);
+  return {
+    provider,
+    model: canonicalProviderModelId(provider, route.model),
+  };
 }
 
 /**
@@ -114,10 +139,19 @@ export function resolveModelSelectionReadiness(input: {
     };
   }
 
-  const provider = normalizeCatalogProvider(input.route.provider);
+  const identity = resolveModelRouteIdentity(input.route);
+  if (!identity) {
+    return {
+      state: 'route_unmanaged',
+      ready: true,
+      provider: null,
+      catalogStatus: null,
+      message: 'This model is owned by a separate capability route.',
+    };
+  }
+  const provider = identity.provider;
   const providerGroups = input.groups.filter(
-    (group) => normalizeCatalogProvider(group.provider) === provider
-      || (group.provider === 'blackswan' && provider === 'huggingface'),
+    (group) => normalizeCatalogProvider(group.provider) === provider,
   );
   const connectedGroups = providerGroups.filter((group) => group.connected);
   if (connectedGroups.length === 0) {
@@ -130,7 +164,7 @@ export function resolveModelSelectionReadiness(input: {
     };
   }
 
-  const requestedId = canonicalProviderModelId(provider, input.route.model);
+  const requestedId = identity.model;
   for (const group of connectedGroups) {
     const match = group.models.find((model) => (
       canonicalProviderModelId(provider, model.id) === requestedId
@@ -201,19 +235,22 @@ export function buildModelCatalogReadinessProfile(input: {
   connected: boolean;
   snapshotStatus: ProviderModelCatalogStatus;
   selectableModelCount: number;
+  failureCode?: ProviderModelCatalogFailureCode;
 }): ModelCatalogReadinessProfile {
   const count = Number.isFinite(input.selectableModelCount)
     ? Math.max(0, Math.min(1000, Math.floor(input.selectableModelCount)))
     : 0;
 
-  if (!input.connected) {
+  if (!input.connected || isStableProviderCredentialFailure(input.failureCode)) {
     return {
       state: 'not_connected',
       connected: false,
       accountInventoryVerified: false,
       selectableModelCount: count,
-      label: 'Not connected',
-      hint: 'Connect this provider to verify and run its models.',
+      label: input.connected ? 'Reconnect required' : 'Not connected',
+      hint: input.connected
+        ? 'The saved provider credential was rejected or could not be read. Reconnect it before running these models.'
+        : 'Connect this provider to verify and run its models.',
     };
   }
 
@@ -257,4 +294,15 @@ export function buildModelCatalogReadinessProfile(input: {
     label: 'Curated fallback',
     hint: 'The account catalog could not be checked. Exact access is checked when a run starts.',
   };
+}
+
+/** Stable credential failures cannot recover by dispatching the same key. */
+export function isStableProviderCredentialFailure(
+  failureCode: ProviderModelCatalogFailureCode | null | undefined,
+): boolean {
+  return failureCode === 'unauthenticated'
+    || failureCode === 'forbidden'
+    || failureCode === 'key_missing'
+    || failureCode === 'credential_unreadable'
+    || failureCode === 'provider_credential_rejected';
 }

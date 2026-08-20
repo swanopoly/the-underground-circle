@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import {
   buildOpenSwanConnectionFingerprint,
   OFFICE_AGENT_SESSION_BINDING_LIMITS,
+  parseOfficeAgentSessionBindingMutationReceipt,
   resolveOfficeAgentSessionBinding,
   type OfficeAgentSessionBindingFailureReason,
   type OfficeAgentSessionBindingResolution,
@@ -22,12 +23,14 @@ const OTHER_AGENT_BOT_ID = '5d555555-5555-4555-8555-555555555555';
 const CONNECTION_ID = 'conn_primary';
 const OTHER_CONNECTION_ID = 'conn_secondary';
 const SESSION_KEY = 'agent:main:Alpha';
+const BINDING_UPDATED_AT = '2026-08-18T12:00:00.000Z';
 
 const binding = {
   id: BINDING_ID,
   officeAgentId: OFFICE_AGENT_ID,
   agentBotId: AGENT_BOT_ID,
   sessionKey: SESSION_KEY,
+  updatedAt: BINDING_UPDATED_AT,
 };
 
 const connection = {
@@ -249,6 +252,30 @@ function main(): void {
       `missing or placeholder token ${JSON.stringify(token)}`,
     );
   }
+  assert.equal(resolveWith({
+    connections: [{ ...connection, endpoint: 'http://localhost:18790', token: '' }],
+    sessionFingerprintsByConnection: {
+      [CONNECTION_ID]: buildOpenSwanConnectionFingerprint({
+        ...connection,
+        endpoint: 'http://localhost:18790',
+        token: '',
+      }),
+    },
+  }).ok, true, 'canonical browser loopback proxy may inject the token outside the client binding resolver');
+  for (const endpoint of [
+    'http://localhost:18789',
+    'http://localhost:18790/private',
+    'http://localhost:18790/?route=other',
+    'http://192.0.2.1:18790',
+    'https://localhost:18790',
+  ]) {
+    expectReason(resolveWith({
+      connections: [{ ...connection, endpoint, token: '' }],
+      sessionFingerprintsByConnection: {
+        [CONNECTION_ID]: buildOpenSwanConnectionFingerprint({ ...connection, endpoint, token: '' }),
+      },
+    }), 'connection_token_missing', `tokenless noncanonical proxy ${endpoint}`);
+  }
 
   expectReason(resolveWith({ sessionsByConnection: null }), 'invalid_sessions_by_connection', 'missing session inventory');
   expectReason(resolveWith({ sessionsByConnection: new Map([[CONNECTION_ID, [{ sessionKey: SESSION_KEY }]]]) }), 'session_list_not_found', 'Map cannot become a record-key fallback');
@@ -361,6 +388,128 @@ function main(): void {
     'session_not_found',
     'a session on another connection cannot be used as fallback',
   );
+
+  const updatedAt = BINDING_UPDATED_AT;
+  const firstBindRequest = {
+    officeAgentId: OFFICE_AGENT_ID,
+    expectedBinding: null,
+    nextBinding: { agentBotId: AGENT_BOT_ID, sessionKey: SESSION_KEY },
+  };
+  const firstBindRow = {
+    mutation_contract_version: 1,
+    mutation_disposition: 'applied',
+    mutation_operation: 'bind',
+    office_agent_id: OFFICE_AGENT_ID,
+    observed_binding_id: null,
+    observed_agent_bot_id: null,
+    observed_session_key: null,
+    observed_updated_at: null,
+    result_binding_id: BINDING_ID,
+    result_agent_bot_id: AGENT_BOT_ID,
+    result_session_key: SESSION_KEY,
+    result_updated_at: updatedAt,
+  };
+  const firstBindReceipt = parseOfficeAgentSessionBindingMutationReceipt([firstBindRow], firstBindRequest);
+  assert.equal(firstBindReceipt?.disposition, 'applied', 'expected-null first bind accepts one exact applied receipt');
+  assert.equal(firstBindReceipt?.observedBinding, null, 'first-bind receipt proves the locked row was missing');
+  assert.equal(firstBindReceipt?.resultBinding?.id, BINDING_ID, 'first-bind receipt returns the exact durable binding id');
+  assert.ok(Object.isFrozen(firstBindReceipt), 'mutation receipt is immutable');
+  assert.ok(Object.isFrozen(firstBindReceipt?.resultBinding), 'mutation receipt binding snapshot is immutable');
+
+  const staleFirstBind = parseOfficeAgentSessionBindingMutationReceipt([{
+    ...firstBindRow,
+    mutation_disposition: 'conflict',
+    observed_binding_id: BINDING_ID,
+    observed_agent_bot_id: AGENT_BOT_ID,
+    observed_session_key: SESSION_KEY,
+    observed_updated_at: updatedAt,
+    result_binding_id: null,
+    result_agent_bot_id: null,
+    result_session_key: null,
+    result_updated_at: null,
+  }], firstBindRequest);
+  assert.equal(staleFirstBind, null, 'conflict receipt must preserve the observed row as its exact result');
+  const exactConflictRow = {
+    ...firstBindRow,
+    mutation_disposition: 'conflict',
+    observed_binding_id: BINDING_ID,
+    observed_agent_bot_id: AGENT_BOT_ID,
+    observed_session_key: SESSION_KEY,
+    observed_updated_at: updatedAt,
+  };
+  const exactConflict = parseOfficeAgentSessionBindingMutationReceipt([exactConflictRow], firstBindRequest);
+  assert.equal(exactConflict?.disposition, 'conflict', 'stale expected-null bind receives a structured conflict');
+  assert.equal(exactConflict?.resultBinding?.sessionKey, SESSION_KEY, 'conflict returns the exact locked current route');
+
+  const clearRequest = {
+    officeAgentId: OFFICE_AGENT_ID,
+    expectedBinding: binding,
+    nextBinding: null,
+  };
+  const clearReceipt = parseOfficeAgentSessionBindingMutationReceipt([{
+    ...exactConflictRow,
+    mutation_disposition: 'applied',
+    mutation_operation: 'clear',
+    result_binding_id: null,
+    result_agent_bot_id: null,
+    result_session_key: null,
+    result_updated_at: null,
+  }], clearRequest);
+  assert.equal(clearReceipt?.operation, 'clear', 'exact clear parses as a database-authored clear receipt');
+  assert.equal(clearReceipt?.resultBinding, null, 'exact clear receipt proves a missing postcondition');
+  assert.equal(parseOfficeAgentSessionBindingMutationReceipt([{
+    ...exactConflictRow,
+    mutation_disposition: 'applied',
+    mutation_operation: 'clear',
+    result_binding_id: null,
+    result_agent_bot_id: null,
+    result_session_key: null,
+    result_updated_at: null,
+  }], {
+    ...clearRequest,
+    expectedBinding: { ...binding, updatedAt: '2026-08-18T08:00:00.000-04:00' },
+  })?.disposition, 'applied', 'equivalent timestamp offsets preserve the same exact CAS instant');
+
+  const moveRequest = {
+    officeAgentId: OFFICE_AGENT_ID,
+    expectedBinding: binding,
+    nextBinding: { agentBotId: OTHER_AGENT_BOT_ID, sessionKey: 'agent:main:Beta' },
+  };
+  const targetConflict = parseOfficeAgentSessionBindingMutationReceipt([{
+    ...exactConflictRow,
+    mutation_disposition: 'target_conflict',
+    mutation_operation: 'move',
+  }], moveRequest);
+  assert.equal(targetConflict?.disposition, 'target_conflict', 'occupied destination returns a structured target conflict');
+  assert.equal(targetConflict?.resultBinding?.id, BINDING_ID, 'target conflict preserves the exact original route');
+
+  for (const [label, row, request] of [
+    ['missing receipt', [], firstBindRequest],
+    ['multiple rows', [firstBindRow, firstBindRow], firstBindRequest],
+    ['wrong contract version', [{ ...firstBindRow, mutation_contract_version: 2 }], firstBindRequest],
+    ['wrong Office agent', [{ ...firstBindRow, office_agent_id: OTHER_OFFICE_AGENT_ID }], firstBindRequest],
+    ['wrong operation', [{ ...firstBindRow, mutation_operation: 'move' }], firstBindRequest],
+    ['partial result identity', [{ ...firstBindRow, result_session_key: null }], firstBindRequest],
+    ['forged applied result', [{ ...firstBindRow, result_session_key: 'agent:main:Other' }], firstBindRequest],
+    ['move that swaps binding id', [{
+      ...exactConflictRow,
+      mutation_disposition: 'applied',
+      mutation_operation: 'move',
+      result_binding_id: OTHER_OFFICE_AGENT_ID,
+      result_agent_bot_id: OTHER_AGENT_BOT_ID,
+      result_session_key: 'agent:main:Beta',
+    }], moveRequest],
+    ['conflict that matches expected', [{ ...exactConflictRow, mutation_disposition: 'conflict' }], {
+      ...firstBindRequest,
+      expectedBinding: binding,
+    }],
+  ] as const) {
+    assert.equal(
+      parseOfficeAgentSessionBindingMutationReceipt(row, request),
+      null,
+      `${label} fails closed`,
+    );
+  }
 
   console.log('office-agent-session-binding-core smoke: all assertions passed');
 }

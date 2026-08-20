@@ -93,6 +93,11 @@ check(
   "unreadable ciphertext is distinct from a missing provider key",
 );
 check(
+  /error\.status === 401 \|\| error\.status === 403/.test(source)
+    && source.includes('"provider_credential_rejected"'),
+  "upstream provider 401/403 is preserved as a bounded stable credential failure",
+);
+check(
   sharedEdgeSource.includes("if (error) throw new StoredApiKeyLookupError(provider);"),
   "stored-key RPC failures never collapse to an absent key",
 );
@@ -114,12 +119,12 @@ ordered(credentialResolver, [
   "const platformKey = opts.envVarName ? Deno.env.get(opts.envVarName) : null",
 ], "user-required lookup fails visibly and exits before platform environment access");
 check(
-  (source.match(/credentialPolicy: "user_required"/g) || []).length === 2,
-  "both public llm-proxy credential lookups require the authenticated user's key",
+  (source.match(/credentialPolicy: "user_required"/g) || []).length === 3,
+  "all public llm-proxy catalog, embedding, and chat credential lookups require the authenticated user's key",
 );
 check(
-  (source.match(/label: null/g) || []).length === 2,
-  "both public llm-proxy lookups select the latest active exact-provider key",
+  (source.match(/label: null/g) || []).length === 3,
+  "all public llm-proxy lookups select the latest active exact-provider key",
 );
 check(
   !source.includes("envVarName"),
@@ -170,8 +175,8 @@ check(
   "authentication precedes request-body parsing",
 );
 check(
-  handler.includes('return jsonResponse({ status: "ok", service: "llm-proxy" })'),
-  "GET exposes minimal health metadata only",
+  /return jsonResponse\(\{\s*status: "ok",\s*service: "llm-proxy",\s*capabilities: \["chat", "list_models", "openai-embed"\],\s*\}\)/s.test(handler),
+  "GET exposes only bounded health and public request-shape capabilities",
 );
 check(!handler.includes("providers: Object.keys(PROVIDER_ENDPOINTS)"),
   "GET does not enumerate configured providers");

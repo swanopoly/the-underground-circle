@@ -923,6 +923,8 @@ const providerModelCatalogCache = new Map<
   string,
   { expiresAt: number; snapshot: ProviderModelCatalogSnapshot }
 >();
+let providerModelCatalogCacheEpoch = 0;
+const providerModelCatalogRequestGeneration = new Map<string, number>();
 
 const RETIRED_LIVE_MODELS: Partial<Record<LLMProvider, ReadonlySet<string>>> = {
   openai: new Set(['gpt-4o', 'gpt-4o-mini', 'gpt-4.1-nano', 'o3-mini', 'o4-mini']),
@@ -1047,10 +1049,18 @@ export async function loadProviderModelCatalogSnapshot(
   if (!options.force && cached && now < cached.expiresAt) {
     return cached.snapshot;
   }
+  const cacheEpoch = providerModelCatalogCacheEpoch;
+  const requestGeneration = cacheKey
+    ? (providerModelCatalogRequestGeneration.get(cacheKey) || 0) + 1
+    : 0;
+  if (cacheKey) providerModelCatalogRequestGeneration.set(cacheKey, requestGeneration);
+  const mayPublishCache = () => cacheKey
+    && cacheEpoch === providerModelCatalogCacheEpoch
+    && providerModelCatalogRequestGeneration.get(cacheKey) === requestGeneration;
 
   if (!(await llmProxySupportsModelCatalog(options.force === true))) {
     const fallback = createProviderModelCatalogFallback(provider, 'request_failed');
-    if (cacheKey) {
+    if (mayPublishCache()) {
       providerModelCatalogCache.set(cacheKey, {
         expiresAt: now + PROVIDER_MODEL_CATALOG_FAILURE_TTL_MS,
         snapshot: fallback,
@@ -1102,7 +1112,7 @@ export async function loadProviderModelCatalogSnapshot(
     snapshot = createProviderModelCatalogFallback(provider, 'request_failed');
   }
 
-  if (cacheKey) {
+  if (mayPublishCache()) {
     providerModelCatalogCache.set(cacheKey, {
       expiresAt: now + (snapshot.status === 'verified'
         ? PROVIDER_MODEL_CATALOG_TTL_MS
@@ -1126,12 +1136,17 @@ export async function listAvailableProviderModels(
 }
 
 export function invalidateProviderModelCatalog(provider?: LLMProvider): void {
+  providerModelCatalogCacheEpoch += 1;
   if (!provider) {
     providerModelCatalogCache.clear();
+    providerModelCatalogRequestGeneration.clear();
     return;
   }
   for (const key of providerModelCatalogCache.keys()) {
     if (key.endsWith(`:${provider}`)) providerModelCatalogCache.delete(key);
+  }
+  for (const key of providerModelCatalogRequestGeneration.keys()) {
+    if (key.endsWith(`:${provider}`)) providerModelCatalogRequestGeneration.delete(key);
   }
 }
 

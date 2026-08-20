@@ -118,6 +118,24 @@ assert(message.trim().length > 0, 'formatted bot message is never empty');
 assert(message.includes(BOT_META_MARKER) || message.includes('[truncated for saved chat]'), 'large metadata is compacted or safely dropped');
 assert(stripPersistedChatBotPrefix(message).trim().length > 0, 'visible saved message content remains readable');
 
+const modelFallbackReceipt = readPersistedChatBotMetadata(formatPersistedChatBotMessage(
+  'OpenSwan',
+  'Fallback-served response.',
+  {
+    source: {
+      actor: 'OpenSwan',
+      surface: 'main_chat_plain_model',
+      selectedModel: 'claude-sonnet-4-6',
+      effectiveModel: 'openai/gpt-5.6-terra',
+      provider: 'openai',
+      showRouteChips: true,
+    },
+  },
+));
+assert(modelFallbackReceipt?.source?.showRouteChips === true, 'pre-dispatch fallback disclosure survives saved-chat reload');
+assert(modelFallbackReceipt?.source?.selectedModel === 'claude-sonnet-4-6', 'saved fallback receipt retains the requested model');
+assert(modelFallbackReceipt?.source?.effectiveModel === 'openai/gpt-5.6-terra', 'saved fallback receipt retains the dispatched model');
+
 if (message.includes(BOT_META_MARKER)) {
   const metadata = readPersistedChatBotMetadata(message);
   assert(!!metadata, 'metadata JSON remains parseable after compaction');

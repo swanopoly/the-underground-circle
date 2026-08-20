@@ -1058,6 +1058,17 @@ export function parseSwanbotToolTurnData(data: unknown): {
   };
 }
 
+/**
+ * The relay reports an upstream provider failure as an HTTP-200 response so
+ * callers can preserve its user-facing recovery text. It is still a failed
+ * provider turn, not a clean assistant `end_turn`.
+ */
+export function hasSwanbotRoutingFallback(
+  routing: SwanBotRoutingInfo | null | undefined,
+): boolean {
+  return routing?.routing_fallback != null;
+}
+
 // ─── Result mapping (AgentRunResult → legacy loop result) ───────────────────
 
 /** True when the runtime should make the legacy one-shot finalization call

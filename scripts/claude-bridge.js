@@ -3190,7 +3190,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      const { target, command, apiKey, port } = parsed;
+      const { target, command, apiKey, port, serviceUrl } = parsed;
       if (!target || !command) {
         res.writeHead(400, CORS);
         res.end(JSON.stringify({ ok: false, error: 'Missing "target" or "command"' }));
@@ -3204,6 +3204,19 @@ const server = http.createServer(async (req, res) => {
       if (apiKey != null && (typeof apiKey !== 'string' || apiKey.length > 512 || /[\x00-\x1f]/.test(apiKey))) {
         res.writeHead(400, CORS);
         res.end(JSON.stringify({ ok: false, error: 'Invalid printer API key' }));
+        return;
+      }
+      const expectedServiceUrl = target === 'octoprint'
+        ? 'http://localhost:5000'
+        : target === 'klipper'
+          ? 'http://localhost:7125'
+          : null;
+      if (expectedServiceUrl && serviceUrl !== expectedServiceUrl) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({
+          ok: false,
+          error: `The requested ${target} service URL does not match the bridge-detected target`,
+        }));
         return;
       }
 

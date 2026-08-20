@@ -35,10 +35,28 @@ const claimSource = section(
   'export async function invokeAgent(',
   '// ─── DB: Stream response updates',
 );
+const budgetConfigCore = section(
+  'function normalizeInvocationBudgetConfig(',
+  'function buildInvocationBudgetWindow(',
+);
+const budgetUsagePureCore = section(
+  'function buildInvocationBudgetWindow(',
+  'async function loadInvocationBudgetSpend(',
+);
+const budgetSpendCore = section(
+  'async function loadInvocationBudgetSpend(',
+  'function buildOfficeBudgetPreflightFailure(',
+);
 
 const runtimeSource = `
 let verifiedUserId = '22222222-2222-4222-8222-222222222222';
 let verifyHook = () => {};
+let preferenceHook = () => {};
+let preferenceResult = { ok: true, preferences: null, revision: 0 };
+let legacyBudgetConfig = { enabled: false };
+let usagePages = [];
+let usagePageIndex = 0;
+let usageHook = () => {};
 function isUuidLike(value) {
   return typeof value === 'string'
     && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
@@ -47,6 +65,17 @@ async function safeGetUserForAccessToken(accessToken) {
   globalThis.__observed.verifiedBearer = accessToken;
   verifyHook();
   return { value: verifiedUserId ? { id: verifiedUserId } : null, error: null };
+}
+async function loadOfficeUserPreferences(circleId, authScope) {
+  globalThis.__observed.preferenceCircleId = circleId;
+  globalThis.__observed.preferenceScope = authScope;
+  globalThis.__observed.preferenceCalls += 1;
+  preferenceHook();
+  return preferenceResult;
+}
+async function loadBudgetConfig() {
+  globalThis.__observed.legacyBudgetCalls += 1;
+  return legacyBudgetConfig;
 }
 function isBlackSwanAgent() { return false; }
 function isInvokeAgentV2Unavailable() { return false; }
@@ -66,9 +95,35 @@ const supabase = {
     };
     return builder;
   },
+  from(table) {
+    globalThis.__observed.usageTables.push(table);
+    const builder = {
+      select(columns, options) {
+        globalThis.__observed.usageSelect = { columns, options };
+        return builder;
+      },
+      eq(column, value) { globalThis.__observed.usageFilters.push(['eq', column, value]); return builder; },
+      gte(column, value) { globalThis.__observed.usageFilters.push(['gte', column, value]); return builder; },
+      lt(column, value) { globalThis.__observed.usageFilters.push(['lt', column, value]); return builder; },
+      order(column, options) { globalThis.__observed.usageOrders.push([column, options]); return builder; },
+      range(from, to) { globalThis.__observed.usageRanges.push([from, to]); return builder; },
+      setHeader(name, value) { globalThis.__observed.usageHeaders.push([name, value]); return builder; },
+      abortSignal(value) { globalThis.__observed.usageAbortSignals.push(value); return builder; },
+      then(resolve, reject) {
+        const page = usagePages[usagePageIndex] || { data: [], error: null, count: 0 };
+        usagePageIndex += 1;
+        usageHook(usagePageIndex);
+        return Promise.resolve(page).then(resolve, reject);
+      },
+    };
+    return builder;
+  },
 };
 ${authorityCore}
 ${claimSource}
+${budgetConfigCore}
+${budgetUsagePureCore}
+${budgetSpendCore}
 globalThis.__core = {
   normalizeOfficeInvocationExactAuthority,
   officeInvocationExecutionIsCurrent,
@@ -76,9 +131,20 @@ globalThis.__core = {
   buildOfficeInvocationAuthorityUnavailableResult,
   buildOfficeInvocationRetiredAfterClaimResult,
   invokeAgent,
+  normalizeInvocationBudgetConfig,
+  readCanonicalOfficeBudgetConfig,
+  loadInvocationBudgetConfig,
+  buildInvocationBudgetWindow,
+  accumulateInvocationBudgetUsagePage,
+  loadInvocationBudgetSpend,
   bindExact(req, execution) { exactExecutionByInvocationRequest.set(req, execution); },
   setVerifiedUserId(value) { verifiedUserId = value; },
   setVerifyHook(value) { verifyHook = value; },
+  setPreferenceHook(value) { preferenceHook = value; },
+  setPreferenceResult(value) { preferenceResult = value; },
+  setLegacyBudgetConfig(value) { legacyBudgetConfig = value; },
+  setUsagePages(value) { usagePages = value; usagePageIndex = 0; },
+  setUsageHook(value) { usageHook = value; },
 };
 `;
 
@@ -100,6 +166,17 @@ const observed = {
   rpcName: '',
   rpcArgs: null as Record<string, unknown> | null,
   headers: {} as Record<string, string>,
+  preferenceCircleId: '',
+  preferenceScope: null as Record<string, unknown> | null,
+  preferenceCalls: 0,
+  legacyBudgetCalls: 0,
+  usageTables: [] as string[],
+  usageSelect: null as Record<string, unknown> | null,
+  usageFilters: [] as unknown[][],
+  usageOrders: [] as unknown[][],
+  usageRanges: [] as number[][],
+  usageHeaders: [] as string[][],
+  usageAbortSignals: [] as AbortSignal[],
 };
 const sandbox: Record<string, any> = {
   __observed: observed,
@@ -192,6 +269,103 @@ async function main(): Promise<void> {
     'throwing current guard fails closed',
   );
 
+  console.log('Exact budget preference authority');
+  current = true;
+  core.setPreferenceResult({
+    ok: true,
+    preferences: {
+      budgetConfig: { enabled: true, hardLimit: true, daily: 2, weekly: 8, monthly: 20 },
+    },
+    revision: 4,
+  });
+  const exactBudget = await core.loadInvocationBudgetConfig(circleId, execution);
+  assert(exactBudget.ok && exactBudget.config.daily === 2, 'exact canonical budget config is accepted');
+  assert(observed.preferenceCircleId === circleId, 'budget preferences use the captured circle');
+  assert(
+    observed.preferenceScope?.userId === userA
+      && observed.preferenceScope?.accessToken === authority.accessToken,
+    'budget preferences use the captured user and bearer',
+  );
+  assert(observed.legacyBudgetCalls === 0, 'exact execution never reads device-local budget storage');
+  core.setPreferenceHook(() => { current = false; });
+  const retiredBudget = await core.loadInvocationBudgetConfig(circleId, execution);
+  assert(!retiredBudget.ok && retiredBudget.reason === 'authority', 'retirement during preference load fails closed');
+  core.setPreferenceHook(() => {});
+  current = true;
+  core.setPreferenceResult({ ok: false, preferences: null, revision: 0, error: 'offline' });
+  const unavailableBudget = await core.loadInvocationBudgetConfig(circleId, execution);
+  assert(!unavailableBudget.ok && unavailableBudget.reason === 'settings', 'unverifiable canonical settings fail closed');
+  assert(
+    core.readCanonicalOfficeBudgetConfig(null)?.enabled === false,
+    'an absent canonical preference record means budgets are disabled',
+  );
+  assert(
+    core.normalizeInvocationBudgetConfig({ enabled: true, hardLimit: true, daily: -1 }) === null,
+    'invalid hard-limit amounts are rejected instead of disabling the cap',
+  );
+  core.setLegacyBudgetConfig({ enabled: true, hardLimit: false, daily: 5 });
+  const legacyBudget = await core.loadInvocationBudgetConfig(circleId);
+  assert(legacyBudget.ok && legacyBudget.config.daily === 5, 'legacy callers retain unscoped device-local config');
+  assert(observed.legacyBudgetCalls === 1, 'legacy budget read does not invent account scope');
+
+  console.log('Budget usage math');
+  const budgetNow = Date.parse('2026-08-17T12:00:00.000Z');
+  const budgetWindow = core.buildInvocationBudgetWindow(budgetNow);
+  const usage = core.accumulateInvocationBudgetUsagePage([
+    { id: '77777777-7777-4777-8777-777777777771', circle_id: circleId, status: 'done', token_count: 1_000_000, created_at: '2026-08-17T08:00:00.000Z' },
+    { id: '77777777-7777-4777-8777-777777777772', circle_id: circleId, status: 'done', token_count: '2000000', created_at: '2026-08-16T08:00:00.000Z' },
+    { id: '77777777-7777-4777-8777-777777777773', circle_id: circleId, status: 'done', token_count: 4_000_000, created_at: '2026-08-07T08:00:00.000Z' },
+    { id: '77777777-7777-4777-8777-777777777774', circle_id: circleId, status: 'pending', token_count: 9_000_000, created_at: '2026-08-17T09:00:00.000Z' },
+  ], circleId, budgetWindow);
+  assert(
+    usage?.today === 5 && usage.week === 6 && usage.month === 8,
+    'all recorded token usage accumulates into local-calendar daily, seven-day, and monthly windows',
+  );
+  assert(
+    core.accumulateInvocationBudgetUsagePage([
+      { id: '77777777-7777-4777-8777-777777777775', circle_id: circleId, status: 'done', token_count: '9007199254740992', created_at: '2026-08-17T08:00:00.000Z' },
+    ], circleId, budgetWindow) === null,
+    'unsafe token totals invalidate the usage snapshot instead of undercounting',
+  );
+
+  console.log('Paginated budget usage authority');
+  const usageNow = Date.now();
+  const usageRows = [
+    { id: '88888888-8888-4888-8888-888888888881', circle_id: circleId, status: 'done', token_count: 1_000_000, created_at: new Date(usageNow - 60_000).toISOString() },
+    { id: '88888888-8888-4888-8888-888888888882', circle_id: circleId, status: 'done', token_count: 2_000_000, created_at: new Date(usageNow - 86_400_000).toISOString() },
+    { id: '88888888-8888-4888-8888-888888888883', circle_id: circleId, status: 'pending', token_count: 9_000_000, created_at: new Date(usageNow - 120_000).toISOString() },
+  ];
+  observed.usageRanges = [];
+  observed.usageHeaders = [];
+  core.setUsagePages([
+    { data: usageRows.slice(0, 2), error: null, count: 3 },
+    { data: usageRows.slice(2), error: null, count: 3 },
+  ]);
+  const pagedSpend = await core.loadInvocationBudgetSpend(circleId, execution);
+  assert(pagedSpend.ok && pagedSpend.spend.month === 6, 'all counted usage pages and statuses contribute to spend');
+  assert(
+    JSON.stringify(observed.usageRanges) === JSON.stringify([[0, 999], [2, 1001]]),
+    'pagination advances by returned rows when a server page is smaller than the request',
+  );
+  assert(
+    observed.usageHeaders.every((entry) => entry[1] === `Bearer ${authority.accessToken}`),
+    'every usage page binds the captured bearer',
+  );
+  assert(
+    observed.usageAbortSignals.every((value) => value === execution.signal),
+    'every usage page carries the captured abort signal',
+  );
+  core.setUsagePages([{ data: null, error: { message: 'offline' }, count: null }]);
+  const failedSpend = await core.loadInvocationBudgetSpend(circleId, execution);
+  assert(!failedSpend.ok && failedSpend.reason === 'usage', 'a usage query error fails the hard-limit preflight closed');
+  current = true;
+  core.setUsageHook(() => { current = false; });
+  core.setUsagePages([{ data: [], error: null, count: 0 }]);
+  const retiredSpend = await core.loadInvocationBudgetSpend(circleId, execution);
+  assert(!retiredSpend.ok && retiredSpend.reason === 'authority', 'retirement during a usage page fails closed');
+  core.setUsageHook(() => {});
+  current = true;
+
   console.log('Claim bearer and post-claim retirement');
   current = true;
   observed.headers = {};
@@ -243,6 +417,45 @@ async function main(): Promise<void> {
   assert(
     orchestration.includes('exactExecutionInput?: OfficeInvocationExactExecution'),
     'invokeAndStream exposes an opt-in exact execution contract',
+  );
+  const budgetConfigReadSource = section(
+    'async function loadInvocationBudgetConfig(',
+    'function buildInvocationBudgetWindow(',
+  );
+  assert(
+    budgetConfigReadSource.includes('await loadOfficeUserPreferences(')
+      && budgetConfigReadSource.includes('exactExecution.authority.userId')
+      && budgetConfigReadSource.includes('exactExecution.authority.accessToken'),
+    'exact dispatch loads canonical user-and-circle Office budget preferences',
+  );
+  assert(
+    budgetConfigReadSource.indexOf('await loadOfficeUserPreferences(')
+      < budgetConfigReadSource.lastIndexOf('officeInvocationExecutionIsCurrent(exactExecution)'),
+    'budget preference authority is rechecked after its await',
+  );
+  const budgetSpendReadSource = section(
+    'async function loadInvocationBudgetSpend(',
+    'function buildOfficeBudgetPreflightFailure(',
+  );
+  assert(
+    budgetSpendReadSource.includes("{ count: 'exact' }")
+      && budgetSpendReadSource.includes('.range(offset, offset + OFFICE_BUDGET_USAGE_PAGE_SIZE - 1)')
+      && budgetSpendReadSource.includes('offset += data.length'),
+    'usage totals page through the exact result count without assuming the server row cap',
+  );
+  assert(
+    budgetSpendReadSource.includes('if (\n      error')
+      && budgetSpendReadSource.indexOf('const { data, error, count } = await query;')
+        < budgetSpendReadSource.indexOf('officeInvocationExecutionIsCurrent(exactExecution)', budgetSpendReadSource.indexOf('const { data, error, count } = await query;')),
+    'every usage page checks query errors and authority after its await',
+  );
+  assert(
+    orchestration.includes('await loadInvocationBudgetConfig(req.circleId, exactExecution)')
+      && orchestration.includes('await loadInvocationBudgetSpend(req.circleId, exactExecution)')
+      && orchestration.includes('OFFICE_BUDGET_SETTINGS_UNAVAILABLE')
+      && orchestration.includes('OFFICE_BUDGET_USAGE_UNAVAILABLE')
+      && !orchestration.includes("console.warn('[agentInvocation] budget_check_unavailable')"),
+    'unverifiable enabled hard limits return non-dispatch failures instead of failing open',
   );
   assert(
     orchestration.includes('const claim = await invokeAgent(req, agent);'),

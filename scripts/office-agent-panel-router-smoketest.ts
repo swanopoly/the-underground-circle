@@ -198,6 +198,7 @@ const shell = read('src/screens/circles/tabs/office/AgentPanelShell.tsx');
 const terminal = read('src/screens/circles/tabs/office/AgentTerminalPanels.tsx');
 const runs = read('src/screens/circles/tabs/office/AgentRunsPanel.tsx');
 const activity = read('src/screens/circles/tabs/office/AgentActivityPanel.tsx');
+const overview = read('src/screens/circles/tabs/office/AgentOverviewPanel.tsx');
 const evolution = read('src/screens/circles/tabs/office/AgentEvolutionPanel.tsx');
 const progression = read('src/lib/progression.ts');
 const xpFeed = read('src/components/rpg/XPEventFeed.tsx');
@@ -219,18 +220,28 @@ for (const marker of [
   "scopeKey: panelScopeKey, tab: 'overview'",
   "panelRoute.scopeKey === panelScopeKey ? panelRoute.tab : 'overview'",
   'identityAuthority?.generation',
-  'hasRuntimeConnection: !!agent && !!runtimeConnectionId',
+  'const hasRuntimeConnection = !!agent && !!runtimeConnectionId;',
   'const contentKey = `${panelScopeKey}:${panelTab}`;',
+  'const executionTruth = resolveOfficeAgentExecutionTruth(agent);',
+  "executionTruth.state === 'warning' ? '#f59e0b'",
+  "executionTruth.state === 'warning' ? 'Needs refresh'",
   'tabGroups={tabGroups}',
   'const openAgentInChat = onOpenAgentInChat && chatAgentTargetIdFromOfficeAgentId(chatAgentId)',
   'onOpenInChat={openAgentInChat}',
   'isIdentityAuthorityCurrent={isExactIdentityAuthorityCurrent}',
+  'spirit={agent.spirit || undefined}',
   "agent.providerType === 'claude-code' && onRunCommand",
   'onResizeSideBy={resizeSideBy}',
   'AccessibilityInfo.isReduceMotionEnabled()',
 ]) {
   assert(panel.includes(marker), `AgentPanel wires ${marker}`);
 }
+assert(
+  panel.includes('}), [canCustomize, hasCircleContext, hasIdentityAuthority, hasRuntimeConnection]);')
+    && panel.includes('const panelRoutingKey = agent ? `${agent.id}\\u0000${agent.providerType}` : \'closed\';')
+    && panel.includes('[panelCapabilities, panelRoutingKey]'),
+  'route capabilities and tab catalogs ignore live roster object churn',
+);
 assert(!panel.includes('requestIdleCallback'), 'panel chunks are not speculatively prefetched');
 assert(!panel.includes('error.message'), 'lazy-section copy never exposes a raw loader error');
 assert(!shell.includes('error.message'), 'render-boundary copy never exposes a raw child error');
@@ -238,9 +249,21 @@ assert(
   activity.includes('const executionTruth = resolveOfficeAgentExecutionTruth(agent);')
     && activity.includes("executionTruth.state === 'warning'")
     && activity.includes('Runtime status warning: ${executionTruth.statusWarning}. Refresh the connection before assigning new work.')
+    && activity.includes("const liveExecutionEvidence = executionTruth.state === 'active';")
+    && activity.includes('liveExecutionEvidence && ((agent.recentToolCalls?.length || 0) > 0')
+    && activity.includes('liveExecutionEvidence && (agent.activeFiles?.length || 0) > 0')
     && activity.includes('setInspectOpen(false);')
     && activity.includes('[agent.id, agent.sessionKey, agent.connectionId]'),
-  'Activity never calls a bridge-disconnected agent available and retires raw diagnostics on subject changes',
+  'Activity never calls a bridge-disconnected agent available, promotes retained work evidence, or leaves raw diagnostics open across subjects',
+);
+assert(
+  overview.includes('const executionTruth = resolveOfficeAgentExecutionTruth(agent);')
+    && overview.includes("executionTruth.state === 'warning'")
+    && overview.includes("executionTruth.state === 'connected'")
+    && overview.includes("executionTruth.state === 'unavailable'")
+    && overview.includes("const hasEvidence = isWorking &&")
+    && overview.includes('Refresh the connection before assigning new work.'),
+  'Overview uses verified execution truth and suppresses retained work evidence for warning, idle, and offline agents',
 );
 
 for (const marker of [
@@ -329,9 +352,10 @@ assert(
   'Customize distinguishes complete, server-only, unknown, and failed exact identity receipts',
 );
 assert(
-  gateway.includes('const cleared = await clearOfficeAgentSessionBinding(')
-    && gateway.includes('if (!cleared) throw new Error('),
-  'OpenSwan unlink success requires a truthful clear receipt',
+  gateway.includes('const clearResult = await clearOfficeAgentSessionBinding(')
+    && gateway.includes('expectedBinding,')
+    && gateway.includes('clearResult.receipt.resultBinding !== null'),
+  'OpenSwan unlink success requires an expected-row CAS receipt with a missing postcondition',
 );
 
 console.log('office agent panel router smoke passed');

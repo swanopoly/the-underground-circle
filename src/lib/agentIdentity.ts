@@ -66,6 +66,25 @@ export interface AgentIdentityExactSyncResult {
   error?: 'invalid_authority' | 'authority_mismatch' | 'server_unavailable' | 'invalid_response';
 }
 
+export type AgentIdentityExactRefreshError =
+  | 'invalid_authority'
+  | 'authority_mismatch'
+  | 'authority_retired'
+  | 'server_unavailable'
+  | 'invalid_response'
+  | 'invalid_local_data'
+  | 'local_write_failed';
+
+export interface AgentIdentityExactRefreshResult {
+  /** True only when the count-complete server snapshot also reached the exact cache. */
+  ok: boolean;
+  identities: Map<string, AgentIdentity>;
+  /** True means `identities` is verified server truth and is safe for immediate UI adoption. */
+  serverVerified: boolean;
+  localSaved: boolean;
+  error?: AgentIdentityExactRefreshError;
+}
+
 export interface AgentIdentityExactSaveResult {
   ok: boolean;
   localSaved: boolean;
@@ -1602,6 +1621,165 @@ async function publishVerifiedAgentIdentityCacheExact(
 }
 
 /**
+ * Read and publish one count-complete server snapshot while the exact cache
+ * lane is exclusive. This owner never calls a durable mutation API: absence
+ * in the locked reread remains absence and cannot be reinterpreted as an
+ * identity to insert from an earlier device snapshot.
+ */
+async function refreshVerifiedAgentIdentitiesFromServerExact(
+  authority: AgentIdentityExactWriteAuthority,
+  fence: AgentIdentityExactAuthorityFence,
+): Promise<AgentIdentityExactRefreshResult> {
+  const key = agentIdentityExactStorageKey(authority);
+  if (!key) {
+    return {
+      ok: false,
+      identities: new Map(),
+      serverVerified: false,
+      localSaved: false,
+      error: 'invalid_authority',
+    };
+  }
+  const locked = await withAgentIdentityExactCachePublicationLock(
+    key,
+    async signal => {
+      const publicationFence: AgentIdentityExactAuthorityFence = candidate => (
+        !signal?.aborted && isAgentIdentityExactAuthorityCurrent(candidate, fence)
+      );
+      if (signal?.aborted) {
+        return {
+          ok: false,
+          identities: new Map<string, AgentIdentity>(),
+          serverVerified: false,
+          localSaved: false,
+          error: 'local_write_failed',
+        } as const;
+      }
+      if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+        return {
+          ok: false,
+          identities: new Map<string, AgentIdentity>(),
+          serverVerified: false,
+          localSaved: false,
+          error: 'authority_retired',
+        } as const;
+      }
+      const snapshot = await fetchAgentIdentitiesServerSnapshotExact(authority, signal);
+      if (signal?.aborted) {
+        return {
+          ok: false,
+          identities: new Map<string, AgentIdentity>(),
+          serverVerified: false,
+          localSaved: false,
+          error: 'local_write_failed',
+        } as const;
+      }
+      if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
+        return {
+          ok: false,
+          identities: new Map<string, AgentIdentity>(),
+          serverVerified: false,
+          localSaved: false,
+          error: 'authority_retired',
+        } as const;
+      }
+      if (!snapshot.ok) {
+        return {
+          ok: false,
+          identities: new Map<string, AgentIdentity>(),
+          serverVerified: false,
+          localSaved: false,
+          error: snapshot.error || 'server_unavailable',
+        } as const;
+      }
+      const identities = new Map(snapshot.identities);
+      const publication = await publishVerifiedAgentIdentityCacheExact(
+        identities,
+        authority,
+        publicationFence,
+      );
+      if (publication.ok) {
+        return {
+          ok: true,
+          identities,
+          serverVerified: true,
+          localSaved: true,
+        } as const;
+      }
+      const publicationError: AgentIdentityExactRefreshError =
+        publication.error === 'authority_retired'
+        || publication.error === 'invalid_local_data'
+        || publication.error === 'local_write_failed'
+          ? publication.error
+          : 'local_write_failed';
+      return {
+        ok: false,
+        identities,
+        serverVerified: true,
+        localSaved: false,
+        error: publicationError,
+      } as const;
+    },
+  );
+  return locked.acquired
+    ? locked.value
+    : {
+      ok: false,
+      identities: new Map(),
+      serverVerified: false,
+      localSaved: false,
+      error: 'local_write_failed',
+    };
+}
+
+/**
+ * Refresh the exact cache from durable server truth without inserting or
+ * updating any identity row. The returned map is the same verified snapshot
+ * considered for cache publication, so the initiating realm can converge
+ * without relying on a same-window storage event.
+ */
+export async function refreshAgentIdentitiesFromServerExact(
+  capturedAuthority: AgentIdentityExactWriteAuthority,
+  fence: AgentIdentityExactAuthorityFence,
+): Promise<AgentIdentityExactRefreshResult> {
+  const syntacticAuthority = normalizeAgentIdentityExactWriteAuthority(capturedAuthority);
+  if (!syntacticAuthority || typeof fence !== 'function') {
+    return {
+      ok: false,
+      identities: new Map(),
+      serverVerified: false,
+      localSaved: false,
+      error: 'invalid_authority',
+    };
+  }
+  if (!isAgentIdentityExactAuthorityCurrent(syntacticAuthority, fence)) {
+    return {
+      ok: false,
+      identities: new Map(),
+      serverVerified: false,
+      localSaved: false,
+      error: 'authority_retired',
+    };
+  }
+  const verified = await verifyAgentIdentityExactAuthority(syntacticAuthority, fence);
+  const authority = normalizeAgentIdentityExactWriteAuthority(
+    verified as AgentIdentityExactWriteAuthority | null,
+  );
+  if (!authority) {
+    return {
+      ok: false,
+      identities: new Map(),
+      serverVerified: false,
+      localSaved: false,
+      error: isAgentIdentityExactAuthorityCurrent(syntacticAuthority, fence)
+        ? 'authority_mismatch'
+        : 'authority_retired',
+    };
+  }
+  return refreshVerifiedAgentIdentitiesFromServerExact(authority, fence);
+}
+
+/**
  * Publish only a complete server snapshot captured while the cross-realm cache
  * lane is exclusive. The mutation receipt proves that this caller's server
  * write completed, but it is deliberately not used as ordering authority: a
@@ -1612,42 +1790,18 @@ async function publishCurrentAgentIdentityServerTruthExact(
   authority: AgentIdentityExactWriteAuthority,
   fence: AgentIdentityExactAuthorityFence,
 ): Promise<AgentIdentityExactSaveResult> {
-  const key = agentIdentityExactStorageKey(authority);
-  if (!key) {
-    return { ok: false, localSaved: false, serverSaved: true, error: 'invalid_authority' };
+  const refresh = await refreshVerifiedAgentIdentitiesFromServerExact(authority, fence);
+  if (refresh.ok) {
+    return { ok: true, localSaved: true, serverSaved: true };
   }
-  const locked = await withAgentIdentityExactCachePublicationLock(
-    key,
-    async signal => {
-      const publicationFence: AgentIdentityExactAuthorityFence = candidate => (
-        !signal?.aborted && isAgentIdentityExactAuthorityCurrent(candidate, fence)
-      );
-      if (signal?.aborted) {
-        return { ok: false, localSaved: false, serverSaved: true, error: 'local_write_failed' } as const;
-      }
-      if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
-        return { ok: false, localSaved: false, serverSaved: true, error: 'authority_retired' } as const;
-      }
-      const snapshot = await fetchAgentIdentitiesServerSnapshotExact(authority, signal);
-      if (signal?.aborted) {
-        return { ok: false, localSaved: false, serverSaved: true, error: 'local_write_failed' } as const;
-      }
-      if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
-        return { ok: false, localSaved: false, serverSaved: true, error: 'authority_retired' } as const;
-      }
-      if (!snapshot.ok) {
-        return { ok: false, localSaved: false, serverSaved: true, error: 'local_write_failed' } as const;
-      }
-      return publishVerifiedAgentIdentityCacheExact(
-        snapshot.identities,
-        authority,
-        publicationFence,
-      );
-    },
-  );
-  return locked.acquired
-    ? locked.value
-    : { ok: false, localSaved: false, serverSaved: true, error: 'local_write_failed' };
+  return {
+    ok: false,
+    localSaved: false,
+    serverSaved: true,
+    error: refresh.error === 'invalid_authority' || refresh.error === 'authority_retired'
+      ? refresh.error
+      : 'local_write_failed',
+  };
 }
 
 async function saveAgentIdentityMapExact(

@@ -190,7 +190,7 @@ assert.match(
 );
 assert.match(
   chatTabSource,
-  /Safe recovery[\s\S]*?Verify current state[\s\S]*?cannot rerun the original prompt or dispatch a mutation/,
+  /Next step[\s\S]*?Check the current state[\s\S]*?READ ONLY[\s\S]*?Verify current state without repeating the original action/,
   'Chat renders one explicit read-only verification action for an uncertain dispatched mutation',
 );
 assert.match(

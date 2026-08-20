@@ -39,13 +39,14 @@ check(
   memory.includes('const [deletingMemoryId, setDeletingMemoryId]')
     && memory.includes('const [mutatingMemoryId, setMutatingMemoryId]')
     && memory.includes('if (!memoryId || memoryMutationLockRef.current) return false')
-    && memory.includes("await mutateMemoryExact(mem, { is_active: false }, row => row.is_active === false)")
-    && memory.includes('The memory change did not return exactly one receipt.')
+    && memory.includes('await mutateMemoryExact(mem, { is_active: false })')
+    && memory.includes("setMemoryActionStatus(`CONFLICT: ${conflictMessage}`)")
+    && memory.includes("setMemoryActionStatus('OUTCOME UNKNOWN:")
     && memory.includes('busy: deletingMemoryId === mem.id')
     && memory.includes("deletingMemoryId === mem.id ? 'Deleting…' : 'Delete'")
-    && memory.includes('setMemoryActionStatus(`Deleted memory: ${title}`)')
-    && memory.includes('setMemoryActionStatus(`ERROR: Could not delete memory: ${title}`)'),
-  'Memory deletion serializes mutations and exposes exact receipt, busy, success, and error states',
+    && memory.includes('`Deleted memory: ${title}`')
+    && memory.includes('`Could not delete memory: ${title}. No successful deletion was confirmed.`'),
+  'Memory deletion serializes mutations and exposes conflict, unknown, busy, success, and failure states',
 );
 check(
   memory.includes('accessibilityLabel={`Edit memory:')
@@ -131,6 +132,9 @@ check(
 check(
   spirit.includes('const requestedProfileName = saveProfileName.trim()')
     && spirit.includes('const expectedProfileReceipt = {')
+    && spirit.includes("supabase.from('custom_agent_profiles')\n                                  .insert(expectedProfileReceipt)")
+    && !spirit.includes("supabase.from('custom_agent_profiles').upsert(")
+    && spirit.includes('if (!Array.isArray(insertedProfiles) || insertedProfiles.length !== 1)')
     && spirit.includes('Object.entries(expectedProfileReceipt).every(([field, requestedValue])')
     && spirit.includes('returnedProfile[field] === requestedValue')
     && spirit.includes(".select('id, user_id, name, emoji, color, tagline, system_prompt, skill_bundle, risk_tier, action_posture, evidence_posture, communication_density, skepticism, escalation_trigger')")
@@ -138,9 +142,11 @@ check(
     && spirit.includes("String(data.name || '') !== requestedProfileName")
     && spirit.includes('accessibilityLabel="Save custom Spirit profile"')
     && spirit.includes('accessibilityLabel="Cancel saving custom Spirit profile"')
-    && spirit.includes('Custom profile outcome could not be verified. Refresh profiles before retrying.')
+    && spirit.includes('Choose a new name; the existing profile was not changed.')
+    && spirit.includes('Custom profile outcome could not be verified. No profile was adopted; refresh profiles before retrying.')
+    && spirit.includes('if (savingProfileTokenRef.current === savingToken)')
     && spirit.includes('minHeight: 44'),
-  'Custom-profile save validates its exact receipt and exposes accessible 44px save/cancel controls',
+  'Custom-profile Save As is create-only, validates one exact receipt, and exposes accessible 44px save/cancel controls',
 );
 check(
   (spirit.match(/^\s*<ScrollView\b/gmu) || []).length === 1
@@ -165,8 +171,10 @@ check(
 check(
   spirit.includes("accessibilityLabel={`${label.toLowerCase()} ${opt.replace(/-/g, ' ')}`}")
     && spirit.includes('accessibilityState={{ selected: value === opt }}')
+    && spirit.includes("style={[{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 8")
     && spirit.includes('accessibilityLabel={`Use ${tmpl.name} personality`}')
-    && spirit.includes('accessibilityState={{ selected: isActive }}'),
+    && spirit.includes('accessibilityState={{ selected: isActive }}')
+    && spirit.includes("personalityChip: {\n    minHeight: 44, justifyContent: 'center'"),
   'Spirit knob and personality choices expose their button and selected semantics',
 );
 check(
@@ -177,6 +185,40 @@ check(
     && spirit.includes("width: 44,\n    height: 44,")
     && spirit.includes("minHeight: 44, justifyContent: 'center', paddingHorizontal: 16"),
   'Spirit personality navigation and save controls have descriptive names and reliable targets',
+);
+check(
+  spirit.includes("accessibilityLabel={showSpirits ? 'Hide Spirit settings' : 'Show Spirit settings'}")
+    && spirit.includes('accessibilityState={{ expanded: showSpirits }}')
+    && spirit.includes("accessibilityLabel={`${editingSpirit ? 'Stop editing' : 'Edit'} ${s.name} Spirit settings`}")
+    && spirit.includes('accessibilityLabel="Draft a resume artifact in this Spirit"')
+    && spirit.includes('accessibilityLabel="Draft interview preparation in this Spirit"')
+    && spirit.includes('accessibilityLabel="Draft an operations plan in this Spirit"')
+    && spirit.includes('accessibilityLabel="Dismiss role artifact"')
+    && spirit.includes('accessibilityLabel="Dismiss operations artifact"')
+    && spirit.includes('accessibilityLabel={`Save ${s.name} settings as a custom Spirit profile`}')
+    && spirit.includes('accessibilityLabel="Loading verified Spirit identity"')
+    && spirit.includes("spiritRow: {\n    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',\n    minHeight: 44")
+    && spirit.includes("spiritClearBtn: {\n    minHeight: 44"),
+  'Spirit disclosure, editing, artifact, loading, and custom-profile actions expose named stateful 44px controls',
+);
+check(
+  spirit.includes('const executionTruth = resolveOfficeAgentExecutionTruth(agent);')
+    && spirit.includes("executionTruth.state === 'warning'")
+    && spirit.includes("executionTruth.state === 'active'")
+    && spirit.includes("executionTruth.state === 'connected'")
+    && spirit.includes("executionTruth.state === 'active' ? 'NOW:' : 'STATUS:'")
+    && !spirit.includes('<Text style={styles.activityValue}>{agent.activity}</Text>'),
+  'Spirit never labels retained offline or warning activity as current work',
+);
+check(
+  spirit.includes("if (!currentSpirit.startsWith('custom::')) return null;")
+    && spirit.includes("const profileId = currentSpirit.slice('custom::'.length);")
+    && spirit.includes('const customSpirit: AgentSpirit = {')
+    && spirit.includes('{selectedSpirit ? (')
+    && spirit.includes('{selectedSpirit && (() => {')
+    && spirit.includes('selectedSpirit.name')
+    && spirit.includes('selectedSpirit.emoji'),
+  'A verified custom Spirit resolves to the same visible badge and editable detail contract as a built-in Spirit',
 );
 
 const sessionTagToggle = sessionTagInput.indexOf("accessibilityLabel={showHelp ? 'Hide Session Tags Guide'");
@@ -198,7 +240,7 @@ check(
     && sessionTagInput.includes('accessibilityLabel="Add session tag"')
     && sessionTagInput.includes('accessibilityLabel={`Start ${meta.label} session tag`}')
     && sessionTagInput.includes('accessibilityLabel={`Add suggested session tag ${suggestion.label}`}')
-    && sessionTagInput.includes('width: 44,\n    height: 44,'),
+    && sessionTagInput.includes("tagRemove: {\n    width: 44,\n    height: 44,"),
   'Session tag editing, suggestions, removal, and help expose named controls with a 44px primary target',
 );
 

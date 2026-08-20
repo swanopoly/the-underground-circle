@@ -78,7 +78,7 @@ const failureCopyConstants = sourceSection(
 const failureCopyMapper = sourceSection(
   invocationSource,
   'function getOfficeProviderFailureCopy(',
-  '// ─── Invoke & Stream: Main entry point',
+  'type InvocationBudgetConfigRead =',
   'Office provider failure copy mapper',
 );
 

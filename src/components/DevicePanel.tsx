@@ -8,7 +8,7 @@
  * Requires a companion bridge server running locally.
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -21,9 +21,9 @@ import {
 } from 'react-native';
 import {
   checkBridgeHealth,
-  discoverAllDevices,
-  detect3DPrinters,
-  scanNetwork,
+  discoverAllDevicesResult,
+  detect3DPrintersResult,
+  scanNetworkResult,
   printText,
   sendGCode,
   sendToSerial,
@@ -47,6 +47,16 @@ const ACCENT_RED = PIXEL_COLORS.red;
 const MONO = Platform.OS === 'web' ? 'monospace' : 'Courier';
 
 type GCodeTarget = 'octoprint' | 'klipper' | 'serial';
+type PendingGCode = Readonly<{
+  command: string;
+  target: GCodeTarget;
+  port?: string;
+  serviceUrl?: string;
+}>;
+
+function deviceErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message.trim() ? error.message.trim() : fallback;
+}
 
 const GCODE_TARGETS: { key: GCodeTarget; label: string }[] = [
   { key: 'serial', label: 'SERIAL' },
@@ -79,20 +89,32 @@ export default function DevicePanel({ circleId }: Props) {
   const [networkDevices, setNetworkDevices] = useState<NetworkDevice[]>([]);
   const [gcodeInput, setGcodeInput] = useState('');
   const [gcodeTarget, setGcodeTarget] = useState<GCodeTarget>('serial');
+  const [selectedSerialPort, setSelectedSerialPort] = useState<string | null>(null);
+  const [pendingGCode, setPendingGCode] = useState<PendingGCode | null>(null);
+  const [mutationBusy, setMutationBusy] = useState(false);
   const [actionFeedback, setActionFeedback] = useState('');
   const [feedbackType, setFeedbackType] = useState<'success' | 'error' | 'info'>('info');
   const [expandedSection, setExpandedSection] = useState<string | null>(null);
+  const feedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Feedback helper ───────────────────────────────────────────────────────
 
   const showFeedback = useCallback(
     (msg: string, type: 'success' | 'error' | 'info' = 'info') => {
+      if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
       setActionFeedback(msg);
       setFeedbackType(type);
-      setTimeout(() => setActionFeedback(''), 4000);
+      feedbackTimerRef.current = setTimeout(() => {
+        feedbackTimerRef.current = null;
+        setActionFeedback('');
+      }, 4000);
     },
     [],
   );
+
+  useEffect(() => () => {
+    if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+  }, []);
 
   // ── Bridge health ─────────────────────────────────────────────────────────
 
@@ -118,14 +140,25 @@ export default function DevicePanel({ circleId }: Props) {
     setScanning(true);
     showFeedback('Scanning devices...', 'info');
     try {
-      const [inv, printers, network] = await Promise.all([
-        discoverAllDevices(),
-        detect3DPrinters().catch(() => [] as PrinterService3D[]),
-        scanNetwork().catch(() => [] as NetworkDevice[]),
+      const [inventoryResult, printerResult, networkResult] = await Promise.all([
+        discoverAllDevicesResult(),
+        detect3DPrintersResult(),
+        scanNetworkResult(),
       ]);
+      if (!inventoryResult.ok || !inventoryResult.data) {
+        throw new Error(inventoryResult.error || 'The authenticated device bridge did not return an inventory.');
+      }
+      const inv = inventoryResult.data;
+      const printers = printerResult.ok ? printerResult.data?.services || [] : [];
+      const network = networkResult.ok ? networkResult.data?.devices || [] : [];
       setInventory(inv);
       setPrinters3D(printers);
       setNetworkDevices(network);
+      setSelectedSerialPort(current => (
+        current && inv.serialPorts.some(port => port.path === current)
+          ? current
+          : inv.serialPorts[0]?.path || null
+      ));
 
       const total =
         (inv?.printers?.length ?? 0) +
@@ -133,7 +166,16 @@ export default function DevicePanel({ circleId }: Props) {
         (inv?.usbDevices?.length ?? 0) +
         printers.length +
         network.length;
-      showFeedback(`Scan complete — ${total} device${total !== 1 ? 's' : ''} found`, 'success');
+      const unavailableReads = [
+        !printerResult.ok ? `3D printer discovery (${printerResult.error || 'unavailable'})` : null,
+        !networkResult.ok ? `network discovery (${networkResult.error || 'unavailable'})` : null,
+      ].filter((value): value is string => Boolean(value));
+      showFeedback(
+        unavailableReads.length > 0
+          ? `Inventory loaded, but ${unavailableReads.join(' and ')} failed. Retry the scan for a complete result.`
+          : `Scan complete — ${total} device${total !== 1 ? 's' : ''} found`,
+        unavailableReads.length > 0 ? 'error' : 'success',
+      );
 
       // Auto-expand first non-empty section
       if (inv?.printers?.length) setExpandedSection('printers');
@@ -141,8 +183,8 @@ export default function DevicePanel({ circleId }: Props) {
       else if (inv?.serialPorts?.length) setExpandedSection('serial');
       else if (inv?.usbDevices?.length) setExpandedSection('usb');
       else if (network.length) setExpandedSection('network');
-    } catch (err: any) {
-      showFeedback(`Scan failed: ${err?.message ?? 'Unknown error'}`, 'error');
+    } catch (err: unknown) {
+      showFeedback(`Scan failed: ${deviceErrorMessage(err, 'Unknown error')}`, 'error');
     } finally {
       setScanning(false);
     }
@@ -152,9 +194,11 @@ export default function DevicePanel({ circleId }: Props) {
 
   const handlePrintTest = useCallback(
     async (printerName?: string) => {
+      if (mutationBusy) return;
+      setMutationBusy(true);
       try {
         showFeedback(`Printing test page${printerName ? ` on ${printerName}` : ''}...`, 'info');
-        await printText(
+        const result = await printText(
           'Test page from The Underground Circle\n' +
             `Circle: ${circleId}\n` +
             `Date: ${new Date().toISOString()}\n` +
@@ -162,41 +206,95 @@ export default function DevicePanel({ circleId }: Props) {
             'If you can read this, your printer is connected.\n',
           { printer: printerName },
         );
+        if (!result.ok) throw new Error(result.error || 'The bridge rejected the print job.');
         showFeedback('Test page sent successfully', 'success');
-      } catch (err: any) {
-        showFeedback(`Print failed: ${err?.message ?? 'Unknown error'}`, 'error');
+      } catch (err: unknown) {
+        showFeedback(`Print failed: ${deviceErrorMessage(err, 'Unknown error')}`, 'error');
+      } finally {
+        setMutationBusy(false);
       }
     },
-    [circleId, showFeedback],
+    [circleId, mutationBusy, showFeedback],
   );
 
-  const handleSendGCode = useCallback(async () => {
+  const requestSendGCode = useCallback(() => {
     const cmd = gcodeInput.trim();
     if (!cmd) {
       showFeedback('Enter a G-code command first', 'error');
       return;
     }
-    try {
-      showFeedback(`Sending ${cmd} via ${gcodeTarget}...`, 'info');
-      await sendGCode(gcodeTarget, cmd);
-      showFeedback(`G-code sent: ${cmd}`, 'success');
-      setGcodeInput('');
-    } catch (err: any) {
-      showFeedback(`G-code failed: ${err?.message ?? 'Unknown error'}`, 'error');
+
+    if (gcodeTarget === 'serial' && !selectedSerialPort) {
+      showFeedback('Choose an exact serial port before reviewing this command.', 'error');
+      return;
     }
-  }, [gcodeInput, gcodeTarget, showFeedback]);
+    const serviceMatches = printers3D.filter(service => service.type === gcodeTarget);
+    if (gcodeTarget !== 'serial' && serviceMatches.length !== 1) {
+      showFeedback(
+        serviceMatches.length === 0
+          ? `No ${gcodeTarget} service is available for this command.`
+          : `Multiple ${gcodeTarget} services were found. Use a single bound service before sending commands.`,
+        'error',
+      );
+      return;
+    }
+    const matchedService = gcodeTarget === 'serial' ? null : serviceMatches[0];
+    if (matchedService && !matchedService.url) {
+      showFeedback(`The detected ${gcodeTarget} service has no verified URL. Scan again before sending commands.`, 'error');
+      return;
+    }
+
+    setPendingGCode({
+      command: cmd,
+      target: gcodeTarget,
+      port: gcodeTarget === 'serial' ? selectedSerialPort || undefined : undefined,
+      serviceUrl: matchedService?.url,
+    });
+  }, [gcodeInput, gcodeTarget, printers3D, selectedSerialPort, showFeedback]);
+
+  const confirmSendGCode = useCallback(async () => {
+    if (!pendingGCode || mutationBusy) return;
+    setMutationBusy(true);
+    try {
+      const targetIdentity = pendingGCode.port || pendingGCode.serviceUrl;
+      const targetLabel = targetIdentity
+        ? `${pendingGCode.target} (${targetIdentity})`
+        : pendingGCode.target;
+      showFeedback(`Sending ${pendingGCode.command} via ${targetLabel}...`, 'info');
+      const result = await sendGCode(
+        pendingGCode.target,
+        pendingGCode.command,
+        pendingGCode.port || pendingGCode.serviceUrl
+          ? { port: pendingGCode.port, serviceUrl: pendingGCode.serviceUrl }
+          : undefined,
+      );
+      if (!result.ok) throw new Error(result.error || 'The bridge rejected the G-code command.');
+      showFeedback(`G-code sent: ${pendingGCode.command}`, 'success');
+      setGcodeInput('');
+      setPendingGCode(null);
+    } catch (err: unknown) {
+      showFeedback(`G-code failed: ${deviceErrorMessage(err, 'Unknown error')}`, 'error');
+    } finally {
+      setMutationBusy(false);
+    }
+  }, [mutationBusy, pendingGCode, showFeedback]);
 
   const handleSerialSend = useCallback(
     async (port: string) => {
+      if (mutationBusy) return;
+      setMutationBusy(true);
       try {
         showFeedback(`Pinging ${port}...`, 'info');
-        await sendToSerial(port, 'PING\n');
+        const result = await sendToSerial(port, 'PING\n');
+        if (!result.ok) throw new Error(result.error || 'The bridge rejected the serial write.');
         showFeedback(`Sent PING to ${port}`, 'success');
-      } catch (err: any) {
-        showFeedback(`Serial send failed: ${err?.message ?? 'Unknown error'}`, 'error');
+      } catch (err: unknown) {
+        showFeedback(`Serial send failed: ${deviceErrorMessage(err, 'Unknown error')}`, 'error');
+      } finally {
+        setMutationBusy(false);
       }
     },
-    [showFeedback],
+    [mutationBusy, showFeedback],
   );
 
   // ── Section toggle ────────────────────────────────────────────────────────
@@ -241,6 +339,9 @@ export default function DevicePanel({ circleId }: Props) {
           </Text>
         </View>
         <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={bridgeOnline ? 'Scan for connected devices' : 'Retry device bridge connection'}
+          accessibilityState={{ busy: scanning, disabled: scanning }}
           onPress={bridgeOnline ? scanDevices : checkBridge}
           disabled={scanning}
           style={({ pressed }) => [
@@ -261,7 +362,11 @@ export default function DevicePanel({ circleId }: Props) {
 
       {/* ── Feedback Banner ───────────────────────────────────────────────── */}
       {actionFeedback !== '' && (
-        <View style={[styles.feedbackBanner, { borderColor: feedbackColor + '60' }]}>
+        <View
+          accessibilityRole="alert"
+          accessibilityLiveRegion="polite"
+          style={[styles.feedbackBanner, { borderColor: feedbackColor + '60' }]}
+        >
           <View style={[styles.feedbackDot, { backgroundColor: feedbackColor }]} />
           <Text style={[styles.feedbackText, { color: feedbackColor }]}>
             {actionFeedback}
@@ -278,13 +383,15 @@ export default function DevicePanel({ circleId }: Props) {
             Start the bridge server on your machine:
           </Text>
           <View style={styles.codeBlock}>
-            <Text style={styles.codeText}>$ npx @tuc/device-bridge start</Text>
+            <Text style={styles.codeText}>$ npm run start</Text>
           </View>
           <Text style={styles.offlineBody}>
-            The bridge listens on localhost:7531 and discovers{'\n'}
-            printers, serial ports, USB devices, and network hosts.
+            The authenticated local bridge listens on localhost:7778 and discovers{'\n'}
+            printers, serial ports, USB devices, and network hosts for this app.
           </Text>
           <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Check device bridge connection"
             onPress={checkBridge}
             style={({ pressed }) => [
               styles.retryButton,
@@ -319,19 +426,24 @@ export default function DevicePanel({ circleId }: Props) {
             {(inventory.printers ?? []).length === 0 ? (
               <Text style={styles.emptyText}>No printers detected</Text>
             ) : (
-              (inventory.printers ?? []).map((p: any, i: number) => (
-                <View key={`printer-${i}`} style={styles.deviceRow}>
+              (inventory.printers ?? []).map((p, i) => (
+                <View key={`${p.name}-${i}`} style={styles.deviceRow}>
                   <View style={styles.deviceInfo}>
-                    <Text style={styles.deviceName}>{p.name ?? p.id ?? `Printer ${i + 1}`}</Text>
+                    <Text style={styles.deviceName}>{p.name || `Printer ${i + 1}`}</Text>
                     <Text style={styles.deviceMeta}>
-                      {p.driver ?? p.type ?? 'Unknown driver'}
+                      {p.isDefault ? 'Default printer' : 'Available printer'}
                       {p.status ? ` \u2022 ${p.status}` : ''}
                     </Text>
                   </View>
                   <Pressable
-                    onPress={() => handlePrintTest(p.name ?? p.id)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Print a test page on ${p.name}`}
+                    accessibilityState={{ busy: mutationBusy, disabled: mutationBusy }}
+                    disabled={mutationBusy}
+                    onPress={() => handlePrintTest(p.name)}
                     style={({ pressed }) => [
                       styles.actionButton,
+                      mutationBusy && styles.actionButtonDisabled,
                       pressed && styles.actionButtonPressed,
                     ]}
                   >
@@ -413,7 +525,13 @@ export default function DevicePanel({ circleId }: Props) {
               {GCODE_TARGETS.map((t) => (
                 <Pressable
                   key={t.key}
-                  onPress={() => setGcodeTarget(t.key)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Select ${t.label} G-code target`}
+                  accessibilityState={{ selected: gcodeTarget === t.key }}
+                  onPress={() => {
+                    setGcodeTarget(t.key);
+                    setPendingGCode(null);
+                  }}
                   style={[
                     styles.gcodeTargetButton,
                     gcodeTarget === t.key && styles.gcodeTargetActive,
@@ -431,12 +549,64 @@ export default function DevicePanel({ circleId }: Props) {
               ))}
             </View>
 
+            {gcodeTarget === 'serial' && (
+              <View style={styles.serialTargetSelector}>
+                <Text style={styles.serialTargetLabel}>EXACT SERIAL PORT</Text>
+                {(inventory.serialPorts ?? []).length === 0 ? (
+                  <Text style={styles.serialTargetEmpty}>
+                    No serial port is available. Scan again after connecting the device.
+                  </Text>
+                ) : (
+                  <View style={styles.serialTargetOptions}>
+                    {(inventory.serialPorts ?? []).map((port) => (
+                      <Pressable
+                        key={port.path}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Use serial port ${port.path}`}
+                        accessibilityState={{ selected: selectedSerialPort === port.path }}
+                        onPress={() => {
+                          setSelectedSerialPort(port.path);
+                          setPendingGCode(null);
+                        }}
+                        style={[
+                          styles.serialTargetOption,
+                          selectedSerialPort === port.path && styles.serialTargetOptionActive,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.serialTargetOptionText,
+                            selectedSerialPort === port.path && styles.serialTargetOptionTextActive,
+                          ]}
+                        >
+                          {port.path}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                )}
+              </View>
+            )}
+
+            {gcodeTarget !== 'serial' && (
+              <Text style={styles.targetBindingText}>
+                {printers3D.filter(service => service.type === gcodeTarget).length === 1
+                  ? `Bound to ${printers3D.find(service => service.type === gcodeTarget)?.url || gcodeTarget}`
+                  : `Requires exactly one detected ${gcodeTarget} service before review.`}
+              </Text>
+            )}
+
             {/* Presets */}
             <View style={styles.gcodePresetsRow}>
               {GCODE_PRESETS.map((p) => (
                 <Pressable
                   key={p.cmd}
-                  onPress={() => setGcodeInput(p.cmd)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Use ${p.label} G-code preset`}
+                  onPress={() => {
+                    setGcodeInput(p.cmd);
+                    setPendingGCode(null);
+                  }}
                   style={({ pressed }) => [
                     styles.presetChip,
                     pressed && styles.presetChipPressed,
@@ -453,32 +623,91 @@ export default function DevicePanel({ circleId }: Props) {
               <TextInput
                 style={styles.gcodeInput}
                 value={gcodeInput}
-                onChangeText={setGcodeInput}
+                accessibilityLabel="G-code command"
+                onChangeText={(value) => {
+                  setGcodeInput(value);
+                  setPendingGCode(null);
+                }}
                 placeholder="G28, M104 S200, ..."
                 placeholderTextColor={PIXEL_COLORS.text3}
                 autoCapitalize="characters"
                 returnKeyType="send"
-                onSubmitEditing={handleSendGCode}
+                onSubmitEditing={requestSendGCode}
               />
               <Pressable
-                onPress={handleSendGCode}
-                disabled={!gcodeInput.trim()}
+                accessibilityRole="button"
+                accessibilityLabel="Review G-code command"
+                accessibilityHint="Shows the exact hardware target and asks for confirmation before sending"
+                accessibilityState={{ busy: mutationBusy, disabled: !gcodeInput.trim() || mutationBusy }}
+                onPress={requestSendGCode}
+                disabled={!gcodeInput.trim() || mutationBusy}
                 style={({ pressed }) => [
                   styles.gcodeSendButton,
-                  !gcodeInput.trim() && styles.gcodeSendDisabled,
-                  pressed && gcodeInput.trim() ? styles.gcodeSendPressed : undefined,
+                  (!gcodeInput.trim() || mutationBusy) && styles.gcodeSendDisabled,
+                  pressed && gcodeInput.trim() && !mutationBusy ? styles.gcodeSendPressed : undefined,
                 ]}
               >
                 <Text
                   style={[
                     styles.gcodeSendText,
-                    !gcodeInput.trim() && { color: PIXEL_COLORS.text3 },
+                    (!gcodeInput.trim() || mutationBusy) && { color: PIXEL_COLORS.text3 },
                   ]}
                 >
-                  SEND
+                  REVIEW
                 </Text>
               </Pressable>
             </View>
+
+            {pendingGCode && (
+              <View
+                style={styles.confirmationCard}
+                accessibilityRole="alert"
+                testID="device-gcode-confirmation"
+              >
+                <Text style={styles.confirmationTitle}>CONFIRM HARDWARE ACTION</Text>
+                <Text style={styles.confirmationMeta}>
+                  Target: {pendingGCode.port || pendingGCode.serviceUrl
+                    ? `${pendingGCode.target} at ${pendingGCode.port || pendingGCode.serviceUrl}`
+                    : pendingGCode.target}
+                </Text>
+                <Text style={styles.confirmationCommand} selectable>
+                  {pendingGCode.command}
+                </Text>
+                <Text style={styles.confirmationWarning}>
+                  This command can move hardware or change temperatures. Verify the target and keep the device in view.
+                </Text>
+                <View style={styles.confirmationActions}>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Cancel G-code command"
+                    disabled={mutationBusy}
+                    onPress={() => setPendingGCode(null)}
+                    style={({ pressed }) => [
+                      styles.confirmationCancel,
+                      mutationBusy && styles.actionButtonDisabled,
+                      pressed && styles.actionButtonPressed,
+                    ]}
+                  >
+                    <Text style={styles.confirmationCancelText}>CANCEL</Text>
+                  </Pressable>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`Run G-code command on ${pendingGCode.port || pendingGCode.serviceUrl || pendingGCode.target}`}
+                    accessibilityState={{ busy: mutationBusy, disabled: mutationBusy }}
+                    testID="device-gcode-confirm-run"
+                    disabled={mutationBusy}
+                    onPress={confirmSendGCode}
+                    style={({ pressed }) => [
+                      styles.confirmationRun,
+                      mutationBusy && styles.actionButtonDisabled,
+                      pressed && !mutationBusy && styles.gcodeSendPressed,
+                    ]}
+                  >
+                    <Text style={styles.confirmationRunText}>{mutationBusy ? 'SENDING…' : 'RUN COMMAND'}</Text>
+                  </Pressable>
+                </View>
+              </View>
+            )}
           </DeviceSection>
 
           {/* Serial Ports */}
@@ -493,22 +722,22 @@ export default function DevicePanel({ circleId }: Props) {
             {(inventory.serialPorts ?? []).length === 0 ? (
               <Text style={styles.emptyText}>No serial ports detected</Text>
             ) : (
-              (inventory.serialPorts ?? []).map((p: any, i: number) => (
-                <View key={`serial-${i}`} style={styles.deviceRow}>
+              (inventory.serialPorts ?? []).map((p, i) => (
+                <View key={p.path || `serial-${i}`} style={styles.deviceRow}>
                   <View style={styles.deviceInfo}>
-                    <Text style={styles.deviceName}>
-                      {p.path ?? p.port ?? `Port ${i + 1}`}
-                    </Text>
-                    <Text style={styles.deviceMeta}>
-                      {p.manufacturer ?? 'Unknown manufacturer'}
-                      {p.vendorId ? ` \u2022 VID:${p.vendorId}` : ''}
-                      {p.productId ? ` PID:${p.productId}` : ''}
-                    </Text>
+                    <Text style={styles.deviceName}>{p.path || `Port ${i + 1}`}</Text>
+                    <Text style={styles.deviceMeta}>{p.description || 'Serial device'}</Text>
                   </View>
                   <Pressable
-                    onPress={() => handleSerialSend(p.path ?? p.port)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Send a PING receipt check to ${p.path}`}
+                    accessibilityHint="Writes a reversible test message to this exact serial port"
+                    accessibilityState={{ busy: mutationBusy, disabled: mutationBusy }}
+                    disabled={mutationBusy}
+                    onPress={() => handleSerialSend(p.path)}
                     style={({ pressed }) => [
                       styles.actionButton,
+                      mutationBusy && styles.actionButtonDisabled,
                       pressed && styles.actionButtonPressed,
                     ]}
                   >
@@ -531,23 +760,16 @@ export default function DevicePanel({ circleId }: Props) {
             {(inventory.usbDevices ?? []).length === 0 ? (
               <Text style={styles.emptyText}>No USB devices detected</Text>
             ) : (
-              (inventory.usbDevices ?? []).map((u: any, i: number) => (
-                <View key={`usb-${i}`} style={styles.deviceRow}>
+              (inventory.usbDevices ?? []).map((u, i) => (
+                <View key={`${u.bus}-${u.device}-${i}`} style={styles.deviceRow}>
                   <View style={styles.deviceInfo}>
-                    <Text style={styles.deviceName}>
-                      {u.product ?? u.description ?? `USB Device ${i + 1}`}
-                    </Text>
+                    <Text style={styles.deviceName}>{u.description || `USB Device ${i + 1}`}</Text>
                     <Text style={styles.deviceMeta}>
-                      {u.manufacturer ?? 'Unknown'}
-                      {u.vendorId ? ` \u2022 VID:${u.vendorId}` : ''}
-                      {u.productId ? ` PID:${u.productId}` : ''}
-                      {u.serialNumber ? ` \u2022 S/N:${u.serialNumber}` : ''}
+                      Bus {u.bus || 'unknown'} • Device {u.device || 'unknown'} • {u.id || 'Unknown ID'}
                     </Text>
                   </View>
                   <View style={styles.usbClassBadge}>
-                    <Text style={styles.usbClassText}>
-                      {u.deviceClass ?? u.class ?? 'DEV'}
-                    </Text>
+                    <Text style={styles.usbClassText}>USB</Text>
                   </View>
                 </View>
               ))
@@ -668,7 +890,17 @@ function DeviceSection({
 }: DeviceSectionProps) {
   return (
     <View style={[styles.sectionCard, { borderColor: expanded ? accentColor + '40' : PIXEL_COLORS.border1 }]}>
-      <Pressable onPress={onToggle} style={styles.sectionHeader}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`${expanded ? 'Collapse' : 'Expand'} ${title}, ${count} detected`}
+        accessibilityState={{ expanded }}
+        onPress={onToggle}
+        style={({ focused, pressed }: any) => [
+          styles.sectionHeader,
+          focused && styles.sectionHeaderFocused,
+          pressed && styles.sectionHeaderPressed,
+        ]}
+      >
         <View style={styles.sectionHeaderLeft}>
           <View style={[styles.sectionIconBox, { backgroundColor: accentColor + '18', borderColor: accentColor + '30' }]}>
             <Text style={[styles.sectionIconText, { color: accentColor }]}>{icon}</Text>
@@ -880,12 +1112,20 @@ const styles = StyleSheet.create({
         }),
   } as any,
   sectionHeader: {
+    minHeight: 48,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: GRID.md,
     paddingVertical: GRID.sm + 2,
   },
+  sectionHeaderFocused: {
+    ...Platform.select({
+      web: { outlineStyle: 'none', boxShadow: 'inset 0 0 0 2px rgba(34,211,238,0.6)' } as any,
+      default: {},
+    }),
+  },
+  sectionHeaderPressed: { backgroundColor: PIXEL_COLORS.bg3 },
   sectionHeaderLeft: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -974,6 +1214,7 @@ const styles = StyleSheet.create({
 
   // Action button (small)
   actionButton: {
+    minHeight: 40,
     backgroundColor: PIXEL_COLORS.bg0,
     borderWidth: 2,
     borderTopColor: PIXEL_COLORS.border1,
@@ -984,6 +1225,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: GRID.sm + 2,
     paddingVertical: GRID.xs,
   },
+  actionButtonDisabled: { opacity: 0.5 },
   actionButtonPressed: {
     borderTopColor: PIXEL_COLORS.bg0,
     borderLeftColor: PIXEL_COLORS.bg0,
@@ -1049,6 +1291,8 @@ const styles = StyleSheet.create({
     marginBottom: GRID.sm,
   },
   gcodeTargetButton: {
+    minHeight: 40,
+    justifyContent: 'center',
     backgroundColor: PIXEL_COLORS.bg0,
     borderWidth: 1,
     borderColor: PIXEL_COLORS.border0,
@@ -1069,6 +1313,54 @@ const styles = StyleSheet.create({
   },
   gcodeTargetTextActive: {
     color: ACCENT,
+  },
+  serialTargetSelector: {
+    marginBottom: GRID.sm,
+    gap: GRID.xs,
+  },
+  serialTargetLabel: {
+    color: PIXEL_COLORS.text2,
+    fontSize: 9,
+    fontWeight: '700',
+    fontFamily: MONO,
+    letterSpacing: 1,
+  },
+  serialTargetEmpty: {
+    color: ACCENT_RED,
+    fontSize: 10,
+    fontFamily: MONO,
+    lineHeight: 15,
+  },
+  serialTargetOptions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: GRID.xs,
+  },
+  serialTargetOption: {
+    minHeight: 40,
+    justifyContent: 'center',
+    paddingHorizontal: GRID.sm,
+    borderWidth: 1,
+    borderColor: PIXEL_COLORS.border1,
+    backgroundColor: PIXEL_COLORS.bg0,
+  },
+  serialTargetOptionActive: {
+    borderColor: ACCENT + '80',
+    backgroundColor: ACCENT + '14',
+  },
+  serialTargetOptionText: {
+    color: PIXEL_COLORS.text2,
+    fontSize: 9,
+    fontWeight: '700',
+    fontFamily: MONO,
+  },
+  serialTargetOptionTextActive: { color: ACCENT },
+  targetBindingText: {
+    color: PIXEL_COLORS.text2,
+    fontSize: 10,
+    fontFamily: MONO,
+    lineHeight: 15,
+    marginBottom: GRID.sm,
   },
   gcodePresetsRow: {
     flexDirection: 'row',
@@ -1143,6 +1435,75 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     fontFamily: MONO,
     letterSpacing: 1,
+  },
+  confirmationCard: {
+    marginTop: GRID.sm,
+    padding: GRID.md,
+    borderWidth: 1,
+    borderColor: '#f59e0b66',
+    backgroundColor: '#f59e0b10',
+    gap: GRID.xs,
+  },
+  confirmationTitle: {
+    color: '#fbbf24',
+    fontSize: 10,
+    fontWeight: '800',
+    fontFamily: MONO,
+    letterSpacing: 1.2,
+  },
+  confirmationMeta: {
+    color: PIXEL_COLORS.text1,
+    fontSize: 10,
+    fontFamily: MONO,
+  },
+  confirmationCommand: {
+    color: PIXEL_COLORS.text0,
+    fontSize: 13,
+    fontWeight: '700',
+    fontFamily: MONO,
+    paddingVertical: GRID.xs,
+  },
+  confirmationWarning: {
+    color: '#d6b56d',
+    fontSize: 10,
+    fontFamily: MONO,
+    lineHeight: 15,
+  },
+  confirmationActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    flexWrap: 'wrap',
+    gap: GRID.sm,
+    marginTop: GRID.xs,
+  },
+  confirmationCancel: {
+    minHeight: 40,
+    justifyContent: 'center',
+    paddingHorizontal: GRID.md,
+    borderWidth: 1,
+    borderColor: PIXEL_COLORS.border1,
+    backgroundColor: PIXEL_COLORS.bg0,
+  },
+  confirmationCancelText: {
+    color: PIXEL_COLORS.text1,
+    fontSize: 9,
+    fontWeight: '800',
+    fontFamily: MONO,
+  },
+  confirmationRun: {
+    minHeight: 40,
+    justifyContent: 'center',
+    paddingHorizontal: GRID.md,
+    borderWidth: 1,
+    borderColor: '#f59e0b88',
+    backgroundColor: '#f59e0b20',
+  },
+  confirmationRunText: {
+    color: '#fbbf24',
+    fontSize: 9,
+    fontWeight: '800',
+    fontFamily: MONO,
+    letterSpacing: 0.5,
   },
 
   // Tips card

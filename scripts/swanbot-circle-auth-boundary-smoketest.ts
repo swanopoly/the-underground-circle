@@ -267,7 +267,7 @@ async function main(): Promise<void> {
     'callMarketplaceProviderWithTools({',
     'fetch("https://api.anthropic.com/v1/messages"',
     'createSwanBotV1Run(supabase, {',
-    'gatherCircleContext(supabase, circleId, userId, message, targetAgentName)',
+    'const context: any = await gatherCircleContext(',
   ];
   for (const marker of sensitiveMarkers) {
     const markerAt = handler.indexOf(marker);

@@ -68,6 +68,11 @@ async function main() {
     'key: separates different model contexts',
   );
   assert(
+    buildSwanBotTurnDedupeKey('text', 'open Notes', baseContext)
+      !== buildSwanBotTurnDedupeKey('text', 'open Notes', { ...baseContext, modelDispatchSealed: true }),
+    'key: sealed Chat dispatches never share unsealed tier-ladder results',
+  );
+  assert(
     buildSwanBotTurnDedupeKey('text', 'open Notes', {
       ...baseContext,
       forceClientToolLoop: true,

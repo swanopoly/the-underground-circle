@@ -35,9 +35,11 @@ import PluginPicker from '../../../components/agent/PluginPicker';
 import MemoryToast from '../../../components/agent/MemoryToast';
 import {
   getSwanBotResponse as getAIResponse,
+  SealedModelDispatchError,
   SwanBotContext,
   type SwanBotStructuredArtifact,
   type SwanBotStructuredResponse,
+  isLocalSwanBotCommandMessage,
   tryHandleLocalSwanBotCommand,
 } from '../../../lib/swanbot';
 import type { WalletInfo, CryptoChain } from '../../../lib/crypto';
@@ -63,7 +65,7 @@ import BuilderGithubSaveModal from './chat/BuilderGithubSaveModal';
 import BuilderNetlifyDeployModal from './chat/BuilderNetlifyDeployModal';
 import ChatAttachmentStrip from './chat/ChatAttachmentStrip';
 import MessageCitations from './chat/MessageCitations';
-import QuickActionDock from './chat/QuickActionDock';
+import ChatActionsMenu from './chat/ChatActionsMenu';
 import AutomationProposalCard from './chat/AutomationProposalCard';
 import { parseAutomationRequest, type AutomationProposal } from '../../../lib/automationChatBuilder';
 import { loadChatAutomationDecisions } from '../../../lib/chatAutomationDecisions';
@@ -133,7 +135,6 @@ import { dispatchBridgeTask, sendTerminalAgentSessionMessage, wakeAndAssignTask 
 import SpawnAgentPanel from '../../../components/SpawnAgentPanel';
 import { storage } from '../../../lib/storage';
 import ProposalCard from '../../../components/ProposalCard';
-import StepAwayCard from '../../../components/StepAwayCard';
 import { Proposal, PinnedMessage } from '../../../types';
 import { executeAgentRun, detectHandoff, HandoffSuggestion } from '../../../lib/agentRuntime';
 import HandoffCard from '../../../components/agent/HandoffCard';
@@ -141,7 +142,23 @@ import AgentModeSelector from '../../../components/agent/AgentModeSelector';
 import AddModelPanel from '../../../components/models/AddModelPanel';
 import type { ModelGroup } from '../../../lib/integrations/modelProviderRegistry';
 import { resolvePlainChatModelRoute } from '../../../lib/crossProviderRouter';
-import { resolveModelSelectionReadiness } from '../../../lib/modelCatalogReadinessCore';
+import { resolveModelRouteIdentity, resolveModelSelectionReadiness } from '../../../lib/modelCatalogReadinessCore';
+import { prettyProviderName } from '../../../lib/modelRouteExplainCore';
+import { getModelCapabilityFlags } from '../../../lib/modelCapabilities';
+import {
+  CHAT_TRANSIENT_PROVIDER_COOLDOWN_MS,
+  classifyProviderFreeChatTurn,
+  collectActiveChatProviderQuarantines,
+  hasIndependentChatActionContinuation,
+  hasProviderFreeChatCompoundIntent,
+  isProviderFreeStructuredSingleIntent,
+  loadChatModelCatalogWithinDeadline,
+  prepareStableChatModelDispatch,
+  resolveReadyChatVisualBriefModel,
+  resolveReadyChatModelForTurn,
+  sameChatModelDispatchIdentity,
+  type ReadyChatModelTurnSelection,
+} from '../../../lib/chatModelFallbackCore';
 import { pickAttachments, ChatAttachment, getMediaTypeIcon, buildAttachmentPromptContext } from '../../../lib/chatMedia';
 import {
   formatVisualBriefsForConnectedAgent,
@@ -219,6 +236,7 @@ import {
 } from '../../../lib/openswanSteering';
 import {
   BLACKSWAN_ENDPOINT_MODEL_ID,
+  BLACKSWAN_PUBLIC_MODEL_ID,
   isLocalOllamaBlackSwan,
   looksLikeAppGroundedMessage,
   resolveComputerTaskPlannerModel,
@@ -471,11 +489,9 @@ import {
   updateChatMessageContent,
 } from '../../../lib/chatService';
 import {
-  FEATURED_QUICK_ACTIONS,
-  FEATURED_TOOL_ACTIONS,
-  PROMPT_CATEGORIES,
-  QUICK_PROMPTS,
+  mergeChatActionDraft,
   resolveQuickActionExecution,
+  type QuickActionMode,
 } from '../../../lib/chatActions';
 import { detectAgenticCodingProfile } from '../../../lib/agenticCodingProfile';
 import { getSpiritById } from '../../../lib/agentSpirits';
@@ -641,13 +657,11 @@ import {
 } from '../../../lib/chatDesktopAttachmentRouting';
 import {
   appendChatSessionArchiveEvent,
-  clearChatSessionArchive,
   formatChatSessionArchiveBlock,
   loadChatSessionArchive,
   upsertChatSessionArchiveMessage,
 } from '../../../lib/chatSessionArchive';
 import {
-  clearPendingBotMessages,
   loadPendingBotMessages,
   reconcilePendingBotMessages,
   removePendingBotMessage,
@@ -1410,6 +1424,49 @@ function formatModelDisplayName(model: string | null | undefined): string {
     .replace(/^minimax\//i, '');
 }
 
+function formatModelRouteDisplayName(
+  model: string | null | undefined,
+  providerOverride?: string | null,
+): string {
+  const modelLabel = formatModelDisplayName(model);
+  const provider = providerOverride || resolvePlainChatModelRoute(String(model || '').trim())?.provider || null;
+  const providerLabel = prettyProviderName(provider);
+  return providerLabel ? `${modelLabel} via ${providerLabel}` : modelLabel;
+}
+
+function modelRoutesNeedProviderDisambiguation(
+  selectedModel: string | null | undefined,
+  effectiveModel: string | null | undefined,
+  provider: string | null | undefined,
+): boolean {
+  if (!selectedModel || !effectiveModel || !provider) return false;
+  return selectedModel.toLowerCase() !== effectiveModel.toLowerCase()
+    && formatModelDisplayName(selectedModel).toLowerCase() === formatModelDisplayName(effectiveModel).toLowerCase();
+}
+
+function resolveTaskAwareReadyFallbackPreference(
+  messageText: string,
+  profile: SessionCodingProfile,
+  groups: readonly ModelGroup[],
+): string | null {
+  const draft = String(messageText || '').trim();
+  const providerSet = new Set(
+    groups
+      .filter((group) => group.connected && group.models.some((model) => model.ready))
+      .map((group) => normalizeConnectedProviderKey(group.provider)),
+  );
+  if (looksLikeActionRequest(draft)) providerSet.delete('blackswan');
+  const route = draft ? analyzeMessageRouting(draft, 'main_chat').route : null;
+  return suggestAutoModelAlternative(
+    profile,
+    route?.intent,
+    providerSet,
+    route?.complexity,
+    { appGroundedHint: looksLikeAppGroundedMessage(draft) },
+    draft,
+  )?.model || null;
+}
+
 type ChatMessageRouteChip = {
   label: string;
   value: string;
@@ -1488,6 +1545,8 @@ type ChatSendOptions = Readonly<{
   displayText?: string;
   modeOverride?: string | null;
   modelOverride?: string | null;
+  /** Canonical quick-action input used by the planner for route telemetry. */
+  quickActionText?: string | null;
   openSwanResume?: {
     locator: OpenSwanResumeLocator;
     sourceMessageId: string;
@@ -1564,11 +1623,18 @@ function buildMessageRouteChips(message: ChatMessage): ChatMessageRouteChip[] {
   if (!message.isBot || !message.source) return [];
   const source = message.source;
   if (source.showRouteChips !== true) return [];
-  const effectiveModel = source.effectiveModel || message.usage?.model || null;
+  const effectiveModel = message.routing?.provider_model || message.usage?.model || source.effectiveModel || null;
   const selectedModel = source.selectedModel || null;
   const provider = source.provider || message.routing?.provider_routed || null;
   const localExecution = isLocalExecutionSource(source, effectiveModel);
   if (localExecution) return [];
+  const selectedModelLabel = selectedModel ? formatModelDisplayName(selectedModel) : null;
+  const effectiveModelLabel = effectiveModel ? formatModelDisplayName(effectiveModel) : null;
+  const needsProviderDisambiguation = modelRoutesNeedProviderDisambiguation(
+    selectedModel,
+    effectiveModel,
+    provider,
+  );
   // P22: prefer the handoff's true surface for the displayed Route so a
   // desktop/app task doesn't read "browser". Display-only — nothing about
   // routing/executor selection changes.
@@ -1581,7 +1647,9 @@ function buildMessageRouteChips(message: ChatMessage): ChatMessageRouteChip[] {
   if (selectedModel) {
     chips.push({
       label: selectedModel.toLowerCase() === 'auto' ? 'Picker' : 'Selected',
-      value: formatModelDisplayName(selectedModel),
+      value: needsProviderDisambiguation
+        ? formatModelRouteDisplayName(selectedModel)
+        : selectedModelLabel || formatModelDisplayName(selectedModel),
       tone: 'model',
     });
   }
@@ -1593,7 +1661,9 @@ function buildMessageRouteChips(message: ChatMessage): ChatMessageRouteChip[] {
         ? 'Local desktop bridge'
         : localExecution && effectiveModel === 'computer-file-adapter'
           ? 'Computer file adapter'
-          : formatModelDisplayName(effectiveModel),
+          : needsProviderDisambiguation
+            ? formatModelRouteDisplayName(effectiveModel, provider)
+            : effectiveModelLabel || formatModelDisplayName(effectiveModel),
       tone: localExecution ? 'local' : 'model',
     });
   } else if (localExecution) {
@@ -1638,8 +1708,9 @@ function describeLastTaskModel(messages: ChatMessage[]): string {
   ));
   if (!lastBot) return 'No previous assistant task is recorded in this chat yet.';
 
-  const effectiveModel = lastBot.source?.effectiveModel || lastBot.usage?.model || null;
+  const effectiveModel = lastBot.routing?.provider_model || lastBot.usage?.model || lastBot.source?.effectiveModel || null;
   const selectedModel = lastBot.source?.selectedModel || null;
+  const provider = lastBot.source?.provider || lastBot.routing?.provider_routed || null;
   const surface = lastBot.source?.surface || 'main_chat';
   const noLlmSurface = effectiveModel === 'local-desktop-bridge'
     || effectiveModel === 'computer-file-adapter'
@@ -1655,9 +1726,18 @@ function describeLastTaskModel(messages: ChatMessage[]): string {
   }
 
   if (effectiveModel) {
+    const disambiguateProvider = modelRoutesNeedProviderDisambiguation(
+      selectedModel,
+      effectiveModel,
+      provider,
+    );
     return [
-      `The last assistant task used **${formatModelDisplayName(effectiveModel)}**.`,
-      selectedModel ? `Picker selection: **${formatModelDisplayName(selectedModel)}**.` : null,
+      `The last assistant task used **${disambiguateProvider
+        ? formatModelRouteDisplayName(effectiveModel, provider)
+        : formatModelDisplayName(effectiveModel)}**.`,
+      selectedModel ? `Picker selection: **${disambiguateProvider
+        ? formatModelRouteDisplayName(selectedModel)
+        : formatModelDisplayName(selectedModel)}**.` : null,
       `Surface: \`${surface}\`.`,
     ].filter(Boolean).join(' ');
   }
@@ -2166,6 +2246,17 @@ type PendingChatAgentFocus = {
   requestId: number;
 };
 
+type ChatModelCatalogState = Readonly<{
+  status: 'loading' | 'ready' | 'error';
+  userId: string | null;
+  circleId: string;
+  generation: number;
+  refreshedAtMs: number;
+  groups: ModelGroup[];
+}>;
+
+const CHAT_MODEL_CATALOG_SEND_FRESHNESS_MS = 60_000;
+
 export default function ChatTab({
   circleId,
   accentColor = '#6366f1',
@@ -2295,13 +2386,18 @@ export default function ChatTab({
   const [showReactions, setShowReactions] = useState<string | null>(null);
   const [showMentions, setShowMentions] = useState(false);
   const [mentionQuery, setMentionQuery] = useState('');
-  const [expandedCategory, setExpandedCategory] = useState<number | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [wallet, setWallet] = useState<WalletInfo | null>(null);
   const [showSendCrypto, setShowSendCrypto] = useState(false);
   const [sendTo, setSendTo] = useState('');
   const [sendAmount, setSendAmount] = useState('');
   const [sendingCrypto, setSendingCrypto] = useState(false);
+  useEffect(() => {
+    setShowSendCrypto(false);
+    setSendTo('');
+    setSendAmount('');
+    setSendingCrypto(false);
+  }, [activeThreadId, circleId, currentUserId]);
   const [discordConfig, setDiscordConfig] = useState<CircleDiscordConfig | null>(null);
   const [discordChannels, setDiscordChannels] = useState<string[]>([]);
   const [floatingEmojis, setFloatingEmojis] = useState<{ id: string; emoji: string; x: number; y: number }[]>([]);
@@ -2318,34 +2414,197 @@ export default function ChatTab({
   // composer (for the picker UI + Auto preview) and the send flow
   // (for resolving 'auto' → concrete model id with provider bias) need
   // to know which integrations are connected.
-  const [marketplaceModelGroups, setMarketplaceModelGroups] = useState<ModelGroup[]>([]);
+  const modelCatalogGenerationRef = useRef(0);
+  const failedModelProviderQuarantineRef = useRef(new Map<string, number>());
+  const failedModelProviderQuarantineScopeRef = useRef<{
+    userId: string | null;
+    circleId: string;
+  }>({ userId: currentUserId, circleId });
+  if (
+    failedModelProviderQuarantineScopeRef.current.userId !== currentUserId
+    || failedModelProviderQuarantineScopeRef.current.circleId !== circleId
+  ) {
+    // A provider failure belongs only to the exact authenticated account and
+    // circle that observed it. Never let account switching inherit another
+    // user's credential quarantine or transient cooldown.
+    failedModelProviderQuarantineRef.current.clear();
+    failedModelProviderQuarantineScopeRef.current = { userId: currentUserId, circleId };
+  }
+  const initialModelCatalogState: ChatModelCatalogState = {
+    status: 'loading',
+    userId: null,
+    circleId,
+    generation: 0,
+    refreshedAtMs: 0,
+    groups: [],
+  };
+  const [modelCatalogState, setModelCatalogState] = useState<ChatModelCatalogState>(initialModelCatalogState);
+  const modelCatalogStateRef = useRef<ChatModelCatalogState>(initialModelCatalogState);
+  modelCatalogStateRef.current = modelCatalogState;
+  const marketplaceModelGroups = modelCatalogState.groups;
+  const modelCatalogIsCurrentReady = modelCatalogState.status === 'ready'
+    && modelCatalogState.userId === currentUserId
+    && modelCatalogState.circleId === circleId
+    && modelCatalogState.generation === modelCatalogGenerationRef.current;
+  const readyMarketplaceModelGroups = modelCatalogIsCurrentReady ? marketplaceModelGroups : [];
   const [modelProviderRefreshToken, setModelProviderRefreshToken] = useState(0);
+  const forceNextModelCatalogRefreshRef = useRef(false);
+  const retireModelCatalogAfterCredentialFailure = useCallback(() => {
+    // The provider just disproved this generation after I/O. Do not replay the
+    // failed turn, but make the next turn re-read exact account readiness so a
+    // different connected API can be selected pre-dispatch.
+    forceNextModelCatalogRefreshRef.current = true;
+    modelCatalogGenerationRef.current += 1;
+    setModelProviderRefreshToken((token) => token + 1);
+  }, []);
+  const quarantineFailedTurnModel = useCallback((
+    modelId: string | null | undefined,
+    failureKind: 'credential' | 'transient' = 'transient',
+  ) => {
+    const identity = resolveModelRouteIdentity(resolvePlainChatModelRoute(modelId));
+    if (identity?.provider) {
+      const provider = normalizeConnectedProviderKey(identity.provider);
+      const expiresAt = failureKind === 'credential'
+        ? Number.POSITIVE_INFINITY
+        : Date.now() + CHAT_TRANSIENT_PROVIDER_COOLDOWN_MS;
+      const previous = failedModelProviderQuarantineRef.current.get(provider) ?? 0;
+      failedModelProviderQuarantineRef.current.set(provider, Math.max(previous, expiresAt));
+    }
+    retireModelCatalogAfterCredentialFailure();
+  }, [retireModelCatalogAfterCredentialFailure]);
+  const releaseFailedTurnModelQuarantine = useCallback((modelId: string | null | undefined) => {
+    const identity = resolveModelRouteIdentity(resolvePlainChatModelRoute(modelId));
+    if (identity?.provider) {
+      failedModelProviderQuarantineRef.current.delete(normalizeConnectedProviderKey(identity.provider));
+    }
+  }, []);
+  const refreshTurnModelCatalogIfNeeded = async (): Promise<ChatModelCatalogState> => {
+    const current = modelCatalogStateRef.current;
+    const currentReady = current.status === 'ready'
+      && current.userId === currentUserId
+      && current.circleId === circleId
+      && current.generation === modelCatalogGenerationRef.current;
+    if (
+      currentReady
+      && Date.now() - current.refreshedAtMs <= CHAT_MODEL_CATALOG_SEND_FRESHNESS_MS
+    ) return current;
+
+    const generation = ++modelCatalogGenerationRef.current;
+    const sameScope = current.userId === currentUserId && current.circleId === circleId;
+    const publish = (next: ChatModelCatalogState) => {
+      if (generation !== modelCatalogGenerationRef.current) return false;
+      modelCatalogStateRef.current = next;
+      setModelCatalogState(next);
+      return true;
+    };
+    publish({
+      status: 'loading',
+      userId: currentUserId,
+      circleId,
+      generation,
+      refreshedAtMs: sameScope ? current.refreshedAtMs : 0,
+      groups: sameScope ? current.groups : [],
+    });
+    if (!circleId || !currentUserId) return modelCatalogStateRef.current;
+    try {
+      const { loadModelGroups } = await import('../../../lib/integrations/modelProviderRegistry');
+      const groups = await loadChatModelCatalogWithinDeadline(() => loadModelGroups(circleId, {
+        includeDisconnected: true,
+        forceCatalogRefresh: true,
+      }));
+      const ready: ChatModelCatalogState = {
+        status: 'ready',
+        userId: currentUserId,
+        circleId,
+        generation,
+        refreshedAtMs: Date.now(),
+        groups,
+      };
+      publish(ready);
+      return modelCatalogStateRef.current;
+    } catch {
+      const failed: ChatModelCatalogState = {
+        status: 'error',
+        userId: currentUserId,
+        circleId,
+        generation,
+        refreshedAtMs: sameScope ? current.refreshedAtMs : 0,
+        groups: sameScope ? current.groups : [],
+      };
+      publish(failed);
+      return modelCatalogStateRef.current;
+    }
+  };
   useEffect(
-    () => subscribeUserApiKeyChanges(() => setModelProviderRefreshToken((token) => token + 1)),
+    () => subscribeUserApiKeyChanges(() => {
+      // Retire the currently verified catalog synchronously. A turn already
+      // awaiting local/deterministic work must not dispatch against a key that
+      // was just removed or replaced before React starts the next load effect.
+      failedModelProviderQuarantineRef.current.clear();
+      forceNextModelCatalogRefreshRef.current = true;
+      modelCatalogGenerationRef.current += 1;
+      setModelProviderRefreshToken((token) => token + 1);
+    }),
     [],
   );
   useEffect(() => {
+    const generation = ++modelCatalogGenerationRef.current;
+    const forceCatalogRefresh = forceNextModelCatalogRefreshRef.current;
+    forceNextModelCatalogRefreshRef.current = false;
     let cancelled = false;
-    if (!circleId) {
-      setMarketplaceModelGroups([]);
-      return;
+    const previous = modelCatalogStateRef.current;
+    const sameScope = previous.userId === currentUserId && previous.circleId === circleId;
+    const publish = (next: ChatModelCatalogState) => {
+      if (cancelled || generation !== modelCatalogGenerationRef.current) return;
+      modelCatalogStateRef.current = next;
+      setModelCatalogState(next);
+    };
+    publish({
+      status: 'loading',
+      userId: currentUserId,
+      circleId,
+      generation,
+      refreshedAtMs: sameScope ? previous.refreshedAtMs : 0,
+      groups: sameScope ? previous.groups : [],
+    });
+    if (!circleId || !currentUserId) {
+      return () => { cancelled = true; };
     }
     (async () => {
       try {
         const { loadModelGroups } = await import('../../../lib/integrations/modelProviderRegistry');
-        const groups = await loadModelGroups(circleId, { includeDisconnected: true });
-        if (!cancelled) setMarketplaceModelGroups(groups);
-      } catch {}
+        const groups = await loadChatModelCatalogWithinDeadline(() => loadModelGroups(circleId, {
+          includeDisconnected: true,
+          forceCatalogRefresh,
+        }));
+        publish({
+          status: 'ready',
+          userId: currentUserId,
+          circleId,
+          generation,
+          refreshedAtMs: Date.now(),
+          groups,
+        });
+      } catch {
+        publish({
+          status: 'error',
+          userId: currentUserId,
+          circleId,
+          generation,
+          refreshedAtMs: sameScope ? previous.refreshedAtMs : 0,
+          groups: sameScope ? previous.groups : [],
+        });
+      }
     })();
     return () => { cancelled = true; };
-  }, [circleId, circleInitRetryToken, modelProviderRefreshToken]);
+  }, [circleId, circleInitRetryToken, currentUserId, modelProviderRefreshToken]);
   const connectedProviderSet: ReadonlySet<string> = useMemo(() => {
     return new Set(
-      marketplaceModelGroups
+      readyMarketplaceModelGroups
         .filter((g) => g.connected && g.models.some((model) => model.ready))
         .map((g) => normalizeConnectedProviderKey(g.provider as string)),
     );
-  }, [marketplaceModelGroups]);
+  }, [readyMarketplaceModelGroups]);
   // Web Search toggle — when on, the user's next chat send routes
   // through OpenRouter with the `openrouter:web_search` server tool
   // attached so the model can fetch up-to-date facts. Persists per-
@@ -2622,10 +2881,6 @@ export default function ChatTab({
   }, [circleId]);
   const agentAvatarSource = getChatAgentAvatarSource(agentAvatarUri);
   const [pendingHandoff, setPendingHandoff] = useState<HandoffSuggestion | null>(null);
-  // Quick action modal states (lifted from old EnhancedQuickBar)
-  const [showQuickCheckIn, setShowQuickCheckIn] = useState(false);
-  const [showQuickNewTask, setShowQuickNewTask] = useState(false);
-  const [showQuickStepAway, setShowQuickStepAway] = useState(false);
   // Agent assignment
   const [showAssignPanel, setShowAssignPanel] = useState(false);
   const [showSpawnPanel, setShowSpawnPanel] = useState(false);
@@ -6359,6 +6614,8 @@ export default function ChatTab({
   const welcomeAnim = useRef(new Animated.Value(0)).current;
   const newMessageAnims = useRef<Map<string, Animated.Value>>(new Map()).current;
   const sendLockRef = useRef(false);
+  const modelCatalogRefreshSendLockRef = useRef(false);
+  const activeTurnDispatchModelRef = useRef<string | null>(null);
   // Open clarifying questions, keyed by thread. When the planner asks for a
   // missing detail we stash the original intent here; the user's next reply is
   // then reconstructed into a well-specified request and routed to completion.
@@ -6669,7 +6926,6 @@ export default function ChatTab({
     setShowReactions(null);
     setShowMentions(false);
     setMentionQuery('');
-    setExpandedCategory(null);
     setAttachments([]);
     setStagedFiles([]);
     setShowComputerUsePermission(false);
@@ -9275,41 +9531,42 @@ export default function ChatTab({
     selectedModel,
   ]);
 
-  const nukeCurrentThread = useCallback(async () => {
-    if (!circleId || !activeThreadId) {
-      addBotMessage('No active thread to clear.');
+  const deleteMyMessagesInCurrentThread = useCallback(async () => {
+    if (!circleId || !activeThreadId || !currentUserId) {
+      addBotMessage('No active signed-in thread is available.', undefined, { localOnly: true, durability: 'ephemeral' });
       return;
     }
 
-    const { error } = await supabase
+    const target = { circleId, threadId: activeThreadId, userId: currentUserId };
+    const { data, error } = await supabase
       .from('messages')
       .delete()
       .eq('circle_id', circleId)
-      .eq('thread_id', activeThreadId);
+      .eq('thread_id', activeThreadId)
+      .eq('user_id', currentUserId)
+      .select('id');
 
     if (error) {
-      addBotMessage('I could not clear this thread. Try again in a moment.');
+      addBotMessage('Your messages were not deleted. Check access and try again.', undefined, { localOnly: true, durability: 'ephemeral' });
       return;
     }
+    if (
+      activeThreadScopeRef.current.circleId !== target.circleId
+      || activeThreadScopeRef.current.threadId !== target.threadId
+    ) return;
 
-    await clearPendingBotMessages(activeThreadId).catch(() => {});
-    setMessages([]);
-    setCachedBuildArtifact(null);
-    setBuilderRevisions([]);
-    setBuilderImages([]);
-    setPendingComputerUseTask('');
-    setPendingComputerUseActions([]);
-    setPendingComputerUsePlan(null);
-    setPendingComputerUseGrantSummary('');
-    setPendingComputerUseApprovalSummary('');
-    setPendingComputerUseGrantIds([]);
-    setPendingComputerUseOrigin(null);
-    setComputerUseSession(null);
-    setComputerTaskState(null);
-    computerUseTask.reset();
-    await clearComputerTaskState(circleId, activeThreadId).catch(() => {});
-    await clearChatSessionArchive(circleId, activeThreadId).catch(() => {});
-  }, [activeThreadId, circleId, computerUseTask]);
+    const deletedIds = new Set(((data || []) as Array<{ id: string }>).map((row) => row.id));
+    if (deletedIds.size === 0) {
+      addBotMessage('No messages owned by you were deleted.', undefined, { localOnly: true, durability: 'ephemeral' });
+      return;
+    }
+    setMessages((current) => current.filter((message) => !message.dbId || !deletedIds.has(message.dbId)));
+    addBotMessage(
+      `Deleted ${deletedIds.size} message${deletedIds.size === 1 ? '' : 's'} owned by you. Messages owned by agents or other members were kept.`,
+      undefined,
+      { localOnly: true, durability: 'ephemeral' },
+    );
+  }, [activeThreadId, addBotMessage, circleId, currentUserId]);
 
   // Mirror the single mid-run confirmation (the pay/book floor) as a PERSISTED
   // chat bubble with Yes/No quick replies, in addition to the live overlay, so
@@ -10687,83 +10944,113 @@ export default function ChatTab({
 
   const handleSendCrypto = async () => {
     if (!sendTo.trim() || !sendAmount.trim()) return;
-    const amount = parseFloat(sendAmount);
-    if (isNaN(amount) || amount <= 0) {
-      addBotMessage("Invalid amount. Enter a number greater than 0.");
+    if (Platform.OS !== 'web') {
+      addBotMessage('Wallet transfers are available on web only.', undefined, { localOnly: true, durability: 'ephemeral' });
       return;
     }
+    const amount = parseFloat(sendAmount);
+    if (isNaN(amount) || amount <= 0) {
+      addBotMessage('Invalid amount. Enter a number greater than 0.', undefined, { localOnly: true, durability: 'ephemeral' });
+      return;
+    }
+    const walletScope = { ...computerTaskAuthScopeRef.current };
+    const isCurrentWalletScope = () => (
+      computerTaskAuthScopeRef.current.userId === walletScope.userId
+      && computerTaskAuthScopeRef.current.circleId === walletScope.circleId
+      && computerTaskAuthScopeRef.current.threadId === walletScope.threadId
+    );
+    if (!walletScope.userId || !walletScope.circleId || !walletScope.threadId) return;
 
     setSendingCrypto(true);
-    const {
-      connectWallet,
-      getExplorerUrl,
-      getMemberByUsername,
-      sendETH,
-      sendSOL,
-    } = await import('../../../lib/crypto');
+    try {
+      const {
+        connectWallet,
+        getExplorerUrl,
+        getMemberByUsername,
+        sendETH,
+        sendSOL,
+      } = await import('../../../lib/crypto');
 
-    // Check if wallet is connected
-    let activeWallet = wallet;
-    if (!activeWallet) {
-      addBotMessage("No wallet connected. Connecting...");
-      try {
+      // Check if wallet is connected.
+      let activeWallet = wallet;
+      if (!activeWallet) {
+        addBotMessage('No wallet connected. Opening a wallet connection request.', undefined, { localOnly: true, durability: 'ephemeral' });
         const wallets = { metamask: !!(window as any)?.ethereum, phantom: !!(window as any)?.solana?.isPhantom };
         if (wallets.metamask) {
           activeWallet = await connectWallet('metamask');
         } else if (wallets.phantom) {
           activeWallet = await connectWallet('phantom');
         } else {
-          addBotMessage("No wallet extension found. Install **MetaMask** or **Phantom** to send crypto.");
-          setSendingCrypto(false);
+          addBotMessage('No wallet extension was found. Install MetaMask or Phantom to continue.', undefined, { localOnly: true, durability: 'ephemeral' });
           return;
         }
         setWallet(activeWallet);
-      } catch (e: any) {
-        addBotMessage('I could not connect the wallet. Check the wallet popup and try again.');
-        setSendingCrypto(false);
+      }
+
+      // Resolve usernames only when they belong to this exact circle.
+      let toAddress = sendTo.trim();
+      let recipientName = toAddress;
+
+      if (!toAddress.startsWith('0x') && !toAddress.match(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/)) {
+        const member = await getMemberByUsername(toAddress.replace('@', ''));
+        const belongsToCircle = !!member && members.some((candidate) => candidate.id === member.id);
+        if (member?.wallet_address && belongsToCircle) {
+          toAddress = member.wallet_address;
+          recipientName = member.display_name || toAddress;
+        } else {
+          addBotMessage(
+            `No wallet was found for that member in this circle. Ask them to connect a wallet, or paste the exact address.`,
+            undefined,
+            { localOnly: true, durability: 'ephemeral' },
+          );
+          return;
+        }
+      }
+
+      const chain = activeWallet.chain;
+      const symbol = chain === 'ethereum' ? 'ETH' : 'SOL';
+      if (!isCurrentWalletScope()) return;
+      const confirmed = window.confirm(
+        `Send ${amount} ${symbol} to ${recipientName} (${shortenAddress(toAddress)}) on ${chain === 'ethereum' ? 'Ethereum' : 'Solana'}?`,
+      );
+      if (!confirmed || !isCurrentWalletScope()) return;
+
+      addBotMessage(`Wallet request opened for ${amount} ${symbol} to ${shortenAddress(toAddress)}. Confirm the exact transaction in your wallet.`, undefined, {
+        localOnly: true,
+        durability: 'ephemeral',
+      });
+
+      const result = chain === 'ethereum'
+        ? await sendETH(toAddress, amount)
+        : await sendSOL(toAddress, amount);
+      if (!isCurrentWalletScope()) return;
+
+      if (!result.success || !result.txHash) {
+        addBotMessage(result.error === 'CONFIRMATION_REQUIRED'
+          ? 'The wallet requires an additional high-value confirmation. Nothing was sent; lower the amount or use the wallet directly.'
+          : 'The transaction was not completed. Check the wallet notice and try again.', undefined, {
+          localOnly: true,
+          durability: 'ephemeral',
+        });
         return;
       }
+
+      const explorerUrl = getExplorerUrl(result.txHash, chain);
+      addBotMessage(`Sent ${amount} ${symbol} to ${shortenAddress(toAddress)}. [View the transaction](${explorerUrl}).`, undefined, {
+        localOnly: true,
+        durability: 'ephemeral',
+      });
+      setShowSendCrypto(false);
+      setSendTo('');
+      setSendAmount('');
+    } catch (error: any) {
+      addBotMessage('The wallet operation did not complete. Check the wallet popup and try again.', undefined, {
+        localOnly: true,
+        durability: 'ephemeral',
+      });
+    } finally {
+      setSendingCrypto(false);
     }
-
-    // Resolve recipient
-    let toAddress = sendTo.trim();
-    let recipientName = toAddress;
-
-    if (!toAddress.startsWith('0x') && !toAddress.match(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/)) {
-      const member = await getMemberByUsername(toAddress.replace('@', ''));
-      if (member?.wallet_address) {
-        toAddress = member.wallet_address;
-        recipientName = member.display_name || toAddress;
-      } else {
-        addBotMessage(`Can't find wallet for **@${toAddress}**. They need to connect a wallet first, or paste their address directly.`);
-        setSendingCrypto(false);
-        return;
-      }
-    }
-
-    const chain = activeWallet.chain;
-    const symbol = chain === 'ethereum' ? 'ETH' : 'SOL';
-
-    addUserMessage(`💸 Sending **${amount} ${symbol}** to **${recipientName}**...`);
-
-    const result = chain === 'ethereum'
-      ? await sendETH(toAddress, amount)
-      : await sendSOL(toAddress, amount);
-
-    if (result.success) {
-      const explorerUrl = getExplorerUrl(result.txHash!, chain);
-      addBotMessage(`✅ **Sent ${amount} ${symbol}** to ${shortenAddress(toAddress)}!\n\n🔗 [View on ${chain === 'ethereum' ? 'Etherscan' : 'Solscan'}](${explorerUrl})\n\nTx: \`${shortenAddress(result.txHash!)}\`\n\n💪 Money moves.`);
-      
-      // Trigger celebration effect
-      setTimeout(() => triggerParticleEffect(300, 200), 500);
-    } else {
-      addBotMessage('I could not finish the transaction. Check your wallet and try again.');
-    }
-
-    setSendingCrypto(false);
-    setShowSendCrypto(false);
-    setSendTo('');
-    setSendAmount('');
   };
 
   // ─── Send Message ────────────────────────────────────────────────────────
@@ -10854,7 +11141,8 @@ export default function ChatTab({
     overrideText?: string,
     options?: ChatSendOptions,
   ) => {
-    if (sendLockRef.current) return;
+    if (sendLockRef.current || modelCatalogRefreshSendLockRef.current) return;
+    activeTurnDispatchModelRef.current = null;
     if (
       !activeThreadId
       || threadLoadState.status !== 'ready'
@@ -10917,9 +11205,14 @@ export default function ChatTab({
     // Resolve Auto once for the entire turn. Capability routing and the final
     // transport must reason about the same concrete executor; using raw
     // `auto` here previously let those two decisions disagree.
-    const resolvedTurnModel = effectiveSelectedModel !== 'auto'
+    const requestedTurnModel = effectiveSelectedModel !== 'auto'
       ? (isLocalOllamaBlackSwan(effectiveSelectedModel) ? BLACKSWAN_ENDPOINT_MODEL_ID : effectiveSelectedModel)
       : resolveSendModel(content);
+    let resolvedTurnModel = requestedTurnModel;
+    const turnModelDecision: { selection: ReadyChatModelTurnSelection | null } = { selection: null };
+    let turnModelCatalogGeneration = modelCatalogStateRef.current.generation;
+    let turnConnectedProviderSet = connectedProviderSet;
+    let modelCatalogUserMessageCommitted = false;
     const escapedAgentNameForPreflight = agentName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const leadingMentionHandle = content.trim().match(/^@([a-z0-9_.:-]+)\b/i)?.[1] || null;
     // Exact loaded member identity wins over every text alias. This prevents a
@@ -10953,12 +11246,13 @@ export default function ChatTab({
         || /^(?:\/(?:assign|agent|terminal|term|multi|roundtable)\b|(?:tell|ask)\s+(?:all\s+|every\s+)?(?:claude(?:\s+code)?|codex|gemini(?:\s+cli)?|cursor)(?:\s+#?\d+)?\s+to\b)/i.test(content.trim())
     );
     // Preflight the pure planner before every stateful/transport shortcut,
-    // including model readiness. A bounded compound turn is executed by the
-    // OpenSwan runtime, which resolves its own tool-capable model; a stale
-    // plain-chat model selection must not discard the A1-A3 contract.
-    const basePreflightAutomationForTurn = (!content.startsWith('/') || !!boundOpenSwanApprovalResume)
+    // including model readiness. A bounded compound turn keeps the A1-A3
+    // OpenSwan execution contract, while Chat still seals one exact connected
+    // tool-capable model before that runtime can perform provider I/O.
+    const basePreflightAutomationForTurn = (!content.startsWith('/') || !!options?.quickActionText || !!boundOpenSwanApprovalResume)
       ? buildChatAutomationPlan({
           message: content,
+          quickActionText: options?.quickActionText || null,
           attachments: attachments.map((attachment) => ({
             uri: attachment.uri,
             type: attachment.type,
@@ -11035,6 +11329,35 @@ export default function ChatTab({
       preflightAutomationForTurn?.multiActionLedger
       || preflightAutomationForTurn?.multiActionOverflow,
     );
+    const canonicalLocalSwanBotCommandTurn = !conversationOnlyTurn
+      && isLocalSwanBotCommandMessage(content);
+    const preflightAutomationProposal = !preflightHasAuthoritativeMultiActionContract
+      && !content.startsWith('/')
+      ? parseAutomationRequest(content)
+      : null;
+    const preflightHasProviderFreeCommandCompound = hasProviderFreeChatCompoundIntent(content)
+      || Boolean(
+        (canonicalLocalSwanBotCommandTurn || preflightAutomationProposal)
+        && hasIndependentChatActionContinuation(content),
+      );
+    const preflightHasMultipleIntents = segmentChatIntents(content).isMultiIntent
+      && !isProviderFreeStructuredSingleIntent(content);
+    const preflightPreservesIntactMultiIntentTurn = preflightHasAuthoritativeMultiActionContract
+      || preflightHasMultipleIntents
+      || preflightHasProviderFreeCommandCompound;
+    // Deterministic UI/data commands must remain available when no model API
+    // is connected (especially /integrations, which is the recovery route).
+    // The pure classifier is token-bound and fail-closed; provider/agent/tool
+    // commands still pass through the exact model-catalog gate below.
+    const providerFreeTurn = preflightPreservesIntactMultiIntentTurn ? null : classifyProviderFreeChatTurn({
+      content,
+      isPlanDraftTurn: !conversationOnlyTurn
+        && shouldCreateAgentPlanForMessage(content, effectiveChatMode),
+      isLocalAuditTurn: !conversationOnlyTurn
+        && isLastTaskModelQuestion(content),
+      isLocalSwanBotCommandTurn: canonicalLocalSwanBotCommandTurn,
+      isAutomationProposalTurn: Boolean(preflightAutomationProposal),
+    });
     if (hasPendingAttachments && content.startsWith('/')) {
       addBotMessage(
         'Attachments cannot run through a slash shortcut yet because that path cannot preserve the exact message-to-file proof. Your files are still attached. Send the same instruction as a normal Chat request so OpenSwan can seal and verify them first.',
@@ -11043,36 +11366,153 @@ export default function ChatTab({
       );
       return;
     }
-    // A curated shelf is discovery, not credential authority. Once the shared
-    // account catalogs have loaded, stop a disconnected or verified-absent
-    // hosted model before capability work, persistence, or provider I/O.
-    if (resolvedTurnModel && marketplaceModelGroups.length > 0) {
-      const modelReadiness = resolveModelSelectionReadiness({
-        route: resolvePlainChatModelRoute(resolvedTurnModel),
-        groups: marketplaceModelGroups,
-      });
-      const shouldBlockForReadiness = !modelReadiness.ready && (
-        effectiveSelectedModel === 'auto'
-        || modelReadiness.state === 'connection_required'
-      );
-      if (
-        shouldBlockForReadiness
-        && !preflightHasAuthoritativeMultiActionContract
-        && !addressedElsewhereForPreflight
-        && !preservesConnectedAgentExecutorForPreflight
-      ) {
-        const requestedLabel = formatModelDisplayName(resolvedTurnModel);
-        const accessSentence = effectiveSelectedModel === 'auto'
-          ? `Auto resolved to **${requestedLabel}**, but ${modelReadiness.message.charAt(0).toLowerCase()}${modelReadiness.message.slice(1)}`
-          : `**${requestedLabel}** is not ready: ${modelReadiness.message}`;
+    const catalogRequestedTurnModel = requestedTurnModel
+      || (effectiveSelectedModel === 'auto' ? DEFAULT_CHAT_MODEL : null);
+    const catalogRequestedRoute = resolvePlainChatModelRoute(catalogRequestedTurnModel);
+    const catalogRequestedIsImageOnly = Boolean(
+      catalogRequestedTurnModel && getModelCapabilityFlags(catalogRequestedTurnModel).imageOnly,
+    );
+    const catalogOwnsThisTurn = Boolean(
+      catalogRequestedTurnModel
+      && !addressedElsewhereForPreflight
+      && !preservesConnectedAgentExecutorForPreflight
+      && !providerFreeTurn,
+    );
+    // Resolve a model only from one exact, generation-bearing account catalog.
+    // This is pre-dispatch selection, not provider failover: after any provider
+    // I/O starts, an error remains terminal for that attempt and is never
+    // replayed against another API.
+    const resolveTurnModelFromCatalog = (snapshot: ChatModelCatalogState): boolean => {
+      if (!catalogOwnsThisTurn || !catalogRequestedTurnModel) return true;
+      const snapshotIsCurrent = snapshot.status === 'ready'
+        && snapshot.userId === currentUserId
+        && snapshot.circleId === circleId
+        && snapshot.generation === modelCatalogGenerationRef.current;
+      if (!snapshotIsCurrent) {
+        const isError = snapshot.status === 'error'
+          && snapshot.userId === currentUserId
+          && snapshot.circleId === circleId;
         addBotMessage(
-          `**Model access needed**\n${accessSentence} Choose a ready model or connect/update that provider in Marketplace. Nothing ran.`,
+          isError
+            ? `**Connected models unavailable**\nChat could not verify this account’s model connections, so no model request was sent. Refresh Marketplace connections and try again; ${modelCatalogUserMessageCommitted ? 'your message is saved in this conversation.' : 'your draft is still here.'}`
+            : `**Checking connected models**\nChat is refreshing this account’s model connections before it sends anything. Try Send again in a moment; ${modelCatalogUserMessageCommitted ? 'your message is saved in this conversation.' : 'your draft is still here.'}`,
           undefined,
           { localOnly: true, durability: 'ephemeral' },
         );
-        return;
+        return false;
+      }
+
+      const requestedReadiness = resolveModelSelectionReadiness({
+        route: catalogRequestedRoute,
+        groups: snapshot.groups,
+      });
+      const requestedIsReadyLocalOllama = !catalogRequestedRoute
+        && snapshot.groups.some((group) => (
+          normalizeConnectedProviderKey(group.provider) === 'ollama'
+          && group.connected
+          && group.models.some((model) => model.ready && model.id === catalogRequestedTurnModel)
+        ));
+      if (requestedIsReadyLocalOllama) {
+        // A verified local Ollama row is not a hosted API route and should keep
+        // its exact local executor. Every other unmanaged/stale saved id still
+        // goes through the connected hosted-model selector below.
+        resolvedTurnModel = catalogRequestedTurnModel;
+        turnModelDecision.selection = null;
+        turnModelCatalogGeneration = snapshot.generation;
+        return true;
+      }
+      const quarantinedProviders = collectActiveChatProviderQuarantines(
+        failedModelProviderQuarantineRef.current,
+      );
+      for (const provider of failedModelProviderQuarantineRef.current.keys()) {
+        if (!quarantinedProviders.has(provider)) failedModelProviderQuarantineRef.current.delete(provider);
+      }
+      turnConnectedProviderSet = new Set(
+        snapshot.groups
+          .filter((group) => (
+            group.connected
+            && group.models.some((model) => model.ready)
+            && !quarantinedProviders.has(normalizeConnectedProviderKey(group.provider))
+          ))
+          .map((group) => normalizeConnectedProviderKey(group.provider)),
+      );
+      const requiresToolUse = preflightHasAuthoritativeMultiActionContract
+        || looksLikeActionRequest(content)
+        || (effectiveChatMode !== 'none' && effectiveChatMode !== 'talk');
+      const requestedRouteIdentity = resolveModelRouteIdentity(catalogRequestedRoute);
+      const requestedCanRunTurn = !requiresToolUse
+        || getModelCapabilityFlags(catalogRequestedTurnModel).toolUse;
+      const requestedUsesUnsupportedPlainTransport = requestedRouteIdentity?.provider === 'huggingface_endpoint';
+      const requestedProviderQuarantined = requestedRouteIdentity
+        ? quarantinedProviders.has(normalizeConnectedProviderKey(requestedRouteIdentity.provider))
+        : false;
+      const selection = resolveReadyChatModelForTurn({
+        requestedModelId: catalogRequestedTurnModel,
+        groups: snapshot.groups,
+        preferredModelIds: [resolveTaskAwareReadyFallbackPreference(content, sessionProfile, snapshot.groups)],
+        excludedGroupProviders: ['blackswan', ...quarantinedProviders],
+        excludedModelIds: looksLikeActionRequest(content)
+          ? [BLACKSWAN_ENDPOINT_MODEL_ID, BLACKSWAN_PUBLIC_MODEL_ID]
+          : [],
+        requireToolUse: requiresToolUse,
+      });
+      const requestedCatalogAbsenceVerified = requestedReadiness.state === 'not_listed'
+        && (
+          requestedReadiness.catalogStatus === 'account_verified'
+          || requestedReadiness.catalogStatus === 'account_verified_empty'
+        );
+      const shouldSelectFallback = (
+        !requestedReadiness.ready
+        && (
+          effectiveSelectedModel === 'auto'
+          || requestedReadiness.state === 'connection_required'
+          || requestedCatalogAbsenceVerified
+          || selection?.source === 'equivalent_ready'
+        )
+      ) || !requestedCanRunTurn
+        || requestedUsesUnsupportedPlainTransport
+        || requestedProviderQuarantined
+        || !catalogRequestedRoute
+        || catalogRequestedIsImageOnly;
+      turnModelCatalogGeneration = snapshot.generation;
+      if (!shouldSelectFallback) {
+        // Even without a fallback, dispatch the exact registry row so a bare
+        // picker alias (for example gpt-* or gemini-*) cannot lose its provider
+        // transport prefix inside OpenSwan/SwanBot.
+        resolvedTurnModel = selection?.source === 'requested'
+          ? selection.modelId
+          : catalogRequestedTurnModel;
+        turnModelDecision.selection = null;
+        return true;
+      }
+
+      if (selection?.fallbackFromModelId) {
+        resolvedTurnModel = selection.modelId;
+        turnModelDecision.selection = selection;
+        return true;
+      }
+
+      const requestedLabel = formatModelDisplayName(catalogRequestedTurnModel);
+      const accessSentence = effectiveSelectedModel === 'auto'
+        ? `Auto resolved to **${requestedLabel}**, but ${requestedReadiness.message.charAt(0).toLowerCase()}${requestedReadiness.message.slice(1)}`
+        : `**${requestedLabel}** is not ready: ${requestedReadiness.message}`;
+      addBotMessage(
+        `**Model access needed**\n${accessSentence} No approved connected Chat model could safely run this turn, so nothing ran. Connect a provider in Marketplace and retry.`,
+        undefined,
+        { localOnly: true, durability: 'ephemeral' },
+      );
+      return false;
+    };
+    let exactTurnCatalog = modelCatalogStateRef.current;
+    if (catalogOwnsThisTurn) {
+      modelCatalogRefreshSendLockRef.current = true;
+      try {
+        exactTurnCatalog = await refreshTurnModelCatalogIfNeeded();
+      } finally {
+        modelCatalogRefreshSendLockRef.current = false;
       }
     }
+    if (!resolveTurnModelFromCatalog(exactTurnCatalog)) return;
 
     // ── Resume a pending clarification ──────────────────────────────────────
     // If we recently asked the user for a missing detail, treat this reply as
@@ -11308,15 +11748,37 @@ export default function ChatTab({
     let visualBriefPromise: Promise<ChatVisualBriefArtifact[]> | null = null;
     const getTurnVisualBriefs = async (): Promise<ChatVisualBriefArtifact[]> => {
       if (!turnHasImageAttachments || !isVisualBriefScopeCurrent()) return [];
+      const visualCatalog = modelCatalogStateRef.current;
+      const visualCatalogIsCurrent = visualCatalog.status === 'ready'
+        && visualCatalog.userId === currentUserId
+        && visualCatalog.circleId === circleId
+        && visualCatalog.generation === modelCatalogGenerationRef.current;
+      const visualBriefModel = visualCatalogIsCurrent
+        ? resolveReadyChatVisualBriefModel(visualCatalog.groups, resolvedTurnModel)
+        : null;
+      // chatVisualBrief currently uses the authenticated Anthropic image-block
+      // transport. Never start that hidden request unless this exact account
+      // catalog proves a supported Anthropic model is connected.
+      if (!visualBriefModel) return [];
       if (!visualBriefPromise) {
         visualBriefPromise = import('../../../lib/chatVisualBrief')
-          .then(({ buildChatVisualBriefs }) => buildChatVisualBriefs({
-            mediaAttachments: currentAttachments,
-            stagedFiles: currentStagedFiles,
-            userMessage: content,
-            circleId,
-            model: 'claude-sonnet-4-6',
-          }))
+          .then(({ buildChatVisualBriefs }) => {
+            const latestCatalog = modelCatalogStateRef.current;
+            const latestModel = latestCatalog.status === 'ready'
+              && latestCatalog.userId === currentUserId
+              && latestCatalog.circleId === circleId
+              && latestCatalog.generation === modelCatalogGenerationRef.current
+              ? resolveReadyChatVisualBriefModel(latestCatalog.groups, resolvedTurnModel)
+              : null;
+            if (latestModel !== visualBriefModel) return [];
+            return buildChatVisualBriefs({
+              mediaAttachments: currentAttachments,
+              stagedFiles: currentStagedFiles,
+              userMessage: content,
+              circleId,
+              model: visualBriefModel,
+            });
+          })
           .catch(() => []);
       }
       const briefs = await visualBriefPromise;
@@ -11351,7 +11813,7 @@ export default function ChatTab({
           source: {
             actor: 'Chat',
             surface: 'chat_visual_brief_blocked',
-            selectedModel: 'claude-sonnet-4-6',
+            selectedModel: effectiveSelectedModel || selectedModel || null,
             effectiveModel: 'deterministic-visual-brief-gate',
           },
           outcomeVerdict: 'blocked',
@@ -11487,7 +11949,6 @@ export default function ChatTab({
         setStagedFiles([]);
         revokeStagedPreviews(currentStagedFiles);
         setReplyTo(null);
-        setExpandedCategory(null);
         if (profileRef.current) {
           profileRef.current = updateProfileFromMessage(profileRef.current, displayContent, true);
           saveUserProfile(profileRef.current).catch(() => {});
@@ -11572,10 +12033,10 @@ export default function ChatTab({
         ? { settle: settlePersistedUserMessage }
         : undefined,
     );
+    modelCatalogUserMessageCommitted = true;
     if (!resumedSourceUserMessage) {
       setInput('');
       setReplyTo(null);
-      setExpandedCategory(null);
     }
 
     // A resumed approval points back to the exact original request, not the
@@ -11981,8 +12442,8 @@ export default function ChatTab({
     // AutomationProposalCard the user can confirm. Falls through to LLM
     // when the parser doesn't recognize the input as an automation
     // request, so normal chat is unaffected.
-    if (!preflightHasAuthoritativeMultiActionContract && !content.startsWith('/')) {
-      const proposal = parseAutomationRequest(content);
+    if (!preflightPreservesIntactMultiIntentTurn && preflightAutomationProposal) {
+      const proposal = preflightAutomationProposal;
       if (proposal) {
         addBotMessage(
           `I think you want to set up an automation. Confirm and I'll create it.`,
@@ -12348,7 +12809,7 @@ export default function ChatTab({
     // ─── Slash intercepts (pure lib calls, no planner) ──────────────────────
     // These run before the model / planner so users see instant feedback
     // for read/write ops that don't need a full agent turn.
-    if (content.startsWith('/v2')) {
+    if (!preflightPreservesIntactMultiIntentTurn && lowerContent.startsWith('/v2')) {
       try {
         const { parseSwanbotV2Command, applySwanbotV2Command } = await import('../../../lib/swanbotRouting');
         const parsed = parseSwanbotV2Command(content);
@@ -12369,7 +12830,10 @@ export default function ChatTab({
         return;
       }
     }
-    if (lowerContent.startsWith('/memory-bank') || lowerContent.startsWith('/mb')) {
+    if (
+      !preflightPreservesIntactMultiIntentTurn
+      && (lowerContent.startsWith('/memory-bank') || lowerContent.startsWith('/mb'))
+    ) {
       try {
         const { executeMemoryBankCommand } = await import('../../../lib/memoryBankChatCommands');
         const outcome = await executeMemoryBankCommand(content, {
@@ -12397,7 +12861,10 @@ export default function ChatTab({
     }
     // UC-4: /record + /replay — capture a workflow once, fire it later.
     // Runs before the planner so the recording observer isn't racing.
-    if (content.startsWith('/record') || content.startsWith('/replay')) {
+    if (
+      !preflightPreservesIntactMultiIntentTurn
+      && (lowerContent.startsWith('/record') || lowerContent.startsWith('/replay'))
+    ) {
       try {
         const { isRecordingCommand, executeRecordingCommand } = await import('../../../lib/recordingChatCommands');
         if (isRecordingCommand(content)) {
@@ -12427,10 +12894,11 @@ export default function ChatTab({
     // /desktop diag — full bridge health checklist so users can tell
     // WHICH layer is broken when "open zoom" misbehaves. Runs a real
     // launch against a sample app name if they pass one.
-    if (content.startsWith('/desktop')) {
+    if (!preflightPreservesIntactMultiIntentTurn && lowerContent.startsWith('/desktop')) {
       try {
         const rest = content.replace(/^\/desktop\s*/i, '').trim();
-        const wantsDiag = /^diag(nose)?\b/i.test(rest) || rest === '' || rest === 'health';
+        const normalizedRest = rest.toLowerCase();
+        const wantsDiag = /^diag(nose)?\b/i.test(rest) || normalizedRest === '' || normalizedRest === 'health';
         if (wantsDiag) {
           const sampleArg = rest.replace(/^diag(nose)?\s*/i, '').replace(/^health\s*/i, '').trim();
           const { runDesktopBridgeDiag, renderDesktopBridgeDiag } = await import('../../../lib/desktopBridgeDiag');
@@ -12451,7 +12919,10 @@ export default function ChatTab({
       }
     }
 
-    if (content.startsWith('/automation') || content.startsWith('/automations')) {
+    if (
+      !preflightPreservesIntactMultiIntentTurn
+      && (lowerContent.startsWith('/automation') || lowerContent.startsWith('/automations'))
+    ) {
       try {
         const { executeAutomationCommand } = await import('../../../lib/automationChatCommands');
         const outcome = await executeAutomationCommand(content, {
@@ -12715,7 +13186,7 @@ export default function ChatTab({
           );
         }
       }
-      if (plan.execution.kind === 'run_computer_task') {
+      if (!providerFreeTurn && plan.execution.kind === 'run_computer_task') {
         const shared = await executeSharedComputerTask(content, {
           requestIdentity: userMessage.id,
         });
@@ -12727,7 +13198,7 @@ export default function ChatTab({
           return;
         }
       }
-      if (plan.execution.kind === 'run_openswan' && !plan.multiActionLedger) {
+      if (!providerFreeTurn && plan.execution.kind === 'run_openswan' && !plan.multiActionLedger) {
         const handledLocalDesktop = await executeLocalComputerAwarenessRequest(content);
         if (handledLocalDesktop) {
           return;
@@ -12852,7 +13323,7 @@ export default function ChatTab({
       // plan-mode / approval / observer pipeline with every other kind. The dep
       // below is the former inline body verbatim (R7/R9: the trailing typing
       // reset became a state request and the park moved to the ctx seam).
-      if (plan.execution.kind === 'ask_clarification' && plan.execution.clarification && !resolvingClarificationRef.current) {
+      if (!preflightHasMultipleIntents && plan.execution.kind === 'ask_clarification' && plan.execution.clarification && !resolvingClarificationRef.current) {
         const clarificationHandlers = createChatTransportHandlers({
           ask_clarification: async (dispatchedPlan, depCtx) => {
             const clarification = dispatchedPlan.execution.clarification!;
@@ -12928,7 +13399,7 @@ export default function ChatTab({
       // deterministic clarification, while good briefs launch the streaming
       // builder and leave its workbench/typing state running until the stream
       // completes.
-      if (plan.execution.kind === 'run_build_discovery') {
+      if (!preflightHasMultipleIntents && plan.execution.kind === 'run_build_discovery') {
         let buildStreamStarted = false;
         const buildDiscoveryHandlers = createChatTransportHandlers({
           run_build_discovery: async (dispatchedPlan) => {
@@ -13013,7 +13484,7 @@ export default function ChatTab({
       // R8: the dep calls `executeDetectedConversationalIntent` with
       // `plan.intent.intent` — `detectConversationalIntent` never runs on
       // this path (the chat-transport-handlers smoke asserts it).
-      if (plan.intent.kind === 'conversational_action' && plan.execution.kind === 'run_command_handler') {
+      if (!preflightHasMultipleIntents && plan.intent.kind === 'conversational_action' && plan.execution.kind === 'run_command_handler') {
         const isUnifiedConversationalIntentType = (intentType: string) => intentType === 'remember'
           || intentType === 'forget'
           || intentType === 'show_memories'
@@ -13130,6 +13601,8 @@ export default function ChatTab({
       // null → fall through to the normal approval-gated pipeline), so this net
       // can never reach a live publish/schedule.
       if (
+        !preflightHasMultipleIntents
+        &&
         plan.intent.kind === 'conversational_action'
         && plan.intent.intent.type !== 'none'
         && !UNIFIED_CONVERSATIONAL_INTENT_TYPES.includes(plan.intent.intent.type)
@@ -13173,13 +13646,15 @@ export default function ChatTab({
       plannedAutomationForTurn?.multiActionLedger
       || plannedAutomationForTurn?.multiActionOverflow,
     );
+    const preservesIntactMultiIntentTurn = hasAuthoritativeMultiActionContract
+      || preflightPreservesIntactMultiIntentTurn;
 
     // ─── Governance commands ───────────────────────────────────────
 
     // /poll "Question" "Option A" "Option B" ...
     if (
-      !hasAuthoritativeMultiActionContract
-      && (lowerContent.startsWith('/poll ') || lowerContent.startsWith('poll '))
+      !preservesIntactMultiIntentTurn
+      && (lowerContent === '/poll' || lowerContent.startsWith('/poll ') || lowerContent.startsWith('poll '))
     ) {
       const pollText = content.replace(/^\/?poll\s+/i, '');
       const parts = pollText.match(/"([^"]+)"/g);
@@ -13204,9 +13679,13 @@ export default function ChatTab({
 
     // /propose Title | Description
     if (
-      !hasAuthoritativeMultiActionContract
-      && (lowerContent.startsWith('/propose ') || lowerContent.startsWith('propose '))
+      !preservesIntactMultiIntentTurn
+      && (lowerContent === '/propose' || lowerContent.startsWith('/propose ') || lowerContent.startsWith('propose '))
     ) {
+      if (lowerContent === '/propose') {
+        addBotMessage('Usage: `/propose Title | Description`', undefined, { localOnly: true, durability: 'ephemeral' });
+        return;
+      }
       const propText = content.replace(/^\/?propose\s+/i, '');
       const [title, ...descParts] = propText.split('|');
       handleCreateProposal(title.trim(), descParts.join('|').trim() || undefined);
@@ -13245,7 +13724,10 @@ export default function ChatTab({
     // /trace <runId> — render a live RunTraceCard for any agent run
     // by id. Useful for debugging — paste a run id from RECENT RUNS
     // and watch the steps unfold.
-    if (lowerContent.startsWith('/trace ') || lowerContent === '/trace') {
+    if (
+      !preservesIntactMultiIntentTurn
+      && (lowerContent.startsWith('/trace ') || lowerContent === '/trace')
+    ) {
       const arg = content.slice(6).trim();
       if (!arg) {
         addBotMessage('Usage: `/trace <runId>` — paste a run id from RECENT RUNS to see its step-by-step trace.', undefined, { localOnly: true, durability: 'ephemeral' });
@@ -13364,7 +13846,10 @@ export default function ChatTab({
     // instead of the swanbot-v2-ai edge round-trip; the designed lane for
     // local desktop automation, and the no-deploy escape hatch when the
     // deployed edge is failing.
-    if (lowerContent === '/v2loop' || lowerContent.startsWith('/v2loop ')) {
+    if (
+      !preservesIntactMultiIntentTurn
+      && (lowerContent === '/v2loop' || lowerContent.startsWith('/v2loop '))
+    ) {
       const arg = content.slice('/v2loop'.length).trim().toLowerCase();
       const { isSwanbotV2ClientLoopEnabled: readLoop, enableSwanbotV2ClientLoop, disableSwanbotV2ClientLoop } =
         await import('../../../lib/swanbotV2ClientLoopFlag');
@@ -13386,7 +13871,10 @@ export default function ChatTab({
 
     // /search query — search both in-memory and DB messages, render
     // results as clickable rows that jump to the message in chat.
-    if (lowerContent.startsWith('/search ')) {
+    if (
+      !preservesIntactMultiIntentTurn
+      && (lowerContent === '/search' || lowerContent.startsWith('/search '))
+    ) {
       const query = content.slice(8).trim();
       if (!query) { addBotMessage('Usage: /search <keyword>', undefined, { localOnly: true, durability: 'ephemeral' }); return; }
       const q = query.toLowerCase();
@@ -13473,7 +13961,7 @@ export default function ChatTab({
     // that…" — actually saves/forgets and confirms, instead of the model
     // replying "Saved." without saving. Conservative: natural language only
     // fires on an explicit lead with real content and not a question.
-    if (!hasAuthoritativeMultiActionContract) {
+    if (!preservesIntactMultiIntentTurn) {
       const { parseMemoryCommand, detectMemoryIntent, MEMORY_COMMAND_USAGE } =
         await import('../../../lib/memoryIntentCore');
       const cmd = parseMemoryCommand(content);
@@ -13534,7 +14022,10 @@ export default function ChatTab({
     // ─── Schedule / Cron commands ─────────────────────────────────────────────
     // /schedule <kind> <recurrence?> <payload...> — queue a one-off or recurring action
     // /cron list — show pending actions, /cron cancel <id> — cancel one
-    if (lowerContent.startsWith('/schedule ') || lowerContent.startsWith('/cron')) {
+    if (
+      !preservesIntactMultiIntentTurn
+      && (lowerContent === '/schedule' || lowerContent.startsWith('/schedule ') || lowerContent.startsWith('/cron'))
+    ) {
       (async () => {
         setBotTyping(true);
         try {
@@ -13721,7 +14212,7 @@ export default function ChatTab({
     // bare PR links → /review). Conservative: message must START with a watch
     // verb AND contain a URL or a folder-watch target.
     if (
-      !hasAuthoritativeMultiActionContract
+      !preservesIntactMultiIntentTurn
       && !lowerContent.startsWith('/')
       && /^(?:please\s+)?(?:watch|monitor|keep\s+an\s+eye\s+on)\s+/i.test(content)
     ) {
@@ -13743,7 +14234,10 @@ export default function ChatTab({
     // ─── What's on my screen — /screen [app] (P19) ──────────────────────────
     // One-tap observation of the frontmost (or named) app: state, windows,
     // what changed since the last look, and a suggested next step. Read-only.
-    if (lowerContent === '/screen' || lowerContent.startsWith('/screen ')) {
+    if (
+      !preservesIntactMultiIntentTurn
+      && (lowerContent === '/screen' || lowerContent.startsWith('/screen '))
+    ) {
       (async () => {
         setBotTyping(true);
         try {
@@ -13781,8 +14275,11 @@ export default function ChatTab({
     // list/connect are pure replies; `act <goal>` hands the goal to the main
     // agent loop, which already has integrations.list + custom_api.read/request
     // (approval-gated) tools to figure the API call out with the model.
-    if (lowerContent === '/integrations' || lowerContent.startsWith('/integrations ')
-      || lowerContent === '/integration' || lowerContent.startsWith('/integration ')) {
+    if (
+      !preservesIntactMultiIntentTurn
+      && (lowerContent === '/integrations' || lowerContent.startsWith('/integrations ')
+        || lowerContent === '/integration' || lowerContent.startsWith('/integration '))
+    ) {
       (async () => {
         setBotTyping(true);
         try {
@@ -13824,7 +14321,10 @@ export default function ChatTab({
     // ─── Context dial — /context [lean|standard|max] ─────────────────────────
     // User-controlled context depth plus a transparency receipt of what the
     // last turn actually loaded. Policy + receipt live in contextDepthPolicy.ts.
-    if (lowerContent === '/context' || lowerContent.startsWith('/context ')) {
+    if (
+      !preservesIntactMultiIntentTurn
+      && (lowerContent === '/context' || lowerContent.startsWith('/context '))
+    ) {
       (async () => {
         try {
           const {
@@ -13866,7 +14366,10 @@ export default function ChatTab({
     // ─── App automation status — /apps [name] (P17) ─────────────────────────
     // Overview of automatable apps, or a per-app detail card with a LIVE
     // reachability check (bridge → installed → running → focus → a11y).
-    if (lowerContent === '/apps' || lowerContent.startsWith('/apps ')) {
+    if (
+      !preservesIntactMultiIntentTurn
+      && (lowerContent === '/apps' || lowerContent.startsWith('/apps '))
+    ) {
       (async () => {
         setBotTyping(true);
         try {
@@ -13993,7 +14496,7 @@ export default function ChatTab({
             );
             return;
           }
-          const models = resolveRaceModels(parsed.models, connectedProviderSet);
+          const models = resolveRaceModels(parsed.models, turnConnectedProviderSet);
           addBotMessage(
             `🏁 Racing ${models.length} models on "${parsed.task.slice(0, 80)}" — judging when all finish…`,
             undefined,
@@ -14038,7 +14541,7 @@ export default function ChatTab({
     // opt-in flag is set (default OFF) and this isn't a /command. Keeps the
     // common path zero-cost.
     if (
-      !hasAuthoritativeMultiActionContract
+      !preservesIntactMultiIntentTurn
       && !content.trim().startsWith('/')
       && (() => { try { const v = (globalThis as any)?.localStorage?.getItem?.('uc_auto_best_of_n'); return v === '1' || v === 'true' || v === 'on'; } catch { return false; } })()
     ) {
@@ -14054,7 +14557,7 @@ export default function ChatTab({
           complexity: route.complexity,
           useRuntime: route.useRuntime,
           messageStartsWithCommand: content.trim().startsWith('/'),
-          connectedProviders: connectedProviderSet,
+          connectedProviders: turnConnectedProviderSet,
         });
         if (decision.race && decision.models.length >= 2) autoRace = decision;
       } catch { /* auto best-of-N is best-effort — fall through to normal send */ }
@@ -14097,7 +14600,11 @@ export default function ChatTab({
     }
 
     // ─── Watch commands — intercept /watch (recurring monitors, plan §6a) ────
-    if (lowerContent.startsWith('/watch') && (lowerContent === '/watch' || lowerContent[6] === ' ')) {
+    if (
+      !preservesIntactMultiIntentTurn
+      && lowerContent.startsWith('/watch')
+      && (lowerContent === '/watch' || lowerContent[6] === ' ')
+    ) {
       (async () => {
         setBotTyping(true);
         try {
@@ -14129,7 +14636,11 @@ export default function ChatTab({
     }
 
     // ─── Mission commands — intercept /mission requests ──────────────────────
-    if (lowerContent.startsWith('/mission') && (lowerContent === '/mission' || lowerContent[8] === ' ')) {
+    if (
+      !preservesIntactMultiIntentTurn
+      && lowerContent.startsWith('/mission')
+      && (lowerContent === '/mission' || lowerContent[8] === ' ')
+    ) {
       (async () => {
         setBotTyping(true);
         try {
@@ -14186,7 +14697,10 @@ export default function ChatTab({
     }
 
     // ─── Room commands — intercept /room requests ───────────────────────────
-    if (lowerContent.startsWith('/room ') || lowerContent === '/room') {
+    if (
+      !preservesIntactMultiIntentTurn
+      && (lowerContent.startsWith('/room ') || lowerContent === '/room')
+    ) {
       (async () => {
         setBotTyping(true);
         try {
@@ -14336,7 +14850,10 @@ export default function ChatTab({
     // Read-only surface over the Site Credential Vault. Supports list, find,
     // status, rotation, and help. Never reveals secret values — that path
     // stays in the Vault panel where access duration + audit logging apply.
-    if (lowerContent.startsWith('/vault ') || lowerContent === '/vault') {
+    if (
+      !preservesIntactMultiIntentTurn
+      && (lowerContent.startsWith('/vault ') || lowerContent === '/vault')
+    ) {
       (async () => {
         setBotTyping(true);
         try {
@@ -14363,7 +14880,7 @@ export default function ChatTab({
     }
 
     // ─── Lightweight local SwanBot commands — short-circuit before OpenSwan ─
-    if (!hasAuthoritativeMultiActionContract) {
+    if (!preservesIntactMultiIntentTurn) {
       try {
         const localCommandResponse = await tryHandleLocalSwanBotCommand(content, {
           userId: currentUserId || 'anonymous',
@@ -14376,8 +14893,24 @@ export default function ChatTab({
           addBotMessage(localCommandResponse);
           return;
         }
+        if (canonicalLocalSwanBotCommandTurn) {
+          addBotMessage(
+            'That local Chat command did not return a verified result. No model API was called. Please retry, or use **/help** to choose another command.',
+            undefined,
+            { localOnly: true, durability: 'ephemeral', outcomeVerdict: 'failed' },
+          );
+          return;
+        }
       } catch (localCmdErr) {
         console.warn('[ChatTab] local SwanBot command failed:', localCmdErr);
+        if (canonicalLocalSwanBotCommandTurn) {
+          addBotMessage(
+            'That local Chat command could not load its data. No model API was called. Please retry in a moment.',
+            undefined,
+            { localOnly: true, durability: 'ephemeral', outcomeVerdict: 'failed' },
+          );
+          return;
+        }
       }
     }
 
@@ -14442,7 +14975,7 @@ export default function ChatTab({
     const { decideWebSearchForTurn, runOptionalWebSearchLane } = await import('../../../lib/webSearchAutoDetect');
     const webDecision = decideWebSearchForTurn(content, webSearchEnabled);
     let webSearchDegradationContext = '';
-    if (webDecision.attach && !hasAuthoritativeMultiActionContract) {
+    if (webDecision.attach && !preservesIntactMultiIntentTurn) {
       setBotTyping(true);
       const webSearchVisualBriefs = await requireTurnVisualBriefs('the web-search model');
       if (webSearchVisualBriefs === null) {
@@ -14474,7 +15007,22 @@ export default function ChatTab({
         const autoFooter = webDecision.auto && webDecision.reason
           ? `\n\n_🌐 Auto-enabled web search — ${webDecision.reason}._`
           : '';
-        addBotMessage((webSearchOutcome.value.response || '(No response from OpenRouter web search.)') + autoFooter);
+        const servedWebModel = webSearchOutcome.value.usage?.model || 'openrouter/auto';
+        addBotMessage(
+          (webSearchOutcome.value.response || '(No response from OpenRouter web search.)') + autoFooter,
+          undefined,
+          {
+            usage: webSearchOutcome.value.usage,
+            source: {
+              actor: agentName,
+              surface: 'main_chat_web_search',
+              selectedModel: effectiveSelectedModel,
+              effectiveModel: servedWebModel,
+              provider: 'openrouter',
+              showRouteChips: true,
+            },
+          },
+        );
         return;
       }
 
@@ -14491,6 +15039,87 @@ export default function ChatTab({
       }
     }
 
+    const revalidateTurnModelCatalog = (): boolean => {
+      if (!catalogOwnsThisTurn) return true;
+      const snapshot = modelCatalogStateRef.current;
+      const unchanged = snapshot.status === 'ready'
+        && snapshot.userId === currentUserId
+        && snapshot.circleId === circleId
+        && snapshot.generation === turnModelCatalogGeneration
+        && snapshot.generation === modelCatalogGenerationRef.current;
+      return unchanged || resolveTurnModelFromCatalog(snapshot);
+    };
+
+    type TurnModelDispatchSeal = Readonly<{
+      model: string;
+      provider: string | null;
+      catalogGeneration: number;
+      connectedProviders: Set<string>;
+      fallbackSelection: ReadyChatModelTurnSelection | null;
+    }>;
+    let committedTurnModelDispatch: TurnModelDispatchSeal | null = null;
+    let committedTurnProvider: string | null = null;
+    let modelProviderDispatchStarted = false;
+    let fallbackSelectionDisclosed = false;
+    const captureTurnModelDispatch = (): TurnModelDispatchSeal | null => {
+      if (modelProviderDispatchStarted) return committedTurnModelDispatch;
+      if (!revalidateTurnModelCatalog()) return null;
+      const model = resolvedTurnModel || catalogRequestedTurnModel;
+      if (!model) return null;
+      return Object.freeze({
+        model,
+        provider: resolvePlainChatModelRoute(model)?.provider
+          || turnModelDecision.selection?.provider
+          || null,
+        catalogGeneration: turnModelCatalogGeneration,
+        connectedProviders: new Set(turnConnectedProviderSet),
+        fallbackSelection: turnModelDecision.selection,
+      });
+    };
+    const discloseTurnModelFallback = (seal: TurnModelDispatchSeal) => {
+      if (fallbackSelectionDisclosed) return;
+      const selection = seal.fallbackSelection;
+      if (!selection?.fallbackFromModelId) return;
+      fallbackSelectionDisclosed = true;
+      const fallbackLabel = formatModelRouteDisplayName(seal.model, seal.provider);
+      const requestedLabel = formatModelRouteDisplayName(selection.fallbackFromModelId);
+      const verified = selection.selectedCatalogStatus === 'account_verified'
+        || selection.selectedCatalogStatus === 'circle_integration';
+      addBotMessage(
+        `**Trying ${fallbackLabel} for this reply**\n${requestedLabel} could not run this turn. Chat selected ${fallbackLabel} from ${verified ? 'a verified connected model catalog' : 'a connected provider candidate that will be checked when the request starts'}. Your saved model choice was not changed.`,
+        undefined,
+        {
+          localOnly: true,
+          durability: 'ephemeral',
+          source: {
+            actor: 'Chat',
+            surface: 'main_chat_model_selection_fallback',
+            selectedModel: effectiveSelectedModel,
+            effectiveModel: seal.model,
+            provider: seal.provider,
+          },
+        },
+      );
+    };
+    const commitTurnModelDispatch = (
+      expected?: TurnModelDispatchSeal,
+    ): TurnModelDispatchSeal | null => {
+      if (modelProviderDispatchStarted) {
+        return committedTurnModelDispatch
+          && (!expected || sameChatModelDispatchIdentity(committedTurnModelDispatch, expected))
+          ? committedTurnModelDispatch
+          : null;
+      }
+      const newest = captureTurnModelDispatch();
+      if (!newest || (expected && !sameChatModelDispatchIdentity(newest, expected))) return null;
+      committedTurnModelDispatch = newest;
+      committedTurnProvider = newest.provider;
+      modelProviderDispatchStarted = true;
+      activeTurnDispatchModelRef.current = newest.model;
+      discloseTurnModelFallback(newest);
+      return newest;
+    };
+
     // Build one image description per turn and reuse it everywhere below. Raw
     // bytes stay inside the authenticated vision request; ordinary Chat and
     // connected agents receive only the bounded, redacted text artifact.
@@ -14506,10 +15135,11 @@ export default function ChatTab({
     }
 
     // ─── Model capability routing — images, webpages, etc. ──────────────────
+    if (!revalidateTurnModelCatalog()) return;
     if (
       !conversationOnlyTurn
       && !boundOpenSwanResume
-      && !hasAuthoritativeMultiActionContract
+      && !preservesIntactMultiIntentTurn
       && !addressedElsewhereForPreflight
     ) {
       try {
@@ -14552,6 +15182,11 @@ export default function ChatTab({
       }
     }
 
+    // Capability work above may await long enough for a key to be replaced.
+    // Keep this cheap preflight, but do not disclose/freeze a fallback until
+    // the exact first provider boundary below.
+    if (!revalidateTurnModelCatalog()) return;
+
     // Trigger Agent AI — always responds UNLESS the user is @mentioning another member
     const escapedName = escapedAgentNameForPreflight;
     const isAtMentioningSomeoneElse = addressedElsewhereForPreflight;
@@ -14559,7 +15194,7 @@ export default function ChatTab({
     if (!isAtMentioningSomeoneElse) {
       let cleanContent = content.replace(new RegExp(`@(agent|blackswan|swanbot|swan|${escapedName})\\s*`, 'gi'), '').trim() || content;
       const latestRecoveryOptionsMessage = findLatestRecoveryOptionsMessage(messages);
-      const recoveryFollowup = !hasAuthoritativeMultiActionContract
+      const recoveryFollowup = !preservesIntactMultiIntentTurn
         && !conversationOnlyTurn
         && latestRecoveryOptionsMessage
         ? resolveChatFailureRecoveryOptionFollowup(cleanContent, latestRecoveryOptionsMessage.recoveryOptions)
@@ -14718,7 +15353,7 @@ export default function ChatTab({
       let pendingMessage: ChatMessage | null = null;
       try {
         const sessionArchiveContext = await loadSessionArchiveContext();
-        const sendModel = resolvedTurnModel;
+        let sendModel = resolvedTurnModel;
         const context: SwanBotContext = {
           userId: currentUserId || 'anonymous',
           circleId,
@@ -14726,7 +15361,7 @@ export default function ChatTab({
           ...selectedAgentSubjectContext,
           model: sendModel || undefined,
           sessionArchiveContext: sessionArchiveContext || undefined,
-          connectedProviders: connectedProviderSet,
+          connectedProviders: turnConnectedProviderSet,
           threadId: activeThreadId || undefined,
           activePluginIds: activePlugins,
         };
@@ -14754,6 +15389,16 @@ export default function ChatTab({
           && effectiveChatMode !== 'none'
           && effectiveChatMode !== 'talk'
         ) {
+          const dispatchSeal = commitTurnModelDispatch();
+          if (!dispatchSeal) {
+            setRunStatus('idle');
+            setBotTyping(false);
+            stopCodingWorkbench();
+            return;
+          }
+          sendModel = dispatchSeal.model;
+          context.model = dispatchSeal.model;
+          context.connectedProviders = dispatchSeal.connectedProviders;
           const result = await executeAgentRun({
             surface: 'main_chat',
             circleId,
@@ -14767,18 +15412,43 @@ export default function ChatTab({
             agentSessionKey: selectedAgentSubjectContext.agentSessionKey,
             agentLegacyIds: selectedAgentSubjectContext.agentLegacyIds,
             agentSubjectMetadata: selectedAgentSubjectContext.agentSubjectMetadata,
-            model: sendModel || undefined,
+            model: dispatchSeal.model,
+            modelDispatchSealed: true,
             threadId: activeThreadId || undefined,
             activePluginIds: activePlugins,
             mode: effectiveChatMode as any,
-            connectedProviders: connectedProviderSet,
+            connectedProviders: dispatchSeal.connectedProviders,
             context: {
               chatHistory,
               sessionArchiveContext: sessionArchiveContext || undefined,
               replyTo: replyTo ? replyTo.content : undefined,
             },
           });
-          addBotMessage(result.response);
+          if (result.success) {
+            releaseFailedTurnModelQuarantine(dispatchSeal.model);
+          } else if (result.modelDispatchFailed) {
+            quarantineFailedTurnModel(dispatchSeal.model, 'transient');
+          }
+          const agentRunOutcomeVerdict: ChatOutcomeVerdict = result.terminalOutcome.status === 'completed'
+            ? 'completed'
+            : result.terminalOutcome.status === 'failed'
+              ? 'failed'
+              : result.terminalOutcome.status === 'cancelled'
+                ? 'blocked'
+                : 'unknown';
+          addBotMessage(result.response, undefined, {
+            hadError: !result.success || result.terminalOutcome.status === 'failed',
+            outcomeVerdict: agentRunOutcomeVerdict,
+            source: {
+              actor: agentName,
+              surface: 'main_chat_agent_run',
+              selectedModel: effectiveSelectedModel,
+              effectiveModel: dispatchSeal.model,
+              provider: dispatchSeal.provider,
+              showRouteChips: agentRunOutcomeVerdict === 'completed'
+                && Boolean(dispatchSeal.fallbackSelection?.fallbackFromModelId),
+            },
+          });
           // Track bot response in behavior profile
           if (profileRef.current) {
             profileRef.current = updateProfileFromMessage(profileRef.current, result.response, false);
@@ -14810,9 +15480,8 @@ export default function ChatTab({
             // exposes. Forcing them off the streaming fast-path lets
             // BlackSwan actually call rooms.create / circle.update_* /
             // missions.* instead of replying "I can't do that."
-            const streamCandidateModel = sendModel || 'claude-haiku-4-5';
             const augmentedPrompt = [pluginPrompt, integrationPreflight, fullPrompt].filter(Boolean).join('\n\n');
-            const terminalTransport = chooseChatTerminalTransport({
+            const resolveTerminalTransportForModel = (model: string) => chooseChatTerminalTransport({
               executionKind: terminalPlan.execution.kind,
               chatMode: effectiveChatMode,
               sessionDelegationMode,
@@ -14823,9 +15492,21 @@ export default function ChatTab({
                 || !!terminalPlan.multiActionLedger
                 || looksLikeActionRequest(cleanContent),
               requiresAuthoritativeCompletion: !!terminalPlan.multiActionLedger,
-              canStreamAnthropic: canUseAnthropicChatStream(streamCandidateModel),
+              canStreamAnthropic: canUseAnthropicChatStream(model),
               conversationOnly: conversationOnlyTurn,
             });
+            const initialDispatchCandidate = captureTurnModelDispatch();
+            if (!initialDispatchCandidate) {
+              setRunStatus('idle');
+              setBotTyping(false);
+              stopCodingWorkbench();
+              return;
+            }
+            sendModel = initialDispatchCandidate.model;
+            context.model = initialDispatchCandidate.model;
+            context.connectedProviders = initialDispatchCandidate.connectedProviders;
+            let streamCandidateModel = initialDispatchCandidate.model;
+            let terminalTransport = resolveTerminalTransportForModel(streamCandidateModel);
             // AI-first telemetry (NO behavior change): annotate which orchestration
             // tier the product policy would pick for this turn — plain_model (stream
             // a model answer), escalate_tools (stream first, activate SwanBot/OpenSwan
@@ -14869,11 +15550,6 @@ export default function ChatTab({
             // only returns this path while the `uc_stream_escalate_on_tool_use`
             // flag is ON, so when the flag is OFF `escalateOnToolUse` is false and
             // every branch below is byte-for-byte the legacy `stream_plain_chat`.
-            const escalateOnToolUse = terminalTransport.path === 'stream_then_escalate';
-            const conversationOnlyPlainChat = terminalTransport.reason === 'conversation_only_plain_chat';
-            let usePlainModelFallback = terminalTransport.path === 'batch_plain_chat';
-            const canStream = terminalTransport.path === 'stream_plain_chat' || escalateOnToolUse;
-
             // One prompt/context assembly for both physical transports in the
             // planned plain-Chat lane. Non-Anthropic models use the provider-only
             // batch endpoint, but must receive the same system/persona, archive,
@@ -14889,16 +15565,17 @@ export default function ChatTab({
                 content: string;
               }>;
             };
-            let plainChatRequestContextPromise: Promise<PlainChatRequestContext> | null = null;
-            const getPlainChatRequestContext = (): Promise<PlainChatRequestContext> => {
-              if (!plainChatRequestContextPromise) {
-                plainChatRequestContextPromise = (async () => {
+            const plainChatRequestContextPromises = new Map<string, Promise<PlainChatRequestContext>>();
+            const getPlainChatRequestContext = (model: string): Promise<PlainChatRequestContext> => {
+              let request = plainChatRequestContextPromises.get(model);
+              if (!request) {
+                request = (async () => {
                   const { buildStreamableSystemPrompt } = await import('../../../lib/swanbot');
                   const systemPrompt = await buildStreamableSystemPrompt({
                     circleId,
                     userId: currentUserId || 'anonymous',
                     currentMessage: cleanContent,
-                    model: effectiveSelectedModel !== 'auto' ? effectiveSelectedModel : undefined,
+                    model,
                     userName: currentUserName,
                     agentId: selectedAgentSubjectContext.agentId,
                     agentName: selectedAgentSubjectContext.agentName,
@@ -14919,9 +15596,59 @@ export default function ChatTab({
                     ],
                   };
                 })();
+                plainChatRequestContextPromises.set(model, request);
               }
-              return plainChatRequestContextPromise;
+              return request;
             };
+
+            type PreparedPlainChatDispatch = Readonly<{
+              seal: TurnModelDispatchSeal;
+              requestContext: PlainChatRequestContext;
+            }>;
+            const preparePlainChatDispatch = async (): Promise<PreparedPlainChatDispatch | null> => {
+              const prepared = await prepareStableChatModelDispatch({
+                capture: captureTurnModelDispatch,
+                prepare: getPlainChatRequestContext,
+                maxAttempts: 3,
+              });
+              if (prepared) {
+                return Object.freeze({
+                  seal: prepared.snapshot,
+                  requestContext: prepared.prepared,
+                });
+              }
+              addBotMessage(
+                '**Model connections changed while preparing this reply**\nNo model request was sent. Your message is saved; retry once Marketplace connections stop changing.',
+                undefined,
+                { localOnly: true, durability: 'ephemeral' },
+              );
+              return null;
+            };
+
+            let preparedPlainChatDispatch: PreparedPlainChatDispatch | null = null;
+            if (
+              terminalTransport.path === 'stream_plain_chat'
+              || terminalTransport.path === 'stream_then_escalate'
+              || terminalTransport.path === 'batch_plain_chat'
+            ) {
+              preparedPlainChatDispatch = await preparePlainChatDispatch();
+              if (!preparedPlainChatDispatch) {
+                setRunStatus('idle');
+                setBotTyping(false);
+                stopCodingWorkbench();
+                return;
+              }
+              streamCandidateModel = preparedPlainChatDispatch.seal.model;
+              sendModel = streamCandidateModel;
+              context.model = streamCandidateModel;
+              context.connectedProviders = preparedPlainChatDispatch.seal.connectedProviders;
+              terminalTransport = resolveTerminalTransportForModel(streamCandidateModel);
+            }
+
+            const escalateOnToolUse = terminalTransport.path === 'stream_then_escalate';
+            const conversationOnlyPlainChat = terminalTransport.reason === 'conversation_only_plain_chat';
+            let usePlainModelFallback = terminalTransport.path === 'batch_plain_chat';
+            const canStream = terminalTransport.path === 'stream_plain_chat' || escalateOnToolUse;
 
             if (canStream) {
               // W5 (P39): hoisted so the catch below can normalize the stream
@@ -14957,7 +15684,7 @@ export default function ChatTab({
               let streamStopReason: string | null = null;
               try {
                 const { streamChatResponse } = await import('../../../lib/swanbotStream');
-                const plainChatRequestContext = await getPlainChatRequestContext();
+                const plainChatRequestContext = preparedPlainChatDispatch!.requestContext;
                 const { systemPrompt } = plainChatRequestContext;
                 // Auto resolution honours the connected marketplace
                 // providers — when OpenRouter is wired, this picks an
@@ -14965,7 +15692,6 @@ export default function ChatTab({
                 // OR key (handled by the relay path in swanbot-ai).
                 // Falls back to platform Sonnet if the helper somehow
                 // returns null so we never send an unresolved 'auto'.
-                const streamModel = streamCandidateModel;
                 // Phase 2 seam (DEFAULT ON): only when the transport chose
                 // `stream_then_escalate` do we advertise the pinned tool palette
                 // on the stream. `getStreamEscalationPinnedToolNames` resolves the
@@ -14988,6 +15714,22 @@ export default function ChatTab({
                     streamTools = undefined;
                   }
                 }
+                const dispatchSeal = commitTurnModelDispatch(preparedPlainChatDispatch!.seal);
+                if (!dispatchSeal) {
+                  addBotMessage(
+                    '**Model connections changed before dispatch**\nNo model request was sent. Your message is saved; retry once Marketplace finishes refreshing.',
+                    undefined,
+                    { localOnly: true, durability: 'ephemeral' },
+                  );
+                  setRunStatus('idle');
+                  setBotTyping(false);
+                  stopCodingWorkbench();
+                  return;
+                }
+                const streamModel = dispatchSeal.model;
+                sendModel = streamModel;
+                context.model = streamModel;
+                context.connectedProviders = dispatchSeal.connectedProviders;
                 // Stream-liveness (a): seed the bubble with a thinking verb —
                 // an empty-string bubble reads as dead air until the first
                 // token. onDelta below replaces the content wholesale, so the
@@ -15007,8 +15749,10 @@ export default function ChatTab({
                 const streamSource: ChatMessageSource = {
                   actor: agentName,
                   surface: 'main_chat_stream',
-                  selectedModel,
+                  provider: dispatchSeal.provider,
+                  selectedModel: effectiveSelectedModel,
                   effectiveModel: streamModel,
+                  showRouteChips: Boolean(dispatchSeal.fallbackSelection?.fallbackFromModelId),
                 };
                 streamSourceForRecovery = streamSource;
                 await new Promise<void>((resolve, reject) => {
@@ -15246,6 +15990,7 @@ export default function ChatTab({
                   usage: streamingUsage,
                   timestamp: new Date(),
                 };
+                if (accumulated.length > 0) releaseFailedTurnModelQuarantine(streamModel);
                 const completedStreamMetadata = projectPersistedChatBotMetadata(
                   completedStreamMessage,
                   pendingMsg.agentSubjectMetadata
@@ -15453,6 +16198,7 @@ export default function ChatTab({
                   ? getLLMProxyCredentialRecoveryPresentation(streamErr)
                   : null;
                 if (credentialRecovery) {
+                  quarantineFailedTurnModel(streamCandidateModel, 'credential');
                   if (streamPendingMsgId) {
                     const orphanId = streamPendingMsgId;
                     setMessages(prev => prev.filter((message) => message.id !== orphanId));
@@ -15465,7 +16211,7 @@ export default function ChatTab({
                     source: {
                       actor: agentName,
                       surface: 'main_chat_plain_model_error',
-                      selectedModel,
+                      selectedModel: effectiveSelectedModel,
                       effectiveModel: streamCandidateModel,
                     },
                   });
@@ -15512,16 +16258,38 @@ export default function ChatTab({
 
             if (usePlainModelFallback) {
               try {
-                const plainModel = sendModel || streamCandidateModel;
-                const plainChatRequestContext = await getPlainChatRequestContext();
+                const prepared = preparedPlainChatDispatch!;
+                const plainChatRequestContext = prepared.requestContext;
+                const candidateModel = prepared.seal.model;
+                const blackSwanModule = isLocalOllamaBlackSwan(candidateModel)
+                  ? await import('../../../lib/blackswanLLM')
+                  : null;
+                const llmProviderModule = blackSwanModule
+                  ? null
+                  : await import('../../../lib/llmProviders');
+                const dispatchSeal = commitTurnModelDispatch(prepared.seal);
+                if (!dispatchSeal) {
+                  addBotMessage(
+                    '**Model connections changed before dispatch**\nNo model request was sent. Your message is saved; retry once Marketplace finishes refreshing.',
+                    undefined,
+                    { localOnly: true, durability: 'ephemeral' },
+                  );
+                  setRunStatus('idle');
+                  setBotTyping(false);
+                  stopCodingWorkbench();
+                  return;
+                }
+                const plainModel = dispatchSeal.model;
+                sendModel = plainModel;
+                context.model = plainModel;
+                context.connectedProviders = dispatchSeal.connectedProviders;
                 let plainResponse: string;
-                if (isLocalOllamaBlackSwan(plainModel)) {
-                  const { callBlackSwan } = await import('../../../lib/blackswanLLM');
-                  const result = await callBlackSwan(plainChatRequestContext.messages, { maxTokens: 2048 });
+                let plainUsage: SwanBotStructuredResponse['usage'] | undefined;
+                if (blackSwanModule) {
+                  const result = await blackSwanModule.callBlackSwan(plainChatRequestContext.messages, { maxTokens: 2048 });
                   plainResponse = result.content;
                 } else {
-                  const { invokePlainChatModel } = await import('../../../lib/llmProviders');
-                  const result = await invokePlainChatModel({
+                  const result = await llmProviderModule!.invokePlainChatModel({
                     modelId: plainModel,
                     messages: plainChatRequestContext.messages,
                     circleId,
@@ -15530,13 +16298,18 @@ export default function ChatTab({
                     maxTokens: 2048,
                   });
                   plainResponse = result.response;
+                  plainUsage = result.usage;
                 }
+                releaseFailedTurnModelQuarantine(plainModel);
                 addBotMessage(plainResponse, undefined, {
+                  usage: plainUsage,
                   source: {
                     actor: agentName,
                     surface: 'main_chat_plain_model',
-                    selectedModel,
-                    effectiveModel: plainModel,
+                    selectedModel: effectiveSelectedModel,
+                    effectiveModel: plainUsage?.model || plainModel,
+                    provider: resolvePlainChatModelRoute(plainModel)?.provider || null,
+                    showRouteChips: Boolean(dispatchSeal.fallbackSelection?.fallbackFromModelId),
                   },
                 });
                 if (profileRef.current) {
@@ -15545,6 +16318,17 @@ export default function ChatTab({
                 }
               } catch (plainModelError) {
                 const modelLabel = sendModel || effectiveSelectedModel || 'the selected model';
+                const credentialRecovery = plainModelError instanceof LLMProxyInvocationError
+                  ? getLLMProxyCredentialRecoveryPresentation(plainModelError)
+                  : null;
+                // Confirmed credential failures remain excluded until the key
+                // changes. Ambiguous network/upstream failures receive only a
+                // short cooldown so a healthy provider cannot be poisoned for
+                // the rest of the mounted session.
+                quarantineFailedTurnModel(
+                  sendModel || effectiveSelectedModel,
+                  credentialRecovery ? 'credential' : 'transient',
+                );
                 const failure = buildPlainChatFailurePresentation(plainModelError, modelLabel);
                 console.warn('[ChatTab] Plain model batch failed:', plainModelError);
                 addBotMessage(
@@ -15556,7 +16340,7 @@ export default function ChatTab({
                     source: {
                       actor: agentName,
                       surface: 'main_chat_plain_model_error',
-                      selectedModel,
+                      selectedModel: effectiveSelectedModel,
                       effectiveModel: sendModel || null,
                     },
                   },
@@ -15806,6 +16590,27 @@ export default function ChatTab({
             }
             const exactSourceUserMessageId = persistedSourceUserMessageId;
 
+            // Every attachment, source-row, connector, and prompt await is now
+            // complete. Seal the exact catalog decision at the final provider
+            // boundary. A prior zero-output stream escalation reuses its seal;
+            // it never selects a second provider after I/O has begun.
+            const openSwanDispatchSeal = commitTurnModelDispatch();
+            if (!openSwanDispatchSeal) {
+              addBotMessage(
+                '**Model connections changed before dispatch**\nOpenSwan did not start and no model or tool request was sent. Your message is saved; retry once Marketplace finishes refreshing.',
+                undefined,
+                { localOnly: true, durability: 'ephemeral', outcomeVerdict: 'blocked' },
+              );
+              setRunStatus('idle');
+              setBotTyping(false);
+              stopCodingWorkbench();
+              return;
+            }
+            sendModel = openSwanDispatchSeal.model;
+            context.model = openSwanDispatchSeal.model;
+            context.modelDispatchSealed = true;
+            context.connectedProviders = openSwanDispatchSeal.connectedProviders;
+
             setRunStatus('running');
             setActiveSubagent(null);
             setActiveDelegatedSubagents([]);
@@ -15839,7 +16644,7 @@ export default function ChatTab({
               originalUserTaskText: content,
               context,
               signal: openSwanController.signal,
-              connectedProviders: connectedProviderSet,
+              connectedProviders: openSwanDispatchSeal.connectedProviders,
               surface: 'main_chat',
               chatSessionId: activeThreadId,
               resumeLocator: boundOpenSwanResume?.locator,
@@ -15968,6 +16773,16 @@ export default function ChatTab({
             } = await import('../../../lib/chatLaneOutcome');
             const openSwanTerminalOutcome = normalizeOpenSwanTerminalOutcome(structured);
             const openSwanLaneTags = buildChatLaneOutcomeTags(openSwanTerminalOutcome);
+            if (structured.terminal.reason === 'edge_failure') {
+              // The OpenSwan edge intentionally redacts provider credentials,
+              // so an edge failure cannot always name a rejected key. Retire
+              // the account catalog generically; the next turn force-checks
+              // every connected API instead of repeatedly dispatching a model
+              // whose credential may just have been revoked.
+              quarantineFailedTurnModel(openSwanDispatchSeal.model, 'transient');
+            } else if (openSwanTerminalOutcome.status === 'completed') {
+              releaseFailedTurnModelQuarantine(openSwanDispatchSeal.model);
+            }
             if (openSwanTerminalOutcome.status !== 'completed') {
               console.warn(
                 '[ChatTab] OpenSwan lane terminal:',
@@ -16075,9 +16890,10 @@ export default function ChatTab({
             const structuredSource: ChatMessageSource = {
               actor: agentName,
               surface: 'main_chat_openswan',
-              selectedModel,
+              selectedModel: effectiveSelectedModel,
               effectiveModel: structured.usage?.model || sendModel || null,
               provider: structured.routing?.provider_routed || null,
+              showRouteChips: Boolean(turnModelDecision.selection?.fallbackFromModelId),
             };
             const structuredMessageSnapshot: ChatMessage = {
               ...pendingMessage,
@@ -16190,6 +17006,19 @@ export default function ChatTab({
             if (boundOpenSwanApprovalResume) {
               options?.openSwanApprovalResumeCustody?.terminalWithoutCustody();
             }
+            if (modelProviderDispatchStarted && sendModel && batchErr instanceof SealedModelDispatchError) {
+              // The sealed provider was actually attempted and failed. Never
+              // replay this turn through another API, but cool that exact API
+              // down so the next turn can select a different connected model.
+              quarantineFailedTurnModel(sendModel, 'transient');
+            } else if (
+              modelProviderDispatchStarted
+              && sendModel
+              && batchErr instanceof LLMProxyInvocationError
+              && getLLMProxyCredentialRecoveryPresentation(batchErr)
+            ) {
+              quarantineFailedTurnModel(sendModel, 'credential');
+            }
             const batchMessage = batchErr instanceof Error ? batchErr.message : String(batchErr || 'Unknown error');
             const batchStack = batchErr instanceof Error ? batchErr.stack || null : null;
             if (batchErr instanceof OpenSwanResumeUnavailableError) {
@@ -16278,6 +17107,7 @@ export default function ChatTab({
               surface: 'main_chat_openswan_error',
               selectedModel,
               effectiveModel: sendModel || null,
+              provider: committedTurnProvider,
             };
             const terminalContent = appendCustomerSafeRecoveryMessage(
               `${errorMessage} Technical details were saved for recovery.`,
@@ -16309,6 +17139,10 @@ export default function ChatTab({
         const chatErrorMessage = err instanceof Error ? err.message : String(err || 'Unknown error');
         const chatErrorStack = err instanceof Error ? err.stack || null : null;
         if (conversationOnlyTurn) {
+          if (
+            err instanceof LLMProxyInvocationError
+            && getLLMProxyCredentialRecoveryPresentation(err)
+          ) quarantineFailedTurnModel(resolvedTurnModel || effectiveSelectedModel, 'credential');
           const failure = buildPlainChatFailurePresentation(
             err,
             effectiveSelectedModel || 'the selected model',
@@ -16401,7 +17235,10 @@ export default function ChatTab({
   ): Promise<void> => {
     try {
       await sendMessageUnsafe(overrideText, options);
+      activeTurnDispatchModelRef.current = null;
     } catch (error) {
+      const boundaryAttemptedModel = activeTurnDispatchModelRef.current;
+      activeTurnDispatchModelRef.current = null;
       // A thrown outer send boundary has terminally ended this concrete
       // resume attempt before runtime custody. Do this before any recovery UI
       // branch returns so the resolved approval cannot enter a retry loop.
@@ -16418,6 +17255,16 @@ export default function ChatTab({
         && stagedFiles.length === 0
         && isConversationOnlyTurn(boundaryMessage);
       if (boundaryConversationOnly) {
+        if (
+          error instanceof LLMProxyInvocationError
+          && getLLMProxyCredentialRecoveryPresentation(error)
+        ) {
+          if (boundaryAttemptedModel) {
+            quarantineFailedTurnModel(boundaryAttemptedModel, 'credential');
+          } else {
+            retireModelCatalogAfterCredentialFailure();
+          }
+        }
         const failure = buildPlainChatFailurePresentation(
           error,
           selectedModel || 'the selected model',
@@ -16625,25 +17472,42 @@ export default function ChatTab({
     }
   };
 
-  const handleQuickActionSelection = useCallback((text: string) => {
+  const handleQuickActionSelection = useCallback((text: string, requestedMode?: QuickActionMode) => {
     const execution = resolveQuickActionExecution(text);
     const actionText = execution.text;
-    const mode = execution.mode;
+    const mode = requestedMode || execution.mode;
 
-    if (actionText === '__SEND_CRYPTO__') { setShowSendCrypto(true); return; }
+    if (actionText === '__SEND_CRYPTO__') {
+      if (Platform.OS !== 'web') {
+        addBotMessage('Wallet transfers are available on web after a compatible wallet is connected.', undefined, {
+          localOnly: true,
+          durability: 'ephemeral',
+        });
+        return;
+      }
+      setShowSendCrypto(true);
+      return;
+    }
     if (actionText === '__TIP__') {
+      if (Platform.OS !== 'web') {
+        addBotMessage('Wallet tips are available on web after a compatible wallet is connected.', undefined, {
+          localOnly: true,
+          durability: 'ephemeral',
+        });
+        return;
+      }
       setShowSendCrypto(true);
       setSendAmount('0.001');
       return;
     }
-    if (actionText === '__CHECK_IN__') { setShowQuickCheckIn(true); return; }
-    if (actionText === '__NEW_TASK__') { setShowQuickNewTask(true); return; }
-    if (actionText === '__STEP_AWAY__') { setShowQuickStepAway(true); return; }
     if (actionText === '__ASSIGN_AGENT__') { setShowAssignPanel(true); setShowSpawnPanel(false); return; }
     if (actionText === '__SPAWN_AGENT__') { setSpawnModalOpen(true); return; }
     if (actionText === '__MY_WALLET__') {
       if (Platform.OS !== 'web') {
-        addBotMessage('Wallet status is only available on web right now.');
+        addBotMessage('Wallet status is only available on web right now.', undefined, {
+          localOnly: true,
+          durability: 'ephemeral',
+        });
         return;
       }
       void (async () => {
@@ -16665,15 +17529,27 @@ export default function ChatTab({
           const activeLine = activeWallet
             ? `\n\nActive wallet: **${activeWallet.chain === 'ethereum' ? 'Ethereum' : 'Solana'}** — \`${shortenAddress(activeWallet.address)}\``
             : '\n\nNo active wallet selected.';
-          addBotMessage(`**Wallet status**\n\n${lines.join('\n')}${activeLine}`);
+          addBotMessage(`**Wallet status**\n\n${lines.join('\n')}${activeLine}`, undefined, {
+            localOnly: true,
+            durability: 'ephemeral',
+          });
         } catch (error: any) {
-          addBotMessage('I could not load wallet status right now. Try again in a moment.');
+          addBotMessage('I could not load wallet status right now. Try again in a moment.', undefined, {
+            localOnly: true,
+            durability: 'ephemeral',
+          });
         }
       })();
       return;
     }
     if (actionText === '__COMPUTER_USE__') {
-      if (Platform.OS !== 'web') return;
+      if (Platform.OS !== 'web') {
+        addBotMessage('Computer tasks are available from Chat on web.', undefined, {
+          localOnly: true,
+          durability: 'ephemeral',
+        });
+        return;
+      }
       // Opens the in-app console instead of window.prompt — nicer UX, and
       // gives room for template chips + saved tasks. The console submits
       // back via onSubmit → runComputerUseTaskFromConsole.
@@ -16681,7 +17557,13 @@ export default function ChatTab({
       return;
     }
     if (actionText === '__OPENSWAN__') {
-      if (Platform.OS !== 'web') return;
+      if (Platform.OS !== 'web') {
+        addBotMessage('OpenSwan controls are available from Chat on web.', undefined, {
+          localOnly: true,
+          durability: 'ephemeral',
+        });
+        return;
+      }
       // Opens the OpenSwan console — user picks a mode + writes a task,
       // onSubmit routes through the planner with `run_openswan` + selected
       // mode so the dispatcher + response contract apply.
@@ -16690,7 +17572,13 @@ export default function ChatTab({
       return;
     }
     if (actionText === '__PAIR_DESKTOP__') {
-      if (Platform.OS !== 'web') return;
+      if (Platform.OS !== 'web') {
+        addBotMessage('Desktop pairing is available from Chat on web.', undefined, {
+          localOnly: true,
+          durability: 'ephemeral',
+        });
+        return;
+      }
       (async () => {
         try {
           await addDesktopBridgeAutoConnectMessage('desktop_bridge_pairing');
@@ -16708,26 +17596,31 @@ export default function ChatTab({
       return;
     }
     if (actionText === '__NUKE__') {
-      const msg = 'Delete the current chat thread? This cannot be undone.';
+      const msg = 'Delete only the messages you own in this chat? Agent and other member messages will remain. This cannot be undone.';
       if (Platform.OS === 'web') {
-        if (window.confirm(msg)) void nukeCurrentThread();
+        if (window.confirm(msg)) void deleteMyMessagesInCurrentThread();
       } else {
-        import('react-native').then(({ Alert }) => Alert.alert('Nuke Chat', msg, [
+        import('react-native').then(({ Alert }) => Alert.alert('Delete my messages', msg, [
           { text: 'Cancel' },
-          { text: 'Delete Thread', style: 'destructive', onPress: () => { void nukeCurrentThread(); } },
+          { text: 'Delete my messages', style: 'destructive', onPress: () => { void deleteMyMessagesInCurrentThread(); } },
         ]));
       }
       return;
     }
 
-    if (mode === 'prefill') {
-      setInput(actionText);
-      inputRef.current?.focus();
+    const composerHasWork = Boolean(input.trim() || attachments.length > 0 || stagedFiles.length > 0);
+    if (mode === 'prefill' || (mode === 'send' && composerHasWork)) {
+      setInput((current) => mergeChatActionDraft(current, actionText));
+      requestAnimationFrame(() => inputRef.current?.focus());
       return;
     }
 
-    sendMessage(actionText);
-  }, [nukeCurrentThread, sendMessage, wallet]);
+    void sendMessage(
+      actionText,
+      execution.routeId ? { quickActionText: actionText } : undefined,
+    );
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, [addBotMessage, attachments.length, deleteMyMessagesInCurrentThread, input, sendMessage, stagedFiles.length, wallet]);
 
   const handleOpenSwanResume = useCallback((message: ChatMessage) => {
     const locator = projectPersistedOpenSwanResumeLocator(message.openSwanResumeLocator);
@@ -20948,6 +21841,7 @@ export default function ChatTab({
         selectedModel={selectedModel}
         onModelChange={handleSessionModelChange}
         marketplaceModelGroups={marketplaceModelGroups}
+        modelCatalogStatus={modelCatalogIsCurrentReady ? 'ready' : modelCatalogState.status === 'error' ? 'error' : 'loading'}
         attachments={attachments}
         hasStagedFiles={stagedFiles.length > 0}
         onPickImage={async () => {
@@ -21020,209 +21914,6 @@ export default function ChatTab({
       />
       </KeyboardAvoidingView>
     </View>
-  );
-}
-
-// ─── Enhanced Sub Components ─────────────────────────────────────────────────
-
-function EnhancedPromptCard({ label, onPress, accentColor, delay }: {
-  label: string;
-  onPress: () => void;
-  accentColor: string;
-  delay: number;
-}) {
-  const [hovered, setHovered] = useState(false);
-  const slideAnim = useRef(new Animated.Value(30)).current;
-  const fadeAnim = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    Animated.parallel([
-      Animated.timing(slideAnim, {
-        toValue: 0,
-        duration: 500,
-        delay,
-        useNativeDriver: true,
-      }),
-      Animated.timing(fadeAnim, {
-        toValue: 1,
-        duration: 500,
-        delay,
-        useNativeDriver: true,
-      }),
-    ]).start();
-  }, [delay]);
-
-  const cardStyle = Platform.OS === 'web' ? {
-    backdropFilter: hovered ? 'blur(10px)' : 'none',
-    boxShadow: hovered ? `0 8px 32px ${accentColor}20` : 'none',
-    transform: hovered ? 'translateY(-2px) perspective(1000px) rotateX(2deg)' : 'none',
-    transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-  } as any : {};
-
-  return (
-    <Animated.View
-      style={{
-        opacity: fadeAnim,
-        transform: [{ translateY: slideAnim }],
-      }}
-    >
-      <Pressable
-        onPress={onPress}
-        onHoverIn={() => setHovered(true)}
-        onHoverOut={() => setHovered(false)}
-        style={[
-          styles.enhancedPromptCard,
-          { borderColor: accentColor + '30', backgroundColor: accentColor + '10' },
-          cardStyle,
-        ]}
-      >
-        <Text style={[styles.enhancedPromptText, { color: accentColor }]}>{label}</Text>
-        {Platform.OS === 'web' && hovered && (
-          <div style={{
-            position: 'absolute',
-            inset: 0,
-            backgroundImage: `linear-gradient(135deg, ${accentColor}20, transparent)`,
-            borderRadius: 12,
-            pointerEvents: 'none',
-          }} />
-        )}
-      </Pressable>
-    </Animated.View>
-  );
-}
-
-function GlassmorphismCard({ category, expanded, onToggle, onPromptPress, accentColor }: {
-  category: any;
-  expanded: boolean;
-  onToggle: () => void;
-  onPromptPress: (text: string) => void;
-  accentColor: string;
-}) {
-  const [hovered, setHovered] = useState(false);
-  
-  const cardStyle = Platform.OS === 'web' ? {
-    backgroundColor: expanded ? `${category.color}15` : '#11111180',
-    backdropFilter: 'blur(10px)',
-    borderColor: expanded ? category.color + '40' : '#00000060',
-    boxShadow: expanded ? `0 8px 32px ${category.color}20` : 'none',
-    transition: 'all 0.3s ease',
-  } as any : {
-    backgroundColor: expanded ? category.color + '15' : '#111111cc',
-  };
-
-  return (
-    <View
-      style={[styles.glassmorphismCard, cardStyle]}
-      onPointerEnter={() => setHovered(true)}
-      onPointerLeave={() => setHovered(false)}
-    >
-      <Pressable onPress={onToggle} style={styles.categoryHeader}>
-        <Text style={[styles.categoryTitle, { color: expanded ? category.color : '#888' }]}>
-          {category.title}
-        </Text>
-        <Text style={[styles.categoryChevron, { color: category.color }]}>
-          {expanded ? '▾' : '▸'}
-        </Text>
-      </Pressable>
-      
-      {expanded && (
-        <View style={styles.categoryPrompts}>
-          {category.prompts.map((p: any, pIdx: number) => (
-            <EnhancedPromptItem
-              key={pIdx}
-              prompt={p}
-              onPress={onPromptPress}
-              color={category.color}
-              delay={pIdx * 50}
-            />
-          ))}
-        </View>
-      )}
-    </View>
-  );
-}
-
-function EnhancedPromptItem({ prompt, onPress, color, delay }: {
-  prompt: any;
-  onPress: (text: string) => void;
-  color: string;
-  delay: number;
-}) {
-  const [pressed, setPressed] = useState(false);
-  const slideAnim = useRef(new Animated.Value(20)).current;
-
-  useEffect(() => {
-    Animated.timing(slideAnim, {
-      toValue: 0,
-      duration: 300,
-      delay,
-      useNativeDriver: true,
-    }).start();
-  }, [delay]);
-
-  return (
-    <Animated.View style={{ transform: [{ translateX: slideAnim }] }}>
-      <Pressable
-        onPress={() => {
-          if (prompt.text.endsWith(' ')) {
-            onPress(prompt.text);
-          } else {
-            onPress(prompt.text);
-          }
-        }}
-        onPressIn={() => setPressed(true)}
-        onPressOut={() => setPressed(false)}
-        style={[
-          styles.enhancedPromptItem,
-          pressed && { backgroundColor: color + '20', transform: [{ scale: 0.98 }] },
-        ]}
-      >
-        <View style={styles.promptInfo}>
-          <Text style={[styles.promptLabel, { color: pressed ? color : '#fff' }]}>
-            {prompt.label}
-          </Text>
-          <Text style={styles.promptDesc}>{prompt.desc}</Text>
-        </View>
-        <Text style={[styles.promptArrow, { color: color }]}>→</Text>
-      </Pressable>
-    </Animated.View>
-  );
-}
-
-function TipCard({ tip, delay, accentColor }: { tip: string; delay: number; accentColor: string }) {
-  const slideAnim = useRef(new Animated.Value(30)).current;
-  const fadeAnim = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    Animated.parallel([
-      Animated.timing(slideAnim, {
-        toValue: 0,
-        duration: 600,
-        delay,
-        useNativeDriver: true,
-      }),
-      Animated.timing(fadeAnim, {
-        toValue: 1,
-        duration: 600,
-        delay,
-        useNativeDriver: true,
-      }),
-    ]).start();
-  }, [delay]);
-
-  return (
-    <Animated.View
-      style={[
-        styles.enhancedTipCard,
-        {
-          opacity: fadeAnim,
-          transform: [{ translateY: slideAnim }],
-        },
-      ]}
-    >
-      <View style={[styles.tipAccent, { backgroundColor: accentColor }]} />
-      <Text style={styles.tipText}>{tip}</Text>
-    </Animated.View>
   );
 }
 
@@ -21442,296 +22133,6 @@ function EnhancedReactionPicker({ onReaction, accentColor }: { onReaction: (emoj
         </Pressable>
       ))}
     </Animated.View>
-  );
-}
-
-function EnhancedQuickBar({ onPromptPress, onSendCrypto, onNuke, accentColor, circleId, userId, userName }: {
-  onPromptPress: (text: string) => void;
-  onSendCrypto: () => void;
-  onNuke: () => Promise<void>;
-  accentColor: string;
-  circleId?: string;
-  userId?: string | null;
-  userName?: string;
-}) {
-  const scrollRef = useRef<ScrollView>(null);
-  const [showStepAway, setShowStepAway] = useState(false);
-  const [showCheckIn, setShowCheckIn] = useState(false);
-  const [checkInText, setCheckInText] = useState('');
-  const [checkInLoading, setCheckInLoading] = useState(false);
-  const [showCreateTask, setShowCreateTask] = useState(false);
-  const [taskTitle, setTaskTitle] = useState('');
-  const [taskPostToChat, setTaskPostToChat] = useState(true);
-  const [taskLoading, setTaskLoading] = useState(false);
-  const [showNukeConfirm, setShowNukeConfirm] = useState(false);
-  const [nuking, setNuking] = useState(false);
-  const [canScrollLeft, setCanScrollLeft] = useState(false);
-  const [canScrollRight, setCanScrollRight] = useState(true);
-  const scrollX = useRef(0);
-  const contentWidth = useRef(0);
-  const containerWidth = useRef(0);
-
-  const handleCheckIn = async () => {
-    const text = checkInText.trim();
-    if (!text || text.length < 10) return;
-    if (!userId || !circleId) return;
-    setCheckInLoading(true);
-    try {
-      const { error } = await supabase.from('check_ins').insert({
-        user_id: userId,
-        circle_id: circleId,
-        content: text.slice(0, 500),
-        check_in_date: new Date().toISOString().split('T')[0],
-      });
-      if (error) {
-        if (error.code === '23505') {
-          onPromptPress('who checked in');
-        }
-        setCheckInLoading(false);
-        return;
-      }
-      awardXP(userId, getXPForAction('check_in'), 'check_in', { circle_id: circleId }).catch(() => {});
-      setCheckInText('');
-      setShowCheckIn(false);
-      // Announce in chat
-      onPromptPress(`I just checked in: "${text}"`);
-    } catch {
-      // ignore
-    }
-    setCheckInLoading(false);
-  };
-
-  const handleCreateTask = async () => {
-    const title = taskTitle.trim();
-    if (!title || !userId || !circleId) return;
-    setTaskLoading(true);
-    try {
-      const { error } = await supabase.from('tasks').insert({
-        circle_id: circleId,
-        created_by: userId,
-        title,
-        status: 'open',
-        priority: 'normal',
-      });
-      if (error) {
-        setTaskLoading(false);
-        return;
-      }
-      awardXP(userId, getXPForAction('create_task'), 'create_task', { circle_id: circleId }).catch(() => {});
-      setTaskTitle('');
-      setShowCreateTask(false);
-      if (taskPostToChat) {
-        onPromptPress(`I just created a task: "${title}"`);
-      }
-    } catch {
-      // ignore
-    }
-    setTaskLoading(false);
-  };
-
-  const updateArrows = () => {
-    setCanScrollLeft(scrollX.current > 5);
-    setCanScrollRight(scrollX.current < contentWidth.current - containerWidth.current - 5);
-  };
-
-  const scrollLeft = () => {
-    const newX = Math.max(0, scrollX.current - 200);
-    scrollRef.current?.scrollTo({ x: newX, animated: true });
-  };
-
-  const scrollRight = () => {
-    const maxX = contentWidth.current - containerWidth.current;
-    const newX = Math.min(maxX, scrollX.current + 200);
-    scrollRef.current?.scrollTo({ x: newX, animated: true });
-  };
-
-  const barStyle = Platform.OS === 'web' ? {
-    backdropFilter: 'blur(10px)',
-    borderColor: accentColor + '20',
-  } as any : { borderColor: accentColor + '20' };
-
-  return (
-    <View style={[styles.enhancedQuickBar, barStyle]}>
-      {canScrollLeft && (
-        <Pressable onPress={scrollLeft} style={[styles.scrollArrow, styles.scrollArrowLeft]}>
-          <Text style={styles.scrollArrowText}>{'‹'}</Text>
-        </Pressable>
-      )}
-      <ScrollView
-        ref={scrollRef}
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.quickBarScroll}
-        onScroll={(e) => {
-          scrollX.current = e.nativeEvent.contentOffset.x;
-          updateArrows();
-        }}
-        onContentSizeChange={(w) => { contentWidth.current = w; updateArrows(); }}
-        onLayout={(e) => { containerWidth.current = e.nativeEvent.layout.width; updateArrows(); }}
-        scrollEventThrottle={16}
-      >
-        <EnhancedQuickChip label="✅ Check In" onPress={() => setShowCheckIn(true)} accentColor={accentColor} />
-        <EnhancedQuickChip label="📋 New Task" onPress={() => setShowCreateTask(true)} accentColor={accentColor} />
-        {QUICK_PROMPTS.map((p, i) => (
-          <EnhancedQuickChip
-            key={i}
-            label={p.label}
-            onPress={() => p.text === '__SEND_CRYPTO__' ? onSendCrypto() : onPromptPress(p.text)}
-            accentColor={accentColor}
-          />
-        ))}
-        <EnhancedQuickChip label="🧠 Trivia" onPress={() => onPromptPress('trivia')} accentColor={accentColor} />
-        <EnhancedQuickChip label="🤔 WYR" onPress={() => onPromptPress('would you rather')} accentColor={accentColor} />
-        <EnhancedQuickChip label="🔥 Hot Take" onPress={() => onPromptPress('hot take')} accentColor={accentColor} />
-        <EnhancedQuickChip label="🖥️ Step Away" onPress={() => setShowStepAway(true)} accentColor={accentColor} />
-        <EnhancedQuickChip label=">_ More" onPress={() => onPromptPress('help')} accentColor={accentColor} />
-        <EnhancedQuickChip label="☢️ Nuke It" onPress={() => setShowNukeConfirm(true)} accentColor={'#ef4444'} />
-      </ScrollView>
-      {canScrollRight && (
-        <Pressable onPress={scrollRight} style={[styles.scrollArrow, styles.scrollArrowRight]}>
-          <Text style={styles.scrollArrowText}>{'›'}</Text>
-        </Pressable>
-      )}
-
-      {/* Step Away Modal (rendered inline, triggered by chip) */}
-      {showStepAway && userId && circleId && (
-        <StepAwayCard
-          circleId={circleId}
-          userId={userId}
-          userName={userName || ''}
-          onPost={async (_type, content) => {
-            onPromptPress(content);
-            setShowStepAway(false);
-          }}
-          autoOpen
-          onClose={() => setShowStepAway(false)}
-        />
-      )}
-
-      {/* Inline Check-In Panel */}
-      {showCheckIn && (
-        <View style={[checkInStyles.panel, { borderColor: accentColor + '30' }]}>
-          <View style={checkInStyles.header}>
-            <Text style={checkInStyles.title}>✅ Quick Check-In</Text>
-            <Pressable onPress={() => setShowCheckIn(false)}>
-              <Text style={checkInStyles.close}>✕</Text>
-            </Pressable>
-          </View>
-          <TextInput
-            style={[checkInStyles.input, { borderColor: accentColor + '30' }]}
-            placeholder="What did you work on today?"
-            placeholderTextColor="#555"
-            value={checkInText}
-            onChangeText={setCheckInText}
-            multiline
-            maxLength={500}
-            autoFocus
-          />
-          <View style={checkInStyles.footer}>
-            <Text style={checkInStyles.charCount}>{checkInText.trim().length < 10 ? `${10 - checkInText.trim().length} more chars` : '✓'}</Text>
-            <Pressable
-              onPress={handleCheckIn}
-              disabled={checkInLoading || checkInText.trim().length < 10}
-              style={[checkInStyles.submitBtn, { backgroundColor: checkInText.trim().length >= 10 ? accentColor : '#333' }]}
-            >
-              <Text style={checkInStyles.submitText}>{checkInLoading ? '...' : 'Check In'}</Text>
-            </Pressable>
-          </View>
-        </View>
-      )}
-
-      {/* Inline Create Task Panel */}
-      {showCreateTask && (
-        <View style={[checkInStyles.panel, { borderColor: accentColor + '30' }]}>
-          <View style={checkInStyles.header}>
-            <Text style={checkInStyles.title}>📋 New Task</Text>
-            <Pressable onPress={() => setShowCreateTask(false)}>
-              <Text style={checkInStyles.close}>✕</Text>
-            </Pressable>
-          </View>
-          <TextInput
-            style={[checkInStyles.input, { borderColor: accentColor + '30', minHeight: 40 }]}
-            placeholder="Task title..."
-            placeholderTextColor="#555"
-            value={taskTitle}
-            onChangeText={setTaskTitle}
-            maxLength={200}
-            autoFocus
-          />
-          <View style={checkInStyles.footer}>
-            <Pressable onPress={() => setTaskPostToChat(!taskPostToChat)} style={checkInStyles.checkbox}>
-              <View style={[checkInStyles.checkboxBox, taskPostToChat && { backgroundColor: accentColor, borderColor: accentColor }]}>
-                {taskPostToChat && <Text style={checkInStyles.checkboxCheck}>✓</Text>}
-              </View>
-              <Text style={checkInStyles.checkboxLabel}>Post to chat</Text>
-            </Pressable>
-            <Pressable
-              onPress={handleCreateTask}
-              disabled={taskLoading || !taskTitle.trim()}
-              style={[checkInStyles.submitBtn, { backgroundColor: taskTitle.trim() ? accentColor : '#333' }]}
-            >
-              <Text style={checkInStyles.submitText}>{taskLoading ? '...' : 'Create'}</Text>
-            </Pressable>
-          </View>
-        </View>
-      )}
-
-      {/* Nuke Confirmation */}
-      {showNukeConfirm && (
-        <View style={[checkInStyles.panel, { borderColor: '#ffffff20' }]}>
-          <View style={checkInStyles.header}>
-            <Text style={checkInStyles.title}>☢️ Nuke All Messages?</Text>
-            <Pressable onPress={() => setShowNukeConfirm(false)}>
-              <Text style={checkInStyles.close}>✕</Text>
-            </Pressable>
-          </View>
-          <Text style={{ color: '#999', fontSize: 12, marginBottom: 10 }}>This will permanently delete every message in this chat. This cannot be undone.</Text>
-          <View style={{ flexDirection: 'row', gap: 8, justifyContent: 'flex-end' }}>
-            <Pressable
-              onPress={() => setShowNukeConfirm(false)}
-              style={[checkInStyles.submitBtn, { backgroundColor: '#333' }]}
-            >
-              <Text style={checkInStyles.submitText}>Cancel</Text>
-            </Pressable>
-            <Pressable
-              onPress={async () => {
-                setNuking(true);
-                await onNuke();
-                setNuking(false);
-                setShowNukeConfirm(false);
-              }}
-              disabled={nuking}
-              style={[checkInStyles.submitBtn, { backgroundColor: '#ef4444' }]}
-            >
-              <Text style={checkInStyles.submitText}>{nuking ? '...' : 'Nuke It ☢️'}</Text>
-            </Pressable>
-          </View>
-        </View>
-      )}
-    </View>
-  );
-}
-
-function EnhancedQuickChip({ label, onPress, accentColor }: {
-  label: string;
-  onPress: () => void;
-  accentColor: string;
-}) {
-  const [pressed, setPressed] = useState(false);
-  
-  return (
-    <Pressable
-      onPress={onPress}
-      onPressIn={() => setPressed(true)}
-      onPressOut={() => setPressed(false)}
-      style={[
-        styles.enhancedQuickChip,
-        { borderColor: accentColor + '30', backgroundColor: accentColor + '10' },
-        pressed && { backgroundColor: accentColor + '20', transform: [{ scale: 0.95 }] },
-      ]}
-    >
-      <Text style={[styles.quickBarChipText, { color: pressed ? accentColor : '#888' }]}>{label}</Text>
-    </Pressable>
   );
 }
 
@@ -22318,12 +22719,6 @@ function modelSectionTransitionStyle() {
     : [];
 }
 
-// ── Quick Actions animated header ───────────────────────────────────────────
-// Dots pulse on hover like loading indicators. Title letters cycle through
-// the dot colors so the whole header comes alive on mouseover.
-
-const QA_DOT_COLORS = ['#6366f1', '#facc15', '#22c55e', '#ef4444', '#a855f7', '#f97316'];
-const QA_TITLE = 'Quick Actions';
 const toTitleCaseWords = (value: string) =>
   value
     .toLowerCase()
@@ -22331,196 +22726,6 @@ const toTitleCaseWords = (value: string) =>
     .filter(Boolean)
     .map(word => word.charAt(0).toUpperCase() + word.slice(1))
     .join(' ');
-
-// Formations: circle → triangle → square → DNA helix → circle
-const S = 26;
-const C = S / 2; // center
-const QA_CIRCLE_POINTS = [
-  { x: 8, y: 6.8 },
-  { x: 16.5, y: 6 },
-  { x: 19.2, y: C },
-  { x: 16.5, y: 16.8 },
-  { x: 8.6, y: 16.3 },
-  { x: 5.6, y: 8.2 },
-];
-// Five distinct formations. The keyframe builder below emits an
-// explicit `100% { formation[0] }` frame that closes the loop with a
-// dna2 → circle morph, so there is no need for a duplicate "return"
-// formation — that used to produce a dead 16.7% hold at the end of
-// every cycle (dots arrived at circle early, then sat still until the
-// loop restarted, which read as a hitch before the loop).
-const qaFormations: Array<{ name: string; pos: Array<{ x: number; y: number }> }> = [
-  // Circle
-  { name: 'circle', pos: QA_CIRCLE_POINTS },
-  // Triangle — 3 vertices + 3 inset points
-  { name: 'triangle', pos: [
-    { x: C, y: 2.1 },
-    { x: S - 2.8, y: S - 3.7 },
-    { x: 2.8, y: S - 3.7 },
-    { x: C + 3.1, y: 6.4 },
-    { x: S - 5.9, y: S - 6.9 },
-    { x: 5.9, y: S - 6.9 },
-  ]},
-  // Square — corners + vertical edge centers
-  { name: 'square', pos: [
-    { x: 2.6, y: 2.6 }, { x: S - 2.6, y: 2.6 },
-    { x: S - 2.6, y: S - 2.6 }, { x: 2.6, y: S - 2.6 },
-    { x: C, y: 2.1 }, { x: C, y: S - 2.1 },
-  ]},
-  // DNA helix — compact double-wave
-  { name: 'dna1', pos: [
-    { x: 2.5, y: 5.1 },
-    { x: 5.3, y: 14.4 },
-    { x: 7.8, y: 6.3 },
-    { x: 10.1, y: 14.9 },
-    { x: 12.6, y: 5.9 },
-    { x: 15.1, y: 14.1 },
-  ]},
-  { name: 'dna2', pos: [
-    { x: 2.5, y: 14.1 },
-    { x: 5.3, y: 6.3 },
-    { x: 7.8, y: 14.1 },
-    { x: 10.1, y: 5.9 },
-    { x: 12.6, y: 14.9 },
-    { x: 15.1, y: 6.6 },
-  ]},
-];
-
-function ensureQuickActionStyles() {
-  if (typeof document === 'undefined') return;
-  let el = document.getElementById('uc-qa-header-style') as HTMLStyleElement | null;
-  if (!el) {
-    el = document.createElement('style');
-    el.id = 'uc-qa-header-style';
-    document.head.appendChild(el);
-  }
-
-  // Build a per-dot keyframe that morphs through all formations.
-  // Each formation holds for ~14% of the cycle then transitions to the next.
-  const totalFormations = qaFormations.length;
-  const holdPct = 100 / totalFormations;
-  let dotKeyframes = '';
-  for (let d = 0; d < QA_DOT_COLORS.length; d++) {
-    let kf = `@keyframes uc-qa-morph-${d} {\n`;
-    for (let f = 0; f < totalFormations; f++) {
-      const startPct = (f * holdPct).toFixed(1);
-      const { x, y } = qaFormations[f].pos[d];
-      kf += `  ${startPct}% { left: ${x.toFixed(1)}px; top: ${y.toFixed(1)}px; }\n`;
-    }
-    kf += `  100% { left: ${qaFormations[0].pos[d].x.toFixed(1)}px; top: ${qaFormations[0].pos[d].y.toFixed(1)}px; }\n`;
-    kf += '}\n';
-    dotKeyframes += kf;
-  }
-
-  el.textContent = `
-${dotKeyframes}
-@keyframes uc-qa-glow { 0%,100% { opacity:.68; transform:scale(1); } 50% { opacity:1; transform:scale(1.16); } }
-@keyframes uc-qa-char-shimmer { 0%,100% { opacity:.82; } 50% { opacity:1; filter:brightness(1.18); } }
-/* Shape pulse aligned to the 5-formation morph beats (20% each), so
- * every shape change lands on a formation change and the final
- * tall-oval → circle morph gets the full 80% → 100% window instead
- * of snapping in the last 7%. */
-@keyframes uc-qa-shape {
-  0% {
-    width: 3px; height: 3px;
-    border-radius: 999px;
-    transform: rotate(0deg);
-  }
-  20% {
-    width: 3px; height: 3px;
-    border-radius: 999px;
-    transform: rotate(0deg);
-  }
-  40% {
-    width: 3px; height: 3px;
-    border-radius: 1px;
-    transform: rotate(45deg);
-  }
-  60% {
-    width: 3px; height: 3px;
-    border-radius: 1px;
-    transform: rotate(0deg);
-  }
-  80% {
-    width: 2px; height: 4.2px;
-    border-radius: 999px;
-    transform: rotate(24deg);
-  }
-  100% {
-    width: 3px; height: 3px;
-    border-radius: 999px;
-    transform: rotate(0deg);
-  }
-}
-.uc-qa-morph-dot { position:absolute; border-radius:50%; }
-.uc-qa-char { animation: uc-qa-char-shimmer 2s ease-in-out infinite; display:inline-block; }
-.uc-actions-sysfont [class*="r-fontFamily"] { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important; }
-.uc-actions-sysfont { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important; }
-.uc-actions-sysfont div, .uc-actions-sysfont span { font-family: inherit !important; }
-.uc-actions-sysfont .uc-qa-char { font-family: inherit !important; }`;
-}
-
-function QuickActionsHeader({ expanded, isHovered, onPress, onHoverIn, onHoverOut }: {
-  expanded: boolean; isHovered: boolean;
-  onPress: () => void; onHoverIn: () => void; onHoverOut: () => void;
-}) {
-  React.useEffect(() => { if (Platform.OS === 'web') ensureQuickActionStyles(); }, []);
-
-  const dotSize = 3;
-  const cycleDuration = 5.5;
-  const activeColor = 'rgb(245, 158, 11)';
-
-  return (
-    <Pressable
-      onPress={onPress}
-      onHoverIn={onHoverIn}
-      onHoverOut={onHoverOut}
-      style={[
-        styles.actionsAccordionHeader,
-        { paddingVertical: 9 },
-        Platform.OS === 'web' && { transition: 'all 0.25s ease' } as any,
-        isHovered && { backgroundColor: '#0f172a' } as any,
-      ]}
-    >
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-        <View style={{ width: S, height: S, position: 'relative' as any }}>
-          {QA_DOT_COLORS.map((c, i) => (
-            <View
-              key={i}
-              {...({ className: 'uc-qa-morph-dot', style: Platform.OS === 'web' ? {
-                width: dotSize,
-                height: dotSize,
-                backgroundColor: c,
-                left: qaFormations[0].pos[i].x,
-                top: qaFormations[0].pos[i].y,
-                marginLeft: -(dotSize / 2),
-                marginTop: -(dotSize / 2),
-                boxShadow: isHovered ? `0 0 4px ${c}66, 0 0 1px ${c}44` : 'none',
-                transition: 'box-shadow 0.18s ease, opacity 0.18s ease',
-                opacity: isHovered ? 1 : 0.92,
-                animation: `uc-qa-morph-${i} ${cycleDuration}s ease-in-out infinite, uc-qa-glow 1.6s ease-in-out infinite, uc-qa-shape ${cycleDuration}s ease-in-out infinite`,
-                animationDelay: `0s, ${i * 0.2}s, 0s`,
-              } : {
-                width: dotSize,
-                height: dotSize,
-                backgroundColor: c,
-                left: qaFormations[0].pos[i].x,
-                top: qaFormations[0].pos[i].y,
-                marginLeft: -(dotSize / 2),
-                marginTop: -(dotSize / 2),
-              }} as any)}
-            />
-          ))}
-        </View>
-
-        <Text style={[styles.actionsAccordionTitle, { color: isHovered ? activeColor : '#e2e8f0' }]}>
-          {QA_TITLE}
-        </Text>
-      </View>
-      <Text style={[styles.actionsAccordionChevron, isHovered && { fontSize: 13 } as any]}>{expanded ? '▾' : '▸'}</Text>
-    </Pressable>
-  );
-}
 
 const CONTROL_PANEL_LAUNCHERS = [
   {
@@ -22784,6 +22989,7 @@ function EnhancedInput({
   selectedModel,
   onModelChange,
   marketplaceModelGroups: marketplaceModelGroupsProp,
+  modelCatalogStatus = 'loading',
   onQuickAction,
   attachments,
   hasStagedFiles,
@@ -22827,28 +23033,12 @@ function EnhancedInput({
   const [popularModels, setPopularModels] = useState<ChatPickerModel[]>(POPULAR_OPENROUTER_MODELS);
   const [popularModelsSource, setPopularModelsSource] = useState<'curated' | 'live'>('curated');
   const [hoveredModel, setHoveredModel] = useState<string | null>(null);
-  const [hoveredAction, setHoveredAction] = useState<number | null>(null);
-  const [expandedActionSections, setExpandedActionSections] = useState<Record<string, boolean>>({
-    soul: false,
-    quick: false,
-    tools: false,
-    missions: false,
-    ai: false,
-    wordpress: false,
-    games: false,
-    challenges: false,
-    productivity: false,
-    stats: false,
-    crypto: false,
-    connect: false,
-    governance: false,
-    motivation: false,
-  });
   const [highlightedSlashIndex, setHighlightedSlashIndex] = useState(0);
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const popularRankingsLoadedRef = useRef(false);
   const modeTriggerRef = useRef<any>(null);
   const modeCloseRef = useRef<any>(null);
+  const actionsTriggerRef = useRef<any>(null);
 
   // Load custom models on mount
   React.useEffect(() => {
@@ -22893,15 +23083,30 @@ function EnhancedInput({
   // here and the send-time auto-resolution in the parent agree on
   // which providers are connected.
   const marketplaceModelGroups: ModelGroup[] = marketplaceModelGroupsProp || [];
+  const fallbackCatalogGroups = useMemo(
+    () => modelCatalogStatus === 'ready' ? marketplaceModelGroups : [],
+    [marketplaceModelGroups, modelCatalogStatus],
+  );
   const pickerModelReadiness = useCallback((modelId: string) => {
-    if (!modelId || modelId === 'auto' || marketplaceModelGroups.length === 0) {
+    if (!modelId || modelId === 'auto') {
       return { ready: true, state: 'route_unmanaged' as const, message: '' };
     }
+    const route = resolvePlainChatModelRoute(modelId);
+    if (!route) return { ready: true, state: 'route_unmanaged' as const, message: '' };
+    if (modelCatalogStatus !== 'ready') {
+      return {
+        ready: false,
+        state: 'connection_required' as const,
+        message: modelCatalogStatus === 'error'
+          ? 'Connected model access could not be verified. Refresh Marketplace connections.'
+          : 'Checking connected model access.',
+      };
+    }
     return resolveModelSelectionReadiness({
-      route: resolvePlainChatModelRoute(modelId),
-      groups: marketplaceModelGroups,
+      route,
+      groups: fallbackCatalogGroups,
     });
-  }, [marketplaceModelGroups]);
+  }, [fallbackCatalogGroups, modelCatalogStatus]);
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
@@ -22941,6 +23146,13 @@ function EnhancedInput({
   useEffect(() => {
     if (!showModePicker) setShowControlAdvanced(false);
   }, [showModePicker]);
+
+  useEffect(() => {
+    if (!composerDisabled) return;
+    setShowModelPicker(false);
+    setShowQuickActions(false);
+    setShowModePicker(false);
+  }, [composerDisabled]);
 
   useEffect(() => {
     if (!showModePicker || Platform.OS !== 'web' || typeof window === 'undefined') return;
@@ -23186,11 +23398,11 @@ function EnhancedInput({
   // resolver stays on the platform Anthropic ladder.
   const connectedProviderSet: ReadonlySet<string> = useMemo(() => {
     return new Set(
-      marketplaceModelGroups
+      fallbackCatalogGroups
         .filter((g) => g.connected && g.models.some((model) => model.ready))
         .map((g) => normalizeConnectedProviderKey(g.provider as string)),
     );
-  }, [marketplaceModelGroups]);
+  }, [fallbackCatalogGroups]);
 
   // Live Auto preview — when selectedModel is 'auto', resolve what the
   // runtime would actually pick for the current input, given the active
@@ -23230,13 +23442,61 @@ function EnhancedInput({
     return pickerModelReadiness(autoResolvedModel);
   }, [autoResolvedModel, pickerModelReadiness]);
 
+  const composerFallbackSelection = useMemo(() => {
+    const requestedModelId = selectedModel === 'auto' ? autoResolvedModel : selectedModel;
+    if (!requestedModelId) return null;
+    const requestedRoute = resolvePlainChatModelRoute(requestedModelId);
+    const requestedIsReadyLocalOllama = !requestedRoute
+      && fallbackCatalogGroups.some((group) => (
+        normalizeConnectedProviderKey(group.provider) === 'ollama'
+        && group.connected
+        && group.models.some((model) => model.ready && model.id === requestedModelId)
+      ));
+    if (requestedIsReadyLocalOllama) return null;
+    const requestedReadiness = pickerModelReadiness(requestedModelId);
+    const actionShaped = looksLikeActionRequest(input)
+      || (chatMode !== 'none' && chatMode !== 'talk');
+    const selection = resolveReadyChatModelForTurn({
+      requestedModelId,
+      groups: fallbackCatalogGroups,
+      preferredModelIds: [resolveTaskAwareReadyFallbackPreference(input, sessionProfile, fallbackCatalogGroups)],
+      excludedGroupProviders: ['blackswan'],
+      excludedModelIds: actionShaped
+        ? [BLACKSWAN_ENDPOINT_MODEL_ID, BLACKSWAN_PUBLIC_MODEL_ID]
+        : [],
+      requireToolUse: actionShaped,
+    });
+    const requestedRouteIdentity = resolveModelRouteIdentity(requestedRoute);
+    const requestedCatalogAbsenceVerified = requestedReadiness.state === 'not_listed'
+      && (
+        requestedReadiness.catalogStatus === 'account_verified'
+        || requestedReadiness.catalogStatus === 'account_verified_empty'
+      );
+    const shouldSelectFallback = (
+      !requestedReadiness.ready
+      && (
+        selectedModel === 'auto'
+        || requestedReadiness.state === 'connection_required'
+        || requestedCatalogAbsenceVerified
+        || selection?.source === 'equivalent_ready'
+      )
+    ) || (actionShaped && !getModelCapabilityFlags(requestedModelId).toolUse)
+      || requestedRouteIdentity?.provider === 'huggingface_endpoint'
+      || !requestedRoute
+      || getModelCapabilityFlags(requestedModelId).imageOnly;
+    return shouldSelectFallback && selection?.fallbackFromModelId ? selection : null;
+  }, [autoResolvedModel, chatMode, fallbackCatalogGroups, input, pickerModelReadiness, selectedModel, sessionProfile]);
+
   const autoResolvedShortLabel = useMemo(() => {
     if (!autoResolvedModel) return null;
     const label = autoModelDisplayName(autoResolvedModel);
+    if (composerFallbackSelection) {
+      return `${label} -> ${autoModelDisplayName(composerFallbackSelection.modelId)}`;
+    }
     return autoResolvedReadiness && !autoResolvedReadiness.ready
       ? `${label} · access needed`
       : label;
-  }, [autoResolvedModel, autoResolvedReadiness]);
+  }, [autoResolvedModel, autoResolvedReadiness, composerFallbackSelection]);
   // Auto defaults to Claude Sonnet; the routing ladder now RECOMMENDS an
   // alternative (cheaper/specialist) instead of silently switching. Manual
   // weak-tier picks get a Sonnet recommendation for action-shaped drafts.
@@ -23270,8 +23530,13 @@ function EnhancedInput({
       return null;
     }
   }, [selectedModel, input, sessionProfile, connectedProviderSet, pickerModelReadiness]);
+  const composerFallbackReason = useMemo(() => {
+    if (!composerFallbackSelection?.fallbackFromModelId) return null;
+    return `Will try ${autoModelDisplayName(composerFallbackSelection.modelId)} for this reply because ${autoModelDisplayName(composerFallbackSelection.fallbackFromModelId)} is not ready. Your saved model choice stays unchanged.`;
+  }, [composerFallbackSelection]);
   const autoModelReason = useMemo(() => {
     if (selectedModel !== 'auto') return null;
+    if (composerFallbackReason) return composerFallbackReason;
     if (autoResolvedReadiness && !autoResolvedReadiness.ready) {
       return `${autoResolvedReadiness.message} Connect that provider or pick a ready model before sending.`;
     }
@@ -23279,7 +23544,7 @@ function EnhancedInput({
       return `Tip: ${autoModelDisplayName(modelRecommendation.model)} — ${modelRecommendation.reason} Tap to use it.`;
     }
     return 'Sonnet is the Auto default; lighter or specialist models are suggested here when they fit better.';
-  }, [selectedModel, modelRecommendation, autoResolvedReadiness]);
+  }, [selectedModel, modelRecommendation, autoResolvedReadiness, composerFallbackReason]);
   const activeModeConfig = CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk')) || CHAT_MODE_CONFIG[0];
   const controlAccent = selectedChatAgentTarget?.color || activeModeConfig?.color || accentColor;
   const draftText = String(input || '').trim();
@@ -23295,7 +23560,9 @@ function EnhancedInput({
       ? selectedChatAgentTarget.description
       : selectedChatAgentTarget.setupHint || 'Connect this agent to route chat work.'
     : 'Default OpenSwan routing with tools, memory, browser, and desktop support.';
-  const modelRouteLabel = selectedModel === 'auto'
+  const modelRouteLabel = composerFallbackSelection
+    ? `${formatModelDisplayName(composerFallbackSelection.fallbackFromModelId)} -> ${formatModelDisplayName(composerFallbackSelection.modelId)}`
+    : selectedModel === 'auto'
     ? autoResolvedShortLabel
       ? `Auto -> ${autoResolvedShortLabel}`
       : 'Auto routing'
@@ -23305,10 +23572,6 @@ function EnhancedInput({
     ? `${Math.min(draftText.length, 9999)} chars ready for handoff`
     : 'Ready for a new task.';
   const soulActions = getMainChatSessionActions(sessionProfile || 'senior');
-  const accordionCategories = PROMPT_CATEGORIES.map((category) => ({
-    key: category.title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, ''),
-    category,
-  }));
 
   const renderAutoModelAction = () => {
     const model = autoModelOption;
@@ -23632,10 +23895,13 @@ function EnhancedInput({
         {/* Model Selector Button */}
         <View style={{ position: 'relative' as const }}>
           <Pressable
+            testID="chat-model-trigger"
+            disabled={composerDisabled}
             onPress={() => {
               const next = !showModelPicker;
               setShowModelPicker(next);
               setShowQuickActions(false);
+              setShowModePicker(false);
               if (!next) {
                 setShowAddModel(false);
                 setActiveModelBrowserKey(null);
@@ -23643,12 +23909,25 @@ function EnhancedInput({
             }}
             onHoverIn={() => setHoveredModel('_btn')}
             onHoverOut={() => setHoveredModel(null)}
+            onFocus={() => setHoveredModel('_btn')}
+            onBlur={() => setHoveredModel(null)}
             accessibilityRole="button"
             accessibilityLabel={`Model: ${currentModel.label}`}
+            accessibilityState={{ expanded: showModelPicker, disabled: composerDisabled }}
+            {...(Platform.OS === 'web' ? {
+              'aria-expanded': showModelPicker,
+              'aria-haspopup': 'dialog',
+              'aria-controls': 'chat-model-picker',
+            } as any : {})}
             style={[
               styles.modelButton,
               { borderColor: currentModel.color + '50' },
-              hoveredModel === '_btn' && { borderColor: currentModel.color, backgroundColor: currentModel.color + '15' },
+              hoveredModel === '_btn' && {
+                borderColor: currentModel.color,
+                backgroundColor: currentModel.color + '15',
+                ...(Platform.OS === 'web' ? { boxShadow: `0 0 0 2px ${currentModel.color}35` } as any : {}),
+              },
+              composerDisabled && { opacity: 0.45 },
               ...(Platform.OS === 'web' ? [{ transition: 'all 0.2s ease', cursor: 'pointer' } as any] : []),
             ]}
           >
@@ -23666,7 +23945,7 @@ function EnhancedInput({
 
           {/* Model Dropdown */}
           {showModelPicker && !showAddModel && !activeModelBrowserKey && (
-            <AnimatedPopup style={[styles.dropdownPanel, { maxHeight: 480, width: 320, left: 0, right: 'auto' }, ...(Platform.OS === 'web' ? [{ boxShadow: '4px 4px 0px rgba(99,102,241,0.05), 0 12px 40px rgba(0,0,0,0.6)', overflowY: 'auto' } as any] : [])]}>
+            <AnimatedPopup nativeID="chat-model-picker" style={[styles.dropdownPanel, { maxHeight: 480, width: 320, left: 0, right: 'auto' }, ...(Platform.OS === 'web' ? [{ boxShadow: '4px 4px 0px rgba(99,102,241,0.05), 0 12px 40px rgba(0,0,0,0.6)', overflowY: 'auto' } as any] : [])]}>
               {renderAutoModelAction()}
               {blackSwanMarketplaceGroup ? renderMarketplaceModelGroup(blackSwanMarketplaceGroup) : null}
               {popularBuiltInModelGroup ? renderBrowseBuiltInModelGroup(popularBuiltInModelGroup) : null}
@@ -23683,7 +23962,7 @@ function EnhancedInput({
 
           {/* Model Section Browser */}
           {showModelPicker && activeModelBrowserKey && (
-            <AnimatedPopup style={[styles.dropdownPanel, styles.providerBrowserDropdown, ...(Platform.OS === 'web' ? [{ boxShadow: '0 8px 32px rgba(0,0,0,0.5)' } as any] : [])]}>
+            <AnimatedPopup nativeID="chat-model-picker" style={[styles.dropdownPanel, styles.providerBrowserDropdown, ...(Platform.OS === 'web' ? [{ boxShadow: '0 8px 32px rgba(0,0,0,0.5)' } as any] : [])]}>
               <ModelSectionBrowserPanel
                 section={activeModelBrowserSection}
                 selectedModel={selectedModel}
@@ -23699,7 +23978,7 @@ function EnhancedInput({
 
           {/* Add Model Panel */}
           {showModelPicker && showAddModel && (
-            <AnimatedPopup style={[styles.dropdownPanel, styles.dropdownPanelWide, ...(Platform.OS === 'web' ? [{ boxShadow: '0 8px 32px rgba(0,0,0,0.5)' } as any] : [])]}>
+            <AnimatedPopup nativeID="chat-model-picker" style={[styles.dropdownPanel, styles.dropdownPanelWide, ...(Platform.OS === 'web' ? [{ boxShadow: '0 8px 32px rgba(0,0,0,0.5)' } as any] : [])]}>
               <AddModelPanel
                 accentColor={accentColor}
                 onModelAdded={(model) => {
@@ -23727,162 +24006,54 @@ function EnhancedInput({
             the model picker / quick actions and groups capability
             indicators where the cost footer already lives. */}
 
-        {/* Quick Actions Button */}
-        <View style={{ position: 'relative' as const }}>
-          <Pressable
-            onPress={() => {
-              setShowQuickActions(!showQuickActions);
-              setShowModelPicker(false);
-              setShowAddModel(false);
-              setActiveModelBrowserKey(null);
-            }}
-            onHoverIn={() => setHoveredAction(-1)}
-            onHoverOut={() => setHoveredAction(null)}
-            accessibilityRole="button"
-            accessibilityLabel="Quick actions"
-            style={[
-              styles.quickActionsButton,
-              hoveredAction === -1 && { borderColor: accentColor + '60', backgroundColor: accentColor + '10' },
-              ...(Platform.OS === 'web' ? [{ transition: 'all 0.2s ease', cursor: 'pointer' } as any] : []),
-            ]}
-          >
-            <Text style={[styles.quickActionsIcon, { color: accentColor }]}>{'+'}</Text>
-            <Text style={styles.quickActionsLabel}>Actions</Text>
-            <Text style={styles.modelChevron}>{showQuickActions ? '▲' : '▼'}</Text>
-          </Pressable>
+        {/* Searchable action library. Runtime dispatch remains in ChatTab. */}
+        <Pressable
+          ref={actionsTriggerRef}
+          testID="chat-actions-trigger"
+          disabled={composerDisabled}
+          onPress={() => {
+            const next = !showQuickActions;
+            setShowQuickActions(next);
+            setShowModelPicker(false);
+            setShowAddModel(false);
+            setActiveModelBrowserKey(null);
+            setShowModePicker(false);
+          }}
+          accessibilityRole="button"
+          accessibilityLabel="Open chat actions"
+          accessibilityHint="Browse suggested actions, commands, apps, and workflows."
+          accessibilityState={{ expanded: showQuickActions, disabled: composerDisabled }}
+          {...(Platform.OS === 'web' ? {
+            'aria-expanded': showQuickActions,
+            'aria-haspopup': 'dialog',
+            'aria-controls': 'chat-actions-dialog',
+          } as any : {})}
+          style={({ hovered, focused: actionFocused, pressed }: any) => [
+            styles.quickActionsButton,
+            showQuickActions && { borderColor: accentColor + '80', backgroundColor: accentColor + '14' },
+            (hovered || pressed) && { borderColor: accentColor + '70', backgroundColor: accentColor + '10' },
+            actionFocused && {
+              borderColor: accentColor,
+              ...(Platform.OS === 'web' ? { boxShadow: `0 0 0 2px ${accentColor}45` } as any : {}),
+            },
+            composerDisabled && { opacity: 0.45 },
+            Platform.OS === 'web' && { cursor: composerDisabled ? 'default' : 'pointer' } as any,
+          ]}
+        >
+          <Text style={styles.quickActionsLabel}>Actions</Text>
+          <Text style={styles.modelChevron}>{showQuickActions ? '▲' : '▼'}</Text>
+        </Pressable>
 
-          {/* Quick Actions Dropdown */}
-          {showQuickActions && (
-            <AnimatedPopup
-              {...(Platform.OS === 'web' ? { className: 'uc-actions-sysfont' } as any : {})}
-              style={[styles.dropdownPanel, styles.dropdownPanelWide, ...(Platform.OS === 'web' ? [{ boxShadow: '4px 4px 0px rgba(99,102,241,0.05), 0 12px 40px rgba(0,0,0,0.6)' } as any] : [])]}
-            >
-              <ScrollView style={styles.actionsAccordionScroll} contentContainerStyle={styles.actionsAccordionContent}>
-                <View style={styles.actionsAccordionSection}>
-                  <QuickActionsHeader
-                    expanded={expandedActionSections.quick}
-                    isHovered={
-                      hoveredAction === -199
-                      || expandedActionSections.quick
-                      || (hoveredAction !== null && hoveredAction >= 50 && hoveredAction < 200)
-                    }
-                    onPress={() => setExpandedActionSections(prev => ({ ...prev, quick: !prev.quick }))}
-                    onHoverIn={() => setHoveredAction(-199)}
-                    onHoverOut={() => setHoveredAction(null)}
-                  />
-                  {expandedActionSections.quick ? (
-                    <View style={styles.actionsAccordionBody}>
-                      {[...FEATURED_QUICK_ACTIONS, ...QUICK_PROMPTS.slice(7)].map((p, i) => (
-                        <Pressable
-                          key={`${p.label}-${i}`}
-                          onPress={() => { onQuickAction(p.text); setShowQuickActions(false); }}
-                          onHoverIn={() => setHoveredAction(50 + i)}
-                          onHoverOut={() => setHoveredAction(null)}
-                          style={[
-                            styles.dropdownItem,
-                            hoveredAction === 50 + i && { backgroundColor: '#1a1a28' },
-                          ]}
-                        >
-                          <Text style={styles.dropdownActionLabel}>{p.label}</Text>
-                        </Pressable>
-                      ))}
-                    </View>
-                  ) : null}
-                </View>
-
-                <View style={styles.dropdownDivider} />
-
-                <View style={styles.actionsAccordionSection}>
-                  <Pressable
-                    onPress={() => setExpandedActionSections(prev => ({ ...prev, tools: !prev.tools }))}
-                    onHoverIn={() => setHoveredAction(-201)}
-                    onHoverOut={() => setHoveredAction(null)}
-                    style={[
-                      styles.actionsAccordionHeader,
-                      Platform.OS === 'web' && { transition: 'all 0.15s ease' } as any,
-                      hoveredAction === -201 && { backgroundColor: '#f59e0b08' } as any,
-                    ]}
-                  >
-                    <Text style={[styles.actionsAccordionTitle, { color: hoveredAction === -201 ? '#f59e0b' : '#e2e8f0' }]}>SwanClaw Tools</Text>
-                    <Text style={styles.actionsAccordionChevron}>{expandedActionSections.tools ? '▾' : '▸'}</Text>
-                  </Pressable>
-                  {expandedActionSections.tools ? (
-                    <View style={styles.actionsAccordionBody}>
-                      {FEATURED_TOOL_ACTIONS.map((tool, toolIndex) => (
-                        <Pressable
-                          key={tool.text}
-                          onPress={() => { onQuickAction(tool.text); setShowQuickActions(false); }}
-                          onHoverIn={() => setHoveredAction(-100 - toolIndex)}
-                          onHoverOut={() => setHoveredAction(null)}
-                          style={[
-                            styles.dropdownItem,
-                            hoveredAction === -100 - toolIndex && { backgroundColor: '#151522' },
-                          ]}
-                        >
-                          {tool.flatIcon ? (
-                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                              <FlatIcon name={tool.flatIcon} size={14} />
-                              <Text style={[styles.featuredQuickActionText, { color: tool.color }]}>{tool.label}</Text>
-                            </View>
-                          ) : (
-                            <Text style={[styles.featuredQuickActionText, { color: tool.color }]}>{tool.label}</Text>
-                          )}
-                        </Pressable>
-                      ))}
-                    </View>
-                  ) : null}
-                </View>
-
-                <View style={styles.dropdownDivider} />
-
-                {accordionCategories.map(({ key, category }, ci) => (
-                  <View key={key} style={styles.actionsAccordionSection}>
-                    <Pressable
-                      onPress={() => setExpandedActionSections(prev => ({ ...prev, [key]: !prev[key] }))}
-                      onHoverIn={() => setHoveredAction(-300 - ci)}
-                      onHoverOut={() => setHoveredAction(null)}
-                      style={[
-                        styles.actionsAccordionHeader,
-                        Platform.OS === 'web' && { transition: 'all 0.15s ease' } as any,
-                        hoveredAction === -300 - ci && { backgroundColor: `${category.color}08` } as any,
-                      ]}
-                    >
-                      <Text style={[styles.actionsAccordionTitle, { color: hoveredAction === -300 - ci ? category.color : '#e2e8f0' }]}>
-                        {toTitleCaseWords(category.title)}
-                      </Text>
-                      <Text style={styles.actionsAccordionChevron}>{expandedActionSections[key] ? '▾' : '▸'}</Text>
-                    </Pressable>
-                    {expandedActionSections[key] ? (
-                      <View style={styles.actionsAccordionBody}>
-                        {category.prompts.map((p, pi) => (
-                          <Pressable
-                            key={pi}
-                            onPress={() => { onQuickAction(p.text); setShowQuickActions(false); }}
-                            onHoverIn={() => setHoveredAction(100 + ci * 20 + pi)}
-                            onHoverOut={() => setHoveredAction(null)}
-                            accessibilityRole="button"
-                            accessibilityLabel={p.label}
-                            style={[
-                              styles.dropdownItem, { paddingLeft: 20 },
-                              hoveredAction === 100 + ci * 20 + pi && { backgroundColor: category.color + '10' },
-                              ...(Platform.OS === 'web' ? [{ transition: 'all 0.15s ease', cursor: 'pointer' } as any] : []),
-                            ]}
-                          >
-                            <View style={styles.dropdownItemText}>
-                              <Text style={styles.dropdownItemLabel}>{p.label}</Text>
-                              <Text style={styles.dropdownItemDesc}>{p.desc}</Text>
-                            </View>
-                          </Pressable>
-                        ))}
-                      </View>
-                    ) : null}
-                    {ci < accordionCategories.length - 1 ? <View style={styles.dropdownDivider} /> : null}
-                  </View>
-                ))}
-              </ScrollView>
-            </AnimatedPopup>
-          )}
-        </View>
+        <ChatActionsMenu
+          visible={showQuickActions}
+          accentColor={accentColor}
+          sessionActions={soulActions}
+          onSelect={(text, mode) => {
+            setShowQuickActions(false);
+            onQuickAction(text, mode);
+          }}
+          onClose={() => setShowQuickActions(false)}
+        />
 
         {/* Mode Selector Dropdown */}
         <View style={{ position: 'relative' as const }}>
@@ -23897,16 +24068,18 @@ function EnhancedInput({
               'aria-haspopup': 'dialog',
               'aria-controls': 'openswan-control-center-popup',
             } as any : {})}
-            style={({ hovered, pressed }: any) => [
+            style={({ hovered, focused: modeFocused, pressed }: any) => [
               styles.modelButton,
               styles.openswanTriggerButton,
               { borderColor: controlAccent + '50' },
-              hovered && {
+              (hovered || pressed) && {
                 borderColor: controlAccent + '80',
                 backgroundColor: controlAccent + '14',
-                ...(Platform.OS === 'web' ? { boxShadow: `0 10px 28px ${controlAccent}22`, transform: 'translateY(-1px)' } as any : {}),
               },
-              pressed && { transform: [{ scale: 0.985 }] },
+              modeFocused && {
+                borderColor: controlAccent,
+                ...(Platform.OS === 'web' ? { boxShadow: `0 0 0 2px ${controlAccent}45` } as any : {}),
+              },
               ...(Platform.OS === 'web' ? [{ transition: 'all 0.2s ease', cursor: 'pointer' } as any] : []),
             ]}
           >
@@ -23988,7 +24161,7 @@ function EnhancedInput({
                   <Text style={styles.controlPanelSummaryLabel}>Model</Text>
                   <Text style={styles.controlPanelSummaryValue} numberOfLines={1}>{modelRouteLabel}</Text>
                   <Text style={styles.controlPanelSummaryDetail} numberOfLines={1}>
-                    {selectedModel === 'auto' ? 'resolved live' : 'manual pick'}
+                    {composerFallbackSelection ? 'connected fallback planned' : selectedModel === 'auto' ? 'resolved live' : 'manual pick'}
                   </Text>
                 </View>
                 <View style={[styles.controlPanelSummaryItem, draftText ? { borderColor: '#22c55e55' } : null]}>
@@ -24018,6 +24191,17 @@ function EnhancedInput({
                       <Text style={styles.controlAutoRouteReason} numberOfLines={2}>{autoModelReason}</Text>
                     </Pressable>
                   ) : null}
+                </View>
+              ) : null}
+              {selectedModel !== 'auto' && composerFallbackReason ? (
+                <View style={styles.controlAutoRouteBand} accessibilityLiveRegion="polite">
+                  <View style={styles.controlCenterStatusHeader}>
+                    <View style={[styles.liveMiniDot, { backgroundColor: '#f59e0b' }]} />
+                    <Text style={styles.controlCenterStatusLabel}>CONNECTED FALLBACK</Text>
+                  </View>
+                  <Text style={styles.controlAutoRouteReason} numberOfLines={3}>
+                    {composerFallbackReason}
+                  </Text>
                 </View>
               ) : null}
               {selectedModel !== 'auto' && modelRecommendation ? (
@@ -24210,26 +24394,6 @@ function EnhancedInput({
                   <Text style={styles.controlCenterStatValue}>{builderRevisionCount || 0}</Text>
                   <Text style={styles.controlCenterStatLabel}>builds</Text>
                 </View>
-              </View>
-              {/* Quick action shortcuts — same RUN/ASSIGN/MISSION/REMEMBER/
-                  MEMORIES/DIAG/SEARCH pills as the dock above the composer,
-                  surfaced here so the OpenSwan menu is the one place users
-                  go for command-palette ergonomics. Tapping a pill closes
-                  this menu, seeds the composer with the slash command,
-                  and refocuses the input. */}
-              <View style={{ marginBottom: 8, marginHorizontal: -4 }}>
-                <QuickActionDock
-                  accentColor={accentColor}
-                  onInsert={(text) => {
-                    setShowModePicker(false);
-                    const current = input || '';
-                    const next = current.trim()
-                      ? (current.endsWith(' ') ? current + text : current + ' ' + text)
-                      : text;
-                    onInputChange(next);
-                    setTimeout(() => inputRef.current?.focus(), 0);
-                  }}
-                />
               </View>
               <View style={styles.controlCenterGrid}>
                 <Pressable
@@ -24511,6 +24675,7 @@ function EnhancedInput({
             setFocused(true);
             setShowModelPicker(false);
             setShowQuickActions(false);
+            setShowModePicker(false);
           }}
           onBlur={() => {
             blurTimeoutRef.current = setTimeout(() => {
@@ -24550,6 +24715,7 @@ function EnhancedSendInputButton({ onPress, disabled, accentColor }: any) {
 
   return (
     <Pressable
+      testID="chat-send-button"
       onPress={onPress}
       disabled={disabled}
       accessibilityRole="button"
@@ -24676,22 +24842,6 @@ const warRoomBannerStyles = StyleSheet.create({
   chipTime: { color: '#555', fontSize: 11 },
 });
 
-const checkInStyles = StyleSheet.create({
-  panel: { backgroundColor: '#111', borderWidth: 1, borderRadius: 12, margin: 8, padding: 12 },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  title: { color: '#fff', fontSize: 13, fontWeight: '700' },
-  close: { color: '#666', fontSize: 16, padding: 4 },
-  input: { backgroundColor: '#0A0A0A', borderWidth: 1, borderRadius: 12, color: '#fff', fontSize: 13, padding: 10, minHeight: 60, textAlignVertical: 'top' },
-  footer: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 },
-  charCount: { color: '#555', fontSize: 11 },
-  submitBtn: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 12 },
-  submitText: { color: '#fff', fontSize: 12, fontWeight: '700' },
-  checkbox: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  checkboxBox: { width: 18, height: 18, borderWidth: 1.5, borderColor: '#444', borderRadius: 6, alignItems: 'center', justifyContent: 'center' },
-  checkboxCheck: { color: '#fff', fontSize: 11, fontWeight: '700', marginTop: -1 },
-  checkboxLabel: { color: '#888', fontSize: 11 },
-});
-
 // ─── Enhanced Styles ─────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
@@ -24782,28 +24932,6 @@ const styles = StyleSheet.create({
   soulActionTitle: { fontSize: 11, fontWeight: '900', letterSpacing: 0.6 },
   soulActionPrompt: { color: '#94a3b8', fontSize: 11, lineHeight: 16 },
 
-  // Enhanced prompts
-  quickPromptSection: { marginBottom: 24 },
-  quickPromptRow: { flexDirection: 'row', alignItems: 'center' },
-  quickArrow: {
-    width: 28, height: 28, borderRadius: 14,
-    backgroundColor: '#2a2a2a', borderWidth: 1, borderColor: '#333333',
-    alignItems: 'center', justifyContent: 'center',
-  },
-  quickArrowText: { fontSize: 18, fontWeight: '700', marginTop: -1 },
-  quickPromptScroll: { flexDirection: 'row', gap: 12, paddingHorizontal: 8 },
-  enhancedPromptCard: {
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 12,
-    borderWidth: 1,
-    flexShrink: 0,
-    position: 'relative',
-    overflow: 'hidden',
-    ...(Platform.OS === 'web' ? { cursor: 'pointer', whiteSpace: 'nowrap' } as any : {}),
-  } as any,
-  enhancedPromptText: { fontSize: 13, fontWeight: '600' },
-
   // Density toggle
   densityToggle: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
   densityButton: {
@@ -24814,54 +24942,6 @@ const styles = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   densityButtonText: { fontSize: 11, fontWeight: '700' },
-
-  // Glassmorphism cards
-  categorySection: { marginBottom: 24 },
-  glassmorphismCard: {
-    borderRadius: 16,
-    borderWidth: 1,
-    marginBottom: 12,
-    overflow: 'hidden',
-  },
-  categoryHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: 16,
-    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
-  },
-  categoryTitle: { fontSize: 12, fontWeight: '800', letterSpacing: 1.5 },
-  categoryChevron: { fontSize: 14 },
-  categoryPrompts: { borderTopWidth: 1, borderTopColor: '#00000020' },
-
-  enhancedPromptItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 14,
-    paddingLeft: 20,
-    borderBottomWidth: 1,
-    borderBottomColor: '#0d0d0d',
-    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.2s ease' } as any : {}),
-  },
-  promptInfo: { flex: 1 },
-  promptLabel: { fontSize: 14, fontWeight: '700' },
-  promptDesc: { color: '#555', fontSize: 12, marginTop: 2 },
-  promptArrow: { fontSize: 16, marginLeft: 8 },
-
-  // Enhanced tips
-  tipsSection: { marginBottom: 40 },
-  enhancedTipCard: {
-    flexDirection: 'row',
-    backgroundColor: '#111111aa',
-    borderRadius: 12,
-    padding: 14,
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: '#00000060',
-    ...(Platform.OS === 'web' ? { backdropFilter: 'blur(8px)' } as any : {}),
-  },
-  tipAccent: { width: 3, height: '100%', borderRadius: 2, marginRight: 12 },
-  tipText: { color: '#888', fontSize: 13, lineHeight: 18, flex: 1 },
 
   // Pinned messages
   pinnedBanner: {
@@ -25750,59 +25830,6 @@ const styles = StyleSheet.create({
   replyIndicatorName: { fontSize: 12, fontWeight: '700' },
   replyIndicatorText: { color: '#555', fontSize: 12, flex: 1 },
 
-  // Enhanced UI components
-  enhancedQuickBar: {
-    borderTopWidth: 1,
-    maxWidth: CHAT_SURFACE_MAX_WIDTH,
-    alignSelf: 'center',
-    width: '100%',
-    backgroundColor: '#0A0A0ACC',
-    ...(Platform.OS === 'web' ? { backdropFilter: 'blur(10px)' } as any : {}),
-  },
-  quickBarScroll: { flexDirection: 'row', gap: 8, paddingHorizontal: 12, paddingVertical: 10 },
-  enhancedQuickChip: {
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 16,
-    borderWidth: 1,
-    flexShrink: 0,
-    ...(Platform.OS === 'web' ? { cursor: 'pointer', whiteSpace: 'nowrap', transition: 'all 0.2s' } as any : {}),
-  },
-  quickBarChipText: { fontSize: 11, fontWeight: '700' },
-
-  // Scroll arrows for quick bar
-  scrollArrow: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    width: 28,
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 10,
-    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
-  },
-  scrollArrowLeft: {
-    left: 0,
-    backgroundColor: '#0A0A0AF0',
-    borderRightWidth: 1,
-    borderRightColor: '#ffffff10',
-    borderTopRightRadius: 8,
-    borderBottomRightRadius: 8,
-  },
-  scrollArrowRight: {
-    right: 0,
-    backgroundColor: '#0A0A0AF0',
-    borderLeftWidth: 1,
-    borderLeftColor: '#ffffff10',
-    borderTopLeftRadius: 8,
-    borderBottomLeftRadius: 8,
-  },
-  scrollArrowText: {
-    color: '#888',
-    fontSize: 22,
-    fontWeight: '700',
-  },
-
   // Enhanced crypto panel
   enhancedCryptoPanel: {
     backgroundColor: '#0A0A0AF0',
@@ -26007,6 +26034,7 @@ const styles = StyleSheet.create({
   },
   composerToolbar: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 8,
     alignItems: 'center',
   },
@@ -26015,7 +26043,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
-    height: 36,
+    minHeight: 44,
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 10,
@@ -26024,8 +26052,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#0a0a10',
   },
   openswanTriggerButton: {
-    minWidth: 172,
+    minWidth: 148,
     maxWidth: 244,
+    flexShrink: 1,
     justifyContent: 'flex-start',
   },
   openswanTriggerCopy: {
@@ -26076,18 +26105,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 5,
-    height: 36,
+    minHeight: 44,
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 10,
     borderWidth: 1,
     borderColor: '#1e293b',
     backgroundColor: '#0a0f1c',
-  },
-  quickActionsIcon: {
-    fontSize: 13,
-    fontWeight: '800',
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
   },
   quickActionsLabel: {
     fontSize: 14,
@@ -26348,56 +26372,6 @@ const styles = StyleSheet.create({
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     paddingHorizontal: 14,
     paddingVertical: 6,
-  },
-  actionsAccordionScroll: {
-    maxHeight: 460,
-  },
-  actionsAccordionContent: {
-    paddingBottom: 6,
-  },
-  actionsAccordionSection: {
-    paddingHorizontal: 6,
-  },
-  actionsAccordionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 12,
-    paddingVertical: 11,
-    borderRadius: 8,
-  },
-  actionsAccordionTitle: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#94a3b8',
-    letterSpacing: 0,
-    textTransform: 'none',
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
-  },
-  actionsAccordionChevron: {
-    color: '#475569',
-    fontSize: 11,
-    fontWeight: '900',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  actionsAccordionBody: {
-    gap: 1,
-    paddingBottom: 4,
-  },
-  featuredQuickActions: {
-    paddingHorizontal: 6,
-    paddingBottom: 2,
-    gap: 1,
-  },
-  featuredQuickActionItem: {
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    borderRadius: 8,
-  },
-  featuredQuickActionText: {
-    fontSize: 14,
-    fontWeight: '600',
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
   },
   dropdownItem: {
     flexDirection: 'row',
@@ -26759,12 +26733,6 @@ const styles = StyleSheet.create({
     paddingTop: 8,
     paddingBottom: 4,
     textTransform: 'uppercase',
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
-  },
-  dropdownActionLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#e2e8f0',
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
   },
   globalDropOverlay: {

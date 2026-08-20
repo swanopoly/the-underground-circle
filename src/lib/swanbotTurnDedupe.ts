@@ -9,6 +9,8 @@ export type SwanBotTurnDedupeContext = {
   agentName?: string;
   spiritId?: string | null;
   model?: string | null;
+  /** A sealed Chat dispatch cannot share a result produced by an unsealed tier ladder. */
+  modelDispatchSealed?: boolean;
   modeKey?: string | null;
   taskKind?: string | null;
   sessionProfile?: string | null;
@@ -58,6 +60,7 @@ export function buildSwanBotTurnDedupeKey(
     agentName: context.agentName || '',
     spiritId: context.spiritId || '',
     model: context.model || '',
+    modelDispatchSealed: context.modelDispatchSealed === true,
     modeKey: context.modeKey || '',
     taskKind: context.taskKind || '',
     sessionProfile: context.sessionProfile || '',

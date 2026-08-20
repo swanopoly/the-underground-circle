@@ -13,6 +13,7 @@ export type LLMProxyErrorCode =
   | 'forbidden'
   | 'key_missing'
   | 'credential_unreadable'
+  | 'provider_credential_rejected'
   | 'unsupported_provider'
   | 'upstream_error'
   | 'internal';
@@ -68,6 +69,7 @@ export function shouldRetryLLMProxyFailure(
     || details.code === 'forbidden'
     || details.code === 'key_missing'
     || details.code === 'credential_unreadable'
+    || details.code === 'provider_credential_rejected'
     || details.code === 'unsupported_provider'
   ) {
     return false;
@@ -96,6 +98,7 @@ const KNOWN_CODES = new Set<LLMProxyErrorCode>([
   'forbidden',
   'key_missing',
   'credential_unreadable',
+  'provider_credential_rejected',
   'unsupported_provider',
   'upstream_error',
   'internal',
@@ -226,17 +229,24 @@ export function normalizeLLMProxyErrorResponseText(
 export function getLLMProxyCredentialRecoveryPresentation(
   details: Pick<LLMProxyErrorDetails, 'code' | 'provider'>,
 ): LLMProxyCredentialRecoveryPresentation | null {
-  if (details.code !== 'key_missing' && details.code !== 'credential_unreadable') return null;
+  if (
+    details.code !== 'key_missing'
+    && details.code !== 'credential_unreadable'
+    && details.code !== 'provider_credential_rejected'
+  ) return null;
 
   const providerId = safeProvider(details.provider) ?? null;
   const providerLabel = providerId ? PROVIDER_LABELS[providerId] : 'model provider';
   const unreadable = details.code === 'credential_unreadable';
+  const rejected = details.code === 'provider_credential_rejected';
 
   return {
     message: unreadable
       ? `Your saved ${providerLabel} credential can no longer be read. Reconnect it in Marketplace → AI Models & APIs, then retry.`
+      : rejected
+        ? `Your saved ${providerLabel} credential was rejected. Reconnect it in Marketplace → AI Models & APIs, then retry.`
       : `Connect your ${providerLabel} API key in Marketplace → AI Models & APIs, then retry.`,
-    actionLabel: unreadable
+    actionLabel: unreadable || rejected
       ? providerId ? `Reconnect ${providerLabel}` : 'Reconnect provider'
       : providerId ? `Connect ${providerLabel}` : 'Open Marketplace',
     providerId,

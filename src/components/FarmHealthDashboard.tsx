@@ -1,4 +1,4 @@
-// Farm Health Dashboard - Real-time Farm Analytics
+// Farm Health Dashboard - directional analytics from current telemetry
 import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, Pressable, Platform } from 'react-native';
 import { OfficeAgent } from '../lib/officeAgents';
@@ -17,6 +17,22 @@ interface Props {
 
 type TabType = 'overview' | 'performance' | 'workload' | 'optimization' | 'health';
 
+function FarmProvenanceNotice() {
+  return (
+    <View
+      testID="farm-health-estimate-notice"
+      accessible
+      accessibilityLabel="Directional estimates. Health, score, workload, optimization, and reliability indicators are derived from current agent status and session telemetry. They are not measured service level agreement results or evaluation receipts."
+      style={styles.provenanceNotice}
+    >
+      <Text accessibilityRole="header" style={styles.provenanceTitle}>DIRECTIONAL ESTIMATES</Text>
+      <Text style={styles.provenanceText}>
+        Health, score, workload, and optimization indicators are derived from current status and session telemetry—not measured SLA results or eval receipts.
+      </Text>
+    </View>
+  );
+}
+
 export default function FarmHealthDashboard({ agents, sessions, accentColor = '#e8e8e8' }: Props) {
   const [activeTab, setActiveTab] = useState<TabType>('overview');
   const [farmMetrics, setFarmMetrics] = useState<FarmMetrics | null>(null);
@@ -27,7 +43,14 @@ export default function FarmHealthDashboard({ agents, sessions, accentColor = '#
 
   // Recalculate metrics when agents/sessions change
   useEffect(() => {
-    if (agents.length === 0) return;
+    if (agents.length === 0) {
+      setFarmMetrics(null);
+      setAgentScores([]);
+      setWorkloads([]);
+      setOptimizations([]);
+      setHealthCheck(null);
+      return;
+    }
 
     const metrics = calculateFarmMetrics(agents, sessions);
     setFarmMetrics(metrics);
@@ -67,10 +90,10 @@ export default function FarmHealthDashboard({ agents, sessions, accentColor = '#
           </Text>
           <View style={{ flex: 1 }}>
             <Text style={[styles.healthStatus, { color: healthColor }]}>
-              FARM STATUS: {farmMetrics.healthStatus.toUpperCase()}
+              ESTIMATED FARM STATUS: {farmMetrics.healthStatus.toUpperCase()}
             </Text>
             <Text style={styles.healthSubtext}>
-              {farmMetrics.activeAgents}/{farmMetrics.totalAgents} agents active · Avg score: {farmMetrics.averageScore}
+              {farmMetrics.activeAgents}/{farmMetrics.totalAgents} agents active · Avg estimate: {farmMetrics.averageScore}
             </Text>
           </View>
         </View>
@@ -121,7 +144,7 @@ export default function FarmHealthDashboard({ agents, sessions, accentColor = '#
         {/* Top Performer */}
         {farmMetrics.topPerformer && (
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>🏆 TOP PERFORMER</Text>
+            <Text style={styles.sectionTitle}>🏆 TOP ESTIMATED PERFORMER</Text>
             <View style={[styles.performerCard, { borderColor: farmMetrics.topPerformer.agent.color + '60' }]}>
               <View style={[styles.performerAvatar, { backgroundColor: farmMetrics.topPerformer.agent.color + '20' }]}>
                 <Text style={[styles.performerAvatarText, { color: farmMetrics.topPerformer.agent.color }]}>
@@ -154,12 +177,12 @@ export default function FarmHealthDashboard({ agents, sessions, accentColor = '#
   const renderPerformance = () => {
     return (
       <View style={styles.tabContent}>
-        <Text style={styles.sectionTitle}>🎯 AGENT PERFORMANCE SCORES</Text>
+        <Text style={styles.sectionTitle}>🎯 AGENT PERFORMANCE ESTIMATES</Text>
         <View style={styles.legendRow}>
           <Text style={styles.legendText}>S: Elite (90+) · A: Expert (80-89) · B: Proficient (70-79) · C: Learning (60-69)</Text>
         </View>
         <ScrollView style={styles.scoreList}>
-          {agentScores
+          {[...agentScores]
             .sort((a, b) => b.overall - a.overall)
             .map((score) => {
               const agent = agents.find(a => a.id === score.agentId);
@@ -186,7 +209,7 @@ export default function FarmHealthDashboard({ agents, sessions, accentColor = '#
                     </View>
                     <View style={styles.scoreOverall}>
                       <Text style={[styles.scoreOverallValue, { color: gradeColor }]}>{score.overall}</Text>
-                      <Text style={styles.scoreOverallLabel}>SCORE</Text>
+                      <Text style={styles.scoreOverallLabel}>ESTIMATE</Text>
                     </View>
                   </View>
 
@@ -241,7 +264,7 @@ export default function FarmHealthDashboard({ agents, sessions, accentColor = '#
       <View style={styles.tabContent}>
         <Text style={styles.sectionTitle}>⚡ WORKLOAD DISTRIBUTION</Text>
         <ScrollView style={styles.workloadList}>
-          {workloads
+          {[...workloads]
             .sort((a, b) => b.currentLoad - a.currentLoad)
             .map((load) => {
               const statusColor =
@@ -289,8 +312,8 @@ export default function FarmHealthDashboard({ agents, sessions, accentColor = '#
         {optimizations.length === 0 ? (
           <View style={styles.emptyState}>
             <Text style={styles.emptyIcon}>✅</Text>
-            <Text style={styles.emptyTitle}>No optimizations needed</Text>
-            <Text style={styles.emptyText}>Your farm is running efficiently!</Text>
+            <Text style={styles.emptyTitle}>No current suggestions</Text>
+            <Text style={styles.emptyText}>Current telemetry did not produce an optimization suggestion.</Text>
           </View>
         ) : (
           <ScrollView style={styles.optimizationList}>
@@ -319,7 +342,7 @@ export default function FarmHealthDashboard({ agents, sessions, accentColor = '#
                   <Text style={styles.optimizationRecommendation}>{opt.recommendation}</Text>
 
                   <View style={styles.savingsRow}>
-                    <Text style={styles.savingsLabel}>Potential Savings:</Text>
+                    <Text style={styles.savingsLabel}>Estimated Savings:</Text>
                     <Text style={[styles.savingsValue, { color: '#22c55e' }]}>
                       ${opt.potentialSavings.toFixed(2)}/day
                     </Text>
@@ -335,16 +358,20 @@ export default function FarmHealthDashboard({ agents, sessions, accentColor = '#
 
   const renderHealth = () => {
     if (!healthCheck) return null;
+    const hasIssues = healthCheck.issues.length > 0;
+    const isClear = healthCheck.passed && !hasIssues;
+    const attentionColor = healthCheck.passed ? '#f59e0b' : '#ef4444';
+    const statusColor = isClear ? '#22c55e' : attentionColor;
 
     return (
       <View style={styles.tabContent}>
-        <View style={[styles.healthStatusCard, { backgroundColor: healthCheck.passed ? '#22c55e08' : '#ef444408', borderColor: healthCheck.passed ? '#22c55e30' : '#ef444430' }]}>
-          <Text style={[styles.healthStatusIcon, { color: healthCheck.passed ? '#22c55e' : '#ef4444' }]}>
-            {healthCheck.passed ? '✅' : '⚠️'}
+        <View style={[styles.healthStatusCard, { backgroundColor: `${statusColor}08`, borderColor: `${statusColor}30` }]}>
+          <Text style={[styles.healthStatusIcon, { color: statusColor }]}>
+            {isClear ? '✅' : '⚠️'}
           </Text>
           <View style={{ flex: 1 }}>
-            <Text style={[styles.healthStatusText, { color: healthCheck.passed ? '#22c55e' : '#ef4444' }]}>
-              {healthCheck.passed ? 'ALL SYSTEMS OPERATIONAL' : 'ISSUES DETECTED'}
+            <Text style={[styles.healthStatusText, { color: statusColor }]}>
+              {isClear ? 'NO CURRENT ISSUES' : 'ATTENTION RECOMMENDED'}
             </Text>
             <Text style={styles.healthStatusSubtext}>
               {healthCheck.issues.length} issue{healthCheck.issues.length !== 1 ? 's' : ''} found
@@ -357,8 +384,8 @@ export default function FarmHealthDashboard({ agents, sessions, accentColor = '#
           {healthCheck.issues.length === 0 ? (
             <View style={styles.emptyState}>
               <Text style={styles.emptyIcon}>🎯</Text>
-              <Text style={styles.emptyTitle}>Perfect Health</Text>
-              <Text style={styles.emptyText}>No issues detected in your agent farm</Text>
+              <Text style={styles.emptyTitle}>No current issues</Text>
+              <Text style={styles.emptyText}>No issues were inferred from current status and session telemetry.</Text>
             </View>
           ) : (
             healthCheck.issues.map((issue, i) => {
@@ -394,16 +421,21 @@ export default function FarmHealthDashboard({ agents, sessions, accentColor = '#
 
   if (agents.length === 0) {
     return (
-      <View style={styles.emptyContainer}>
-        <Text style={styles.emptyIcon}>🏢</Text>
-        <Text style={styles.emptyTitle}>No Agent Data</Text>
-        <Text style={styles.emptyText}>Connect agents to see farm health metrics</Text>
+      <View style={styles.container}>
+        <FarmProvenanceNotice />
+        <View style={styles.emptyContainer}>
+          <Text style={styles.emptyIcon}>🏢</Text>
+          <Text style={styles.emptyTitle}>No Agent Data</Text>
+          <Text style={styles.emptyText}>Connect agents to see farm health metrics</Text>
+        </View>
       </View>
     );
   }
 
   return (
     <View style={styles.container}>
+      <FarmProvenanceNotice />
+
       {/* Tab Bar */}
       <View style={styles.tabBar}>
         {[
@@ -416,6 +448,9 @@ export default function FarmHealthDashboard({ agents, sessions, accentColor = '#
           <Pressable
             key={tab.key}
             onPress={() => setActiveTab(tab.key as TabType)}
+            accessibilityRole="tab"
+            accessibilityLabel={`${tab.label} farm estimates`}
+            accessibilityState={{ selected: activeTab === tab.key }}
             style={[
               styles.tab,
               activeTab === tab.key && [styles.tabActive, { borderBottomColor: accentColor }],
@@ -446,6 +481,27 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#000000',
+  },
+  provenanceNotice: {
+    backgroundColor: '#0d0d14',
+    borderBottomWidth: 1,
+    borderBottomColor: '#f59e0b55',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  provenanceTitle: {
+    color: '#f59e0b',
+    fontSize: 9,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+    letterSpacing: 1,
+  },
+  provenanceText: {
+    color: '#b0b0b0',
+    fontSize: 10,
+    fontFamily: 'monospace',
+    lineHeight: 15,
+    marginTop: 3,
   },
   tabBar: {
     flexDirection: 'row',

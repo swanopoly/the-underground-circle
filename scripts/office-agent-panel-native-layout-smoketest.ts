@@ -41,16 +41,15 @@ check(
 );
 check(
   layout.includes("import { Platform, useWindowDimensions } from 'react-native';")
-    && layout.includes('const measuredViewport = useWindowDimensions();'),
-  'panel geometry follows the platform-aware live viewport',
+    && layout.includes("from './agentPanelLayoutCore';")
+    && layout.includes('const measuredViewport = useWindowDimensions();')
+    && layout.includes('resolveAgentPanelViewport(measuredViewport.width, measuredViewport.height)'),
+  'the hook delegates the platform-aware live viewport to the executable geometry core',
 );
 check(
-  layout.includes('Number.isFinite(measuredViewport.width)')
-    && layout.includes('Number.isFinite(measuredViewport.height)')
-    && layout.includes(': 320,')
-    && layout.includes(': 480,')
+  layout.includes('resolveAgentPanelViewport(measuredViewport.width, measuredViewport.height)')
     && layout.includes('[measuredViewport.height, measuredViewport.width]'),
-  'invalid measurements fail to bounded geometry and rotation refreshes both axes',
+  'measurement changes on either axis recompute the normalized viewport',
 );
 check(
   !layout.includes('window.innerWidth')
@@ -60,22 +59,18 @@ check(
   'native geometry never falls back to browser globals or a desktop-sized synthetic viewport',
 );
 check(
-  layout.includes('const availableWidth = Math.max(SIDE_MIN_W, viewport.w - 80);')
-    && layout.includes('Math.min(SIDE_MAX_W, availableWidth),'),
-  'a saved web dock width is clamped after responsive viewport changes',
+  layout.includes('clampAgentPanelSideWidthForViewport(width, viewport.w)'),
+  'responsive viewport changes delegate saved dock-width clamping to the tested core',
 );
 check(
-  layout.includes('const parsed = Number(stored);')
-    && layout.includes('if (Number.isFinite(parsed))')
-    && layout.includes('Number.isFinite(width) ? width : SIDE_DEFAULT_W'),
-  'corrupt persisted dock widths recover to a finite bounded value instead of propagating NaN',
+  layout.includes('return parseAgentPanelStoredSideWidth(stored);')
+    && layout.includes('return AGENT_PANEL_SIDE_DEFAULT_W;'),
+  'persisted dock widths use the tested parser and a bounded storage-error fallback',
 );
 check(
-  layout.includes('const maxCenteredHeight = Math.max(1, viewport.h - (POPUP_PADDING * 2));')
-    && layout.includes('const top = Math.min(APP_HEADER_OFFSET, Math.max(0, viewport.h - 1));')
-    && layout.includes('height: Math.max(1, viewport.h - top)')
-    && layout.includes('top: Math.max(0, Math.round((viewport.h - height) / 2))'),
-  'centered and docked geometry remains inside very short landscape viewports',
+  layout.includes('computeAgentPanelGeometry(effectivePanelMode, sideWidth, viewport)')
+    && panel.includes('useAgentPanelLayout(supportsDockedPanel)'),
+  'centered and docked geometry comes from the executable production core',
 );
 check(
   panel.includes('reduceMotion={reduceMotion}')
@@ -96,7 +91,8 @@ check(
   'PixelAgent removes inert previews from the nested button accessibility path',
 );
 check(
-  pixelAgent.includes('const motionDisabled = reduceMotionPreference === true;')
+  pixelAgent.includes("const webAnimationEffectsDisabled = Platform.OS === 'web';")
+    && pixelAgent.includes('const motionDisabled = reduceMotionPreference === true || webAnimationEffectsDisabled;')
     && pixelAgent.includes('if (motionDisabled || agent.status === \'offline\')')
     && pixelAgent.includes('if (motionDisabled) {\n      auraFlicker.stopAnimation();')
     && pixelAgent.includes('setFloatingText([]);')

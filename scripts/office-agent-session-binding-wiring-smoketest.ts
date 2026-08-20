@@ -108,8 +108,8 @@ async function main(): Promise<void> {
   );
 
   // ── Canonical binding persistence ────────────────────────────────────────
-  // Read is an exact RLS-visible row lookup. Set/clear are server-authorized
-  // RPCs; clients never emulate ownership or CAS with a broad table write.
+  // Read is an exact RLS-visible row lookup. Set/clear share one receipt-bearing
+  // server CAS; clients never emulate the compare-and-set with read-then-write.
   expectMatch(
     bindingSource,
     /export\s+async\s+function\s+readOfficeAgentSessionBinding\s*\(/,
@@ -134,22 +134,42 @@ async function main(): Promise<void> {
   expectMatch(bindingSource, /\.maybeSingle\(\s*\)/, 'binding read cannot silently choose among multiple rows');
   expectMatch(
     bindingSource,
-    /\.rpc\(\s*['"][^'"]*set[^'"]*office[^'"]*session[^'"]*binding[^'"]*['"]\s*,/i,
-    'binding set crosses a dedicated server-authorized RPC',
+    /\.rpc\(\s*['"]compare_and_set_office_agent_session_binding_v1['"]\s*,/,
+    'binding mutations cross the dedicated receipt-bearing server CAS',
   );
-  expectMatch(
+  check(
+    count(bindingSource, /supabase\.rpc\('compare_and_set_office_agent_session_binding_v1'/g) === 1,
+    'set and clear share one canonical CAS dispatch site',
+  );
+  expectNoMatch(
     bindingSource,
-    /\.rpc\(\s*['"][^'"]*clear[^'"]*office[^'"]*session[^'"]*binding[^'"]*['"]\s*,/i,
-    'binding clear crosses a dedicated server-authorized RPC',
+    /supabase\.rpc\(\s*['"](?:set|clear)_office_agent_session_binding['"]\s*,/,
+    'legacy unconditional set and clear RPCs have no client dispatch path',
   );
-  for (const field of ['p_office_agent_id', 'p_agent_bot_id', 'p_session_key']) {
-    expectMatch(bindingSource, new RegExp(`\\b${field}\\b`), `binding set carries ${field}`);
+  for (const field of [
+    'p_office_agent_id',
+    'p_circle_id',
+    'p_expected_binding_id',
+    'p_expected_agent_bot_id',
+    'p_expected_session_key',
+    'p_expected_updated_at',
+    'p_next_agent_bot_id',
+    'p_next_session_key',
+  ]) {
+    expectMatch(bindingSource, new RegExp(`\\b${field}\\b`), `binding CAS carries ${field}`);
   }
   expectMatch(
     bindingSource,
-    /clear_office_agent_session_binding[\s\S]{0,180}\bp_office_agent_id\b/,
-    'binding clear deletes only the authenticated owner\'s exact Office-agent row',
+    /expectedBinding\?\.id\s*\?\?\s*null/,
+    'first bind sends an explicit expected-null database precondition',
   );
+  expectMatch(bindingSource, /p_expected_updated_at:\s*request\.expectedBinding\?\.updatedAt\s*\?\?\s*null/, 'non-null CAS carries the exact observed row version');
+  expectMatch(bindingSource, /isAuthorityCurrent:\s*OfficeConnectionAuthorityFence/, 'mutation options require an exact lifecycle fence');
+  check(
+    count(bindingSource, /mutationAuthorityIsCurrent\(/g) >= 3,
+    'mutation authority is fenced before dispatch and after the RPC',
+  );
+  expectMatch(bindingSource, /parseOfficeAgentSessionBindingMutationReceipt/, 'client accepts only a structured exact mutation receipt');
   expectNoMatch(bindingSource, /\.ilike\s*\(|\.or\s*\(/, 'binding persistence never resolves identity by fuzzy query');
 
   // ── Pure resolver boundary ───────────────────────────────────────────────
@@ -288,6 +308,17 @@ async function main(): Promise<void> {
   expectMatch(gatewaySource, /officeAgentId\s*:/, 'binding writes one published Office agent UUID');
   expectMatch(gatewaySource, /agentBotId\s*:/, 'binding writes one exact agent-bot UUID');
   expectMatch(gatewaySource, /sessionKey\s*:/, 'binding writes one exact session key');
+  expectMatch(gatewaySource, /bindingLoadState\s*!==\s*['"]ready['"][\s\S]{0,180}hasOwnProperty\.call\(sessionBindings,\s*officeAgent\.id\)/, 'first bind requires a verified expected-null snapshot');
+  expectMatch(gatewaySource, /setOfficeAgentSessionBinding\([\s\S]{0,320}currentBinding[\s\S]{0,220}isAuthorityCurrent:\s*isIdentityAuthorityCurrent/, 'bind/move passes its expected row and exact authority fence into the CAS');
+  const unbindSection = sourceSection(
+    gatewaySource,
+    'const unbindPublishedAgent = useCallback',
+    ['const exactSessionCanBind'],
+    'exact binding clear action',
+  );
+  expectNoMatch(unbindSection, /readOfficeAgentSessionBindingsBatch/, 'clear has no client read-then-unconditional-write race');
+  expectMatch(unbindSection, /clearOfficeAgentSessionBinding\([\s\S]{0,180}expectedBinding[\s\S]{0,220}isAuthorityCurrent:\s*isIdentityAuthorityCurrent/, 'clear submits the exact expected row and authority fence to the CAS');
+  expectMatch(gatewaySource, /bindingResult\.receipt\.resultBinding|clearResult\.receipt\.resultBinding/, 'Gateway verifies database-authored route postconditions');
 
   // The gateway panel owns asynchronous connection/session state. Switching
   // between two exact targets must therefore remount the panel, and late work

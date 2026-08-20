@@ -1,17 +1,37 @@
+import {
+  CHAT_COMMAND_REGISTRY,
+  type ChatCommandRouteId,
+  type ChatSlashCommandCategory,
+} from './chatCommandRegistry';
+import type { SessionPromptAction } from './sessionPromptCatalog';
+
 export type QuickActionMode = 'send' | 'prefill' | 'special';
+export type ChatActionRisk = 'routine' | 'external' | 'sensitive' | 'destructive';
+export type ChatActionPlatform = 'all' | 'web';
 
 export type QuickActionItem = {
+  id: string;
   label: string;
+  description: string;
   text: string;
-  mode?: QuickActionMode;
+  mode: QuickActionMode;
+  routeId: ChatCommandRouteId | null;
+  platform?: ChatActionPlatform;
+  risk?: ChatActionRisk;
+  keywords?: string[];
 };
 
 export type FeaturedToolAction = {
+  id: string;
   label: string;
+  description: string;
   text: string;
   color: string;
   flatIcon?: string;
   mode: QuickActionMode;
+  routeId: ChatCommandRouteId | null;
+  platform?: ChatActionPlatform;
+  risk?: ChatActionRisk;
 };
 
 export type PromptCategoryItem = {
@@ -26,49 +46,115 @@ export type PromptCategory = {
   prompts: PromptCategoryItem[];
 };
 
-export const QUICK_PROMPTS: QuickActionItem[] = [
-  { label: '>_ Assign Agent', text: '__ASSIGN_AGENT__', mode: 'special' },
-  { label: '+ Spawn Agent', text: '__SPAWN_AGENT__', mode: 'special' },
-  { label: 'OS OpenSwan', text: '__OPENSWAN__', mode: 'special' },
-  { label: '>_ Use Computer', text: '__COMPUTER_USE__', mode: 'special' },
-  { label: '⎇ Pair Desktop Bridge', text: '__PAIR_DESKTOP__', mode: 'special' },
-  { label: '📋 My Tasks', text: 'my tasks', mode: 'send' },
-  { label: '</> GitHub', text: '/gh help', mode: 'send' },
-  { label: '[] Rooms', text: '/room help', mode: 'send' },
-  { label: 'AI Summarize', text: '/summarize ', mode: 'prefill' },
-  { label: 'AI Translate', text: '/translate ', mode: 'prefill' },
-  { label: 'AI Imagine', text: '/imagine ', mode: 'prefill' },
-  { label: '✅ Check In', text: '__CHECK_IN__', mode: 'special' },
-  { label: '📋 New Task', text: '__NEW_TASK__', mode: 'special' },
-  { label: '📅 Daily Plan', text: 'daily plan', mode: 'send' },
-  { label: '📊 Status', text: '/status', mode: 'send' },
-  { label: '🔥 My Streak', text: 'my streak', mode: 'send' },
-  { label: '🗳️ Vote', text: '/proposals', mode: 'send' },
-  { label: '💸 Send Crypto', text: '__SEND_CRYPTO__', mode: 'special' },
-  { label: '⚔️ Challenge', text: 'challenge a member', mode: 'send' },
-  { label: '🎮 Play a Game', text: 'play a game', mode: 'send' },
-  { label: '🧠 Trivia', text: 'trivia', mode: 'send' },
-  { label: '🤔 Would You Rather', text: 'would you rather', mode: 'send' },
-  { label: '🔥 Hot Take', text: 'hot take', mode: 'send' },
-  { label: '🖥️ Step Away', text: '__STEP_AWAY__', mode: 'special' },
-  { label: '>_ Help', text: '/help', mode: 'send' },
-  { label: '☢️ Nuke Chat', text: '__NUKE__', mode: 'special' },
-];
+export type ChatActionMenuEntry = Readonly<{
+  id: string;
+  label: string;
+  description: string;
+  text: string;
+  mode: QuickActionMode;
+  routeId: ChatCommandRouteId | null;
+  color: string;
+  sectionId: string;
+  platform: ChatActionPlatform;
+  risk: ChatActionRisk;
+  keywords: readonly string[];
+}>;
+
+export type ChatActionMenuSection = Readonly<{
+  id: string;
+  label: string;
+  description: string;
+  color: string;
+  items: readonly ChatActionMenuEntry[];
+}>;
+
+export type ChatActionMenuCatalog = Readonly<{
+  contextual: readonly ChatActionMenuEntry[];
+  common: readonly ChatActionMenuEntry[];
+  sections: readonly ChatActionMenuSection[];
+  searchItems: readonly ChatActionMenuEntry[];
+}>;
+
+function resolveSlashRoute(text: string): ChatCommandRouteId | null {
+  const normalized = text.trim().toLowerCase();
+  if (!normalized.startsWith('/')) return null;
+
+  const match = CHAT_COMMAND_REGISTRY
+    .flatMap((entry) => [entry.command, ...(entry.aliases || [])].map((command) => ({ entry, command })))
+    .filter(({ command }) => {
+      const candidate = command.toLowerCase();
+      return normalized === candidate || normalized.startsWith(`${candidate} `);
+    })
+    .sort((a, b) => b.command.length - a.command.length)[0];
+
+  return match?.entry.routeId || null;
+}
+
+function withQuickActionRoutes(
+  actions: ReadonlyArray<Pick<QuickActionItem, 'label' | 'text' | 'mode'> & Partial<Omit<QuickActionItem, 'label' | 'text' | 'mode' | 'routeId'>>>,
+): QuickActionItem[] {
+  return actions.map((action, index) => ({
+    id: action.id || `quick-${action.text.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase() || index}`,
+    description: action.description || action.label.replace(/^[^A-Za-z0-9]+\s*/, ''),
+    ...action,
+    routeId: action.text === '__COMPUTER_USE__' ? 'browser' : resolveSlashRoute(action.text),
+  }));
+}
+
+function withToolActionRoutes(
+  actions: ReadonlyArray<Pick<FeaturedToolAction, 'label' | 'text' | 'color' | 'mode'> & Partial<Omit<FeaturedToolAction, 'label' | 'text' | 'color' | 'mode' | 'routeId'>>>,
+): FeaturedToolAction[] {
+  return actions.map((action, index) => ({
+    id: action.id || `tool-${action.text.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase() || index}`,
+    description: action.description || action.label,
+    ...action,
+    routeId: resolveSlashRoute(action.text),
+  }));
+}
+
+export const QUICK_PROMPTS: QuickActionItem[] = withQuickActionRoutes([
+  { id: 'assign-agent', label: 'Assign agent', description: 'Choose an existing agent for this chat.', text: '__ASSIGN_AGENT__', mode: 'special' },
+  { id: 'spawn-agent', label: 'Create agent', description: 'Open the agent creation workflow.', text: '__SPAWN_AGENT__', mode: 'special' },
+  { id: 'openswan', label: 'OpenSwan', description: 'Open local agent controls and connections.', text: '__OPENSWAN__', mode: 'special', platform: 'web' },
+  { id: 'computer-use', label: 'Use computer', description: 'Open the computer task composer.', text: '__COMPUTER_USE__', mode: 'special', platform: 'web', risk: 'external' },
+  { id: 'pair-desktop', label: 'Pair desktop bridge', description: 'Connect this browser to a local desktop bridge.', text: '__PAIR_DESKTOP__', mode: 'special', platform: 'web', risk: 'external' },
+  { id: 'my-tasks', label: 'My tasks', description: 'Ask for your open work in this circle.', text: 'my tasks', mode: 'send' },
+  { id: 'github-help', label: 'GitHub', description: 'Fill the composer with GitHub command help.', text: '/gh help', mode: 'prefill' },
+  { id: 'rooms-help', label: 'Rooms', description: 'Fill the composer with project room help.', text: '/room help', mode: 'prefill' },
+  { id: 'summarize', label: 'Summarize', description: 'Summarize text, a file, or a URL.', text: '/summarize ', mode: 'prefill' },
+  { id: 'translate', label: 'Translate', description: 'Translate text into another language.', text: '/translate ', mode: 'prefill' },
+  { id: 'imagine', label: 'Create image', description: 'Describe an image to generate.', text: '/imagine ', mode: 'prefill' },
+  { id: 'check-in', label: 'Check in', description: 'Draft a concise progress check-in.', text: '__CHECK_IN__', mode: 'prefill' },
+  { id: 'new-task', label: 'New task', description: 'Open the task form with a title.', text: '__NEW_TASK__', mode: 'prefill' },
+  { id: 'daily-plan', label: 'Daily plan', description: 'Ask for a prioritized plan from current work.', text: 'daily plan', mode: 'send' },
+  { id: 'circle-status', label: 'Circle status', description: 'Show current circle work and activity.', text: '/status', mode: 'send' },
+  { id: 'my-streak', label: 'My streak', description: 'Review your current accountability streak.', text: 'my streak', mode: 'send' },
+  { id: 'proposals', label: 'Proposals', description: 'Review open proposals and polls.', text: '/proposals', mode: 'send' },
+  { id: 'send-crypto', label: 'Send crypto', description: 'Open a reviewed wallet transfer flow.', text: '__SEND_CRYPTO__', mode: 'special', platform: 'web', risk: 'sensitive' },
+  { id: 'challenge', label: 'Challenge a member', description: 'Draft a challenge for a circle member.', text: 'challenge a member', mode: 'prefill' },
+  { id: 'play-game', label: 'Play a game', description: 'Start a lightweight circle game.', text: 'play a game', mode: 'send' },
+  { id: 'trivia', label: 'Trivia', description: 'Start a trivia round.', text: 'trivia', mode: 'send' },
+  { id: 'would-you-rather', label: 'Would you rather', description: 'Start a would-you-rather prompt.', text: 'would you rather', mode: 'send' },
+  { id: 'hot-take', label: 'Hot take', description: 'Get a discussion prompt for the circle.', text: 'hot take', mode: 'send' },
+  { id: 'step-away', label: 'Step away', description: 'Draft a clear handoff before leaving.', text: '__STEP_AWAY__', mode: 'prefill' },
+  { id: 'help', label: 'Chat help', description: 'Show available commands and workflows.', text: '/help', mode: 'send' },
+  { id: 'delete-chat', label: 'Delete my messages', description: 'Review removal of your messages in this chat.', text: '__NUKE__', mode: 'special', risk: 'destructive' },
+]);
 
 export const FEATURED_QUICK_ACTIONS = QUICK_PROMPTS.slice(0, 7);
 export const ALL_QUICK_ACTIONS = QUICK_PROMPTS;
 
-export const FEATURED_TOOL_ACTIONS: FeaturedToolAction[] = [
-  { label: 'Image', text: '/imagine ', color: '#f43f5e', flatIcon: 'designer', mode: 'prefill' },
-  { label: 'Speak', text: '/speak ', color: '#06b6d4', mode: 'prefill' },
-  { label: 'Code', text: '/code ', color: '#22c55e', flatIcon: 'code', mode: 'prefill' },
-  { label: 'WordPress', text: '/wp help', color: '#21759b', flatIcon: 'wordpress', mode: 'send' },
-  { label: 'Summarize', text: '/summarize ', color: '#f59e0b', flatIcon: 'writer', mode: 'prefill' },
-  { label: 'Translate', text: '/translate ', color: '#8b5cf6', mode: 'prefill' },
-  { label: 'Build page', text: '/build-page ', color: '#3b82f6', flatIcon: 'architect', mode: 'prefill' },
-  { label: 'Computer', text: '/browser plan ', color: '#14b8a6', mode: 'prefill' },
-  { label: 'All tools', text: '/hf help', color: '#eab308', flatIcon: 'brain', mode: 'send' },
-];
+export const FEATURED_TOOL_ACTIONS: FeaturedToolAction[] = withToolActionRoutes([
+  { id: 'tool-image', label: 'Image', description: 'Create an image from a description.', text: '/imagine ', color: '#f43f5e', flatIcon: 'designer', mode: 'prefill' },
+  { id: 'tool-speak', label: 'Speak', description: 'Turn text into speech.', text: '/speak ', color: '#06b6d4', mode: 'prefill' },
+  { id: 'tool-code', label: 'Code', description: 'Generate or revise code.', text: '/code ', color: '#22c55e', flatIcon: 'code', mode: 'prefill' },
+  { id: 'tool-wordpress', label: 'WordPress', description: 'Open WordPress command help.', text: '/wp help', color: '#21759b', flatIcon: 'wordpress', mode: 'prefill' },
+  { id: 'tool-summarize', label: 'Summarize', description: 'Summarize text, a file, or a URL.', text: '/summarize ', color: '#f59e0b', flatIcon: 'writer', mode: 'prefill' },
+  { id: 'tool-translate', label: 'Translate', description: 'Translate text into another language.', text: '/translate ', color: '#8b5cf6', mode: 'prefill' },
+  { id: 'tool-build-page', label: 'Build page', description: 'Generate a webpage from a brief.', text: '/build-page ', color: '#3b82f6', flatIcon: 'architect', mode: 'prefill' },
+  { id: 'tool-computer', label: 'Computer task', description: 'Plan a browser or desktop task.', text: '/browser plan ', color: '#14b8a6', mode: 'prefill' },
+  { id: 'tool-all', label: 'All AI tools', description: 'Show available AI tool commands.', text: '/hf help', color: '#eab308', flatIcon: 'brain', mode: 'prefill' },
+]);
 
 export const PROMPT_CATEGORIES: PromptCategory[] = [
   {
@@ -203,15 +289,19 @@ export const PROMPT_CATEGORIES: PromptCategory[] = [
   },
 ];
 
-const QUICK_ACTION_OVERRIDES: Record<string, { mode: QuickActionMode; text: string }> = {
+const QUICK_ACTION_OVERRIDES: Record<string, { mode: QuickActionMode; text: string; routeId?: ChatCommandRouteId | null }> = {
   '__tip__': { mode: 'special', text: '__TIP__' },
   '__send_crypto__': { mode: 'special', text: '__SEND_CRYPTO__' },
-  '__check_in__': { mode: 'special', text: '__CHECK_IN__' },
-  '__new_task__': { mode: 'special', text: '__NEW_TASK__' },
-  '__step_away__': { mode: 'special', text: '__STEP_AWAY__' },
+  '__check_in__': { mode: 'prefill', text: 'Log this check-in: ' },
+  '__new_task__': { mode: 'prefill', text: '/task new ' },
+  '__step_away__': { mode: 'prefill', text: "I'm stepping away. Help me write a clear handoff for " },
   '__assign_agent__': { mode: 'special', text: '__ASSIGN_AGENT__' },
   '__spawn_agent__': { mode: 'special', text: '__SPAWN_AGENT__' },
-  '__computer_use__': { mode: 'special', text: '__COMPUTER_USE__' },
+  '__spawn_agents__': { mode: 'special', text: '__SPAWN_AGENTS__' },
+  '__log_proof__': { mode: 'special', text: '__LOG_PROOF__' },
+  '__open_search__': { mode: 'special', text: '__OPEN_SEARCH__' },
+  '__open_games__': { mode: 'special', text: '__OPEN_GAMES__' },
+  '__computer_use__': { mode: 'special', text: '__COMPUTER_USE__', routeId: 'browser' },
   '__openswan__': { mode: 'special', text: '__OPENSWAN__' },
   '__pair_desktop__': { mode: 'special', text: '__PAIR_DESKTOP__' },
   '__nuke__': { mode: 'special', text: '__NUKE__' },
@@ -262,14 +352,224 @@ const QUICK_ACTION_OVERRIDES: Record<string, { mode: QuickActionMode; text: stri
   'pep talk': { mode: 'send', text: 'Give me a personalized pep talk for the work in front of me right now.' },
 };
 
-export function resolveQuickActionExecution(text: string): { mode: QuickActionMode; text: string } {
+export function resolveQuickActionExecution(text: string): { mode: QuickActionMode; text: string; routeId: ChatCommandRouteId | null } {
   const normalized = text.trim().toLowerCase();
   const override = QUICK_ACTION_OVERRIDES[normalized];
-  if (override) return override;
+  if (override) return { ...override, routeId: override.routeId ?? resolveSlashRoute(override.text) };
 
   const action =
     QUICK_PROMPTS.find(item => item.text === text) ||
     FEATURED_TOOL_ACTIONS.find(item => item.text === text);
   const mode = action?.mode || (text.endsWith(' ') ? 'prefill' : 'send');
-  return { mode, text };
+  return { mode, text, routeId: action?.routeId ?? resolveSlashRoute(text) };
+}
+
+export function mergeChatActionDraft(currentDraft: string, actionText: string): string {
+  if (!currentDraft.trim()) return actionText;
+  if (!actionText.trim()) return currentDraft;
+  if (currentDraft.includes(actionText.trim())) return currentDraft;
+  const separator = /\s$/.test(currentDraft) ? '' : '\n\n';
+  return `${currentDraft}${separator}${actionText}`;
+}
+
+const CATEGORY_PRESENTATION: Record<ChatSlashCommandCategory, { label: string; color: string }> = {
+  general: { label: 'General', color: '#64748b' },
+  knowledge: { label: 'Knowledge', color: '#38bdf8' },
+  memory: { label: 'Memory', color: '#8b5cf6' },
+  missions: { label: 'Missions', color: '#22c55e' },
+  rooms: { label: 'Rooms', color: '#06b6d4' },
+  github: { label: 'GitHub', color: '#94a3b8' },
+  wordpress: { label: 'WordPress', color: '#21759b' },
+  ai_tools: { label: 'AI tools', color: '#6366f1' },
+  governance: { label: 'Circle', color: '#f59e0b' },
+  vault: { label: 'Vault', color: '#14b8a6' },
+};
+
+const DESTRUCTIVE_COMMAND_IDS = new Set(['forget', 'mission-complete', 'wp-delete', 'vault-revoke']);
+
+function registryMenuEntry(
+  command: (typeof CHAT_COMMAND_REGISTRY)[number],
+): ChatActionMenuEntry {
+  const presentation = CATEGORY_PRESENTATION[command.category];
+  return {
+    id: `command-${command.id}`,
+    label: command.title,
+    description: command.description,
+    text: command.insertText,
+    mode: 'prefill',
+    routeId: command.routeId,
+    color: presentation.color,
+    sectionId: `registry-${command.category}`,
+    platform: 'all',
+    risk: DESTRUCTIVE_COMMAND_IDS.has(command.id) ? 'destructive' : 'routine',
+    keywords: [command.command, ...(command.aliases || []), ...(command.keywords || [])],
+  };
+}
+
+export const REGISTRY_BACKED_ACTION_SECTIONS: readonly ChatActionMenuSection[] = (
+  Object.keys(CATEGORY_PRESENTATION) as ChatSlashCommandCategory[]
+).map((category) => {
+  const presentation = CATEGORY_PRESENTATION[category];
+  return {
+    id: `registry-${category}`,
+    label: presentation.label,
+    description: `Browse ${presentation.label.toLowerCase()} commands.`,
+    color: presentation.color,
+    items: CHAT_COMMAND_REGISTRY.filter((entry) => entry.category === category).map(registryMenuEntry),
+  };
+});
+
+function quickMenuEntry(action: QuickActionItem): ChatActionMenuEntry {
+  const resolved = resolveQuickActionExecution(action.text);
+  return {
+    id: action.id,
+    label: action.label,
+    description: action.description,
+    text: resolved.text,
+    mode: resolved.mode,
+    routeId: resolved.routeId,
+    color: action.risk === 'destructive' ? '#ef4444' : '#6366f1',
+    sectionId: action.risk === 'destructive' ? 'danger' : 'quick',
+    platform: action.platform || 'all',
+    risk: action.risk || 'routine',
+    keywords: action.keywords || [],
+  };
+}
+
+function legacyMenuEntry(category: PromptCategory, item: PromptCategoryItem, index: number): ChatActionMenuEntry {
+  const resolved = resolveQuickActionExecution(item.text);
+  const normalizedCategory = category.title.toLowerCase();
+  const destructive = /\b(delete|remove|lock|revoke|forget|nuke)\b/i.test(`${item.label} ${item.text}`);
+  const sensitive = normalizedCategory === 'wallet';
+  const external = ['design apps', 'mac dashboard', 'gmail', 'wordpress'].includes(normalizedCategory);
+  return {
+    id: `legacy-${normalizedCategory.replace(/[^a-z0-9]+/g, '-')}-${item.label.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase()}-${index}`,
+    label: item.label,
+    description: item.desc,
+    text: resolved.text,
+    mode: resolved.mode === 'special' ? 'special' : 'prefill',
+    routeId: resolved.routeId,
+    color: category.color,
+    sectionId: `legacy-${normalizedCategory.replace(/[^a-z0-9]+/g, '-')}`,
+    platform: external || sensitive ? 'web' : 'all',
+    risk: destructive ? 'destructive' : sensitive ? 'sensitive' : external ? 'external' : 'routine',
+    keywords: [category.title, item.desc],
+  };
+}
+
+function uniqueEntries(entries: readonly ChatActionMenuEntry[]): ChatActionMenuEntry[] {
+  const seen = new Set<string>();
+  return entries.filter((entry) => {
+    const key = `${entry.mode}:${entry.text.trim().toLowerCase()}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function sectionEntries(categories: readonly ChatSlashCommandCategory[]): ChatActionMenuEntry[] {
+  return REGISTRY_BACKED_ACTION_SECTIONS
+    .filter((section) => categories.some((category) => section.id === `registry-${category}`))
+    .flatMap((section) => section.items);
+}
+
+function legacyCategoryEntries(titles: readonly string[]): ChatActionMenuEntry[] {
+  return PROMPT_CATEGORIES
+    .filter((category) => titles.includes(category.title))
+    .flatMap((category) => category.prompts
+      .filter((item) => !(category.title === 'GMAIL' && item.label === 'Schedule Draft'))
+      .map((item, index) => legacyMenuEntry(category, item, index)));
+}
+
+export function buildChatActionMenuCatalog(
+  sessionActions: readonly SessionPromptAction[] = [],
+): ChatActionMenuCatalog {
+  const quick = QUICK_PROMPTS.map(quickMenuEntry);
+  const dangerous = uniqueEntries([
+    ...sectionEntries(['memory', 'missions', 'wordpress', 'vault']).filter((item) => item.risk === 'destructive'),
+    ...quick.filter((item) => item.risk === 'destructive'),
+    ...legacyCategoryEntries(['DESIGN APPS', 'MAC DASHBOARD', 'GMAIL', 'WORDPRESS', 'WALLET'])
+      .filter((item) => item.risk === 'destructive'),
+  ]);
+  const safe = (items: readonly ChatActionMenuEntry[]) => uniqueEntries(items.filter((item) => item.risk !== 'destructive'));
+
+  const sections: ChatActionMenuSection[] = [
+    {
+      id: 'create',
+      label: 'Create & transform',
+      description: 'Write, build, generate, summarize, and translate.',
+      color: '#6366f1',
+      items: safe([...sectionEntries(['ai_tools']), ...legacyCategoryEntries(['CREATE'])]),
+    },
+    {
+      id: 'work',
+      label: 'Work & organize',
+      description: 'Tasks, missions, rooms, GitHub, and schedules.',
+      color: '#22c55e',
+      items: safe(sectionEntries(['general', 'missions', 'rooms', 'github'])),
+    },
+    {
+      id: 'apps',
+      label: 'Apps & computer',
+      description: 'Browser, desktop, design apps, Gmail, and WordPress.',
+      color: '#38bdf8',
+      items: safe([...sectionEntries(['wordpress']), ...legacyCategoryEntries(['DESIGN APPS', 'MAC DASHBOARD', 'GMAIL', 'WORDPRESS'])]),
+    },
+    {
+      id: 'circle',
+      label: 'Circle & memory',
+      description: 'Knowledge, memory, status, governance, and collaboration.',
+      color: '#f59e0b',
+      items: safe([
+        ...sectionEntries(['knowledge', 'memory', 'governance']),
+        ...legacyCategoryEntries(['PUBLISH']),
+        ...quick.filter((item) => ![
+          'assign-agent', 'spawn-agent', 'openswan', 'computer-use', 'pair-desktop', 'send-crypto', 'delete-chat',
+        ].includes(item.id)),
+      ]),
+    },
+    {
+      id: 'setup',
+      label: 'Connections & setup',
+      description: 'Agents, OpenSwan, desktop pairing, and the vault.',
+      color: '#14b8a6',
+      items: safe([
+        ...sectionEntries(['vault']),
+        ...quick.filter((item) => ['assign-agent', 'spawn-agent', 'openswan', 'computer-use', 'pair-desktop'].includes(item.id)),
+      ]),
+    },
+    {
+      id: 'wallet',
+      label: 'Wallet',
+      description: 'Review wallet status and open confirmed transfer flows.',
+      color: '#f97316',
+      items: safe(legacyCategoryEntries(['WALLET'])),
+    },
+    {
+      id: 'danger',
+      label: 'Danger zone',
+      description: 'Actions that remove or revoke data and require review.',
+      color: '#ef4444',
+      items: dangerous,
+    },
+  ].filter((section) => section.items.length > 0);
+
+  const contextual = sessionActions.map<ChatActionMenuEntry>((action) => ({
+    id: `context-${action.id}`,
+    label: action.label,
+    description: 'Use this session profile as the starting point for your draft.',
+    text: action.prompt,
+    mode: 'prefill',
+    routeId: null,
+    color: action.color,
+    sectionId: 'suggested',
+    platform: 'all',
+    risk: 'routine',
+    keywords: ['suggested', 'session'],
+  }));
+  const commonIds = new Set(['assign-agent', 'computer-use', 'my-tasks', 'new-task', 'check-in']);
+  const common = quick.filter((item) => commonIds.has(item.id));
+  const searchItems = uniqueEntries([...contextual, ...common, ...sections.flatMap((section) => section.items)]);
+
+  return { contextual, common, sections, searchItems };
 }

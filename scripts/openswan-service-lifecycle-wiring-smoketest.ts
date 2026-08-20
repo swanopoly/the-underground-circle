@@ -233,20 +233,39 @@ assert.match(
   /onOpenInChat\(taskInput\.trim\(\)\)/,
   'the primary Runtime task carries its draft to canonical Chat without auto-send',
 );
-assert.match(
+assert.doesNotMatch(
   agentGatewayPanels,
-  /onOpenInChat\(messageInput\.trim\(\)\)/,
-  'the advanced session-message draft also hands off to canonical Chat',
+  /messageInput|DRAFT FOR CHAT|send a session message/,
+  'the Runtime panel keeps one generic Chat draft instead of a duplicate advanced composer',
 );
 assert.match(
   agentGatewayPanels,
   /onOpenInChat\(`Delegate this to a subagent: \$\{spawnInput\.trim\(\)\}`\)/,
   'the advanced delegation draft also hands off to canonical Chat',
 );
-assert.match(
+const runtimeSearchAction = section(
   agentGatewayPanels,
-  /const result = await fn\(config\);[\s\S]{0,180}if \(!result\.ok\) throw new Error\(result\.error\);[\s\S]{0,180}result\.commit\?\.\(\);/,
-  'read-only runtime search results commit only after an exact successful result',
+  'const runAction = useCallback',
+  'const exactSessionMatches',
+  'OpenSwan runtime search action',
+);
+const runtimeProviderResult = runtimeSearchAction.indexOf('const result = await fn(config);');
+const runtimeProviderSuccessGate = runtimeSearchAction.indexOf('if (!result.ok) throw new Error(result.error);');
+const runtimeCurrentGate = runtimeSearchAction.indexOf('if (!invocationIsCurrent()) return false;', runtimeProviderSuccessGate);
+const runtimeLatestConfigRead = runtimeSearchAction.indexOf('const latestConfig = await resolveConfig();', runtimeCurrentGate);
+const runtimeFingerprintGate = runtimeSearchAction.indexOf(
+  '!matchesOpenSwanConnectionFingerprint(capturedConnectionFingerprint, latestConfig.connection)',
+  runtimeLatestConfigRead,
+);
+const runtimeResultCommit = runtimeSearchAction.indexOf('result.commit?.();', runtimeFingerprintGate);
+assert.ok(
+  runtimeProviderResult >= 0
+    && runtimeProviderSuccessGate > runtimeProviderResult
+    && runtimeCurrentGate > runtimeProviderSuccessGate
+    && runtimeLatestConfigRead > runtimeCurrentGate
+    && runtimeFingerprintGate > runtimeLatestConfigRead
+    && runtimeResultCommit > runtimeFingerprintGate,
+  'read-only runtime search results commit only after exact success, live authority, and connection revalidation',
 );
 assert.match(service, /export function parseCronMutationReceipt\([\s\S]{0,2200}if \(expectedAction === 'run' && !runId\) return null;/, 'cron actions require a structured exact target receipt and run lineage');
 assert.doesNotMatch(section(service, 'export async function manageCronJob', 'export async function createCronJob', 'cron mutation'), /\.match\(|'Done'/, 'cron mutation success is never inferred from provider prose');

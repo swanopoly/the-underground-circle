@@ -5,10 +5,17 @@
  */
 
 import { supabase } from './supabase';
-import type { AgentConnection } from './connectionManager';
+import type {
+  AgentConnection,
+  OfficeConnectionAuthorityFence,
+  OfficeConnectionExactAuthority,
+} from './connectionManager';
 import {
+  parseOfficeAgentSessionBindingMutationReceipt,
   resolveOfficeAgentSessionBinding as resolveOfficeAgentSessionBindingCore,
   type OfficeAgentSessionBinding,
+  type OfficeAgentSessionBindingMutationReceipt,
+  type OfficeAgentSessionBindingMutationRequest,
   type OfficeAgentSessionBindingResolution,
   type OfficeAgentSessionsByConnection,
   type OpenSwanConnectionFingerprint,
@@ -22,7 +29,7 @@ const BATCH_READ_LIMIT = 100;
 
 export interface OfficeAgentSessionBindingRecord extends OfficeAgentSessionBinding {
   readonly createdAt?: string;
-  readonly updatedAt?: string;
+  readonly updatedAt: string;
 }
 
 /**
@@ -80,6 +87,38 @@ export type OfficeAgentSessionBindingBatchReadResult =
       readonly status?: number;
     };
 
+export type OfficeAgentSessionBindingMutationFailureReason =
+  | 'invalid_request'
+  | 'authority_retired'
+  | 'schema_unavailable'
+  | 'request_rejected'
+  | 'outcome_unknown'
+  | 'invalid_response'
+  | 'conflict'
+  | 'target_conflict';
+
+export type OfficeAgentSessionBindingMutationResult =
+  | Readonly<{
+      ok: true;
+      receipt: OfficeAgentSessionBindingMutationReceipt;
+    }>
+  | Readonly<{
+      ok: false;
+      reason: 'conflict' | 'target_conflict';
+      error: string;
+      receipt: OfficeAgentSessionBindingMutationReceipt;
+    }>
+  | Readonly<{
+      ok: false;
+      reason: Exclude<OfficeAgentSessionBindingMutationFailureReason, 'conflict' | 'target_conflict'>;
+      error: string;
+    }>;
+
+export type OfficeAgentSessionBindingMutationOptions = Readonly<{
+  authority: OfficeConnectionExactAuthority;
+  isAuthorityCurrent: OfficeConnectionAuthorityFence;
+}>;
+
 function isUuid(value: unknown): value is string {
   return typeof value === 'string' && UUID_RE.test(value);
 }
@@ -88,6 +127,13 @@ function isSessionKey(value: unknown): value is string {
   return typeof value === 'string'
     && value.length <= SESSION_KEY_LIMIT
     && SESSION_KEY_RE.test(value);
+}
+
+function isExactTimestamp(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= 64
+    && Number.isFinite(Date.parse(value));
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -107,16 +153,25 @@ function parseBindingRow(value: unknown): OfficeAgentSessionBindingRecord | null
   const officeAgentId = row.office_agent_id ?? row.officeAgentId;
   const agentBotId = row.agent_bot_id ?? row.binding_agent_bot_id ?? row.agentBotId;
   const sessionKey = row.session_key ?? row.binding_session_key ?? row.sessionKey;
-  if (!isUuid(id) || !isUuid(officeAgentId) || !isUuid(agentBotId) || !isSessionKey(sessionKey)) {
+  const updatedAt = row.updated_at ?? row.updatedAt;
+  if (
+    !isUuid(id)
+    || !isUuid(officeAgentId)
+    || !isUuid(agentBotId)
+    || !isSessionKey(sessionKey)
+    || !isExactTimestamp(updatedAt)
+  ) {
     return null;
   }
+  const createdAt = row.created_at ?? row.createdAt;
+  if (createdAt != null && !isExactTimestamp(createdAt)) return null;
   return Object.freeze({
     id,
     officeAgentId,
     agentBotId,
     sessionKey,
-    ...(typeof row.created_at === 'string' ? { createdAt: row.created_at } : {}),
-    ...(typeof row.updated_at === 'string' ? { updatedAt: row.updated_at } : {}),
+    ...(typeof createdAt === 'string' ? { createdAt } : {}),
+    updatedAt,
   });
 }
 
@@ -133,6 +188,7 @@ export function isOfficeAgentSessionBindingSchemaUnavailable(error: unknown): bo
     || message.includes('office_agent_session_bindings')
     || message.includes('set_office_agent_session_binding')
     || message.includes('clear_office_agent_session_binding')
+    || message.includes('compare_and_set_office_agent_session_binding_v1')
     || message.includes('invoke_agent_v2')
     || message.includes('schema cache')
     || message.includes('could not find the function');
@@ -302,62 +358,186 @@ export async function readOfficeAgentSessionBinding(
   }
 }
 
-/**
- * Bind a published owner-owned OpenSwan agent to an owner-owned private bot
- * plus exact session key. The database RPC performs the authority checks.
- */
+function isExpectedBinding(
+  value: OfficeAgentSessionBindingRecord | null,
+  officeAgentId: string,
+): value is OfficeAgentSessionBindingRecord | null {
+  return value === null || (
+    isUuid(value.id)
+    && value.officeAgentId === officeAgentId
+    && isUuid(value.agentBotId)
+    && isSessionKey(value.sessionKey)
+    && isExactTimestamp(value.updatedAt)
+  );
+}
+
+function normalizeMutationAuthority(
+  options: OfficeAgentSessionBindingMutationOptions | null | undefined,
+): OfficeConnectionExactAuthority | null {
+  const authority = options?.authority;
+  if (
+    !authority
+    || !isUuid(authority.userId)
+    || !isUuid(authority.circleId)
+    || typeof authority.accessToken !== 'string'
+    || !authority.accessToken.trim()
+    || authority.accessToken !== authority.accessToken.trim()
+    || authority.accessToken.length > 16_384
+    || !Number.isSafeInteger(authority.generation)
+    || authority.generation <= 0
+    || typeof options?.isAuthorityCurrent !== 'function'
+  ) return null;
+  return authority;
+}
+
+function mutationAuthorityIsCurrent(
+  authority: OfficeConnectionExactAuthority,
+  fence: OfficeConnectionAuthorityFence,
+): boolean {
+  try {
+    return fence(authority) === true;
+  } catch {
+    return false;
+  }
+}
+
+function mutationFailureFromError(error: unknown): Exclude<
+  OfficeAgentSessionBindingMutationResult,
+  { ok: true } | { receipt: OfficeAgentSessionBindingMutationReceipt }
+> {
+  if (isOfficeAgentSessionBindingSchemaUnavailable(error)) {
+    return Object.freeze({
+      ok: false,
+      reason: 'schema_unavailable',
+      error: 'Exact Office session route updates are not installed yet. Apply database section 49, then reload.',
+    });
+  }
+  const record = asRecord(error);
+  const code = String(record?.code || '');
+  if (code === '22023' || code === '42501') {
+    return Object.freeze({
+      ok: false,
+      reason: 'request_rejected',
+      error: 'The database rejected this Office session route update.',
+    });
+  }
+  return Object.freeze({
+    ok: false,
+    reason: 'outcome_unknown',
+    error: 'The Office session route update outcome could not be verified. Refresh before retrying.',
+  });
+}
+
+async function compareAndSetOfficeAgentSessionBinding(
+  request: OfficeAgentSessionBindingMutationRequest,
+  options: OfficeAgentSessionBindingMutationOptions,
+): Promise<OfficeAgentSessionBindingMutationResult> {
+  const authority = normalizeMutationAuthority(options);
+  if (
+    !authority
+    || !isUuid(request.officeAgentId)
+    || !isExpectedBinding(request.expectedBinding, request.officeAgentId)
+    || (
+      request.nextBinding !== null
+      && (!isUuid(request.nextBinding.agentBotId) || !isSessionKey(request.nextBinding.sessionKey))
+    )
+  ) {
+    return Object.freeze({
+      ok: false,
+      reason: 'invalid_request',
+      error: 'The exact Office session route request is invalid.',
+    });
+  }
+  if (!mutationAuthorityIsCurrent(authority, options.isAuthorityCurrent)) {
+    return Object.freeze({
+      ok: false,
+      reason: 'authority_retired',
+      error: 'The Office session authority changed. Refresh before updating this route.',
+    });
+  }
+
+  const query = bindCapturedBearer(supabase.rpc('compare_and_set_office_agent_session_binding_v1', {
+    p_office_agent_id: request.officeAgentId,
+    p_circle_id: authority.circleId,
+    p_expected_binding_id: request.expectedBinding?.id ?? null,
+    p_expected_agent_bot_id: request.expectedBinding?.agentBotId ?? null,
+    p_expected_session_key: request.expectedBinding?.sessionKey ?? null,
+    p_expected_updated_at: request.expectedBinding?.updatedAt ?? null,
+    p_next_agent_bot_id: request.nextBinding?.agentBotId ?? null,
+    p_next_session_key: request.nextBinding?.sessionKey ?? null,
+  }), authority);
+  if (!query) {
+    return Object.freeze({
+      ok: false,
+      reason: 'invalid_request',
+      error: 'The exact Office session authority is invalid.',
+    });
+  }
+
+  try {
+    const { data, error } = await query;
+    if (!mutationAuthorityIsCurrent(authority, options.isAuthorityCurrent)) {
+      return Object.freeze({
+        ok: false,
+        reason: 'authority_retired',
+        error: 'The Office session authority changed while the route was updating. Refresh to verify its current state.',
+      });
+    }
+    if (error) return mutationFailureFromError(error);
+    const receipt = parseOfficeAgentSessionBindingMutationReceipt(data, request);
+    if (!receipt) {
+      return Object.freeze({
+        ok: false,
+        reason: 'invalid_response',
+        error: 'The Office session route update returned an invalid receipt. Refresh before retrying.',
+      });
+    }
+    if (receipt.disposition === 'conflict' || receipt.disposition === 'target_conflict') {
+      return Object.freeze({
+        ok: false,
+        reason: receipt.disposition,
+        error: receipt.disposition === 'conflict'
+          ? 'This Office session route changed before the update committed.'
+          : 'This exact OpenSwan session is already linked to another Office agent.',
+        receipt,
+      });
+    }
+    return Object.freeze({ ok: true, receipt });
+  } catch {
+    return Object.freeze({
+      ok: false,
+      reason: 'outcome_unknown',
+      error: 'The Office session route update outcome could not be verified. Refresh before retrying.',
+    });
+  }
+}
+
+/** Bind or move only if the database row still equals the caller's exact snapshot. */
 export async function setOfficeAgentSessionBinding(
   officeAgentId: string,
   agentBotId: string,
   sessionKey: string,
-  authority?: OfficeAgentSessionBindingAuthority | null,
-): Promise<OfficeAgentSessionBindingRecord> {
-  if (!isUuid(officeAgentId) || !isUuid(agentBotId) || !isSessionKey(sessionKey)) {
-    throw new Error('Invalid Office agent session binding.');
-  }
-  const query = bindCapturedBearer(supabase.rpc('set_office_agent_session_binding', {
-    p_office_agent_id: officeAgentId,
-    p_agent_bot_id: agentBotId,
-    p_session_key: sessionKey,
-  }), authority);
-  if (!query) throw new Error('The captured Office session authority is invalid.');
-  const { data, error } = await query;
-  if (error) {
-    throw new Error(isOfficeAgentSessionBindingSchemaUnavailable(error)
-      ? 'Office session binding is not installed yet. Apply database section 36, then reload.'
-      : 'Office session binding could not be saved.');
-  }
-  const returnedId = isUuid(data)
-    ? data
-    : (Array.isArray(data) && isUuid(data[0]) ? data[0] : null);
-  const binding = returnedId
-    ? Object.freeze({
-        id: returnedId,
-        officeAgentId,
-        agentBotId,
-        sessionKey,
-      })
-    : parseBindingRow(data) || await readOfficeAgentSessionBinding(officeAgentId, authority);
-  if (!binding) throw new Error('Office session binding could not be verified after saving.');
-  return binding;
+  expectedBinding: OfficeAgentSessionBindingRecord | null,
+  options: OfficeAgentSessionBindingMutationOptions,
+): Promise<OfficeAgentSessionBindingMutationResult> {
+  return compareAndSetOfficeAgentSessionBinding({
+    officeAgentId,
+    expectedBinding,
+    nextBinding: { agentBotId, sessionKey },
+  }, options);
 }
 
+/** Clear only if the database row still equals the caller's exact snapshot. */
 export async function clearOfficeAgentSessionBinding(
   officeAgentId: string,
-  authority?: OfficeAgentSessionBindingAuthority | null,
-): Promise<boolean> {
-  if (!isUuid(officeAgentId)) return false;
-  const query = bindCapturedBearer(supabase.rpc('clear_office_agent_session_binding', {
-    p_office_agent_id: officeAgentId,
-  }), authority);
-  if (!query) return false;
-  const { data, error } = await query;
-  if (error) {
-    throw new Error(isOfficeAgentSessionBindingSchemaUnavailable(error)
-      ? 'Office session binding is not installed yet. Apply database section 36, then reload.'
-      : 'Office session binding could not be cleared.');
-  }
-  return data === true || (Array.isArray(data) && data[0] === true);
+  expectedBinding: OfficeAgentSessionBindingRecord,
+  options: OfficeAgentSessionBindingMutationOptions,
+): Promise<OfficeAgentSessionBindingMutationResult> {
+  return compareAndSetOfficeAgentSessionBinding({
+    officeAgentId,
+    expectedBinding,
+    nextBinding: null,
+  }, options);
 }
 
 /** Convert the runtime Map into the exact own-property shape accepted by the core. */

@@ -2,10 +2,10 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ActivityIndicator, Alert, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import FlatIcon, { ICON_CATALOG } from '../../../../components/FlatIcon';
 import SessionTagInput from '../../../../components/SessionTagInput';
-import { OfficeAgent } from '../../../../lib/officeAgents';
+import { OfficeAgent, resolveOfficeAgentExecutionTruth } from '../../../../lib/officeAgents';
 import { SessionTag, type OfficeSessionStorageScope } from '../../../../lib/sessionTags';
 import { getTemplatesByCategory, detectTemplate } from '../../../../lib/soulTemplates';
-import { AGENT_SPIRITS, SPIRIT_CATEGORIES, getSpiritById } from '../../../../lib/agentSpirits';
+import { AGENT_SPIRITS, SPIRIT_CATEGORIES, getSpiritById, type AgentSpirit } from '../../../../lib/agentSpirits';
 import {
   buildSpiritCareerArtifact,
   buildSpiritRoleReadinessChecklist,
@@ -68,6 +68,16 @@ type WordPressReadiness = {
   username?: string | null;
   label?: string | null;
 };
+
+function oneOf<T extends string>(value: unknown, options: readonly T[], fallback: T): T {
+  return typeof value === 'string' && options.includes(value as T) ? value as T : fallback;
+}
+
+function customProfileInsertErrorCode(error: unknown): string {
+  if (!error || typeof error !== 'object' || Array.isArray(error)) return '';
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : '';
+}
 
 function normalizeSpiritIdentityAuthority(
   circleId: string | undefined,
@@ -140,6 +150,8 @@ export default function AgentSpiritPanel({
 
   const personalityScrollRef = useRef<ScrollView>(null);
   const personalityScrollX = useRef(0);
+  const savingProfileRef = useRef(false);
+  const savingProfileTokenRef = useRef(0);
   const spiritAssignmentBusyRef = useRef(false);
   const spiritAssignmentTokenRef = useRef(0);
   const stableSessionKey = sessionKey || getAgentIdentityKey(agent);
@@ -175,6 +187,44 @@ export default function AgentSpiritPanel({
     ? agent.sessionKey
     : null;
   const dbAgentId = dbAgentLink?.agentKey === stableSessionKey ? dbAgentLink.dbAgentId : null;
+  const selectedSpirit = useMemo(() => {
+    if (!currentSpirit) return null;
+    const builtIn = getSpiritById(currentSpirit);
+    if (builtIn) return builtIn;
+    if (!currentSpirit.startsWith('custom::')) return null;
+    const profileId = currentSpirit.slice('custom::'.length);
+    const profile = customProfiles.find(candidate => String(candidate?.id || '') === profileId);
+    if (!profile) return null;
+    const text = (value: unknown, fallback: string, max = 4000) => {
+      const normalized = typeof value === 'string' ? value.trim() : '';
+      return (normalized || fallback).slice(0, max);
+    };
+    const customSpirit: AgentSpirit = {
+      id: currentSpirit,
+      name: text(profile.name, 'Custom Spirit', 200),
+      emoji: text(profile.emoji, '🤖', 16),
+      color: text(profile.color, '#6366f1', 32),
+      category: 'thinking' as const,
+      tagline: text(profile.tagline, 'Custom behavioral profile', 300),
+      systemPromptPrefix: text(profile.system_prompt, '', 20_000),
+      skillBundle: text(profile.skill_bundle, 'custom', 300),
+      riskTier: oneOf(profile.risk_tier, ['low', 'medium', 'high', 'critical'] as const, 'medium'),
+      actionPosture: oneOf(profile.action_posture, ['act', 'act-gated', 'observe-act-gated', 'observe-propose', 'propose', 'never-act'] as const, 'propose'),
+      evidencePosture: oneOf(profile.evidence_posture, ['medium', 'high', 'very-high'] as const, 'high'),
+      communicationDensity: oneOf(profile.communication_density, ['terse', 'normal', 'detailed', 'motivational'] as const, 'normal'),
+      skepticism: oneOf(profile.skepticism, ['low', 'medium', 'high', 'very-high'] as const, 'medium'),
+      escalationTrigger: text(profile.escalation_trigger, 'When requirements, evidence, or risk are unclear.', 500),
+    };
+    return customSpirit;
+  }, [currentSpirit, customProfiles]);
+  const executionTruth = resolveOfficeAgentExecutionTruth(agent);
+  const activityCopy = executionTruth.state === 'warning'
+    ? `Runtime status warning: ${executionTruth.statusWarning}. Refresh the connection before assigning new work.`
+    : executionTruth.state === 'active'
+      ? executionTruth.activity || 'Agent is active; no current activity label was reported.'
+      : executionTruth.state === 'connected'
+        ? 'Agent is connected and standing by. No current execution is verified.'
+        : 'Agent is offline or unavailable. Reconnect it before assigning new work.';
   const currentSpiritProfile = currentSpirit && !currentSpirit.startsWith('custom::')
     ? getSpiritCareerProfile(currentSpirit)
     : null;
@@ -318,6 +368,8 @@ export default function AgentSpiritPanel({
     setSoulText('');
     setCustomProfiles([]);
     setSpiritSnapshotState('loading');
+    savingProfileTokenRef.current += 1;
+    savingProfileRef.current = false;
     setSavingProfile(false);
     setDeletingProfileId(null);
     setProfileActionStatus('');
@@ -655,7 +707,12 @@ export default function AgentSpiritPanel({
   if (spiritSnapshotState === 'loading') {
     return (
       <View accessibilityLiveRegion="polite" style={{ minHeight: 120, alignItems: 'center', justifyContent: 'center', gap: 10, padding: 16 }}>
-        <ActivityIndicator size="small" color={agent.color || '#6366f1'} />
+        <ActivityIndicator
+          accessibilityRole="progressbar"
+          accessibilityLabel="Loading verified Spirit identity"
+          size="small"
+          color={agent.color || '#6366f1'}
+        />
         <Text style={{ color: '#808090', fontSize: 11, fontFamily: 'monospace' }}>Loading verified Spirit identity…</Text>
       </View>
     );
@@ -683,20 +740,23 @@ export default function AgentSpiritPanel({
     <>
       <Pressable
         onPress={() => setShowSpirits(!showSpirits)}
+        accessibilityRole="button"
+        accessibilityLabel={showSpirits ? 'Hide Spirit settings' : 'Show Spirit settings'}
+        accessibilityState={{ expanded: showSpirits }}
         style={[styles.spiritRow, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
       >
         <Text style={styles.spiritLabel}>
           {showSpirits ? '▼' : '▶'} SOUL
         </Text>
-        {currentSpirit ? (
+        {selectedSpirit ? (
           <View style={[styles.spiritBadge, { flexDirection: 'row', alignItems: 'center', gap: 6 }]}>
-            {ICON_CATALOG[currentSpirit] ? (
-              <FlatIcon name={currentSpirit} size={18} />
+            {ICON_CATALOG[selectedSpirit.id] ? (
+              <FlatIcon name={selectedSpirit.id} size={18} />
             ) : (
-              <Text style={{ fontSize: 12 }}>{getSpiritById(currentSpirit)?.emoji}</Text>
+              <Text style={{ fontSize: 12 }}>{selectedSpirit.emoji}</Text>
             )}
             <Text style={styles.spiritBadgeText}>
-              {getSpiritById(currentSpirit)?.name}
+              {selectedSpirit.name}
             </Text>
           </View>
         ) : (
@@ -724,8 +784,8 @@ export default function AgentSpiritPanel({
               {spiritAssignmentBusy ? 'Saving verified Spirit assignment…' : spiritAssignmentStatus}
             </Text>
           ) : null}
-          {currentSpirit && getSpiritById(currentSpirit) && (() => {
-            const s = getSpiritById(currentSpirit)!;
+          {selectedSpirit && (() => {
+            const s = selectedSpirit;
             const postureColors: Record<string, string> = {
               'act': '#22c55e', 'act-gated': '#3b82f6', 'observe-act-gated': '#f59e0b',
               'observe-propose': '#a855f7', 'propose': '#6366f1', 'never-act': '#ef4444',
@@ -752,7 +812,7 @@ export default function AgentSpiritPanel({
                         accessibilityLabel={`${label.toLowerCase()} ${opt.replace(/-/g, ' ')}`}
                         accessibilityState={{ selected: value === opt }}
                         onPress={() => setCustomKnobs(prev => ({ ...prev, [label === 'ACTION' ? 'actionPosture' : label === 'EVIDENCE' ? 'evidencePosture' : label === 'COMMUNICATION' ? 'communicationDensity' : label === 'SKEPTICISM' ? 'skepticism' : 'riskTier']: opt }))}
-                        style={[{ paddingHorizontal: 8, paddingVertical: 6, borderRadius: 4, borderWidth: 1, borderColor: value === opt ? (colors?.[opt] || '#6366f1') + '60' : '#1e1e3a', backgroundColor: value === opt ? (colors?.[opt] || '#6366f1') + '15' : 'transparent' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                        style={[{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 8, paddingVertical: 6, borderRadius: 4, borderWidth: 1, borderColor: value === opt ? (colors?.[opt] || '#6366f1') + '60' : '#1e1e3a', backgroundColor: value === opt ? (colors?.[opt] || '#6366f1') + '15' : 'transparent' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
                         <Text style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: '700', color: value === opt ? (colors?.[opt] || '#6366f1') : '#555' }}>{opt.replace(/-/g, ' ').toUpperCase()}</Text>
                       </Pressable>
                     ))}
@@ -773,6 +833,9 @@ export default function AgentSpiritPanel({
                   </View>
                   <View style={{ flexDirection: 'row', gap: 6 }}>
                     <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`${editingSpirit ? 'Stop editing' : 'Edit'} ${s.name} Spirit settings`}
+                      accessibilityState={{ selected: editingSpirit }}
                       onPress={() => {
                         if (!editingSpirit) {
                           setCustomPrompt(s.systemPromptPrefix);
@@ -780,7 +843,7 @@ export default function AgentSpiritPanel({
                         }
                         setEditingSpirit(!editingSpirit);
                       }}
-                      style={[{ paddingVertical: 5, paddingHorizontal: 10, borderRadius: 6, backgroundColor: editingSpirit ? '#6366f120' : '#ffffff08', borderWidth: 1, borderColor: editingSpirit ? '#6366f140' : '#ffffff15' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                      style={[{ minHeight: 44, justifyContent: 'center', paddingVertical: 5, paddingHorizontal: 10, borderRadius: 6, backgroundColor: editingSpirit ? '#6366f120' : '#ffffff08', borderWidth: 1, borderColor: editingSpirit ? '#6366f140' : '#ffffff15' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                     >
                       <Text style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: '700', color: editingSpirit ? '#6366f1' : '#888' }}>{editingSpirit ? 'EDITING' : 'EDIT'}</Text>
                     </Pressable>
@@ -892,19 +955,19 @@ export default function AgentSpiritPanel({
                     </View>
 
                     <View style={styles.roleActionRow}>
-                      <Pressable onPress={() => handleGenerateRoleArtifact('resume')} style={[styles.roleActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                      <Pressable accessibilityRole="button" accessibilityLabel="Draft a resume artifact in this Spirit" onPress={() => handleGenerateRoleArtifact('resume')} style={[styles.roleActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
                         <Text style={styles.roleActionBtnText}>RESUME</Text>
                       </Pressable>
-                      <Pressable onPress={() => handleGenerateRoleArtifact('interview')} style={[styles.roleActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                      <Pressable accessibilityRole="button" accessibilityLabel="Draft interview preparation in this Spirit" onPress={() => handleGenerateRoleArtifact('interview')} style={[styles.roleActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
                         <Text style={styles.roleActionBtnText}>INTERVIEW</Text>
                       </Pressable>
-                      <Pressable onPress={() => handleGenerateRoleArtifact('portfolio')} style={[styles.roleActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                      <Pressable accessibilityRole="button" accessibilityLabel="Draft a portfolio artifact in this Spirit" onPress={() => handleGenerateRoleArtifact('portfolio')} style={[styles.roleActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
                         <Text style={styles.roleActionBtnText}>PORTFOLIO</Text>
                       </Pressable>
-                      <Pressable onPress={() => handleGenerateRoleArtifact('drill')} style={[styles.roleActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                      <Pressable accessibilityRole="button" accessibilityLabel="Draft a practice drill in this Spirit" onPress={() => handleGenerateRoleArtifact('drill')} style={[styles.roleActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
                         <Text style={styles.roleActionBtnText}>DRILL</Text>
                       </Pressable>
-                      <Pressable onPress={() => handleGenerateRoleArtifact('work_sample')} style={[styles.roleActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                      <Pressable accessibilityRole="button" accessibilityLabel="Draft a work sample in this Spirit" onPress={() => handleGenerateRoleArtifact('work_sample')} style={[styles.roleActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
                         <Text style={styles.roleActionBtnText}>WORK SAMPLE</Text>
                       </Pressable>
                     </View>
@@ -919,7 +982,7 @@ export default function AgentSpiritPanel({
                           <Pressable accessibilityRole="button" accessibilityLabel="Continue in Chat with this role artifact" onPress={handleSaveRoleArtifact} style={[styles.roleSaveBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
                             <Text style={styles.roleSaveBtnText}>CONTINUE IN CHAT</Text>
                           </Pressable>
-                          <Pressable onPress={() => setRoleArtifact(null)} style={[styles.roleDismissBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                          <Pressable accessibilityRole="button" accessibilityLabel="Dismiss role artifact" onPress={() => setRoleArtifact(null)} style={[styles.roleDismissBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
                             <Text style={styles.roleDismissBtnText}>DISMISS</Text>
                           </Pressable>
                         </View>
@@ -1078,13 +1141,13 @@ export default function AgentSpiritPanel({
                     </View>
 
                     <View style={styles.roleActionRow}>
-                      <Pressable onPress={() => handleGenerateOpsArtifact('ops_plan')} style={[styles.opsActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                      <Pressable accessibilityRole="button" accessibilityLabel="Draft an operations plan in this Spirit" onPress={() => handleGenerateOpsArtifact('ops_plan')} style={[styles.opsActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
                         <Text style={styles.opsActionBtnText}>OPS PLAN</Text>
                       </Pressable>
-                      <Pressable onPress={() => handleGenerateOpsArtifact('access_checklist')} style={[styles.opsActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                      <Pressable accessibilityRole="button" accessibilityLabel="Draft an access checklist in this Spirit" onPress={() => handleGenerateOpsArtifact('access_checklist')} style={[styles.opsActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
                         <Text style={styles.opsActionBtnText}>ACCESS</Text>
                       </Pressable>
-                      <Pressable onPress={() => handleGenerateOpsArtifact('sop')} style={[styles.opsActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                      <Pressable accessibilityRole="button" accessibilityLabel="Draft a standard operating procedure in this Spirit" onPress={() => handleGenerateOpsArtifact('sop')} style={[styles.opsActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
                         <Text style={styles.opsActionBtnText}>SOP</Text>
                       </Pressable>
                     </View>
@@ -1099,7 +1162,7 @@ export default function AgentSpiritPanel({
                           <Pressable accessibilityRole="button" accessibilityLabel="Continue in Chat with this operations artifact" onPress={handleSaveOpsArtifact} style={[styles.opsSaveBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
                             <Text style={styles.opsSaveBtnText}>CONTINUE IN CHAT</Text>
                           </Pressable>
-                          <Pressable onPress={() => setOpsArtifact(null)} style={[styles.roleDismissBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                          <Pressable accessibilityRole="button" accessibilityLabel="Dismiss operations artifact" onPress={() => setOpsArtifact(null)} style={[styles.roleDismissBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
                             <Text style={styles.roleDismissBtnText}>DISMISS</Text>
                           </Pressable>
                         </View>
@@ -1121,6 +1184,7 @@ export default function AgentSpiritPanel({
                         <View style={{ flexDirection: 'row', gap: 8 }}>
                           <Pressable
                             onPress={async () => {
+                              if (savingProfileRef.current) return;
                               const requestedProfileName = saveProfileName.trim();
                               if (
                                 !requestedProfileName
@@ -1133,6 +1197,9 @@ export default function AgentSpiritPanel({
                               const authority = exactIdentityAuthority;
                               const capturedRequestKey = identityRequestKey;
                               if (!authority || !capturedRequestKey) return;
+                              savingProfileRef.current = true;
+                              const savingToken = savingProfileTokenRef.current + 1;
+                              savingProfileTokenRef.current = savingToken;
                               setSavingProfile(true);
                               setProfileActionStatus('');
                               try {
@@ -1142,17 +1209,29 @@ export default function AgentSpiritPanel({
                                   risk_tier: customKnobs.riskTier, action_posture: customKnobs.actionPosture,
                                   evidence_posture: customKnobs.evidencePosture, communication_density: customKnobs.communicationDensity,
                                   skepticism: customKnobs.skepticism, escalation_trigger: customKnobs.escalationTrigger,
-                                  emoji: getSpiritById(currentSpirit)?.emoji || '🤖', color: getSpiritById(currentSpirit)?.color || '#6366f1',
+                                  emoji: selectedSpirit.emoji || '🤖', color: selectedSpirit.color || '#6366f1',
                                   tagline: `Custom ${s.name} profile`,
                                 };
-                                const { data, error } = await supabase.from('custom_agent_profiles').upsert(
-                                  expectedProfileReceipt,
-                                  { onConflict: 'user_id,name' },
-                                )
+                                const { data: insertedProfiles, error } = await supabase.from('custom_agent_profiles')
+                                  .insert(expectedProfileReceipt)
                                   .setHeader('Authorization', `Bearer ${authority.accessToken}`)
-                                  .select('id, user_id, name, emoji, color, tagline, system_prompt, skill_bundle, risk_tier, action_posture, evidence_posture, communication_density, skepticism, escalation_trigger')
-                                  .single();
+                                  .select('id, user_id, name, emoji, color, tagline, system_prompt, skill_bundle, risk_tier, action_posture, evidence_posture, communication_density, skepticism, escalation_trigger');
                                 if (!isIdentityRequestCurrent(capturedRequestKey)) return;
+                                if (error) {
+                                  const errorCode = customProfileInsertErrorCode(error);
+                                  if (errorCode === '23505') {
+                                    setProfileActionStatus('WARNING: That profile name is already in use. Choose a new name; the existing profile was not changed.');
+                                  } else {
+                                    console.warn('[AgentSpiritPanel] Custom profile insert failed.', { code: errorCode || 'unknown' });
+                                    setProfileActionStatus('ERROR: Custom profile was not saved. Check the connection and try again.');
+                                  }
+                                  return;
+                                }
+                                if (!Array.isArray(insertedProfiles) || insertedProfiles.length !== 1) {
+                                  setProfileActionStatus('WARNING: Custom profile creation could not be verified. No profile was adopted; refresh profiles before retrying.');
+                                  return;
+                                }
+                                const data = insertedProfiles[0];
                                 const returnedProfileId = String(data?.id || '');
                                 const returnedProfile = data as Record<string, unknown> | null;
                                 const receiptMatchesRequestedProfile = returnedProfile !== null
@@ -1160,33 +1239,30 @@ export default function AgentSpiritPanel({
                                     returnedProfile[field] === requestedValue
                                   ));
                                 if (
-                                  error
-                                  || !data
+                                  !data
                                   || !isUuidLike(returnedProfileId)
                                   || returnedProfileId !== returnedProfileId.toLowerCase()
                                   || String(data.user_id || '') !== authority.userId
                                   || String(data.name || '') !== requestedProfileName
                                   || !receiptMatchesRequestedProfile
                                 ) {
-                                  if (error) {
-                                    console.warn('[AgentSpiritPanel] Failed to save profile:', error);
-                                    setProfileActionStatus('ERROR: Custom profile was not saved. Check the connection and try again.');
-                                  } else {
-                                    setProfileActionStatus('WARNING: Custom profile outcome could not be verified. Refresh profiles before retrying.');
-                                  }
+                                  setProfileActionStatus('WARNING: Custom profile outcome could not be verified. No profile was adopted; refresh profiles before retrying.');
                                   return;
                                 }
                                 setCustomProfiles(prev => [...prev.filter(p => p.id !== data.id), data]);
                                 setShowSaveForm(false);
                                 setSaveProfileName('');
                                 setProfileActionStatus('Custom profile saved.');
-                              } catch (err) {
-                                console.warn('[AgentSpiritPanel] Failed to save profile:', err);
+                              } catch {
+                                console.warn('[AgentSpiritPanel] Custom profile insert failed unexpectedly.');
                                 if (isIdentityRequestCurrent(capturedRequestKey)) {
                                   setProfileActionStatus('ERROR: Custom profile was not saved. Check the connection and try again.');
                                 }
                               } finally {
-                                if (isIdentityRequestCurrent(capturedRequestKey)) setSavingProfile(false);
+                                if (savingProfileTokenRef.current === savingToken) {
+                                  savingProfileRef.current = false;
+                                  if (isIdentityRequestCurrent(capturedRequestKey)) setSavingProfile(false);
+                                }
                               }
                             }}
                             disabled={savingProfile}
@@ -1208,8 +1284,12 @@ export default function AgentSpiritPanel({
                         </View>
                       </View>
                     ) : (
-                      <Pressable onPress={() => { setSaveProfileName(s.name + ' (Custom)'); setShowSaveForm(true); }}
-                        style={[{ paddingVertical: 10, borderRadius: 8, backgroundColor: '#6366f115', borderWidth: 1, borderColor: '#6366f140', alignItems: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={`Save ${s.name} settings as a custom Spirit profile`}
+                        onPress={() => { setSaveProfileName(s.name + ' (Custom)'); setShowSaveForm(true); }}
+                        style={[{ minHeight: 44, paddingVertical: 10, borderRadius: 8, backgroundColor: '#6366f115', borderWidth: 1, borderColor: '#6366f140', alignItems: 'center', justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                      >
                         <Text style={{ color: '#6366f1', fontSize: 12, fontFamily: 'monospace', fontWeight: '800', letterSpacing: 0.5 }}>SAVE AS CUSTOM PROFILE</Text>
                       </Pressable>
                     )}
@@ -1431,9 +1511,13 @@ export default function AgentSpiritPanel({
         </View>
       )}
 
-      <View style={styles.activityBar}>
-        <Text style={styles.activityLabel}>NOW:</Text>
-        <Text style={styles.activityValue}>{agent.activity}</Text>
+      <View
+        accessibilityRole={executionTruth.state === 'warning' ? 'alert' : undefined}
+        accessibilityLiveRegion="polite"
+        style={styles.activityBar}
+      >
+        <Text style={styles.activityLabel}>{executionTruth.state === 'active' ? 'NOW:' : 'STATUS:'}</Text>
+        <Text style={styles.activityValue}>{activityCopy}</Text>
       </View>
 
       {onAddSessionTag && onRemoveSessionTag && sessionKey && (
@@ -1489,7 +1573,7 @@ const styles = StyleSheet.create({
   },
   spiritRow: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 8, paddingVertical: 10,
+    minHeight: 44, paddingHorizontal: 8, paddingVertical: 10,
   },
   spiritLabel: {
     color: '#aaa', fontSize: 13, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 1.5,
@@ -1546,7 +1630,7 @@ const styles = StyleSheet.create({
     color: '#ccc', fontSize: 12, fontFamily: 'monospace', marginTop: 4, lineHeight: 18,
   },
   spiritClearBtn: {
-    paddingVertical: 6, paddingHorizontal: 14, borderRadius: 8,
+    minHeight: 44, justifyContent: 'center', paddingVertical: 6, paddingHorizontal: 14, borderRadius: 8,
     backgroundColor: '#ef444415', borderWidth: 1, borderColor: '#ef444430',
   },
   spiritClearText: {
@@ -1900,7 +1984,7 @@ const styles = StyleSheet.create({
     marginTop: -1,
   },
   personalityChip: {
-    paddingHorizontal: 14, paddingVertical: 8, borderRadius: 12,
+    minHeight: 44, justifyContent: 'center', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 12,
     borderWidth: 1, borderColor: '#1e1e3a', backgroundColor: '#000000',
     marginRight: 8,
   },

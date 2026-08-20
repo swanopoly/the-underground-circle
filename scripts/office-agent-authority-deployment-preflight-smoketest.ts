@@ -90,6 +90,31 @@ function readFixtureFile(fixture: string, relativePath: string): string {
   return readFileSync(resolve(fixture, relativePath), 'utf8');
 }
 
+function withRoadmapDeploymentStates(
+  roadmap: string,
+  section47State: 'pending' | 'applied',
+  section48State: 'pending' | 'applied',
+): string {
+  const stateBySection = new Map([
+    [47, section47State],
+    [48, section48State],
+  ] as const);
+
+  return roadmap
+    .split('\n')
+    .map((line) => {
+      const section = line.startsWith('| 47 |') ? 47 : line.startsWith('| 48 |') ? 48 : null;
+      if (section === null) return line;
+
+      const state = stateBySection.get(section);
+      const marker = state === 'pending'
+        ? '**Pending / not applied.**'
+        : '**Applied / catalog-ready.**';
+      return line.replace(/\*\*(?:Pending \/ not applied|Applied\b[^*]*)\*\*/u, marker);
+    })
+    .join('\n');
+}
+
 function expectedSnapshot(repoRoot: string): Record<string, unknown> {
   const local = inspectLocalSource(repoRoot);
   check(local.sourceReady, 'snapshot fixture starts from source-ready canonical files');
@@ -282,35 +307,20 @@ try {
   check(JSON.parse(deploymentGate.stdout).deployment.ready === false, 'require-deployed fails on the machine-readable deployment state');
 
   const roadmapPath = 'docs/AGENTS_ROADMAP.md';
-  const pendingRoadmap = readFixtureFile(fixture, roadmapPath);
-  const invalidRoadmap = pendingRoadmap
-    .split('\n')
-    .map((line) => line.startsWith('| 48 |')
-      ? line.replace('**Pending / not applied.**', '**Applied / catalog-ready.**')
-      : line)
-    .join('\n');
+  const canonicalRoadmap = readFixtureFile(fixture, roadmapPath);
+  const invalidRoadmap = withRoadmapDeploymentStates(canonicalRoadmap, 'pending', 'applied');
   writeFixtureFile(fixture, roadmapPath, invalidRoadmap);
   const invalidRoadmapRun = runPreflight(['--repo-root', fixture, '--json']);
   check(invalidRoadmapRun.status === 2, '§48-applied while §47 remains pending is invalid ordering');
   check(JSON.parse(invalidRoadmapRun.stdout).source.roadmapDeploymentState === 'invalid', 'invalid docs ordering is called out');
 
-  const partialRoadmap = pendingRoadmap
-    .split('\n')
-    .map((line) => line.startsWith('| 47 |')
-      ? line.replace('**Pending / not applied.**', '**Applied / catalog-ready.**')
-      : line)
-    .join('\n');
+  const partialRoadmap = withRoadmapDeploymentStates(canonicalRoadmap, 'applied', 'pending');
   writeFixtureFile(fixture, roadmapPath, partialRoadmap);
   const partialRun = runPreflight(['--repo-root', fixture, '--json']);
   check(partialRun.status === 0, 'valid §47-applied/§48-pending rollout remains source-checkable');
   check(JSON.parse(partialRun.stdout).source.roadmapDeploymentState === 'partial', 'partial rollout is explicitly reported');
 
-  const appliedRoadmap = pendingRoadmap
-    .split('\n')
-    .map((line) => line.startsWith('| 47 |') || line.startsWith('| 48 |')
-      ? line.replace('**Pending / not applied.**', '**Applied / catalog-ready.**')
-      : line)
-    .join('\n');
+  const appliedRoadmap = withRoadmapDeploymentStates(canonicalRoadmap, 'applied', 'applied');
   writeFixtureFile(fixture, roadmapPath, appliedRoadmap);
   const appliedCatalogRun = runPreflight([
     '--repo-root', fixture,

@@ -5,7 +5,7 @@ import {
   type AgentIdentityExactAuthority,
   type AgentIdentityExactSaveResult,
 } from '../../../../lib/agentIdentity';
-import { OfficeAgent, getOfficeStatusColor, getOfficeStatusLabel } from '../../../../lib/officeAgents';
+import { OfficeAgent, getOfficeStatusColor, getOfficeStatusLabel, resolveOfficeAgentExecutionTruth } from '../../../../lib/officeAgents';
 import { SessionTag, type OfficeSessionStorageScope } from '../../../../lib/sessionTags';
 import AgentPanelShell from './AgentPanelShell';
 import {
@@ -210,6 +210,11 @@ export default function AgentPanel({
   onOpenAgentInChat,
 }: Props) {
   const slideAnim = useRef(new Animated.Value(400)).current;
+  // Docking is a web-only inspector affordance. A wide native tablet still
+  // needs the React Native Modal window, hardware-Back handling, and modal
+  // accessibility isolation; never let its desktop breakpoint expose the
+  // persisted web side-panel mode.
+  const supportsDockedPanel = !!isDesktop && Platform.OS === 'web';
 
   const {
     panelMode,
@@ -220,12 +225,7 @@ export default function AgentPanel({
     toggleMode,
     startSideResize,
     resizeSideBy,
-  } = useAgentPanelLayout();
-  // Docking is a web-only inspector affordance. A wide native tablet still
-  // needs the React Native Modal window, hardware-Back handling, and modal
-  // accessibility isolation; never let its desktop breakpoint expose the
-  // persisted web side-panel mode.
-  const supportsDockedPanel = !!isDesktop && Platform.OS === 'web';
+  } = useAgentPanelLayout(supportsDockedPanel);
   // A saved desktop dock preference must never turn a compact or native sheet
   // into a non-modal inspector. Keep the preference for the next web desktop
   // visit, but use centered dialog semantics everywhere else.
@@ -273,6 +273,8 @@ export default function AgentPanel({
   }, []);
   const userId = exactIdentityAuthority?.userId || null;
   const returnFocusRef = useRef<HTMLElement | null>(null);
+  const returnFocusLabelRef = useRef<string | null>(null);
+  const returnFocusGenerationRef = useRef(0);
   // `null` means the platform preference has not resolved yet. Treat unknown
   // (and a failed read) as reduced motion so native never flashes an entrance
   // animation before it knows the user's accessibility preference.
@@ -300,7 +302,7 @@ export default function AgentPanel({
   const scaleAnim = useRef(new Animated.Value(1)).current;
   const opacityAnim = useRef(new Animated.Value(1)).current;
   const panelAnimationRef = useRef<Animated.CompositeAnimation | null>(null);
-  const previouslyOpenAgentRef = useRef<OfficeAgent | null>(null);
+  const previouslyOpenRef = useRef(false);
   const stopPanelAnimation = useCallback(() => {
     panelAnimationRef.current?.stop();
     panelAnimationRef.current = null;
@@ -326,7 +328,7 @@ export default function AgentPanel({
   );
   const agentSubject = useMemo(
     () => agent ? buildAgentRuntimeSubject(agent, { dbAgentId }) : null,
-    [agent, dbAgentId],
+    [agent?.id, agent?.name, agent?.providerType, agent?.sessionKey, agent?.spirit, dbAgentId],
   );
 
   const panelScopeKey = useMemo(() => {
@@ -404,15 +406,22 @@ export default function AgentPanel({
       ? { ...current, name }
       : current);
   }, [panelScopeKey]);
+  const hasCircleContext = !!circleId;
+  const hasIdentityAuthority = !!exactIdentityAuthority;
+  const canCustomize = !!onAppearanceChange;
+  const hasRuntimeConnection = !!agent && !!runtimeConnectionId;
   const panelCapabilities = useMemo<AgentPanelCapabilities>(() => ({
-    hasCircleContext: !!circleId,
-    hasIdentityAuthority: !!exactIdentityAuthority,
-    canCustomize: !!onAppearanceChange,
+    hasCircleContext,
+    hasIdentityAuthority,
+    canCustomize,
     hasRuntimeConnection: !!agent && !!runtimeConnectionId,
-  }), [agent, circleId, exactIdentityAuthority, onAppearanceChange, runtimeConnectionId]);
+  }), [canCustomize, hasCircleContext, hasIdentityAuthority, hasRuntimeConnection]);
+  // Route availability depends on stable subject/provider capabilities, not
+  // the live telemetry object Office replaces on every roster refresh.
+  const panelRoutingKey = agent ? `${agent.id}\u0000${agent.providerType}` : 'closed';
   const tabs = useMemo(
     () => agent ? getAgentPanelTabs(agent, panelCapabilities) : [],
-    [agent, panelCapabilities],
+    [panelCapabilities, panelRoutingKey],
   );
   const tabGroups = useMemo(() => getAgentPanelGroups(tabs), [tabs]);
   const [panelRoute, setPanelRoute] = useState<{
@@ -437,7 +446,7 @@ export default function AgentPanel({
     if (!agent) return;
     const nextTab = getFallbackAgentPanelTab(agent, panelTab, panelCapabilities);
     if (nextTab !== panelTab) setPanelTab(nextTab);
-  }, [agent, panelCapabilities, panelTab, setPanelTab]);
+  }, [panelCapabilities, panelRoutingKey, panelTab, setPanelTab]);
 
   const gatewayPanels = useLazyPanelModule<GatewayPanelsModule>(
     panelTab === 'openswan' || panelTab === 'cron',
@@ -463,41 +472,68 @@ export default function AgentPanel({
   // if (panelTab !== 'terminal' || terminalPanelsModule) return;
   // if (panelTab !== 'memory' || memoryPanelModule) return;
 
-  // Preserve the invoking Office control so closing the pop-up returns keyboard
-  // users to the agent they were inspecting. Docked mode is intentionally
-  // non-modal and leaves the rest of the Office reachable.
+  const restoreAgentPanelFocus = useCallback(() => {
+    if (Platform.OS !== 'web' || typeof document === 'undefined') return;
+    const restoreGeneration = ++returnFocusGenerationRef.current;
+    const triggerLabel = returnFocusLabelRef.current;
+    let target = returnFocusRef.current;
+    returnFocusRef.current = null;
+    returnFocusLabelRef.current = null;
+    const findMatchingTriggers = () => triggerLabel
+      ? Array.from(document.querySelectorAll<HTMLElement>('[aria-label]'))
+        .filter(element => element.getAttribute('aria-label') === triggerLabel)
+      : [];
+    if (!target?.isConnected) {
+      target = findMatchingTriggers().find(element => element.offsetParent !== null) || null;
+    }
+    if (!target || typeof requestAnimationFrame === 'undefined') return;
+    requestAnimationFrame(() => {
+      if (returnFocusGenerationRef.current !== restoreGeneration) return;
+      const liveTarget = target?.isConnected
+        ? target
+        : findMatchingTriggers().find(element => element.offsetParent !== null);
+      liveTarget?.focus({ preventScroll: true });
+    });
+  }, []);
+
+  // Track the exact semantic opener for the current subject. Replacing one
+  // docked agent with another is not a close and must never focus the prior
+  // roster control; restoration runs only when the panel actually closes.
   useEffect(() => {
-    if (Platform.OS !== 'web' || typeof document === 'undefined' || !agent) return;
+    if (Platform.OS !== 'web' || typeof document === 'undefined') return;
+    if (!agent) {
+      restoreAgentPanelFocus();
+      return;
+    }
     const activeElement = document.activeElement;
     const triggerLabel = `Open ${agent.name} agent panel`;
-    const findMatchingTriggers = () => Array.from(document.querySelectorAll<HTMLElement>('[aria-label]'))
+    returnFocusGenerationRef.current += 1;
+    const matchingTriggers = Array.from(document.querySelectorAll<HTMLElement>('[aria-label]'))
       .filter(element => element.getAttribute('aria-label') === triggerLabel);
-    const matchingTriggers = findMatchingTriggers();
     const exactActiveTrigger = activeElement instanceof HTMLElement
       ? matchingTriggers.find(element => element === activeElement || element.contains(activeElement))
       : null;
     const visibleTrigger = matchingTriggers.find(element => element.offsetParent !== null);
+    returnFocusLabelRef.current = triggerLabel;
     // Touch-style RN Web presses can leave document.body active. In that case,
     // retain the exact visible semantic opener instead of losing the user's
     // place when the sheet closes.
     returnFocusRef.current = exactActiveTrigger
       || visibleTrigger
       || (activeElement instanceof HTMLElement && activeElement !== document.body ? activeElement : null);
-    return () => {
-      let target = returnFocusRef.current;
-      returnFocusRef.current = null;
-      if (!target?.isConnected) {
-        target = findMatchingTriggers().find(element => element.offsetParent !== null) || null;
-      }
-      if (!target || typeof requestAnimationFrame === 'undefined') return;
-      requestAnimationFrame(() => {
-        const liveTarget = target?.isConnected
-          ? target
-          : findMatchingTriggers().find(element => element.offsetParent !== null);
-        liveTarget?.focus({ preventScroll: true });
-      });
-    };
-  }, [agent?.id]);
+  }, [agent?.id, agent?.name, restoreAgentPanelFocus]);
+
+  useEffect(() => () => {
+    restoreAgentPanelFocus();
+  }, [restoreAgentPanelFocus]);
+
+  // Office keeps the selected panel subject synchronized to its live roster,
+  // and therefore supplies a fresh close callback whenever that roster
+  // refreshes. The keyboard owner must always call the newest callback without
+  // tearing down and reinstalling its focus trap on every telemetry render.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const closePanel = useCallback(() => onCloseRef.current(), []);
 
   // ── Keyboard shortcuts + modal focus trap (web only) ─────────────────────
   // ESC         → cancel Rename first; otherwise close panel
@@ -537,7 +573,7 @@ export default function AgentPanel({
         if (editingRef.current) {
           if (!renameInFlightRef.current) setRenameDraft(null);
         } else {
-          onClose();
+          closePanel();
         }
         return;
       }
@@ -585,19 +621,44 @@ export default function AgentPanel({
       window.removeEventListener('keydown', onKey, { capture: true });
       if (rafId !== null) cancelAnimationFrame(rafId);
     };
-  }, [agent, effectivePanelMode, onClose, toggleMode]);
+  }, [agent?.id, closePanel, effectivePanelMode, toggleMode]);
 
+  const panelOpen = !!agent;
   useEffect(() => {
     let rafId: number | null = null;
     let timerId: any = null;
-    const wasOpen = previouslyOpenAgentRef.current !== null;
+    const wasOpen = previouslyOpenRef.current;
     const isOpening = !!agent && !wasOpen;
-    previouslyOpenAgentRef.current = agent;
+    previouslyOpenRef.current = panelOpen;
+
+    // The web shell owns its entrance animation through CSS. Touching React
+    // Native Animated values here still notifies AnimatedProps subscribers
+    // during the passive-effect phase, even though those values never drive
+    // the web transition. With a roster of animated PixelAgents mounted behind
+    // the modal, those synchronous notifications can re-enter React deeply
+    // enough to hit the maximum-update-depth guard. Keep the web lifecycle to
+    // the backdrop state only; native retains the bottom-sheet animation below.
+    if (Platform.OS === 'web') {
+      if (agent) {
+        setBackdropOn(reduceMotion || !isOpening);
+        if (!reduceMotion && isOpening && typeof requestAnimationFrame !== 'undefined') {
+          rafId = requestAnimationFrame(() => setBackdropOn(true));
+        } else if (!reduceMotion && isOpening) {
+          timerId = setTimeout(() => setBackdropOn(true), 16);
+        }
+      } else {
+        setBackdropOn(false);
+      }
+      return () => {
+        if (rafId !== null && typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(rafId);
+        if (timerId !== null) clearTimeout(timerId);
+      };
+    }
+
     stopPanelAnimation();
     if (agent) {
-      // Open: render at full opacity/scale and let CSS keyframes handle the
-      // entrance feel on web. The previous Animated.Value-driven scale+fade
-      // re-rendered the entire panel tree on every frame and felt laggy.
+      // Native keeps the card at full opacity/scale and only animates the
+      // compact bottom sheet. Web returned above and uses the shell CSS.
       scaleAnim.setValue(1);
       opacityAnim.setValue(1);
       setBackdropOn(reduceMotion || !isOpening);
@@ -614,7 +675,7 @@ export default function AgentPanel({
           slideAnim.setValue(400);
           startPanelAnimation(Animated.spring(slideAnim, {
             toValue: 0,
-            useNativeDriver: Platform.OS !== 'web',
+            useNativeDriver: true,
             tension: 180,
             friction: 20,
           }));
@@ -634,7 +695,7 @@ export default function AgentPanel({
       if (timerId !== null) clearTimeout(timerId);
       stopPanelAnimation();
     };
-  }, [agent, isDesktop, reduceMotion, setBackdropOn, startPanelAnimation, stopPanelAnimation]);
+  }, [panelOpen, isDesktop, reduceMotion, setBackdropOn, startPanelAnimation, stopPanelAnimation]);
 
   // Extract sessionKey early so hooks always run in same order
   const sessionKey = agent ? getAgentIdentityKey(agent) : undefined;
@@ -660,8 +721,9 @@ export default function AgentPanel({
 
   if (!agent) return null;
 
-  const statusColor = getOfficeStatusColor(agent.status);
-  const statusLabel = getOfficeStatusLabel(agent.status);
+  const executionTruth = resolveOfficeAgentExecutionTruth(agent);
+  const statusColor = executionTruth.state === 'warning' ? '#f59e0b' : getOfficeStatusColor(agent.status);
+  const statusLabel = executionTruth.state === 'warning' ? 'Needs refresh' : getOfficeStatusLabel(agent.status);
   const chatAgentId = dbAgentId || agent.id;
   const openAgentInChat = onOpenAgentInChat && chatAgentTargetIdFromOfficeAgentId(chatAgentId)
     ? (draft?: string) => onOpenAgentInChat(chatAgentId, draft)
@@ -861,7 +923,7 @@ export default function AgentPanel({
       {/* ── OVERVIEW TAB — one-stop agent command center ── */}
       {panelTab === 'overview' && (
         <AgentOverviewPanel
-          key={`${exactIdentityAuthority?.userId || 'locked'}::${exactIdentityAuthority?.circleId || circleId || 'none'}::${agent.id}`}
+          key={panelScopeKey}
           agent={agent}
           circleId={circleId}
           runtimeConnectionId={runtimeConnectionId}
@@ -946,6 +1008,7 @@ export default function AgentPanel({
             accentColor={agent.color || '#6366f1'}
             circleId={circleId}
             userId={userId}
+            spirit={agent.spirit || undefined}
             identityAuthority={runtimeIdentityAuthority}
             isIdentityAuthorityCurrent={isExactIdentityAuthorityCurrent}
           />

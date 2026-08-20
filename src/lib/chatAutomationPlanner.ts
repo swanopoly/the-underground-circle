@@ -1,4 +1,5 @@
 import { inferChatCommandExecution, matchesChatCommandRoute, type ChatCommandDecisionSource, type ChatCommandRouteId } from './chatCommandRegistry';
+import { resolveQuickActionExecution } from './chatActions';
 import { isLowRiskLocalImageExportTask, planComputerTaskPreview } from './computerTaskPlanner';
 import { classifyBrowserbaseWorkflow } from './browserbaseWorkflowIntent';
 import { detectLocalComputerAwarenessIntent, detectLocalComputerAwarenessIntentSequence, getLocalComputerAwarenessRisk } from './localComputerAwarenessIntent';
@@ -990,36 +991,6 @@ function buildPlanFromComputerRequestRoute(route: ChatComputerRequestRoute, norm
   };
 }
 
-function resolvePlannerQuickActionExecution(text: string): { text: string; mode: 'send' | 'prefill' | 'special'; routeId: ChatCommandRouteId | null } {
-  switch (text) {
-    case '__COMPUTER_USE__':
-      return { text, mode: 'special', routeId: 'browser' };
-    case '__TIP__':
-      return { text, mode: 'special', routeId: null };
-    case '__ASSIGN_AGENT__':
-    case '__SPAWN_AGENT__':
-    case '__SPAWN_AGENTS__':
-    case '__LOG_PROOF__':
-    case '__STEP_AWAY__':
-    case '__OPEN_SEARCH__':
-    case '__OPEN_GAMES__':
-    case '__SEND_CRYPTO__':
-    case '__NUKE__':
-      return { text, mode: 'special', routeId: null };
-    default:
-      if (text.startsWith('/')) {
-        // W-A1/M5: keep in sync with the slash branch below — 'vault' was
-        // missing, so /vault commands fell to the "did not map cleanly" path.
-        const routeIds: ChatCommandRouteId[] = [
-          'help', 'summary', 'schedule', 'mission', 'room', 'github', 'wordpress', 'browser', 'build_page', 'hf_tools', 'local_knowledge', 'memory', 'governance', 'vault', 'search',
-        ];
-        const matchedRoute = routeIds.find((routeId) => matchesChatCommandRoute(text, routeId)) || null;
-        return { text, mode: 'send', routeId: matchedRoute };
-      }
-      return { text, mode: 'send', routeId: null };
-  }
-}
-
 function buildSingleChatAutomationPlan(input: BuildChatAutomationPlanInput): ChatAutomationPlan {
   const normalized = input.message.trim();
   const lower = normalized.toLowerCase();
@@ -1049,7 +1020,7 @@ function buildSingleChatAutomationPlan(input: BuildChatAutomationPlanInput): Cha
   const pipelineDecision = buildUserTaskPipelineDecision(normalized, { includeFallback: false });
 
   if (input.quickActionText) {
-    const execution = resolvePlannerQuickActionExecution(input.quickActionText);
+    const execution = resolveQuickActionExecution(input.quickActionText);
     const routeId = execution.routeId || null;
     const risk = buildRiskForRoute(routeId);
     return {

@@ -124,8 +124,8 @@ const ACTION_VERBS: Readonly<Record<string, true>> = Object.freeze({
   commit: true, push: true, pull: true, merge: true, rebase: true,
   fetch: true, clone: true, checkout: true, tag: true, stash: true,
   install: true, configure: true, config: true, setup: true, enable: true,
-  disable: true, archive: true, unarchive: true, connect: true, integrate: true, wire: true, hook: true,
-  authorize: true, grant: true, link: true, login: true, log: true,
+  disable: true, archive: true, unarchive: true, connect: true, disconnect: true, integrate: true, wire: true, hook: true,
+  approve: true, authorize: true, grant: true, link: true, login: true, log: true,
   sign: true, authenticate: true,
   provision: true,
   move: true, copy: true, download: true, upload: true, import: true,
@@ -398,6 +398,15 @@ function firstActionVerb(raw: string, allowGerund = false): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Shared, bounded imperative classifier for callers that already isolated one
+ * candidate clause. Reuse the exact multi-intent vocabulary instead of growing
+ * a second command-specific verb list.
+ */
+export function resolveLeadingChatActionVerb(raw: string): string | null {
+  return firstActionVerb(raw);
 }
 
 // ── Internal boundary model ───────────────────────────────────────────────────

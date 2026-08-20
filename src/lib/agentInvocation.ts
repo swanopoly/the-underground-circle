@@ -5,7 +5,8 @@
 
 import { supabase } from './supabase';
 import { CircleOfficeAgent, BLACKSWAN_AGENT_ID } from './circleOffice';
-import { loadBudgetConfig, checkHardLimit } from './budgetAlerts';
+import { loadBudgetConfig, checkHardLimit, type BudgetConfig } from './budgetAlerts';
+import { loadOfficeUserPreferences } from './officeDashboardPersistence';
 import { getStrictLocalAiModeMessage, shouldBlockExternalAiProvider } from './privacyMode';
 import {
   buildAgentRuntimeSubject,
@@ -146,6 +147,12 @@ const OFFICE_INVOCATION_AUTHORITY_RETIRED =
   'Office invocation authority retired after the durable claim. Nothing was replayed.';
 const OFFICE_INVOCATION_AUTHORITY_UNAVAILABLE =
   'Office invocation authority could not be verified. Nothing was dispatched.';
+const OFFICE_BUDGET_SETTINGS_UNAVAILABLE =
+  'Office budget settings could not be verified. Nothing was dispatched.';
+const OFFICE_BUDGET_USAGE_UNAVAILABLE =
+  'Office budget usage could not be verified. Nothing was dispatched.';
+const OFFICE_BUDGET_USAGE_PAGE_SIZE = 1000;
+const OFFICE_ESTIMATED_COST_PER_TOKEN = 0.0000005;
 
 function normalizeOfficeInvocationExactAuthority(
   input: OfficeInvocationExactAuthority | null | undefined,
@@ -1377,6 +1384,243 @@ function getOfficeProviderFailureCopy(result: AgentInvocationResult): string {
     : OFFICE_PROVIDER_FAILURE;
 }
 
+type InvocationBudgetConfigRead =
+  | { ok: true; config: BudgetConfig }
+  | { ok: false; reason: 'authority' | 'settings' };
+
+type InvocationBudgetSpend = Readonly<{
+  today: number;
+  week: number;
+  month: number;
+}>;
+
+type InvocationBudgetSpendRead =
+  | { ok: true; spend: InvocationBudgetSpend }
+  | { ok: false; reason: 'authority' | 'usage' };
+
+type InvocationBudgetWindow = Readonly<{
+  todayStartMs: number;
+  weekStartMs: number;
+  monthStartMs: number;
+  monthStartIso: string;
+  snapshotEndMs: number;
+  snapshotEndIso: string;
+}>;
+
+function normalizeInvocationBudgetConfig(value: unknown): BudgetConfig | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  if (typeof row.enabled !== 'boolean') return null;
+  if (row.hardLimit !== undefined && typeof row.hardLimit !== 'boolean') return null;
+
+  const config: BudgetConfig = {
+    enabled: row.enabled,
+    ...(row.hardLimit === undefined ? {} : { hardLimit: row.hardLimit }),
+  };
+  for (const period of ['daily', 'weekly', 'monthly'] as const) {
+    const amount = row[period];
+    if (amount === undefined) continue;
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount < 0) return null;
+    config[period] = amount;
+  }
+  return config;
+}
+
+function readCanonicalOfficeBudgetConfig(
+  preferences: Record<string, unknown> | null,
+): BudgetConfig | null {
+  if (!preferences || !Object.prototype.hasOwnProperty.call(preferences, 'budgetConfig')) {
+    return { enabled: false };
+  }
+  return normalizeInvocationBudgetConfig(preferences.budgetConfig);
+}
+
+async function loadInvocationBudgetConfig(
+  circleId: string,
+  exactExecution?: OfficeInvocationExactExecution,
+): Promise<InvocationBudgetConfigRead> {
+  if (!exactExecution) {
+    // Compatibility callers have no immutable account authority. Retain their
+    // device-local setting without attempting to infer a user or circle.
+    const config = normalizeInvocationBudgetConfig(await loadBudgetConfig());
+    return config
+      ? { ok: true, config }
+      : { ok: false, reason: 'settings' };
+  }
+  if (
+    exactExecution.authority.circleId !== circleId
+    || !officeInvocationExecutionIsCurrent(exactExecution)
+  ) return { ok: false, reason: 'authority' };
+
+  const preferenceResult = await loadOfficeUserPreferences(
+    exactExecution.authority.circleId,
+    {
+      userId: exactExecution.authority.userId,
+      accessToken: exactExecution.authority.accessToken,
+    },
+  );
+  if (!officeInvocationExecutionIsCurrent(exactExecution)) {
+    return { ok: false, reason: 'authority' };
+  }
+  if (!preferenceResult.ok) return { ok: false, reason: 'settings' };
+
+  const config = readCanonicalOfficeBudgetConfig(preferenceResult.preferences);
+  return config
+    ? { ok: true, config }
+    : { ok: false, reason: 'settings' };
+}
+
+function buildInvocationBudgetWindow(nowMs: number): InvocationBudgetWindow | null {
+  if (!Number.isFinite(nowMs) || nowMs <= 0) return null;
+  const snapshotEndMs = Math.floor(nowMs);
+  const snapshotEnd = new Date(snapshotEndMs);
+  const snapshotEndIso = snapshotEnd.toISOString();
+  const todayStart = new Date(
+    snapshotEnd.getFullYear(),
+    snapshotEnd.getMonth(),
+    snapshotEnd.getDate(),
+  );
+  const weekStart = new Date(todayStart);
+  weekStart.setDate(weekStart.getDate() - 6);
+  const monthStart = new Date(snapshotEnd.getFullYear(), snapshotEnd.getMonth(), 1);
+  const todayStartMs = todayStart.getTime();
+  const weekStartMs = weekStart.getTime();
+  const monthStartMs = monthStart.getTime();
+  return {
+    todayStartMs,
+    weekStartMs,
+    monthStartMs,
+    monthStartIso: new Date(monthStartMs).toISOString(),
+    snapshotEndMs,
+    snapshotEndIso,
+  };
+}
+
+function readBudgetTokenCount(value: unknown): number | null {
+  const numeric = typeof value === 'string' && /^\d+$/.test(value)
+    ? Number(value)
+    : value;
+  return typeof numeric === 'number'
+    && Number.isSafeInteger(numeric)
+    && numeric >= 0
+    ? numeric
+    : null;
+}
+
+function accumulateInvocationBudgetUsagePage(
+  rows: unknown,
+  circleId: string,
+  window: InvocationBudgetWindow,
+): InvocationBudgetSpend | null {
+  if (!Array.isArray(rows)) return null;
+  let todayTokens = 0;
+  let weekTokens = 0;
+  let monthTokens = 0;
+
+  for (const value of rows) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const row = value as Record<string, unknown>;
+    const createdAtMs = typeof row.created_at === 'string'
+      ? Date.parse(row.created_at)
+      : Number.NaN;
+    const tokenCount = readBudgetTokenCount(row.token_count);
+    if (
+      !isUuidLike(String(row.id || ''))
+      || row.circle_id !== circleId
+      || !Number.isFinite(createdAtMs)
+      || createdAtMs < window.monthStartMs
+      || createdAtMs >= window.snapshotEndMs
+      || tokenCount === null
+      || !['pending', 'streaming', 'done', 'error'].includes(String(row.status || ''))
+    ) return null;
+    monthTokens += tokenCount;
+    if (createdAtMs >= window.weekStartMs) weekTokens += tokenCount;
+    if (createdAtMs >= window.todayStartMs) todayTokens += tokenCount;
+    if (
+      !Number.isSafeInteger(monthTokens)
+      || !Number.isSafeInteger(weekTokens)
+      || !Number.isSafeInteger(todayTokens)
+    ) return null;
+  }
+
+  return {
+    today: todayTokens * OFFICE_ESTIMATED_COST_PER_TOKEN,
+    week: weekTokens * OFFICE_ESTIMATED_COST_PER_TOKEN,
+    month: monthTokens * OFFICE_ESTIMATED_COST_PER_TOKEN,
+  };
+}
+
+async function loadInvocationBudgetSpend(
+  circleId: string,
+  exactExecution?: OfficeInvocationExactExecution,
+): Promise<InvocationBudgetSpendRead> {
+  const window = buildInvocationBudgetWindow(Date.now());
+  if (!window) return { ok: false, reason: 'usage' };
+
+  let expectedCount: number | null = null;
+  let offset = 0;
+  let spend: InvocationBudgetSpend = { today: 0, week: 0, month: 0 };
+
+  while (expectedCount === null || offset < expectedCount) {
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return { ok: false, reason: 'authority' };
+    }
+    let query = supabase
+      .from('office_terminal_responses')
+      .select('id, circle_id, status, token_count, created_at', { count: 'exact' })
+      .eq('circle_id', circleId)
+      .gte('created_at', window.monthStartIso)
+      .lt('created_at', window.snapshotEndIso)
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+      .range(offset, offset + OFFICE_BUDGET_USAGE_PAGE_SIZE - 1);
+    if (exactExecution) {
+      query = query.setHeader(
+        'Authorization',
+        `Bearer ${exactExecution.authority.accessToken}`,
+      );
+      if (exactExecution.signal) query = query.abortSignal(exactExecution.signal);
+    }
+
+    const { data, error, count } = await query;
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return { ok: false, reason: 'authority' };
+    }
+    if (
+      error
+      || !Number.isSafeInteger(count)
+      || Number(count) < 0
+      || (expectedCount !== null && count !== expectedCount)
+    ) return { ok: false, reason: 'usage' };
+    if (expectedCount === null) expectedCount = Number(count);
+
+    const pageSpend = accumulateInvocationBudgetUsagePage(data, circleId, window);
+    if (!pageSpend || !Array.isArray(data)) return { ok: false, reason: 'usage' };
+    spend = {
+      today: spend.today + pageSpend.today,
+      week: spend.week + pageSpend.week,
+      month: spend.month + pageSpend.month,
+    };
+    offset += data.length;
+    if (offset > expectedCount) return { ok: false, reason: 'usage' };
+    if (offset === expectedCount) break;
+    if (data.length === 0) return { ok: false, reason: 'usage' };
+  }
+
+  return { ok: true, spend };
+}
+
+function buildOfficeBudgetPreflightFailure(
+  error: string,
+): AgentInvocationResult {
+  return {
+    success: false,
+    disposition: 'failed',
+    completionVerified: false,
+    error,
+  };
+}
+
 // ─── Invoke & Stream: Main entry point ──────────────────────────────────────
 
 /**
@@ -1529,44 +1773,48 @@ export async function invokeAndStream(
     return buildOfficeInvocationAuthorityUnavailableResult();
   }
 
-  // Check hard spending limits before invoking
+  // Budget authority is a pre-dispatch gate. Exact Office executions read the
+  // captured account's canonical per-circle preferences; compatibility calls
+  // retain the historical device-local configuration without guessing scope.
+  let budgetConfigRead: InvocationBudgetConfigRead;
   try {
-    const budgetConfig = await loadBudgetConfig();
+    budgetConfigRead = await loadInvocationBudgetConfig(req.circleId, exactExecution);
+  } catch {
     if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
       return buildOfficeInvocationAuthorityUnavailableResult();
     }
-    if (budgetConfig.enabled && budgetConfig.hardLimit) {
-      const now = new Date();
-      const todayStr = now.toISOString().split('T')[0];
-      const weekAgo = new Date(now.getTime() - 7 * 86400000).toISOString();
-      const monthAgo = new Date(now.getTime() - 30 * 86400000).toISOString();
+    return buildOfficeBudgetPreflightFailure(OFFICE_BUDGET_SETTINGS_UNAVAILABLE);
+  }
+  if (!budgetConfigRead.ok) {
+    return budgetConfigRead.reason === 'authority'
+      ? buildOfficeInvocationAuthorityUnavailableResult()
+      : buildOfficeBudgetPreflightFailure(OFFICE_BUDGET_SETTINGS_UNAVAILABLE);
+  }
 
-      let todayQuery = supabase.from('office_terminal_responses').select('token_count').eq('circle_id', req.circleId).gte('created_at', todayStr).eq('status', 'done');
-      let weekQuery = supabase.from('office_terminal_responses').select('token_count').eq('circle_id', req.circleId).gte('created_at', weekAgo).eq('status', 'done');
-      let monthQuery = supabase.from('office_terminal_responses').select('token_count').eq('circle_id', req.circleId).gte('created_at', monthAgo).eq('status', 'done');
-      if (exactExecution) {
-        const authorization = `Bearer ${exactExecution.authority.accessToken}`;
-        todayQuery = todayQuery.setHeader('Authorization', authorization);
-        weekQuery = weekQuery.setHeader('Authorization', authorization);
-        monthQuery = monthQuery.setHeader('Authorization', authorization);
-      }
-      const [todayRes, weekRes, monthRes] = await Promise.all([
-        todayQuery,
-        weekQuery,
-        monthQuery,
-      ]);
+  const budgetConfig = budgetConfigRead.config;
+  if (budgetConfig.enabled && budgetConfig.hardLimit) {
+    let spendRead: InvocationBudgetSpendRead;
+    try {
+      spendRead = await loadInvocationBudgetSpend(req.circleId, exactExecution);
+    } catch {
       if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
         return buildOfficeInvocationAuthorityUnavailableResult();
       }
-
-      const estimateCost = (rows: any[]) => (rows || []).reduce((s: number, r: any) => s + (r.token_count || 0), 0) * 0.0000005;
-      const blocked = checkHardLimit(budgetConfig, estimateCost(todayRes.data || []), estimateCost(weekRes.data || []), estimateCost(monthRes.data || []));
-      if (blocked) {
-        return { success: false, error: blocked };
-      }
+      return buildOfficeBudgetPreflightFailure(OFFICE_BUDGET_USAGE_UNAVAILABLE);
     }
-  } catch {
-    console.warn('[agentInvocation] budget_check_unavailable');
+    if (!spendRead.ok) {
+      return spendRead.reason === 'authority'
+        ? buildOfficeInvocationAuthorityUnavailableResult()
+        : buildOfficeBudgetPreflightFailure(OFFICE_BUDGET_USAGE_UNAVAILABLE);
+    }
+
+    const blocked = checkHardLimit(
+      budgetConfig,
+      spendRead.spend.today,
+      spendRead.spend.week,
+      spendRead.spend.month,
+    );
+    if (blocked) return buildOfficeBudgetPreflightFailure(blocked);
   }
 
   // Detect agent type for routing

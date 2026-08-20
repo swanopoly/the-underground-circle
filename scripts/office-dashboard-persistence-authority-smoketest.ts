@@ -136,6 +136,14 @@ async function main(): Promise<void> {
 
   console.log('Persistence request boundaries');
   assert(!source.includes('auth.getSession('), 'dashboard persistence never borrows the mutable global session');
+  assert(
+    source.includes("import { getSupabaseClientForAccessToken } from './supabase';"),
+    'dashboard persistence imports the captured-bearer client',
+  );
+  assert(
+    !/\bsupabase\.(?:from|rpc)\(/.test(source),
+    'dashboard persistence never dispatches through the mutable-session client',
+  );
   assert(source.includes('export type OfficeDashboardExactAuthority'), 'module exports the exact authority contract');
   assert(source.includes('authorityGeneration: number'), 'authority contract carries lifecycle generation');
 
@@ -144,12 +152,33 @@ async function main(): Promise<void> {
     'export async function loadOfficeUserPreferences',
   );
   assert(membershipProof.includes('resolveExactAuthority('), 'membership proof verifies captured exact authority');
+  assert(
+    membershipProof.includes('const exactClient = getSupabaseClientForAccessToken(authority.accessToken);'),
+    'membership proof bypasses the mutable browser auth lock with the captured bearer',
+  );
   assert(membershipProof.includes(".from('circle_members')"), 'membership proof reads the canonical membership table');
   assert(membershipProof.includes(".eq('circle_id', authority.circleId)"), 'membership proof binds the captured circle');
   assert(membershipProof.includes(".eq('user_id', authority.userId)"), 'membership proof binds the captured user');
   assert(membershipProof.includes(".setHeader('Authorization', `Bearer ${authority.accessToken}`)"), 'membership proof uses the captured bearer');
   assert(membershipProof.includes('if (!authorityGuardPasses(isCurrent))'), 'membership proof rejects a late retired result');
   assert(membershipProof.includes("error: 'This signed-in account is not a member of this circle.'"), 'empty membership fails closed as denial');
+
+  for (const [label, start, end] of [
+    ['preference read', 'export async function loadOfficeUserPreferences', 'export async function patchOfficeUserPreferences'],
+    ['preference mutation', 'export async function patchOfficeUserPreferences', 'function readLayoutDocument'],
+    ['layout read', 'export async function loadOfficeLayoutState', 'export async function saveOfficeLayoutState'],
+    ['layout mutation', 'export async function saveOfficeLayoutState', '// Once a target reports'],
+  ] as const) {
+    const body = section(start, end);
+    assert(
+      body.includes('const exactClient = getSupabaseClientForAccessToken(authority.accessToken);'),
+      `${label} bypasses the mutable browser auth lock`,
+    );
+    assert(
+      body.includes(".setHeader('Authorization', `Bearer ${authority.accessToken}`)"),
+      `${label} binds the captured bearer explicitly`,
+    );
+  }
 
   const leaseStart = officeSource.indexOf('// Membership is a lease, not a one-time boot fact.');
   const leaseEnd = officeSource.indexOf('// Cleanup pollers on unmount', leaseStart);
@@ -177,6 +206,10 @@ async function main(): Promise<void> {
     assert(body.includes('capturedAuthority?: OfficeDashboardExactAuthority'), `${label} accepts captured exact authority`);
     assert(body.includes('isCurrent?: OfficeDashboardAuthorityGuard'), `${label} accepts a current-generation guard`);
     assert(body.includes('resolveExactAuthority('), `${label} verifies its captured authority`);
+    assert(
+      body.includes('const exactClient = getSupabaseClientForAccessToken(authority.accessToken);'),
+      `${label} bypasses the mutable browser auth lock`,
+    );
     assert(body.includes(".setHeader('Authorization', `Bearer ${authority.accessToken}`)"), `${label} binds the captured bearer`);
     assert(body.includes('authorityGuardPasses(isCurrent)'), `${label} rejects a retired result`);
   }

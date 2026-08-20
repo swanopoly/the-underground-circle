@@ -23,6 +23,43 @@ export interface OfficeAgentSessionBinding {
   readonly sessionKey: string;
 }
 
+export interface OfficeAgentSessionBindingMutationTarget {
+  readonly agentBotId: string;
+  readonly sessionKey: string;
+}
+
+export interface OfficeAgentSessionBindingMutationSnapshot extends OfficeAgentSessionBinding {
+  readonly updatedAt: string;
+}
+
+export interface OfficeAgentSessionBindingMutationRequest {
+  readonly officeAgentId: string;
+  /** `null` is an explicit expectation that no durable binding exists. */
+  readonly expectedBinding: OfficeAgentSessionBindingMutationSnapshot | null;
+  /** `null` requests an exact clear; a target requests an exact bind or move. */
+  readonly nextBinding: OfficeAgentSessionBindingMutationTarget | null;
+}
+
+export type OfficeAgentSessionBindingMutationOperation = 'bind' | 'move' | 'clear';
+export type OfficeAgentSessionBindingMutationDisposition =
+  | 'applied'
+  | 'unchanged'
+  | 'conflict'
+  | 'target_conflict';
+
+/**
+ * One database-authored compare-and-set receipt. `observedBinding` is the row
+ * locked before the attempt and `resultBinding` is the exact postcondition.
+ */
+export interface OfficeAgentSessionBindingMutationReceipt {
+  readonly contractVersion: 1;
+  readonly disposition: OfficeAgentSessionBindingMutationDisposition;
+  readonly operation: OfficeAgentSessionBindingMutationOperation;
+  readonly officeAgentId: string;
+  readonly observedBinding: OfficeAgentSessionBindingMutationSnapshot | null;
+  readonly resultBinding: OfficeAgentSessionBindingMutationSnapshot | null;
+}
+
 export interface OfficeAgentBindingLocalConnection {
   readonly id: string;
   readonly remoteId: string;
@@ -227,6 +264,175 @@ function isExactSessionKey(value: unknown): value is string {
     && EXACT_SESSION_KEY_RE.test(value);
 }
 
+function isExactTimestamp(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= 64
+    && Number.isFinite(Date.parse(value));
+}
+
+function parseMutationSnapshot(
+  row: Record<string, unknown>,
+  prefix: 'observed' | 'result',
+  officeAgentId: string,
+): OfficeAgentSessionBindingMutationSnapshot | null | typeof READ_FAILED {
+  const id = readField(row, `${prefix}_binding_id`);
+  const agentBotId = readField(row, `${prefix}_agent_bot_id`);
+  const sessionKey = readField(row, `${prefix}_session_key`);
+  const updatedAt = readField(row, `${prefix}_updated_at`);
+  if (id === null && agentBotId === null && sessionKey === null && updatedAt === null) return null;
+  if (
+    !isExactUuid(id)
+    || !isExactUuid(agentBotId)
+    || !isExactSessionKey(sessionKey)
+    || !isExactTimestamp(updatedAt)
+  ) return READ_FAILED;
+  return Object.freeze({
+    id,
+    officeAgentId,
+    agentBotId,
+    sessionKey,
+    updatedAt,
+  });
+}
+
+function mutationBindingMatches(
+  left: OfficeAgentSessionBinding | OfficeAgentSessionBindingMutationTarget | null,
+  right: OfficeAgentSessionBinding | OfficeAgentSessionBindingMutationTarget | null,
+): boolean {
+  if (left === null || right === null) return left === right;
+  const leftRecord = left as OfficeAgentSessionBinding & Partial<OfficeAgentSessionBindingMutationTarget>;
+  const rightRecord = right as OfficeAgentSessionBinding & Partial<OfficeAgentSessionBindingMutationTarget>;
+  return leftRecord.agentBotId === rightRecord.agentBotId
+    && leftRecord.sessionKey === rightRecord.sessionKey
+    && (
+      !('id' in leftRecord)
+      || !('id' in rightRecord)
+      || leftRecord.id === rightRecord.id
+  );
+}
+
+function mutationSnapshotMatches(
+  left: OfficeAgentSessionBindingMutationSnapshot | null,
+  right: OfficeAgentSessionBindingMutationSnapshot | null,
+): boolean {
+  return mutationBindingMatches(left, right)
+    && (
+      left === null
+      || right === null
+      || Date.parse(left.updatedAt) === Date.parse(right.updatedAt)
+    );
+}
+
+/**
+ * Parse and cross-check the single-row RPC receipt against the exact request.
+ * Hostile, partial, widened, or internally inconsistent rows fail closed.
+ */
+export function parseOfficeAgentSessionBindingMutationReceipt(
+  value: unknown,
+  requestInput: unknown,
+): OfficeAgentSessionBindingMutationReceipt | null {
+  try {
+    if (!isRecord(requestInput)) return null;
+    const officeAgentId = readField(requestInput, 'officeAgentId');
+    if (!isExactUuid(officeAgentId)) return null;
+
+    const expectedInput = readField(requestInput, 'expectedBinding');
+    let expectedBinding: OfficeAgentSessionBindingMutationSnapshot | null;
+    if (expectedInput === null) {
+      expectedBinding = null;
+    } else if (isRecord(expectedInput)) {
+      const id = readField(expectedInput, 'id');
+      const expectedOfficeAgentId = readField(expectedInput, 'officeAgentId');
+      const agentBotId = readField(expectedInput, 'agentBotId');
+      const sessionKey = readField(expectedInput, 'sessionKey');
+      const updatedAt = readField(expectedInput, 'updatedAt');
+      if (
+        !isExactUuid(id)
+        || expectedOfficeAgentId !== officeAgentId
+        || !isExactUuid(agentBotId)
+        || !isExactSessionKey(sessionKey)
+        || !isExactTimestamp(updatedAt)
+      ) return null;
+      expectedBinding = { id, officeAgentId, agentBotId, sessionKey, updatedAt };
+    } else {
+      return null;
+    }
+
+    const nextInput = readField(requestInput, 'nextBinding');
+    let nextBinding: OfficeAgentSessionBindingMutationTarget | null;
+    if (nextInput === null) {
+      nextBinding = null;
+    } else if (isRecord(nextInput)) {
+      const agentBotId = readField(nextInput, 'agentBotId');
+      const sessionKey = readField(nextInput, 'sessionKey');
+      if (!isExactUuid(agentBotId) || !isExactSessionKey(sessionKey)) return null;
+      nextBinding = { agentBotId, sessionKey };
+    } else {
+      return null;
+    }
+
+    const rowValue = Array.isArray(value)
+      ? (value.length === 1 ? value[0] : null)
+      : value;
+    if (!isRecord(rowValue)) return null;
+    if (readField(rowValue, 'mutation_contract_version') !== 1) return null;
+    if (readField(rowValue, 'office_agent_id') !== officeAgentId) return null;
+
+    const disposition = readField(rowValue, 'mutation_disposition');
+    if (
+      disposition !== 'applied'
+      && disposition !== 'unchanged'
+      && disposition !== 'conflict'
+      && disposition !== 'target_conflict'
+    ) return null;
+    const expectedOperation: OfficeAgentSessionBindingMutationOperation = nextBinding === null
+      ? 'clear'
+      : expectedBinding === null
+        ? 'bind'
+        : 'move';
+    if (readField(rowValue, 'mutation_operation') !== expectedOperation) return null;
+
+    const observedBinding = parseMutationSnapshot(rowValue, 'observed', officeAgentId);
+    const resultBinding = parseMutationSnapshot(rowValue, 'result', officeAgentId);
+    if (observedBinding === READ_FAILED || resultBinding === READ_FAILED) return null;
+
+    const observedMatchesExpected = mutationSnapshotMatches(observedBinding, expectedBinding);
+    const resultMatchesObserved = mutationSnapshotMatches(resultBinding, observedBinding);
+    const resultMatchesNext = mutationBindingMatches(resultBinding, nextBinding);
+    if (disposition === 'applied' && (!observedMatchesExpected || !resultMatchesNext)) return null;
+    if (
+      disposition === 'applied'
+      && expectedOperation === 'move'
+      && (
+        observedBinding === null
+        || resultBinding === null
+        || resultBinding.id !== observedBinding.id
+      )
+    ) return null;
+    if (
+      disposition === 'unchanged'
+      && (!observedMatchesExpected || !resultMatchesObserved || !resultMatchesNext)
+    ) return null;
+    if (disposition === 'conflict' && (observedMatchesExpected || !resultMatchesObserved)) return null;
+    if (
+      disposition === 'target_conflict'
+      && (!observedMatchesExpected || !resultMatchesObserved || resultMatchesNext)
+    ) return null;
+
+    return Object.freeze({
+      contractVersion: 1 as const,
+      disposition,
+      operation: expectedOperation,
+      officeAgentId,
+      observedBinding,
+      resultBinding,
+    });
+  } catch {
+    return null;
+  }
+}
+
 function isUsableEndpoint(value: unknown): value is string {
   if (
     typeof value !== 'string'
@@ -353,7 +559,10 @@ function resolveOfficeAgentSessionBindingInternal(
   if (!isUsableEndpoint(endpoint)) return fail('connection_endpoint_invalid');
 
   const token = readField(connection, 'token');
-  if (!isRealToken(token)) return fail('connection_token_missing');
+  if (
+    !isRealToken(token)
+    && !(token === '' && isCanonicalTokenlessLocalOpenSwanProxy(endpoint))
+  ) return fail('connection_token_missing');
 
   const sessionFingerprintsByConnection = input.sessionFingerprintsByConnection;
   if (!isRecord(sessionFingerprintsByConnection)) return fail('invalid_session_fingerprints');

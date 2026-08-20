@@ -70,7 +70,13 @@ interface Props {
 function PixelAgentInner({ agent, appearance, environmentType, onPress, selected, scale = 1, showThoughts = false, totalAgents = 1, dancing = false, xp = 0, xpNext = 100, turns = 0, tokens = 0, onAutomate, plaque, xpLevel, xpIntoLevel, xpLevelSpan, xpMaxed = false, reduceMotion: reduceMotionPreference = false }: Props) {
   // Performance mode: disable expensive animations when many agents are on the floor
   // 1-3 agents: full animations | 4-6: reduced | 7+: minimal (static sprites with blinking only)
-  const motionDisabled = reduceMotionPreference === true;
+  // RN Web's JS Animated values notify AnimatedProps subscribers synchronously.
+  // A full Office floor resetting dozens of decorative values from passive
+  // effects can therefore re-enter React until it hits the nested-update limit.
+  // Web already disables RN Animated loops globally; keep PixelAgent static
+  // there as well and reserve these JS-driven effects for native surfaces.
+  const webAnimationEffectsDisabled = Platform.OS === 'web';
+  const motionDisabled = reduceMotionPreference === true || webAnimationEffectsDisabled;
   const reducedMotion = motionDisabled || totalAgents >= 4;
   const minimalMotion = motionDisabled || totalAgents >= 7;
   const interactive = typeof onPress === 'function';
@@ -168,6 +174,7 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
   // the next loop; otherwise a press/celebration could continue after Reduce
   // Motion became active.
   useEffect(() => {
+    if (webAnimationEffectsDisabled) return;
     if (!motionDisabled) return;
     pressScale.stopAnimation();
     celebJump.stopAnimation();
@@ -206,6 +213,7 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
 
   // Dance animation — triggered by badge earn
   useEffect(() => {
+    if (webAnimationEffectsDisabled) return;
     if (motionDisabled || !dancing) {
       danceX.setValue(0);
       danceY.setValue(0);
@@ -246,6 +254,7 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
 
   // Glow animation — disabled in reduced motion
   useEffect(() => {
+    if (webAnimationEffectsDisabled) return;
     if (reducedMotion) {
       glowAnim.stopAnimation();
       glowAnim.setValue(0.3);
@@ -263,6 +272,7 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
 
   // Eye blinking — periodic blink every 3-6s for alive agents
   useEffect(() => {
+    if (webAnimationEffectsDisabled) return;
     if (motionDisabled || agent.status === 'offline') {
       blinkAnim.stopAnimation();
       blinkAnim.setValue(1);
@@ -297,6 +307,7 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
 
   // Typing animation — arm wiggle when building/active (disabled in minimal motion)
   useEffect(() => {
+    if (webAnimationEffectsDisabled) return;
     if (minimalMotion) {
       typingAnim.stopAnimation();
       typingAnim.setValue(0);
@@ -340,6 +351,7 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
   //   full      (1-3)    → breathe + bob + sway + idle look
   // Working agents breathe/bob faster — the floor should read "busy" at a glance.
   useEffect(() => {
+    if (webAnimationEffectsDisabled) return;
     const parked: Array<[Animated.Value, number]> = [
       [bobAnim, 0], [breatheAnim, 1], [swayAnim, 0], [lookAnim, 0],
     ];
@@ -399,12 +411,19 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
     loops.forEach((loop) => loop.start());
     return () => {
       loops.forEach((loop) => loop.stop());
-      parked.forEach(([value, rest]) => value.setValue(rest));
+      // `setValue` synchronously notifies RN Web's AnimatedProps subscriber.
+      // Doing that from passive-effect cleanup for every agent can dispatch
+      // back into React while it is already unmounting this effect and exceed
+      // the nested-update limit. Cancel the in-flight animations here; the
+      // next setup parks values when motion is disabled/offline and otherwise
+      // resumes smoothly from the current frame.
+      parked.forEach(([value]) => value.stopAnimation());
     };
   }, [agent.status, minimalMotion, motionDisabled, reducedMotion, crowd]);
 
   // Limb fidget — disabled in reduced motion mode
   useEffect(() => {
+    if (webAnimationEffectsDisabled) return;
     if (reducedMotion) {
       [leftArmWiggle, rightArmWiggle, leftLegWiggle, rightLegWiggle].forEach(value => {
         value.stopAnimation();
@@ -483,6 +502,7 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
 
   // Aura animations — visual identity, but only for agents that HAVE an aura.
   useEffect(() => {
+    if (webAnimationEffectsDisabled) return;
     if (motionDisabled) {
       auraFlicker.stopAnimation();
       auraPulse.stopAnimation();
@@ -529,6 +549,7 @@ function PixelAgentInner({ agent, appearance, environmentType, onPress, selected
   // Pet animations — disabled in reduced motion (heavy recursive timers), and
   // skipped entirely for agents with no pet (nothing consumes these values).
   useEffect(() => {
+    if (webAnimationEffectsDisabled) return;
     if (reducedMotion || !hasPet) {
       [petBounce, petTail, petCrawl, petCrawlY, petWander, petWanderY, petLegAnim].forEach(value => {
         value.stopAnimation();
@@ -2320,16 +2341,19 @@ const PixelAgent = memo(PixelAgentInner, (prev, next) => {
     prev.xpLevelSpan === next.xpLevelSpan &&
     prev.xpMaxed === next.xpMaxed &&
     prev.selected === next.selected &&
+    prev.scale === next.scale &&
     prev.dancing === next.dancing &&
     prev.appearance === next.appearance &&
     prev.environmentType === next.environmentType &&
     prev.showThoughts === next.showThoughts &&
     prev.totalAgents === next.totalAgents &&
     prev.xp === next.xp &&
+    prev.xpNext === next.xpNext &&
     prev.turns === next.turns &&
     prev.tokens === next.tokens &&
     prev.reduceMotion === next.reduceMotion &&
-    prev.onPress === next.onPress
+    prev.onPress === next.onPress &&
+    prev.onAutomate === next.onAutomate
   );
 });
 export default PixelAgent;
@@ -2361,8 +2385,10 @@ function ConfettiBurst() {
         Animated.timing(p.opacity, { toValue: 0, duration: 700, easing: Easing.in(Easing.quad), useNativeDriver: false }),
       ])
     );
-    Animated.parallel(anims).start();
-  }, []);
+    const animation = Animated.parallel(anims);
+    animation.start();
+    return () => animation.stop();
+  }, [particles]);
 
   return (
     <View style={{ position: 'absolute', top: '30%', left: '50%', zIndex: 60 }}>
@@ -2412,6 +2438,7 @@ function XPBar({ xp, xpNext, color, level, maxed = false, reduceMotion = false }
   const rainbowAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
+    if (Platform.OS === 'web') return;
     if (reduceMotion || pct <= 0) {
       pulseAnim.stopAnimation();
       pulseAnim.setValue(0);
@@ -2426,6 +2453,7 @@ function XPBar({ xp, xpNext, color, level, maxed = false, reduceMotion = false }
   }, [pct > 0, reduceMotion]);
 
   useEffect(() => {
+    if (Platform.OS === 'web') return;
     if (reduceMotion || !isFull) {
       rainbowAnim.stopAnimation();
       rainbowAnim.setValue(0);
@@ -2437,6 +2465,32 @@ function XPBar({ xp, xpNext, color, level, maxed = false, reduceMotion = false }
     });
     loop.start();
     return () => loop.stop();
+  }, [isFull, reduceMotion]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web' || !isFull || reduceMotion || typeof document === 'undefined') return;
+
+    // Shared, idempotent web stylesheet. Inject it after commit so XPBar render
+    // stays pure (and remains safe in non-DOM/SSR web environments).
+    const styleId = 'xp-rainbow-style';
+    if (document.getElementById(styleId)) return;
+    const style = document.createElement('style');
+    style.id = styleId;
+    style.textContent = `
+      @keyframes xp-rainbow {
+        0%   { background-position: 0% 50%; }
+        100% { background-position: 200% 50%; }
+      }
+      .xp-fill-rainbow {
+        background: linear-gradient(90deg, #ff0080, #ff8c00, #ffe600, #00ff88, #00cfff, #a855f7, #ff0080);
+        background-size: 200% 100%;
+        animation: xp-rainbow 1.8s linear infinite;
+      }
+      .xp-fill-rainbow-glow {
+        box-shadow: 0 0 6px 2px rgba(255,255,255,0.8), 0 0 12px 4px rgba(168,85,247,0.6);
+      }
+    `;
+    document.head.appendChild(style);
   }, [isFull, reduceMotion]);
 
   // Glow opacity: stronger when full
@@ -2457,28 +2511,6 @@ function XPBar({ xp, xpNext, color, level, maxed = false, reduceMotion = false }
   const glowColor = isFull ? '#ffffff' : color;
 
   if (Platform.OS === 'web') {
-    // Web: inject a CSS keyframe animation for true rainbow gradient
-    const styleId = 'xp-rainbow-style';
-    if (isFull && !reduceMotion && !document.getElementById(styleId)) {
-      const style = document.createElement('style');
-      style.id = styleId;
-      style.textContent = `
-        @keyframes xp-rainbow {
-          0%   { background-position: 0% 50%; }
-          100% { background-position: 200% 50%; }
-        }
-        .xp-fill-rainbow {
-          background: linear-gradient(90deg, #ff0080, #ff8c00, #ffe600, #00ff88, #00cfff, #a855f7, #ff0080);
-          background-size: 200% 100%;
-          animation: xp-rainbow 1.8s linear infinite;
-        }
-        .xp-fill-rainbow-glow {
-          box-shadow: 0 0 6px 2px rgba(255,255,255,0.8), 0 0 12px 4px rgba(168,85,247,0.6);
-        }
-      `;
-      document.head.appendChild(style);
-    }
-
     return (
       <View style={xpStyles.outer}>
         {/* Glow behind the track */}
@@ -2583,15 +2615,17 @@ function FloatingText({ text, color, xOffset }: { text: string; color: string; x
   const isBig = text.includes('!') || text.includes('COMBO') || text.includes('LEVEL') || text.includes('FIRE') || text.includes('UNSTOPPABLE') || text.includes('LEGEND');
 
   useEffect(() => {
-    Animated.parallel([
+    const animation = Animated.parallel([
       // Pop-in scale
       Animated.spring(scaleAnim, { toValue: 1, friction: 4, tension: 120, useNativeDriver: false }),
       // Float upward
       Animated.timing(animY, { toValue: isBig ? -45 : -35, duration: 2000, useNativeDriver: false, easing: Easing.out(Easing.cubic) }),
       // Fade out
       Animated.timing(opacity, { toValue: 0, duration: 2000, useNativeDriver: false, delay: 600 }),
-    ]).start();
-  }, []);
+    ]);
+    animation.start();
+    return () => animation.stop();
+  }, [animY, isBig, opacity, scaleAnim]);
 
   return (
     <Animated.Text style={{
@@ -2621,14 +2655,23 @@ function MoodBubble({ emoji }: { emoji: string }) {
   const floatAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    Animated.spring(scaleAnim, { toValue: 1, friction: 4, tension: 60, useNativeDriver: false }).start(() => {
-      const floatLoop = animLoop(() => Animated.sequence([
+    let disposed = false;
+    let floatLoop: ReturnType<typeof animLoop> | null = null;
+    const entrance = Animated.spring(scaleAnim, { toValue: 1, friction: 4, tension: 60, useNativeDriver: false });
+    entrance.start(({ finished }) => {
+      if (!finished || disposed) return;
+      floatLoop = animLoop(() => Animated.sequence([
         Animated.timing(floatAnim, { toValue: -3, duration: 1200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
         Animated.timing(floatAnim, { toValue: 0, duration: 1200, useNativeDriver: false, easing: Easing.inOut(Easing.sin) }),
       ]));
       floatLoop.start();
     });
-  }, []);
+    return () => {
+      disposed = true;
+      entrance.stop();
+      floatLoop?.stop();
+    };
+  }, [floatAnim, scaleAnim]);
 
   return (
     <Animated.View style={{
@@ -2701,6 +2744,8 @@ function SparkleEffect({ onComplete }: { onComplete: () => void }) {
       angle: Math.random() * Math.PI * 2,
     }))
   ).current;
+  const onCompleteRef = useRef(onComplete);
+  onCompleteRef.current = onComplete;
 
   useEffect(() => {
     const anims = particles.map(p => {
@@ -2711,8 +2756,12 @@ function SparkleEffect({ onComplete }: { onComplete: () => void }) {
         Animated.timing(p.op, { toValue: 0, duration: 500, useNativeDriver: false }),
       ]);
     });
-    Animated.parallel(anims).start(onComplete);
-  }, []);
+    const animation = Animated.parallel(anims);
+    animation.start(({ finished }) => {
+      if (finished) onCompleteRef.current();
+    });
+    return () => animation.stop();
+  }, [particles]);
 
   const colors = ['#fbbf24', '#f472b6', '#60a5fa', '#a78bfa', '#34d399', '#fb923c'];
   return (
@@ -2764,16 +2813,22 @@ function SweatDrop() {
 function LevelUpFlash({ onComplete }: { onComplete: () => void }) {
   const flashOp = useRef(new Animated.Value(0)).current;
   const flashScale = useRef(new Animated.Value(0.5)).current;
+  const onCompleteRef = useRef(onComplete);
+  onCompleteRef.current = onComplete;
 
   useEffect(() => {
-    Animated.sequence([
+    const animation = Animated.sequence([
       Animated.parallel([
         Animated.timing(flashOp, { toValue: 0.8, duration: 200, useNativeDriver: false }),
         Animated.spring(flashScale, { toValue: 1.5, friction: 4, tension: 60, useNativeDriver: false }),
       ]),
       Animated.timing(flashOp, { toValue: 0, duration: 600, useNativeDriver: false }),
-    ]).start(onComplete);
-  }, []);
+    ]);
+    animation.start(({ finished }) => {
+      if (finished) onCompleteRef.current();
+    });
+    return () => animation.stop();
+  }, [flashOp, flashScale]);
 
   return (
     <Animated.View style={{

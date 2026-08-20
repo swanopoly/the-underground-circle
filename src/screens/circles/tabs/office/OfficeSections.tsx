@@ -224,7 +224,7 @@ export function OfficeWorkspaceSection({
             return (
               <View key={floor.id} style={styles.floorChipWrap}>
                 {renamingFloorId === floor.id ? (
-                  <View style={[styles.floorChip, isActive && styles.floorChipActive, { minHeight: 40, paddingVertical: 3 }]}>
+                  <View style={[styles.floorChip, isActive && styles.floorChipActive]}>
                     <TextInput
                       testID={`office-floor-name-input-${floor.id}`}
                       value={renamingFloorName}
@@ -236,7 +236,7 @@ export function OfficeWorkspaceSection({
                       selectTextOnFocus
                       maxLength={80}
                       accessibilityLabel={`New name for ${floor.name}`}
-                      style={{ minWidth: 130, color: '#f8fafc', fontFamily: 'monospace', fontSize: 11, paddingHorizontal: 4, paddingVertical: 4 }}
+                      style={styles.floorRenameInput}
                     />
                     <Pressable
                       onPress={() => {
@@ -244,11 +244,11 @@ export function OfficeWorkspaceSection({
                       }}
                       accessibilityRole="button"
                       accessibilityLabel={`Save name for ${floor.name}`}
-                      style={{ minWidth: 36, minHeight: 36, alignItems: 'center', justifyContent: 'center' }}
+                      style={styles.floorInlineActionBtn}
                     >
                       <Text style={{ color: '#86efac', fontWeight: '900' }}>✓</Text>
                     </Pressable>
-                    <Pressable onPress={() => setRenamingFloorId(null)} accessibilityRole="button" accessibilityLabel="Cancel floor rename" style={{ minWidth: 36, minHeight: 36, alignItems: 'center', justifyContent: 'center' }}>
+                    <Pressable onPress={() => setRenamingFloorId(null)} accessibilityRole="button" accessibilityLabel="Cancel floor rename" style={styles.floorInlineActionBtn}>
                       <Text style={{ color: '#94a3b8', fontWeight: '900' }}>×</Text>
                     </Pressable>
                   </View>
@@ -259,7 +259,6 @@ export function OfficeWorkspaceSection({
                     onLongPress={() => { setRenamingFloorId(floor.id); setRenamingFloorName(floor.name); }}
                     style={[
                       styles.floorChip,
-                      floors.length > 1 && styles.floorChipWithDelete,
                       isActive && styles.floorChipActive,
                       Platform.OS === 'web' && { cursor: 'pointer' } as any,
                     ]}
@@ -268,7 +267,7 @@ export function OfficeWorkspaceSection({
                     accessibilityHint="Activate to open this floor. Long press to rename it."
                     accessibilityState={{ selected: isActive }}
                   >
-                    <Text style={[styles.floorChipText, isActive && styles.floorChipTextActive]}>{floor.name}</Text>
+                    <Text numberOfLines={1} style={[styles.floorChipText, isActive && styles.floorChipTextActive]}>{floor.name}</Text>
                     {floorAgentCount > 0 && (
                       <View style={styles.floorAgentBadge}>
                         <Text style={styles.floorAgentBadgeText}>{floorAgentCount}</Text>
@@ -281,7 +280,7 @@ export function OfficeWorkspaceSection({
                   <Pressable
                     testID={`office-floor-rename-${floor.id}`}
                     onPress={() => { setRenamingFloorId(floor.id); setRenamingFloorName(floor.name); }}
-                    style={{ minWidth: 36, minHeight: 36, marginLeft: 2, alignItems: 'center', justifyContent: 'center', borderRadius: 8, borderWidth: 1, borderColor: '#334155' }}
+                    style={[styles.floorRenameBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                     accessibilityRole="button"
                     accessibilityLabel={`Rename floor ${floor.name}`}
                   >
@@ -303,15 +302,14 @@ export function OfficeWorkspaceSection({
               </View>
             );
           })}
-          <Pressable testID="office-floor-add" onPress={onAddFloor} style={[styles.floorAddBtn, { minHeight: 44, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]} accessibilityRole="button" accessibilityLabel="Add and open a new floor">
-            <Text style={styles.floorAddBtnText}>+ FLOOR</Text>
+          <Pressable testID="office-floor-add" onPress={onAddFloor} style={[styles.floorAddBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]} accessibilityRole="button" accessibilityLabel="Add and open a new floor">
+            <Text numberOfLines={1} style={styles.floorAddBtnText}>+ FLOOR</Text>
           </Pressable>
           <Pressable
             testID="office-floor-presets-toggle"
             onPress={() => setShowFloorPresets((current) => !current)}
             style={[
               styles.floorAddBtn,
-              { minHeight: 44, justifyContent: 'center' },
               showFloorPresets && { borderColor: accentColor + '80', backgroundColor: accentColor + '12' },
               Platform.OS === 'web' && { cursor: 'pointer' } as any,
             ]}
@@ -319,7 +317,7 @@ export function OfficeWorkspaceSection({
             accessibilityLabel={showFloorPresets ? 'Close floor presets' : 'Open floor presets'}
             accessibilityState={{ expanded: showFloorPresets }}
           >
-            <Text style={[styles.floorAddBtnText, showFloorPresets && { color: accentColor }]}>★ PRESETS</Text>
+            <Text numberOfLines={1} style={[styles.floorAddBtnText, showFloorPresets && { color: accentColor }]}>★ PRESETS</Text>
           </Pressable>
         </ScrollView>
 

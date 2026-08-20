@@ -1009,7 +1009,7 @@ for (const readOnlyAwarenessTool of [
 }
 
 const computerPlanBranchStart = chatSource.indexOf(
-  "if (plan.execution.kind === 'run_computer_task') {",
+  "if (!providerFreeTurn && plan.execution.kind === 'run_computer_task') {",
 );
 assert.match(
   chatSource,
@@ -1022,7 +1022,7 @@ assert.doesNotMatch(
   'Chat has no parallel local lane allowlist that can re-enable ask #1 for computer tasks',
 );
 const openSwanPlanBranchStart = chatSource.indexOf(
-  "if (plan.execution.kind === 'run_openswan') {",
+  "if (!providerFreeTurn && plan.execution.kind === 'run_openswan' && !plan.multiActionLedger) {",
   computerPlanBranchStart,
 );
 assert(

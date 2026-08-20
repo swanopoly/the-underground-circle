@@ -22,7 +22,7 @@ import {
   runOfficeLayoutRequestWithDeadline,
 } from './officeLayoutSaveQueueCore';
 import { safeGetUserForAccessToken } from './authSession';
-import { supabase } from './supabase';
+import { getSupabaseClientForAccessToken } from './supabase';
 
 export interface OfficeLayoutDocument {
   floors: OfficeFloor[];
@@ -207,9 +207,10 @@ export async function verifyOfficeCircleMembership(
   if (!authority) {
     return { ok: false, denied: true, error: OFFICE_AUTHORITY_RETIRED_ERROR };
   }
+  const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
   try {
     const { data, error } = await runOfficeLayoutRequestWithDeadline((signal) => (
-      supabase
+      exactClient
         .from('circle_members')
         .select('circle_id,user_id')
         .eq('circle_id', authority.circleId)
@@ -253,9 +254,10 @@ export async function loadOfficeUserPreferences(
   if (!normalizedCircleId || !authority) {
     return { ok: false, preferences: null, revision: 0, error: 'Sign in required.' };
   }
+  const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
   try {
     const { data, error } = await runOfficeLayoutRequestWithDeadline((signal) => (
-      supabase.rpc('read_my_office_preferences_v1', { p_circle_id: normalizedCircleId })
+      exactClient.rpc('read_my_office_preferences_v1', { p_circle_id: normalizedCircleId })
         .setHeader('Authorization', `Bearer ${authority.accessToken}`)
         .abortSignal(signal)
     ));
@@ -310,8 +312,9 @@ export async function patchOfficeUserPreferences(
   if (!normalizedCircleId || !authority || !partial || typeof partial !== 'object' || Array.isArray(partial)) {
     return { ok: false, revision: 0, retryable: false, error: 'Office preferences failed validation.' };
   }
+  const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
   try {
-    let request = supabase.rpc('patch_my_office_preferences_v1', {
+    let request = exactClient.rpc('patch_my_office_preferences_v1', {
       p_circle_id: normalizedCircleId,
       p_patch: partial,
     }).setHeader('Authorization', `Bearer ${authority.accessToken}`);
@@ -368,11 +371,12 @@ export async function loadOfficeLayoutState(
   if (!normalizedCircleId) return { ok: false, layout: null, version: 0, source: 'none', error: 'Missing circle.' };
   const authority = normalizeLayoutAuthScope(authScope);
   if (!authority) return { ok: false, layout: null, version: 0, source: 'none', error: 'Sign in required.' };
+  const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
 
   let response: { data: unknown; error: unknown };
   try {
     response = await runOfficeLayoutRequestWithDeadline((signal) => (
-      supabase
+      exactClient
         .from('office_layouts')
         .select('layout, layout_version, updated_at')
         .eq('user_id', authority.userId)
@@ -436,11 +440,12 @@ export async function saveOfficeLayoutState(
   if (!normalizedCircleId || !layout || normalizedVersion <= 0 || !authority) {
     return { ok: false, version: 0, source: 'none', error: 'Office layout failed validation.' };
   }
+  const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
   const payload: OfficeLayoutDocument = { ...layout, updatedAt: normalizedVersion };
-  let response: Awaited<ReturnType<typeof supabase.rpc>>;
+  let response: { data: unknown; error: unknown };
   try {
     response = await runOfficeLayoutRequestWithDeadline((signal) => (
-      supabase.rpc('save_office_layout_v2', {
+      exactClient.rpc('save_office_layout_v2', {
         p_circle_id: normalizedCircleId,
         p_layout: payload,
         p_layout_version: normalizedVersion,
@@ -489,9 +494,10 @@ export async function listOfficeAttentionAcknowledgements(
 ): Promise<string[]> {
   const authority = await resolveExactAuthority(circleId, capturedAuthority, isCurrent);
   if (!authority) return [];
+  const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
   const { data, error } = attentionRpcMissingThisSession
     ? { data: null, error: { code: 'PGRST202', message: 'cached: rpc missing this session' } }
-    : await supabase.rpc('list_active_office_attention_acknowledgements', {
+    : await exactClient.rpc('list_active_office_attention_acknowledgements', {
         p_circle_id: authority.circleId,
       }).setHeader('Authorization', `Bearer ${authority.accessToken}`);
   if (!authorityGuardPasses(isCurrent)) return [];
@@ -504,7 +510,7 @@ export async function listOfficeAttentionAcknowledgements(
     // Compatibility for a target that has the historical §37 objects but has
     // not installed the server-clock follow-up yet. Keep current dismissals
     // working; once the migration lands, every read uses the RPC above.
-    const { data: legacyData, error: legacyError } = await supabase
+    const { data: legacyData, error: legacyError } = await exactClient
       .from('office_attention_acknowledgements')
       .select('attention_id,expires_at')
       .eq('user_id', authority.userId)
@@ -538,6 +544,7 @@ export async function acknowledgeOfficeAttention(
   if (!normalizedCircleId || !id) return { ok: false, error: 'Missing attention item.' };
   const authority = await resolveExactAuthority(normalizedCircleId, capturedAuthority, isCurrent);
   if (!authority) return { ok: false, error: OFFICE_AUTHORITY_RETIRED_ERROR };
+  const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
   // Compatibility for targets that still have the historical §37 table but
   // not the server-stamping trigger: an upsert must renew an expired row, not
   // merely update its run_id. The hardened trigger overwrites both values with
@@ -545,7 +552,7 @@ export async function acknowledgeOfficeAttention(
   const acknowledgedAt = new Date();
   const expiresAt = new Date(acknowledgedAt.getTime() + 30 * 24 * 60 * 60 * 1000);
   if (!authorityGuardPasses(isCurrent)) return { ok: false, error: OFFICE_AUTHORITY_RETIRED_ERROR };
-  const { error } = await supabase.from('office_attention_acknowledgements').upsert({
+  const { error } = await exactClient.from('office_attention_acknowledgements').upsert({
     user_id: authority.userId,
     circle_id: authority.circleId,
     attention_id: id,
@@ -587,7 +594,8 @@ export async function listOfficeFloorPresets(
 ): Promise<{ ok: boolean; presets: OfficeFloorPresetRecord[]; error?: string }> {
   const authority = await resolveExactAuthority(circleId, capturedAuthority, isCurrent);
   if (!authority) return { ok: false, presets: [], error: OFFICE_AUTHORITY_RETIRED_ERROR };
-  const { data, error } = await supabase
+  const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+  const { data, error } = await exactClient
     .from('office_floor_presets')
     .select('id,circle_id,user_id,name,description,snapshot,created_at,updated_at')
     .eq('user_id', authority.userId)
@@ -625,8 +633,9 @@ export async function saveOfficeFloorPreset(input: {
   if (!name || !snapshot) return { ok: false, error: 'Preset name or floor snapshot is invalid.' };
   const authority = await resolveExactAuthority(input.circleId, capturedAuthority, isCurrent);
   if (!authority) return { ok: false, error: OFFICE_AUTHORITY_RETIRED_ERROR };
+  const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
   if (!authorityGuardPasses(isCurrent)) return { ok: false, error: OFFICE_AUTHORITY_RETIRED_ERROR };
-  const { data, error } = await supabase
+  const { data, error } = await exactClient
     .from('office_floor_presets')
     .upsert({
       user_id: authority.userId,
@@ -657,8 +666,9 @@ export async function deleteOfficeFloorPreset(
   if (!normalizedId || !normalizedCircleId) return { ok: false, error: 'Missing preset or circle.' };
   const authority = await resolveExactAuthority(normalizedCircleId, capturedAuthority, isCurrent);
   if (!authority) return { ok: false, error: OFFICE_AUTHORITY_RETIRED_ERROR };
+  const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
   if (!authorityGuardPasses(isCurrent)) return { ok: false, error: OFFICE_AUTHORITY_RETIRED_ERROR };
-  const { data, error } = await supabase
+  const { data, error } = await exactClient
     .from('office_floor_presets')
     .delete()
     .eq('id', normalizedId)
@@ -686,7 +696,8 @@ export async function loadOfficeCircleSessionMemoryMode(
 ): Promise<OfficeSessionMemoryModeLoadResult> {
   const authority = await resolveExactAuthority(circleId, capturedAuthority, isCurrent);
   if (!authority) return { ok: false, mode: 'private', error: OFFICE_AUTHORITY_RETIRED_ERROR };
-  const { data, error } = await supabase
+  const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+  const { data, error } = await exactClient
     .from('circles')
     .select('id,settings')
     .eq('id', authority.circleId)
@@ -721,7 +732,8 @@ export async function saveOfficeCircleSessionMemoryMode(
   }
   const authority = await resolveExactAuthority(circleId, capturedAuthority, isCurrent);
   if (!authority) return { ok: false, error: OFFICE_AUTHORITY_RETIRED_ERROR };
-  const { data, error } = await supabase
+  const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+  const { data, error } = await exactClient
     .from('circles')
     .select('id,settings')
     .eq('id', authority.circleId)
@@ -738,7 +750,7 @@ export async function saveOfficeCircleSessionMemoryMode(
     ? data.settings as Record<string, unknown>
     : {};
   if (!authorityGuardPasses(isCurrent)) return { ok: false, error: OFFICE_AUTHORITY_RETIRED_ERROR };
-  const { data: updatedRows, error: updateError } = await supabase
+  const { data: updatedRows, error: updateError } = await exactClient
     .from('circles')
     .update({ settings: { ...settings, sessionMemoryMode: mode } })
     .eq('id', authority.circleId)

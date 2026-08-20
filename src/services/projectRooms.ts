@@ -6,6 +6,10 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type RoomStatus = 'active' | 'paused' | 'completed';
@@ -91,16 +95,25 @@ export async function createRoom(params: {
 }
 
 export async function updateRoomStatus(roomId: string, status: RoomStatus): Promise<void> {
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('project_rooms')
     .update({ status })
-    .eq('id', roomId);
+    .eq('id', roomId)
+    .select('id')
+    .maybeSingle();
   if (error) throw error;
+  if (!data) throw new Error('The project room was not updated. Check your circle access and try again.');
 }
 
 export async function deleteRoom(roomId: string): Promise<void> {
-  const { error } = await supabase.from('project_rooms').delete().eq('id', roomId);
+  const { data, error } = await supabase
+    .from('project_rooms')
+    .delete()
+    .eq('id', roomId)
+    .select('id')
+    .maybeSingle();
   if (error) throw error;
+  if (!data) throw new Error('The project room was not deleted. Check your circle access and try again.');
 }
 
 // ─── Agent Presence ───────────────────────────────────────────────────────────
@@ -209,67 +222,163 @@ export async function getRoomActivity(roomId: string, limit = 50): Promise<RoomA
 // ─── Hooks ────────────────────────────────────────────────────────────────────
 
 export function useProjectRooms(circleId: string | null) {
-  const [rooms, setRooms] = useState<ProjectRoom[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [state, setState] = useState<{
+    circleId: string | null;
+    rooms: ProjectRoom[];
+    isLoading: boolean;
+    error: string | null;
+  }>({
+    circleId: null,
+    rooms: [],
+    isLoading: true,
+    error: null,
+  });
+  const generationRef = useRef(0);
 
   const fetch = useCallback(async () => {
-    if (!circleId) return;
-    const data = await getRooms(circleId).catch(() => []);
-    setRooms(data);
-    setIsLoading(false);
+    const generation = ++generationRef.current;
+    if (!circleId) {
+      setState({ circleId: null, rooms: [], isLoading: false, error: null });
+      return [];
+    }
+
+    setState(previous => ({
+      circleId,
+      rooms: previous.circleId === circleId ? previous.rooms : [],
+      isLoading: previous.circleId !== circleId,
+      error: null,
+    }));
+    try {
+      const data = await getRooms(circleId);
+      if (generation !== generationRef.current) return undefined;
+      setState({ circleId, rooms: data, isLoading: false, error: null });
+      return data;
+    } catch (loadError) {
+      if (generation !== generationRef.current) return undefined;
+      setState(previous => ({
+        circleId,
+        rooms: previous.circleId === circleId ? previous.rooms : [],
+        isLoading: false,
+        error: errorMessage(loadError, 'Project rooms could not be loaded.'),
+      }));
+      return null;
+    }
   }, [circleId]);
 
   useEffect(() => {
-    if (!circleId) return;
-    fetch();
+    void fetch();
+    if (!circleId) return () => { generationRef.current += 1; };
     const ch = supabase
       .channel(`project_rooms:${circleId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'project_rooms', filter: `circle_id=eq.${circleId}` },
-        () => fetch())
+        () => { void fetch(); })
       .subscribe();
-    return () => { supabase.removeChannel(ch); };
+    return () => {
+      generationRef.current += 1;
+      supabase.removeChannel(ch);
+    };
   }, [circleId, fetch]);
 
-  return { rooms, isLoading, refresh: fetch };
+  const isCurrentScope = state.circleId === circleId;
+  return {
+    rooms: isCurrentScope ? state.rooms : [],
+    isLoading: isCurrentScope ? state.isLoading : true,
+    error: isCurrentScope ? state.error : null,
+    refresh: fetch,
+  };
 }
 
 export function useRoomAgents(roomId: string | null) {
   const [agents, setAgents] = useState<RoomAgent[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const generationRef = useRef(0);
 
   const fetch = useCallback(async () => {
-    if (!roomId) return;
-    const data = await getRoomAgents(roomId).catch(() => []);
-    setAgents(data);
+    const generation = ++generationRef.current;
+    if (!roomId) {
+      setAgents([]);
+      setError(null);
+      setIsLoading(false);
+      return [];
+    }
+    setIsLoading(true);
+    setError(null);
+    try {
+      const data = await getRoomAgents(roomId);
+      if (generation !== generationRef.current) return undefined;
+      setAgents(data);
+      return data;
+    } catch (loadError) {
+      if (generation !== generationRef.current) return undefined;
+      setError(errorMessage(loadError, 'Room agents could not be loaded.'));
+      return null;
+    } finally {
+      if (generation === generationRef.current) setIsLoading(false);
+    }
   }, [roomId]);
 
   useEffect(() => {
-    if (!roomId) return;
-    fetch();
+    void fetch();
+    if (!roomId) return () => { generationRef.current += 1; };
     const ch = supabase
       .channel(`room_agents:${roomId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'project_room_agents', filter: `room_id=eq.${roomId}` },
-        () => fetch())
+        () => { void fetch(); })
       .subscribe();
-    return () => { supabase.removeChannel(ch); };
+    return () => {
+      generationRef.current += 1;
+      supabase.removeChannel(ch);
+    };
   }, [roomId, fetch]);
 
-  return { agents, refresh: fetch };
+  return { agents, isLoading, error, refresh: fetch };
 }
 
 export function useRoomActivity(roomId: string | null) {
   const [activity, setActivity] = useState<RoomActivity[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const generationRef = useRef(0);
+
+  const fetch = useCallback(async () => {
+    const generation = ++generationRef.current;
+    if (!roomId) {
+      setActivity([]);
+      setError(null);
+      setIsLoading(false);
+      return [];
+    }
+    setIsLoading(true);
+    setError(null);
+    try {
+      const data = await getRoomActivity(roomId);
+      if (generation !== generationRef.current) return undefined;
+      setActivity(data);
+      return data;
+    } catch (loadError) {
+      if (generation !== generationRef.current) return undefined;
+      setError(errorMessage(loadError, 'Room activity could not be loaded.'));
+      return null;
+    } finally {
+      if (generation === generationRef.current) setIsLoading(false);
+    }
+  }, [roomId]);
 
   useEffect(() => {
-    if (!roomId) return;
-    getRoomActivity(roomId).then(setActivity).catch(() => {});
+    void fetch();
+    if (!roomId) return () => { generationRef.current += 1; };
     const ch = supabase
       .channel(`room_activity:${roomId}`)
       .on('postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'project_room_activity', filter: `room_id=eq.${roomId}` },
         (payload) => setActivity(prev => [payload.new as RoomActivity, ...prev].slice(0, 50)))
       .subscribe();
-    return () => { supabase.removeChannel(ch); };
-  }, [roomId]);
+    return () => {
+      generationRef.current += 1;
+      supabase.removeChannel(ch);
+    };
+  }, [roomId, fetch]);
 
-  return { activity };
+  return { activity, isLoading, error, refresh: fetch };
 }

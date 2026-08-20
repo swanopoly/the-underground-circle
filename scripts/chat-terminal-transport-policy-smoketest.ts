@@ -318,8 +318,8 @@ assert(
   'ChatTab keeps greetings from selecting or resuming a prior recovery action',
 );
 assert(
-  chatTabSource.includes('!conversationOnlyTurn\n      && !content.startsWith')
-    && chatTabSource.includes('&& !boundOpenSwanResume\n      && !hasAuthoritativeMultiActionContract'),
+  chatTabSource.includes('!preflightHasAuthoritativeMultiActionContract\n      &&\n      !conversationOnlyTurn\n      && !content.startsWith')
+    && chatTabSource.includes('!conversationOnlyTurn\n      && !boundOpenSwanResume\n      && !preservesIntactMultiIntentTurn'),
   'ChatTab keeps greetings on the selected model instead of connected-agent or capability dispatch',
 );
 assert(
@@ -330,7 +330,8 @@ assert(
 assert(
   chatTabSource.includes("terminalTransport.path === 'batch_plain_chat'")
     && chatTabSource.includes("surface: 'main_chat_plain_model'")
-    && chatTabSource.includes('const { invokePlainChatModel } = await import')
+    && chatTabSource.includes('const llmProviderModule = blackSwanModule')
+    && chatTabSource.includes('const result = await llmProviderModule!.invokePlainChatModel({')
     && !chatTabSource.includes('const plainResponse = await getAIResponse(augmentedPrompt, context);')
     && chatTabSource.indexOf("if (usePlainModelFallback) {")
       < chatTabSource.indexOf("const structured = await runOpenSwanSessionTurn({"),

@@ -9,7 +9,7 @@
  */
 
 import { supabase } from './supabase';
-import { getSwanBotTurnResult, type SwanBotContext } from './swanbot';
+import { SealedModelDispatchError, getSwanBotTurnResult, type SwanBotContext } from './swanbot';
 import {
   TASK_CAPABILITY_PROFILES,
   inferTaskCapabilityProfile,
@@ -100,6 +100,8 @@ export interface AgentRunRequest {
   agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
   targetAgentSubjects?: AgentRuntimeSubjectMetadata[] | null;
   model?: string;
+  /** Exact pre-dispatch model authority supplied by Chat. */
+  modelDispatchSealed?: boolean;
   connectedProviders?: ConnectedProviderSet | string[];
   /**
    * Volatile typed-loop context. Callers should supply only values owned by
@@ -153,6 +155,8 @@ function normalizeConnectedProviders(value?: ConnectedProviderSet | string[]): C
 export interface AgentRunResult {
   /** Transport compatibility flag: true means a model response was returned. */
   success: boolean;
+  /** The exact generation-sealed model failed before producing a response. */
+  modelDispatchFailed?: boolean;
   /** Authoritative task-level terminal outcome. */
   terminalOutcome: AgentTaskTerminalOutcome;
   response: string;
@@ -538,17 +542,19 @@ export async function executeAgentRun(
   const profileResolution = resolveOpenSwanProfileForMode(mode || 'talk', prompt, routingSurface);
   const { resolveModelForProfile } = await import('./serviceProfileSouls');
   const connectedProviders = normalizeConnectedProviders(request.connectedProviders);
-  const resolvedModel = resolveModelForProfile(
-    profileResolution.resolvedProfile,
-    model,
-    routeAnalysis.route.intent,
-    connectedProviders,
-    routeAnalysis.route.complexity,
-    undefined,
-    // P27: raw message activates the BlackSwan reliability guard on the
-    // EXECUTION model — the hard subset of the grounded lane escalates to frontier.
-    prompt,
-  );
+  const resolvedModel = request.modelDispatchSealed && model
+    ? model
+    : resolveModelForProfile(
+        profileResolution.resolvedProfile,
+        model,
+        routeAnalysis.route.intent,
+        connectedProviders,
+        routeAnalysis.route.complexity,
+        undefined,
+        // P27: raw message activates the BlackSwan reliability guard on the
+        // EXECUTION model — the hard subset of the grounded lane escalates to frontier.
+        prompt,
+      );
   const activeTaskKind =
     modePolicy.key === 'build' || modePolicy.key === 'execute'
       ? 'build'
@@ -756,6 +762,7 @@ export async function executeAgentRun(
       userName,
       ...subjectPayload.swanContextPatch,
       model: resolvedModel || undefined,
+      modelDispatchSealed: request.modelDispatchSealed === true,
       chatHistory: context?.chatHistory,
       sessionArchiveContext: context?.sessionArchiveContext,
       modeKey: modePolicy.key,
@@ -991,6 +998,7 @@ export async function executeAgentRun(
 
     return {
       success: false,
+      modelDispatchFailed: err instanceof SealedModelDispatchError,
       terminalOutcome: failureOutcome,
       runId,
       response: `Something went wrong: ${err?.message || 'Unknown error'}`,

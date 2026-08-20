@@ -256,11 +256,12 @@ const LIVE_CATALOG_UI_TIMEOUT_MS = 3500;
 async function loadProviderCatalogWithTimeout(
   provider: LLMProvider,
   circleId: string | null | undefined,
+  force = false,
 ): Promise<ProviderModelCatalogSnapshot> {
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      loadProviderModelCatalogSnapshot(provider, circleId),
+      loadProviderModelCatalogSnapshot(provider, circleId, { force }),
       new Promise<ProviderModelCatalogSnapshot>((resolve) => {
         timeoutId = setTimeout(() => resolve(
           createProviderModelCatalogFallback(provider, 'catalog_timeout'),
@@ -275,12 +276,13 @@ async function loadProviderCatalogWithTimeout(
 async function loadConnectedProviderCatalogs(
   activeProviders: ReadonlySet<LLMProvider>,
   circleId: string | null | undefined,
+  force = false,
 ): Promise<Map<LLMProvider, ProviderModelCatalogSnapshot>> {
   const providers = [...activeProviders].filter(
     (provider) => LIVE_MODEL_CATALOG_PROVIDERS.has(provider),
   );
   const pairs = await Promise.all(providers.map(async (provider) => {
-    const snapshot = await loadProviderCatalogWithTimeout(provider, circleId);
+    const snapshot = await loadProviderCatalogWithTimeout(provider, circleId, force);
     return [provider, snapshot] as const;
   }));
   return new Map(pairs);
@@ -320,7 +322,7 @@ function readyModelOptions(
   const availability = optionAvailability(profile);
   return models.map((model) => ({
     ...model,
-    ready: connected,
+    ready: connected && profile.connected,
     availability,
   }));
 }
@@ -395,6 +397,8 @@ interface RegistryOpts {
    *  but with `ready=false` so the picker can grey them out instead of
    *  hiding entirely (helpful for "go connect this" affordances). */
   includeDisconnected?: boolean;
+  /** Bypass per-provider catalog caches for an exact pre-dispatch refresh. */
+  forceCatalogRefresh?: boolean;
 }
 
 export async function loadModelGroups(circleId: string | null | undefined, opts: RegistryOpts = {}): Promise<ModelGroup[]> {
@@ -416,6 +420,7 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
   const liveCatalogs = await loadConnectedProviderCatalogs(
     activeUserApiProviders,
     circleId,
+    opts.forceCatalogRefresh === true,
   );
 
   if (activeUserApiProviders.has('openai')) maybeRefreshDirectProviderCatalog('openai');
@@ -453,12 +458,13 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
     connected: anthropicReady,
     snapshotStatus: anthropicSnapshot.status,
     selectableModelCount: anthropicModels.length,
+    failureCode: anthropicSnapshot.failureCode,
   });
   groups.push({
     provider: 'anthropic',
     label: 'Anthropic',
-    connected: anthropicReady,
-    hint: anthropicReady
+    connected: anthropicReadiness.connected,
+    hint: anthropicReadiness.connected
       ? combinedCatalogHint(anthropicReadiness)
       : 'Add your Anthropic key in Marketplace > Models before using Claude chat models.',
     catalogStatus: anthropicReadiness.state,
@@ -593,6 +599,7 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
       connected: hasUserKey,
       snapshotStatus: catalogSnapshot.status,
       selectableModelCount: chatReadyModels.length,
+      failureCode: catalogSnapshot.failureCode,
     });
 
     // This registry feeds Chat, Rooms, and agent-spawn selectors. Never show a
@@ -606,7 +613,7 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
     groups.push({
       provider: entry.marketplaceProvider,
       label: hasUserKey ? entry.label : `${entry.label} - key needed`,
-      connected: hasUserKey,
+      connected: catalogReadiness.connected,
       hint: hasUserKey ? combinedCatalogHint(catalogReadiness, hint) : hint,
       catalogStatus: catalogReadiness.state,
       catalogLabel: catalogReadiness.label,
@@ -700,12 +707,13 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
       connected: isConnected,
       snapshotStatus: catalogSnapshot.status,
       selectableModelCount: entry.models.length,
+      failureCode: catalogSnapshot.failureCode,
     });
     groups.push({
       provider: entry.provider,
       label: isDegraded ? `${entry.label} — DEGRADED` : entry.label,
-      connected: isConnected,
-      hint: isConnected
+      connected: catalogReadiness.connected,
+      hint: catalogReadiness.connected
         ? combinedCatalogHint(catalogReadiness, providerHint)
         : providerHint,
       catalogStatus: catalogReadiness.state,

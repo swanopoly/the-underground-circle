@@ -300,7 +300,7 @@ assert(
 const approvalArgsSource = section(
   guardedRuntimeSource,
   '      approvalArgs = {',
-  '      const gate = await maybeRequestToolApproval(',
+  '      const gate = await maybeAuthorizeToolWithWorkflowReview(',
   'native semantic durable approval args',
 );
 assert(

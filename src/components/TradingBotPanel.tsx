@@ -56,15 +56,12 @@ import {
   saveTradeAlert,
   trackWallet,
   logTrade,
-  getTradingLog,
   getFeaturedTrades,
   generateFeaturedTrades,
   executeFeaturedTrade,
   getFeaturedTradeStats,
-  getOpenPositions,
   closePosition,
   closePaperPosition,
-  checkPositionStops,
   scoreTokenRisk,
   calculateTechnicalSignals,
   generateRebalancePlan,
@@ -95,6 +92,8 @@ type Tab = 'featured' | 'pending' | 'positions' | 'signals' | 'portfolio' | 'pap
 
 const ALL_TABS: { key: Tab; label: string; icon: string; color: string }[] = [
   { key: 'trade',     label: 'Terminal',   icon: 'TV', color: '#3b82f6' },
+  { key: 'portfolio', label: 'Portfolio',  icon: 'PF', color: '#22c55e' },
+  { key: 'positions', label: 'Positions',  icon: 'PS', color: '#06b6d4' },
   { key: 'paper',     label: 'Paper',      icon: 'PP', color: '#14b8a6' },
   { key: 'signals',   label: 'Signals',    icon: '//', color: '#6366f1' },
   { key: 'backtest',  label: 'Lab',        icon: 'BT', color: '#f97316' },
@@ -104,6 +103,7 @@ const ALL_TABS: { key: Tab; label: string; icon: string; color: string }[] = [
   { key: 'alerts',    label: 'Alerts',     icon: '!',  color: '#ef4444' },
   { key: 'pending',   label: 'Queue',      icon: '..', color: '#f97316' },
   { key: 'wallets',   label: 'Watch',      icon: '@',  color: '#ec4899' },
+  { key: 'history',   label: 'History',    icon: 'HX', color: '#a78bfa' },
 ];
 
 interface Props {
@@ -393,92 +393,239 @@ function getExecutionModeLabel(mode: TradingExecutionMode): string {
   }
 }
 
+function getTradingErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message.trim()) return error.message;
+  if (typeof error === 'string' && error.trim()) return error;
+  return fallback;
+}
+
+async function assertExactTradingUser(expectedUserId: string): Promise<void> {
+  const { data, error } = await supabase.auth.getUser();
+  if (error) throw error;
+  if (!data.user) {
+    throw new Error('Your session expired. Sign in again, then retry.');
+  }
+  if (data.user.id !== expectedUserId) {
+    throw new Error('This trading view no longer matches the signed-in account. Reload the circle before continuing.');
+  }
+}
+
+function mapScopedTradeLog(row: any): TradeLogEntry {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    circleId: row.circle_id || undefined,
+    walletAddress: row.wallet_address,
+    action: row.action as TradeLogEntry['action'],
+    inputMint: row.input_mint || undefined,
+    outputMint: row.output_mint || undefined,
+    inputAmount: row.input_amount || undefined,
+    outputAmount: row.output_amount || undefined,
+    priceUsd: row.price_usd != null ? parseFloat(row.price_usd) : undefined,
+    txHash: row.tx_hash || undefined,
+    status: row.status as TradeLogEntry['status'],
+    reason: row.reason || undefined,
+    executionMode: (row.execution_mode || 'live') as TradingExecutionMode,
+    strategyName: row.strategy_name || undefined,
+    backtestRunId: row.backtest_run_id || undefined,
+    metadata: row.metadata || {},
+    createdAt: row.created_at,
+  };
+}
+
+function mapScopedPosition(row: any): Position {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    circleId: row.circle_id || undefined,
+    tokenMint: row.token_mint,
+    tokenSymbol: row.token_symbol,
+    side: row.side || 'long',
+    entryPrice: parseFloat(row.entry_price) || 0,
+    currentPrice: parseFloat(row.current_price) || 0,
+    quantity: parseFloat(row.quantity) || 0,
+    entryValueUsd: parseFloat(row.entry_value_usd) || 0,
+    currentValueUsd: parseFloat(row.current_value_usd) || 0,
+    unrealizedPnl: parseFloat(row.unrealized_pnl) || 0,
+    unrealizedPnlPct: parseFloat(row.unrealized_pnl_pct) || 0,
+    stopLossPrice: row.stop_loss_price != null ? parseFloat(row.stop_loss_price) : undefined,
+    takeProfitPrice: row.take_profit_price != null ? parseFloat(row.take_profit_price) : undefined,
+    trailingStopPct: row.trailing_stop_pct != null ? parseFloat(row.trailing_stop_pct) : undefined,
+    entryTxHash: row.entry_tx_hash || undefined,
+    executionMode: (row.execution_mode || 'live') as TradingExecutionMode,
+    strategyName: row.strategy_name || undefined,
+    backtestRunId: row.backtest_run_id || undefined,
+    status: row.status,
+    openedAt: row.created_at,
+    closedAt: row.closed_at || undefined,
+  };
+}
+
+function TradingLoadError({
+  title,
+  message,
+  busy,
+  onRetry,
+  testID,
+}: {
+  title: string;
+  message: string;
+  busy: boolean;
+  onRetry: () => void;
+  testID: string;
+}) {
+  return (
+    <View
+      style={s.center}
+      accessibilityRole="alert"
+      accessibilityLiveRegion="polite"
+      testID={testID}
+    >
+      <Text style={s.emptyTitle}>{title}</Text>
+      <Text style={s.emptyDesc}>{message}</Text>
+      <Pressable
+        onPress={onRetry}
+        disabled={busy}
+        accessibilityRole="button"
+        accessibilityLabel={`Retry ${title.toLowerCase()}`}
+        accessibilityState={{ disabled: busy, busy }}
+        style={[s.retryBtn, busy && s.controlDisabled]}
+      >
+        {busy ? <ActivityIndicator size="small" color={ACCENT} /> : <Text style={s.retryText}>Retry</Text>}
+      </Pressable>
+    </View>
+  );
+}
+
 export default function TradingBotPanel({ circleId, userId, accentColor = ACCENT }: Props) {
+  const scopeKey = `${userId}:${circleId}`;
   const [tab, setTab] = useState<Tab>('trade');
   const [client, setClient] = useState<HeliusClient | null>(null);
   const [loading, setLoading] = useState(true);
+  const [initError, setInitError] = useState<string | null>(null);
+  const [resolvedScope, setResolvedScope] = useState<string | null>(null);
   const [noKey, setNoKey] = useState(false);
   const [noKeyMessage, setNoKeyMessage] = useState('Add your Helius API key in Integrations to enable the trading bot.');
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [botWallet, setBotWallet] = useState<TradingBotWalletInfo | null>(null);
   const [badges, setBadges] = useState<Partial<Record<Tab, number>>>({});
-  const autopilotBusyRef = useRef(false);
-
-  const refreshBotWallet = useCallback(async () => {
-    try {
-      setBotWallet(await getTradingBotWallet(circleId));
-    } catch {
-      setBotWallet(null);
-    }
-  }, [circleId]);
+  const currentScopeRef = useRef(scopeKey);
+  const resolvedScopeRef = useRef<string | null>(resolvedScope);
+  const initGenerationRef = useRef(0);
+  const walletRefreshGenerationRef = useRef(0);
+  currentScopeRef.current = scopeKey;
+  resolvedScopeRef.current = resolvedScope;
 
   const init = useCallback(async () => {
+    const requestedScope = `${userId}:${circleId}`;
+    const generation = ++initGenerationRef.current;
+    const isCurrent = () => (
+      initGenerationRef.current === generation
+      && currentScopeRef.current === requestedScope
+    );
+    const refreshingCurrentScope = resolvedScopeRef.current === requestedScope;
+
     setLoading(true);
+    setInitError(null);
     setNoKey(false);
     setNoKeyMessage('Add your Helius API key in Integrations to enable the trading bot.');
+    if (!refreshingCurrentScope) {
+      setResolvedScope(null);
+      setClient(null);
+      setWalletAddress(null);
+      setBotWallet(null);
+      setBadges({});
+    }
+
     try {
+      await assertExactTradingUser(userId);
       const c = await createUserHeliusClient(userId);
       if (!c) {
-        setClient(null);
-      setBotWallet(null);
-        try {
-          const { data: allKeys } = await supabase.rpc('list_user_api_keys');
-          const hasActiveHelius = (allKeys || []).some((key: any) => key?.provider === 'helius' && key?.is_active);
-          if (hasActiveHelius) {
-            setNoKeyMessage('Helius is saved in Integrations, but this Supabase project is missing the get_user_api_key RPC. Apply the latest DB migrations, or re-save the Helius key once after this update to refresh the local cache on this device.');
-          }
-        } catch {
-          // Ignore metadata lookup failures and keep the default message.
+        const { data: allKeys, error: keyListError } = await supabase.rpc('list_user_api_keys');
+        if (keyListError) throw keyListError;
+        const hasActiveHelius = (allKeys || []).some((key: any) => key?.provider === 'helius' && key?.is_active);
+        if (hasActiveHelius) {
+          throw new Error('Helius is configured, but its credential could not be loaded. Retry now; if this continues, apply the latest database migrations or re-save the Helius integration.');
         }
+        if (!isCurrent()) return;
+        setClient(null);
+        setWalletAddress(null);
+        setBotWallet(null);
+        setBadges({});
         setNoKey(true);
+        setResolvedScope(requestedScope);
         return;
       }
-      setClient(c);
 
-      const countSafe = async (q: any): Promise<number> => {
-        try { const r = await q; return r.count || 0; } catch { return 0; }
-      };
-      const [profileRes, pendingCount, positionCount, alertCount, nextBotWallet] = await Promise.all([
-        supabase.from('profiles').select('wallet_address, wallet_address_sol').eq('id', userId).single(),
-        countSafe(supabase.from('trading_pending_actions').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('status', 'pending')),
-        countSafe(supabase.from('trading_positions').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('status', 'open')),
-        countSafe(supabase.from('trading_alerts').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('triggered', false)),
-        getTradingBotWallet(circleId).catch(() => null),
+      const [profileRes, pendingRes, positionRes, nextBotWallet] = await Promise.all([
+        supabase.from('profiles').select('wallet_address, wallet_address_sol').eq('id', userId).maybeSingle(),
+        supabase.from('trading_pending_actions').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('circle_id', circleId).eq('status', 'pending'),
+        supabase.from('trading_positions').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('circle_id', circleId).eq('status', 'open'),
+        getTradingBotWallet(circleId),
       ]);
 
+      if (profileRes.error) throw profileRes.error;
+      if (pendingRes.error) throw pendingRes.error;
+      if (positionRes.error) throw positionRes.error;
+      if (!isCurrent()) return;
+
       const addr = profileRes.data?.wallet_address_sol || profileRes.data?.wallet_address || null;
+      const pendingCount = pendingRes.count || 0;
+      const positionCount = positionRes.count || 0;
+
+      setClient(c);
       setWalletAddress(addr);
       setBotWallet(nextBotWallet);
 
       const nextBadges: Partial<Record<Tab, number>> = {};
-      if (pendingCount > 0) nextBadges.pending = pendingCount as number;
-      if (positionCount > 0) nextBadges.positions = positionCount as number;
-      if (alertCount > 0) nextBadges.alerts = alertCount as number;
+      if (pendingCount > 0) nextBadges.pending = pendingCount;
+      if (positionCount > 0) nextBadges.positions = positionCount;
       setBadges(nextBadges);
-    } catch (err) {
-      console.warn('[TradingBotPanel] init failed', err);
+      setResolvedScope(requestedScope);
+    } catch (error) {
+      if (!isCurrent()) return;
+      console.warn('[TradingBotPanel] init failed', error);
       setClient(null);
-      if (`${(err as any)?.message || err || ''}`.includes('get_user_api_key')) {
-        setNoKeyMessage('Helius key lookup failed because the backend get_user_api_key RPC is missing. Apply the latest DB migrations, or re-save the Helius key once after this update to refresh the local cache on this device.');
-      }
-      setNoKey(true);
+      setWalletAddress(null);
+      setBotWallet(null);
+      setBadges({});
+      setNoKey(false);
+      setInitError(getTradingErrorMessage(error, 'The trading workspace could not be loaded.'));
+      setResolvedScope(requestedScope);
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
+    }
+  }, [circleId, userId]);
+
+  const refreshBotWallet = useCallback(async () => {
+    const requestedScope = `${userId}:${circleId}`;
+    const generation = ++walletRefreshGenerationRef.current;
+    await assertExactTradingUser(userId);
+    const nextBotWallet = await getTradingBotWallet(circleId);
+    if (
+      walletRefreshGenerationRef.current === generation
+      && currentScopeRef.current === requestedScope
+    ) {
+      setBotWallet(nextBotWallet);
     }
   }, [circleId, userId]);
 
   useEffect(() => {
-    init();
+    void init();
+    return () => {
+      initGenerationRef.current += 1;
+      walletRefreshGenerationRef.current += 1;
+    };
   }, [init]);
 
   useEffect(() => {
     if (RNPlatform.OS !== 'web' || typeof window === 'undefined' || typeof document === 'undefined') {
       return;
     }
-    const handleFocus = () => { init(); };
+    const handleFocus = () => { void init(); };
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        init();
+        void init();
       }
     };
     window.addEventListener('focus', handleFocus);
@@ -489,51 +636,20 @@ export default function TradingBotPanel({ circleId, userId, accentColor = ACCENT
     };
   }, [init]);
 
-  useEffect(() => {
-    if (!botWallet || botWallet.status !== 'active') {
-      return;
-    }
-
-    let cancelled = false;
-    const tick = async () => {
-      if (cancelled || autopilotBusyRef.current) {
-        return;
-      }
-      if (RNPlatform.OS === 'web' && typeof document !== 'undefined' && document.visibilityState !== 'visible') {
-        return;
-      }
-
-      autopilotBusyRef.current = true;
-      try {
-        const result = await runTradingBotAutopilot(circleId, { triggerSource: 'dashboard_poll' });
-        if (cancelled) {
-          return;
-        }
-        if (result.wallet) {
-          setBotWallet(result.wallet);
-        }
-        if (result.status === 'executed') {
-          await init();
-        }
-      } catch {
-        // Ignore background autopilot failures here; the Bot tab surfaces the error state.
-      } finally {
-        autopilotBusyRef.current = false;
-      }
-    };
-
-    const warmup = setTimeout(() => { void tick(); }, 15000);
-    const interval = setInterval(() => { void tick(); }, 120000);
-
-    return () => {
-      cancelled = true;
-      clearTimeout(warmup);
-      clearInterval(interval);
-    };
-  }, [botWallet?.id, botWallet?.status, circleId, init]);
-
-  if (loading) {
+  if (resolvedScope !== scopeKey || (loading && !client && !noKey && !initError)) {
     return <LoadingScreen />;
+  }
+
+  if (initError) {
+    return (
+      <TradingLoadError
+        title="Trading unavailable"
+        message={initError}
+        busy={loading}
+        onRetry={() => { void init(); }}
+        testID="trading-init-error"
+      />
+    );
   }
 
   if (noKey) {
@@ -544,6 +660,14 @@ export default function TradingBotPanel({ circleId, userId, accentColor = ACCENT
         <Text style={s.emptyDesc}>
           {noKeyMessage}
         </Text>
+        <Pressable
+          onPress={() => { void init(); }}
+          accessibilityRole="button"
+          accessibilityLabel="Check Helius connection again"
+          style={s.retryBtn}
+        >
+          <Text style={s.retryText}>Check again</Text>
+        </Pressable>
       </View>
     );
   }
@@ -555,7 +679,11 @@ export default function TradingBotPanel({ circleId, userId, accentColor = ACCENT
       <Pressable
         key={t.key}
         onPress={() => setTab(t.key)}
-        style={[s.tab, { borderColor: isActive ? t.color + '40' : PIXEL_COLORS.border1 }, isActive && { backgroundColor: t.color + '10' }]}
+        disabled={loading}
+        accessibilityRole="tab"
+        accessibilityLabel={`${t.label} trading tab`}
+        accessibilityState={{ selected: isActive, disabled: loading }}
+        style={[s.tab, { borderColor: isActive ? t.color + '40' : PIXEL_COLORS.border1 }, isActive && { backgroundColor: t.color + '10' }, loading && s.controlDisabled]}
       >
         <View style={[s.tabIconWrap, { borderColor: t.color + (isActive ? '60' : '30'), backgroundColor: isActive ? t.color + '18' : PIXEL_COLORS.bg2 }]}>
           <Text style={[s.tabIconChar, { color: t.color }]}>{t.icon}</Text>
@@ -571,7 +699,13 @@ export default function TradingBotPanel({ circleId, userId, accentColor = ACCENT
   };
 
   return (
-    <View style={s.container}>
+    <View style={s.container} accessibilityState={{ busy: loading }}>
+      {loading && (
+        <View style={s.inlineBusy} accessibilityLiveRegion="polite">
+          <ActivityIndicator size="small" color={accentColor} />
+          <Text style={s.listMeta}>Refreshing trading workspace…</Text>
+        </View>
+      )}
       {/* Tab Bar */}
       <View style={s.tabBar}>
         <View style={s.tabRow}>
@@ -580,8 +714,14 @@ export default function TradingBotPanel({ circleId, userId, accentColor = ACCENT
       </View>
 
       {/* Content */}
-      <View style={s.content}>
+      <View
+        style={[s.content, loading && s.contentRefreshing]}
+        pointerEvents={loading ? 'none' : 'auto'}
+        accessibilityElementsHidden={loading}
+      >
         {tab === 'trade' && <TradingTerminalLayout client={client!} walletAddress={walletAddress} userId={userId} circleId={circleId} botWallet={botWallet} onBotWalletRefresh={refreshBotWallet} />}
+        {tab === 'portfolio' && <PortfolioTab client={client!} walletAddress={walletAddress} userId={userId} circleId={circleId} />}
+        {tab === 'positions' && <PositionsTab client={client!} userId={userId} circleId={circleId} />}
         {tab === 'paper' && <TradingBotPaperTab client={client!} userId={userId} circleId={circleId} />}
         {tab === 'signals' && <SignalsTab client={client!} userId={userId} />}
         {tab === 'backtest' && <TradingBotBacktestTab client={client!} userId={userId} circleId={circleId} />}
@@ -591,6 +731,7 @@ export default function TradingBotPanel({ circleId, userId, accentColor = ACCENT
         {tab === 'alerts' && <AlertsTab client={client!} userId={userId} />}
         {tab === 'pending' && <PendingTab client={client!} walletAddress={walletAddress} userId={userId} circleId={circleId} botWallet={botWallet} onBotWalletRefresh={refreshBotWallet} />}
         {tab === 'wallets' && <WalletsTab client={client!} userId={userId} />}
+        {tab === 'history' && <HistoryTab userId={userId} circleId={circleId} />}
       </View>
     </View>
   );
@@ -716,6 +857,7 @@ function BotWalletTab({
   };
 
   const handleRunAutopilot = async () => {
+    if (runningAutopilot || !botWallet || botWallet.status !== 'active') return;
     setRunningAutopilot(true);
     setStatusMessage(null);
     try {
@@ -899,7 +1041,7 @@ function BotWalletTab({
         <View style={s.listTop}>
           <View style={{ flex: 1 }}>
             <Text style={s.listTitle}>Autopilot</Text>
-            <Text style={[s.listMeta, { marginTop: 6 }]}>Server-side trading through the bot wallet. First pass auto-executes SOL-funded queued actions and featured ideas that fit your limits.</Text>
+            <Text style={[s.listMeta, { marginTop: 6 }]}>Server-side trading through the bot wallet. Run Now explicitly starts one cycle using queued actions or featured ideas that fit your saved limits.</Text>
           </View>
           {loadingConfig && <ActivityIndicator size="small" color={ACCENT} />}
         </View>
@@ -970,7 +1112,19 @@ function BotWalletTab({
               <Pressable onPress={handleSaveConfig} disabled={savingConfig} style={[s.toggleChip, { flex: 1, borderColor: '#22c55e50', backgroundColor: '#22c55e' }]}>
                 {savingConfig ? <ActivityIndicator size="small" color="#e8e8e8" /> : <Text style={[s.toggleChipText, { color: '#e8e8e8' }]}>Save Rules</Text>}
               </Pressable>
-              <Pressable onPress={handleRunAutopilot} disabled={runningAutopilot || botWallet.status !== 'active'} style={[s.toggleChip, { flex: 1, borderColor: '#84cc1640', backgroundColor: '#84cc1612' }]}>
+              <Pressable
+                onPress={handleRunAutopilot}
+                disabled={runningAutopilot || botWallet.status !== 'active'}
+                accessibilityRole="button"
+                accessibilityLabel="Run trading autopilot once"
+                accessibilityHint="Explicitly starts one trading cycle using the saved Bot tab rules"
+                accessibilityState={{
+                  disabled: runningAutopilot || botWallet.status !== 'active',
+                  busy: runningAutopilot,
+                }}
+                testID="trading-autopilot-run-once"
+                style={[s.toggleChip, { flex: 1, borderColor: '#84cc1640', backgroundColor: '#84cc1612' }]}
+              >
                 {runningAutopilot ? <ActivityIndicator size="small" color="#84cc16" /> : <Text style={[s.toggleChipText, { color: '#84cc16' }]}>Run Now</Text>}
               </Pressable>
             </View>
@@ -1049,8 +1203,8 @@ function BotWalletTab({
             <View style={[s.reasonBox, { marginTop: 12 }]}>
               <Text style={s.reasonText}>
                 {config.strategyMode === 'momentum_rotation'
-                  ? 'Momentum mode scans token positions, exits losers to USDC, and enters gainers from USDC. Autopilot runs this on each cycle.'
-                  : 'Autopilot scans every ~2 minutes while the Trading Bot dashboard is open. The same backend action can later be triggered by cron or circle automations.'}
+                  ? 'Momentum mode can exit losers to USDC and enter gainers from USDC. This dashboard only starts a cycle when you explicitly choose Run Now.'
+                  : 'This dashboard never runs autopilot because it mounted or stayed open. Choose Run Now for one explicit cycle; separately configured server automations run under their own authority.'}
               </Text>
             </View>
 
@@ -2643,29 +2797,79 @@ function WalletsTab({ client, userId }: { client: HeliusClient; userId: string }
 
 // ??? History Tab ??????????????????????????????????????????????????????????????
 
-function HistoryTab({ userId }: { userId: string }) {
+function HistoryTab({ userId, circleId }: { userId: string; circleId: string }) {
   const [trades, setTrades] = useState<TradeLogEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [settledScope, setSettledScope] = useState<string | null>(null);
   const [modeFilter, setModeFilter] = useState<'all' | TradingExecutionMode>('all');
+  const scopeKey = `${userId}:${circleId}:${modeFilter}`;
+  const currentScopeRef = useRef(scopeKey);
+  const generationRef = useRef(0);
+  currentScopeRef.current = scopeKey;
 
-  useEffect(() => { loadHistory(); }, [userId, modeFilter]);
-
-  const loadHistory = async () => {
+  const loadHistory = useCallback(async () => {
+    const requestedScope = `${userId}:${circleId}:${modeFilter}`;
+    const generation = ++generationRef.current;
+    const isCurrent = () => (
+      generationRef.current === generation
+      && currentScopeRef.current === requestedScope
+    );
     setLoading(true);
+    setError(null);
     try {
-      setTrades(await getTradingLog(userId, modeFilter, 100));
-    } catch {
-      setTrades([]);
-    }
-    setLoading(false);
-  };
+      await assertExactTradingUser(userId);
+      let query = supabase
+        .from('trading_log')
+        .select('*')
+        .eq('user_id', userId)
+        .eq('circle_id', circleId)
+        .order('created_at', { ascending: false })
+        .limit(100);
 
-  if (loading) return <LoadingScreen />;
+      if (modeFilter !== 'all') {
+        query = query.eq('execution_mode', modeFilter);
+      }
+
+      const { data, error: queryError } = await query;
+      if (queryError) throw queryError;
+      if (!isCurrent()) return;
+      setTrades((data || []).map(mapScopedTradeLog));
+      setSettledScope(requestedScope);
+    } catch (loadError) {
+      if (!isCurrent()) return;
+      setError(getTradingErrorMessage(loadError, 'Trade history could not be loaded.'));
+      setSettledScope(requestedScope);
+    } finally {
+      if (isCurrent()) setLoading(false);
+    }
+  }, [circleId, modeFilter, userId]);
+
+  useEffect(() => {
+    void loadHistory();
+    return () => {
+      generationRef.current += 1;
+    };
+  }, [loadHistory]);
+
+  if (settledScope !== scopeKey || (loading && trades.length === 0)) return <LoadingScreen />;
+
+  if (error) {
+    return (
+      <TradingLoadError
+        title="History unavailable"
+        message={error}
+        busy={loading}
+        onRetry={() => { void loadHistory(); }}
+        testID="trading-history-error"
+      />
+    );
+  }
 
   return (
-    <ScrollView contentContainerStyle={s.scrollPad}>
+    <ScrollView contentContainerStyle={s.scrollPad} accessibilityState={{ busy: loading }}>
       <Text style={s.label}>TRADE HISTORY</Text>
-      <Text style={s.emptyDesc}>Shared execution log for live swaps, paper trades, and backtest-generated entries and exits.</Text>
+      <Text style={s.emptyDesc}>This circle's execution log for live swaps, paper trades, and backtest-generated entries and exits.</Text>
 
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12 }}>
         <View style={s.quickRow}>
@@ -2676,6 +2880,9 @@ function HistoryTab({ userId }: { userId: string }) {
               <Pressable
                 key={mode}
                 onPress={() => setModeFilter(mode)}
+                accessibilityRole="tab"
+                accessibilityLabel={`${mode === 'all' ? 'All modes' : getExecutionModeLabel(mode)} trade history`}
+                accessibilityState={{ selected: active }}
                 style={[
                   s.quickBtn,
                   active && { borderColor: `${color}70`, backgroundColor: `${color}18` },
@@ -2692,6 +2899,13 @@ function HistoryTab({ userId }: { userId: string }) {
 
       {trades.length === 0 && (
         <Text style={s.emptyDesc}>No trades recorded for this mode yet.</Text>
+      )}
+
+      {loading && (
+        <View style={s.inlineBusy} accessibilityLiveRegion="polite">
+          <ActivityIndicator size="small" color={ACCENT} />
+          <Text style={s.listMeta}>Refreshing history…</Text>
+        </View>
       )}
 
       {trades.map(trade => {
@@ -2746,38 +2960,163 @@ function HistoryTab({ userId }: { userId: string }) {
           </View>
         );
       })}
+
+      <Pressable
+        onPress={() => { void loadHistory(); }}
+        disabled={loading}
+        accessibilityRole="button"
+        accessibilityLabel="Refresh trade history"
+        accessibilityState={{ disabled: loading, busy: loading }}
+        style={[s.refreshBtn, loading && s.controlDisabled]}
+      >
+        <Text style={s.refreshText}>{loading ? 'REFRESHING…' : 'REFRESH'}</Text>
+      </Pressable>
     </ScrollView>
   );
 }
 
 // ??? Positions Tab ????????????????????????????????????????????????????????????
 
-function PositionsTab({ client, userId }: { client: HeliusClient; userId: string }) {
+function PositionsTab({ client, userId, circleId }: { client: HeliusClient; userId: string; circleId: string }) {
   const [positions, setPositions] = useState<Position[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [settledScope, setSettledScope] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
+  const [closingPositionId, setClosingPositionId] = useState<string | null>(null);
   const [modeFilter, setModeFilter] = useState<'all' | 'live' | 'paper'>('all');
+  const scopeKey = `${userId}:${circleId}:${modeFilter}`;
+  const currentScopeRef = useRef(scopeKey);
+  const generationRef = useRef(0);
+  currentScopeRef.current = scopeKey;
 
-  useEffect(() => { loadPositions(); }, [userId, modeFilter]);
-
-  const loadPositions = async () => {
+  const loadPositions = useCallback(async () => {
+    const requestedScope = `${userId}:${circleId}:${modeFilter}`;
+    const generation = ++generationRef.current;
+    const isCurrent = () => (
+      generationRef.current === generation
+      && currentScopeRef.current === requestedScope
+    );
     setLoading(true);
+    setError(null);
     try {
-      const nextPositions = await getOpenPositions(userId, modeFilter);
-      setPositions(nextPositions);
-    } catch {
-      setPositions([]);
+      await assertExactTradingUser(userId);
+      let query = supabase
+        .from('trading_positions')
+        .select('*')
+        .eq('user_id', userId)
+        .eq('circle_id', circleId)
+        .eq('status', 'open')
+        .order('created_at', { ascending: false });
+
+      if (modeFilter !== 'all') {
+        query = query.eq('execution_mode', modeFilter);
+      }
+
+      const { data, error: queryError } = await query;
+      if (queryError) throw queryError;
+      if (!isCurrent()) return;
+      setPositions((data || []).map(mapScopedPosition));
+      setSettledScope(requestedScope);
+    } catch (loadError) {
+      if (!isCurrent()) return;
+      setError(getTradingErrorMessage(loadError, 'Open positions could not be loaded.'));
+      setSettledScope(requestedScope);
+    } finally {
+      if (isCurrent()) setLoading(false);
     }
-    setLoading(false);
-  };
+  }, [circleId, modeFilter, userId]);
+
+  useEffect(() => {
+    void loadPositions();
+    return () => {
+      generationRef.current += 1;
+    };
+  }, [loadPositions]);
 
   const handleCheckStops = async () => {
+    if (loading || checking || closingPositionId) return;
+    const requestedScope = `${userId}:${circleId}:${modeFilter}`;
+    const actionGeneration = generationRef.current;
+    const actionIsCurrent = () => (
+      generationRef.current === actionGeneration
+      && currentScopeRef.current === requestedScope
+    );
     setChecking(true);
     try {
-      const result = await checkPositionStops(client, userId);
-      const total = result.stoppedOut.length + result.tookProfit.length;
+      await assertExactTradingUser(userId);
+      if (!actionIsCurrent()) throw new Error('The active trading scope changed. Review the current positions before retrying.');
+      const scopedPositions = positions.filter(position => (
+        position.userId === userId
+        && position.circleId === circleId
+        && (modeFilter === 'all' || position.executionMode === modeFilter)
+      ));
+      const prices = await client.getTokenPrices([...new Set(scopedPositions.map(position => position.tokenMint))]);
+      let stoppedOut = 0;
+      let tookProfit = 0;
+
+      for (const position of scopedPositions) {
+        if (!actionIsCurrent()) throw new Error('The active trading scope changed. Remaining position checks were stopped.');
+        const currentPrice = prices[position.tokenMint];
+        if (!currentPrice) continue;
+
+        const hitStop = position.stopLossPrice != null && (
+          position.side === 'long'
+            ? currentPrice <= position.stopLossPrice
+            : currentPrice >= position.stopLossPrice
+        );
+        const hitTakeProfit = !hitStop && position.takeProfitPrice != null && (
+          position.side === 'long'
+            ? currentPrice >= position.takeProfitPrice
+            : currentPrice <= position.takeProfitPrice
+        );
+        const highWaterMark = Math.max(position.currentPrice, currentPrice);
+        const trailingStopPrice = position.trailingStopPct
+          ? highWaterMark * (1 - position.trailingStopPct / 100)
+          : null;
+        const hitTrailingStop = !hitStop
+          && !hitTakeProfit
+          && position.side === 'long'
+          && trailingStopPrice != null
+          && currentPrice <= trailingStopPrice;
+
+        if (hitStop || hitTakeProfit || hitTrailingStop) {
+          const reason = hitTakeProfit ? 'take_profit' : hitTrailingStop ? 'trailing_stop' : 'stop_loss';
+          const closed = position.executionMode === 'paper'
+            ? await closePaperPosition(position.id, currentPrice, reason)
+            : await closePosition(position.id, currentPrice, reason);
+          if (!closed) throw new Error(`Could not close ${position.tokenSymbol}.`);
+          if (hitTakeProfit) tookProfit += 1;
+          else stoppedOut += 1;
+          continue;
+        }
+
+        const currentValueUsd = currentPrice * position.quantity;
+        const unrealizedPnl = position.side === 'long'
+          ? currentValueUsd - position.entryValueUsd
+          : position.entryValueUsd - currentValueUsd;
+        const unrealizedPnlPct = position.entryValueUsd > 0
+          ? (unrealizedPnl / position.entryValueUsd) * 100
+          : 0;
+        const { error: updateError } = await supabase
+          .from('trading_positions')
+          .update({
+            current_price: currentPrice,
+            current_value_usd: currentValueUsd,
+            unrealized_pnl: unrealizedPnl,
+            unrealized_pnl_pct: unrealizedPnlPct,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', position.id)
+          .eq('user_id', userId)
+          .eq('circle_id', circleId)
+          .eq('status', 'open');
+        if (updateError) throw updateError;
+      }
+
+      const total = stoppedOut + tookProfit;
       if (total > 0) {
-        alert(`${result.stoppedOut.length} stopped out, ${result.tookProfit.length} took profit`);
+        alert(`${stoppedOut} stopped out, ${tookProfit} took profit`);
       }
       await loadPositions();
     } catch (err: any) {
@@ -2787,23 +3126,54 @@ function PositionsTab({ client, userId }: { client: HeliusClient; userId: string
   };
 
   const handleClosePosition = async (pos: Position) => {
+    if (loading || closingPositionId || checking) return;
+    if (pos.userId !== userId || pos.circleId !== circleId) {
+      alert('This position no longer belongs to the active trading scope. Refresh before continuing.');
+      return;
+    }
+    const requestedScope = `${userId}:${circleId}:${modeFilter}`;
+    const actionGeneration = generationRef.current;
+    setClosingPositionId(pos.id);
     try {
+      await assertExactTradingUser(userId);
       const { price } = await client.getTokenPrice(pos.tokenMint);
       if (!price) {
         throw new Error('Live pricing is unavailable for this position.');
       }
+      if (
+        generationRef.current !== actionGeneration
+        || currentScopeRef.current !== requestedScope
+      ) {
+        throw new Error('The active trading scope changed. Review the current position before retrying.');
+      }
       if (pos.executionMode === 'paper') {
-        await closePaperPosition(pos.id, price, 'manual');
+        const closed = await closePaperPosition(pos.id, price, 'manual');
+        if (!closed) throw new Error('The paper position could not be closed.');
       } else {
-        await closePosition(pos.id, price, 'manual');
+        const closed = await closePosition(pos.id, price, 'manual');
+        if (!closed) throw new Error('The position could not be closed.');
       }
       await loadPositions();
     } catch (err: any) {
       alert('Error closing position: ' + (err.message || err));
+    } finally {
+      setClosingPositionId(null);
     }
   };
 
-  if (loading) return <LoadingScreen />;
+  if (settledScope !== scopeKey || (loading && positions.length === 0)) return <LoadingScreen />;
+
+  if (error) {
+    return (
+      <TradingLoadError
+        title="Positions unavailable"
+        message={error}
+        busy={loading}
+        onRetry={() => { void loadPositions(); }}
+        testID="trading-positions-error"
+      />
+    );
+  }
 
   const totalPnl = positions.reduce((sum, p) => sum + p.unrealizedPnl, 0);
   const totalValue = positions.reduce((sum, p) => sum + p.currentValueUsd, 0);
@@ -2819,6 +3189,9 @@ function PositionsTab({ client, userId }: { client: HeliusClient; userId: string
               <Pressable
                 key={mode}
                 onPress={() => setModeFilter(mode)}
+                accessibilityRole="tab"
+                accessibilityLabel={`${mode === 'all' ? 'All open' : getExecutionModeLabel(mode)} positions`}
+                accessibilityState={{ selected: active }}
                 style={[
                   s.quickBtn,
                   active && { borderColor: `${color}70`, backgroundColor: `${color}18` },
@@ -2852,9 +3225,24 @@ function PositionsTab({ client, userId }: { client: HeliusClient; userId: string
         </View>
       )}
 
-      <Pressable style={s.refreshBtn} onPress={handleCheckStops} disabled={checking}>
+      <Pressable
+        style={[s.refreshBtn, (loading || checking || closingPositionId != null) && s.controlDisabled]}
+        onPress={handleCheckStops}
+        disabled={loading || checking || closingPositionId != null}
+        accessibilityRole="button"
+        accessibilityLabel="Check scoped positions against stop loss and take profit"
+        accessibilityHint="Checks only the positions shown for this circle and execution mode"
+        accessibilityState={{ disabled: loading || checking || closingPositionId != null, busy: checking }}
+      >
         <Text style={s.refreshText}>{checking ? 'CHECKING STOPS...' : 'CHECK STOP-LOSS / TAKE-PROFIT'}</Text>
       </Pressable>
+
+      {loading && (
+        <View style={s.inlineBusy} accessibilityLiveRegion="polite">
+          <ActivityIndicator size="small" color={ACCENT} />
+          <Text style={s.listMeta}>Refreshing positions…</Text>
+        </View>
+      )}
 
       {positions.length === 0 ? (
         <View style={[s.emptyCard, { marginTop: 16 }]}>
@@ -2915,8 +3303,17 @@ function PositionsTab({ client, userId }: { client: HeliusClient; userId: string
               <Pressable
                 style={[s.refreshBtn, { marginTop: 8, backgroundColor: '#ffffff08', borderColor: '#ffffff15' }]}
                 onPress={() => handleClosePosition(pos)}
+                disabled={loading || checking || closingPositionId != null}
+                accessibilityRole="button"
+                accessibilityLabel={`Close ${pos.tokenSymbol} position`}
+                accessibilityState={{
+                  disabled: loading || checking || closingPositionId != null,
+                  busy: closingPositionId === pos.id,
+                }}
               >
-                <Text style={[s.refreshText, { color: '#ef4444' }]}>CLOSE POSITION</Text>
+                {closingPositionId === pos.id
+                  ? <ActivityIndicator size="small" color="#ef4444" />
+                  : <Text style={[s.refreshText, { color: '#ef4444' }]}>CLOSE POSITION</Text>}
               </Pressable>
             </View>
           );
@@ -3121,8 +3518,32 @@ function SignalsTab({ client, userId }: { client: HeliusClient; userId: string }
 const s = StyleSheet.create({
   container: { flex: 1 },
   content: { flex: 1 },
+  contentRefreshing: { opacity: 0.72 },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
   scrollPad: { padding: 16, paddingBottom: 40 },
+  controlDisabled: { opacity: 0.55 },
+  retryBtn: {
+    minHeight: 44,
+    minWidth: 112,
+    marginTop: 16,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: ACCENT + '45',
+    backgroundColor: ACCENT + '12',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  retryText: { color: ACCENT, fontSize: 12, fontWeight: '700', fontFamily: 'monospace' },
+  inlineBusy: {
+    minHeight: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 8,
+  },
 
   // Tab bar ? pixel-art style matching Backpack
   tabBar: {
@@ -3269,6 +3690,7 @@ const s = StyleSheet.create({
   // Quick amounts
   quickRow: { flexDirection: 'row', gap: 8, marginBottom: 14 },
   quickBtn: {
+    minHeight: 44,
     paddingVertical: 6,
     paddingHorizontal: 12,
     borderRadius: 6,
@@ -3290,6 +3712,7 @@ const s = StyleSheet.create({
   // Refresh
   refreshBtn: {
     marginTop: 16,
+    minHeight: 44,
     paddingVertical: 10,
     borderRadius: 8,
     borderWidth: 1,
@@ -3457,4 +3880,3 @@ const s = StyleSheet.create({
     letterSpacing: 0.5,
   },
 });
-

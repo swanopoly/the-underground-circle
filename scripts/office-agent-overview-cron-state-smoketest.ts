@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { cronJobControlSnapshotMatches } from '../src/screens/circles/tabs/office/agentCronControlCore';
 
 const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 const overview = read('src/screens/circles/tabs/office/AgentOverviewPanel.tsx');
@@ -61,18 +62,47 @@ assert(
   'Cron never paints an unavailable initial read as a verified empty schedule',
 );
 assert(
-  cron.includes("typeof patch.enabled === 'boolean'")
-    && cron.includes("const nextState = patch.enabled ? 'Enable' : 'Disable';")
-    && cron.indexOf('await confirm(`${nextState} cron job') < cron.indexOf('await manageCronJob(config, action, jobId, patch)'),
+  cron.includes("typeof actionPatch.enabled === 'boolean'")
+    && cron.includes("const nextState = actionPatch.enabled ? 'Enable' : 'Disable';")
+    && cron.indexOf('await confirm(`${nextState} cron job') < cron.indexOf('await manageCronJob(preflightConfig, action, jobId, actionPatch)'),
   'both enabling and disabling a schedule require confirmation before the provider mutation',
 );
 assert(
   cron.includes('const expectedFingerprint = verifiedConnectionFingerprint;')
     && cron.includes('!matchesOpenSwanConnectionFingerprint(expectedFingerprint, config.connection)')
-    && cron.indexOf('!matchesOpenSwanConnectionFingerprint(expectedFingerprint, config.connection)') < cron.indexOf('await manageCronJob(config, action, jobId, patch)')
+    && cron.indexOf('!matchesOpenSwanConnectionFingerprint(expectedFingerprint, config.connection)') < cron.indexOf('await manageCronJob(preflightConfig, action, jobId, actionPatch)')
     && cron.includes('confirmationGeneration !== refreshGeneration.current'),
   'Cron revalidates generation, scope, and exact runtime identity after confirmation and before provider I/O',
 );
+assert(
+  cron.includes('const preflightInventory = await listCronJobs(config);')
+    && cron.includes('cronJobControlSnapshotMatches(expectedJob, currentJobMatches[0])')
+    && cron.indexOf('const preflightInventory = await listCronJobs(config);') < cron.indexOf('await manageCronJob(preflightConfig, action, jobId, actionPatch)'),
+  'Cron rereads and compares the exact provider-controlled job before run, update, or remove',
+);
+
+const cronControlJob = {
+  id: 'job-1',
+  enabled: true,
+  name: 'Daily report',
+  schedule: '0 9 * * *',
+  payload: 'Summarize the latest work',
+  delivery: 'chat',
+  sessionTarget: 'isolated',
+  timezone: 'UTC',
+};
+assert(cronJobControlSnapshotMatches(cronControlJob, cronControlJob));
+for (const changed of [
+  { enabled: false },
+  { name: 'Changed report' },
+  { schedule: '0 18 * * *' },
+  { payload: 'Run a different task' },
+  { delivery: 'email' },
+  { sessionTarget: 'main' },
+  { timezone: 'America/New_York' },
+]) {
+  assert(!cronJobControlSnapshotMatches(cronControlJob, { ...cronControlJob, ...changed }));
+}
 assert(
   cron.includes('verifyCronJobPostcondition(inventory.jobs')
     && cron.includes('Cron postcondition verification failed.')

@@ -33,6 +33,7 @@ function sourceSection(source: string, start: string, end: string): string {
 const header = '-- BEGIN SECTION 48: Atomic published-agent Spirit projection';
 const sourceMarker = '-- Source: supabase/migrations/20260817140000_agent_spirit_assignment_rpc.sql';
 const footer = '-- END SECTION 48: Atomic published-agent Spirit projection';
+const nextHeader = '-- BEGIN SECTION 49: Exact Office-agent session binding compare-and-set';
 const prefix = `${header}\n${sourceMarker}\n`;
 const sectionStart = consolidated.indexOf(prefix);
 const sectionEnd = consolidated.indexOf(footer, sectionStart + prefix.length);
@@ -51,7 +52,12 @@ for (const marker of [header, sourceMarker, footer]) {
     `${marker} appears exactly once`,
   );
 }
-check(/^\s*$/u.test(consolidated.slice(sectionEnd + footer.length)), '§48 is the closed final section');
+assertions += 1;
+assert.equal(
+  consolidated.slice(sectionEnd, sectionEnd + footer.length + 2 + nextHeader.length),
+  `${footer}\n\n${nextHeader}`,
+  '§48 closes immediately before §49',
+);
 check(consolidated.includes('--   §48 Atomic published-agent Spirit projection'), 'contents index records §48');
 
 for (const marker of [

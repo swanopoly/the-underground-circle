@@ -6,9 +6,9 @@
  * Live via Supabase Realtime subscription on circle_office_agents
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, Pressable, Platform,
+  View, Text, StyleSheet, ScrollView, Pressable,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { subscribeWithReconnect } from '../lib/subscribeWithReconnect';
@@ -161,24 +161,201 @@ function computePercentiles(values: number[]): LatencyPercentiles {
   return { p50: p(50), p95: p(95), p99: p(99), count: sorted.length };
 }
 
-interface UserUsage { name: string; commands: number; tokens: number; cost: number; model: string; lastActive: string }
+interface UserUsage { name: string; commands: number; tokens: number; model: string; lastActive: string }
+
+interface AnalyticsSnapshot {
+  latencyPercentiles: LatencyPercentiles;
+  errorRateData: ErrorRateData;
+  userUsage: UserUsage[];
+}
+
+interface AnalyticsResponseRow {
+  id: string;
+  latency_ms: number | null;
+  status: string;
+  agent_name: string | null;
+  error_message: string | null;
+  created_at: string;
+}
+
+interface AnalyticsMessageRow {
+  id: string;
+  sender_id: string | null;
+  model: string | null;
+  created_at: string;
+}
+
+interface AnalyticsResponseUsageRow {
+  id: string;
+  message_id: string;
+  token_count: number | null;
+  model: string | null;
+  created_at: string;
+}
+
+interface AnalyticsProfileRow {
+  id: string;
+  display_name: string | null;
+  username: string | null;
+}
+
+const ANALYTICS_PAGE_SIZE = 500;
+const ANALYTICS_FILTER_CHUNK_SIZE = 100;
+
+function chunkValues<T>(values: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+  return chunks;
+}
+
+async function loadAllResponseRows(
+  circleId: string,
+  windowStart: string,
+  windowEnd: string,
+): Promise<AnalyticsResponseRow[]> {
+  const rows: AnalyticsResponseRow[] = [];
+  let expectedCount: number | null = null;
+  let offset = 0;
+  while (expectedCount === null || offset < expectedCount) {
+    const { data, error, count } = await supabase
+      .from('office_terminal_responses')
+      .select('id, latency_ms, status, agent_name, error_message, created_at', { count: 'exact' })
+      .eq('circle_id', circleId)
+      .gte('created_at', windowStart)
+      .lte('created_at', windowEnd)
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+      .range(offset, offset + ANALYTICS_PAGE_SIZE - 1);
+    if (error) throw error;
+    if (!Number.isSafeInteger(count) || Number(count) < 0 || (expectedCount !== null && count !== expectedCount)) {
+      throw new Error('Analytics response history changed while it was loading.');
+    }
+    if (expectedCount === null) expectedCount = Number(count);
+    const page = (data ?? []) as AnalyticsResponseRow[];
+    rows.push(...page);
+    offset += page.length;
+    if (offset === expectedCount) break;
+    if (offset > expectedCount || page.length === 0) throw new Error('Analytics response history was incomplete.');
+  }
+  return rows;
+}
+
+async function loadAllMessageRows(
+  circleId: string,
+  windowStart: string,
+  windowEnd: string,
+): Promise<AnalyticsMessageRow[]> {
+  const rows: AnalyticsMessageRow[] = [];
+  let expectedCount: number | null = null;
+  let offset = 0;
+  while (expectedCount === null || offset < expectedCount) {
+    const { data, error, count } = await supabase
+      .from('office_terminal_messages')
+      .select('id, sender_id, model, created_at', { count: 'exact' })
+      .eq('circle_id', circleId)
+      .gte('created_at', windowStart)
+      .lte('created_at', windowEnd)
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+      .range(offset, offset + ANALYTICS_PAGE_SIZE - 1);
+    if (error) throw error;
+    if (!Number.isSafeInteger(count) || Number(count) < 0 || (expectedCount !== null && count !== expectedCount)) {
+      throw new Error('Analytics message history changed while it was loading.');
+    }
+    if (expectedCount === null) expectedCount = Number(count);
+    const page = (data ?? []) as AnalyticsMessageRow[];
+    rows.push(...page);
+    offset += page.length;
+    if (offset === expectedCount) break;
+    if (offset > expectedCount || page.length === 0) throw new Error('Analytics message history was incomplete.');
+  }
+  return rows;
+}
+
+async function loadProfiles(senderIds: string[]): Promise<AnalyticsProfileRow[]> {
+  const rows: AnalyticsProfileRow[] = [];
+  for (const senderIdChunk of chunkValues(senderIds, ANALYTICS_FILTER_CHUNK_SIZE)) {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('id, display_name, username')
+      .in('id', senderIdChunk)
+      .order('id', { ascending: true });
+    if (error) throw error;
+    rows.push(...((data ?? []) as AnalyticsProfileRow[]));
+  }
+  return rows;
+}
+
+async function loadResponseUsageRows(
+  messageIds: string[],
+  windowStart: string,
+  windowEnd: string,
+): Promise<AnalyticsResponseUsageRow[]> {
+  const rows: AnalyticsResponseUsageRow[] = [];
+  for (const messageIdChunk of chunkValues(messageIds, ANALYTICS_FILTER_CHUNK_SIZE)) {
+    let expectedCount: number | null = null;
+    let offset = 0;
+    while (expectedCount === null || offset < expectedCount) {
+      const { data, error, count } = await supabase
+        .from('office_terminal_responses')
+        .select('id, message_id, token_count, model, created_at', { count: 'exact' })
+        .in('message_id', messageIdChunk)
+        .gte('created_at', windowStart)
+        .lte('created_at', windowEnd)
+        .order('created_at', { ascending: true })
+        .order('id', { ascending: true })
+        .range(offset, offset + ANALYTICS_PAGE_SIZE - 1);
+      if (error) throw error;
+      if (!Number.isSafeInteger(count) || Number(count) < 0 || (expectedCount !== null && count !== expectedCount)) {
+        throw new Error('Analytics usage history changed while it was loading.');
+      }
+      if (expectedCount === null) expectedCount = Number(count);
+      const page = (data ?? []) as AnalyticsResponseUsageRow[];
+      rows.push(...page);
+      offset += page.length;
+      if (offset === expectedCount) break;
+      if (offset > expectedCount || page.length === 0) throw new Error('Analytics usage history was incomplete.');
+    }
+  }
+  return rows;
+}
+
+const EMPTY_ANALYTICS: AnalyticsSnapshot = {
+  latencyPercentiles: { p50: 0, p95: 0, p99: 0, count: 0 },
+  errorRateData: { total: 0, errors: 0, rate: 0, recentErrors: [] },
+  userUsage: [],
+};
 
 type Scope = 'all' | 'mine';
 
 export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAgents }: Props) {
   const [scope, setScope] = useState<Scope>('all');
+  const [focusedControl, setFocusedControl] = useState<'all' | 'mine' | 'refresh' | null>(null);
   const [agents, setAgents] = useState<CircleOfficeAgent[]>(propAgents);
-  const [latencyPercentiles, setLatencyPercentiles] = useState<LatencyPercentiles>({ p50: 0, p95: 0, p99: 0, count: 0 });
-  const [errorRateData, setErrorRateData] = useState<ErrorRateData>({ total: 0, errors: 0, rate: 0, recentErrors: [] });
-  const [userUsage, setUserUsage] = useState<UserUsage[]>([]);
+  const [agentScopeKey, setAgentScopeKey] = useState(`${circleId}:${userId}`);
+  const [analytics, setAnalytics] = useState<AnalyticsSnapshot>(EMPTY_ANALYTICS);
+  const [analyticsLoading, setAnalyticsLoading] = useState(true);
+  const [analyticsError, setAnalyticsError] = useState<string | null>(null);
+  const [analyticsStale, setAnalyticsStale] = useState(false);
+  const [hasAnalyticsSnapshot, setHasAnalyticsSnapshot] = useState(false);
+  const [analyticsUpdatedAt, setAnalyticsUpdatedAt] = useState<Date | null>(null);
+  const analyticsGenerationRef = useRef(0);
+  const analyticsScopeRef = useRef<string | null>(null);
+  const realtimeGenerationRef = useRef(0);
+  const usageRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const currentAnalyticsScope = `${circleId}:${userId}`;
 
   // Keep local state in sync with prop changes (parent's realtime updates)
   useEffect(() => {
     setAgents(propAgents);
-  }, [propAgents]);
+    setAgentScopeKey(`${circleId}:${userId}`);
+  }, [circleId, userId, propAgents]);
 
   // Additional realtime subscription for analytics-specific fields
   useEffect(() => {
+    const generation = ++realtimeGenerationRef.current;
     const handle = subscribeWithReconnect({
       channelName: `analytics-${circleId}`,
       // No onCatchUp: this handler applies incremental UPDATE patches over the
@@ -191,6 +368,7 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
         table: 'circle_office_agents',
         filter: `circle_id=eq.${circleId}`,
       }, ({ new: row }) => {
+        if (realtimeGenerationRef.current !== generation) return;
         const r = row as Record<string, unknown>;
         setAgents(prev => prev.map(a =>
           a.id === (r.id as string)
@@ -218,117 +396,195 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
       }),
     });
 
-    return () => { handle.unsubscribe(); };
-  }, [circleId]);
+    return () => {
+      if (realtimeGenerationRef.current === generation) {
+        realtimeGenerationRef.current += 1;
+      }
+      handle.unsubscribe();
+    };
+  }, [circleId, userId]);
 
   // Load latency percentiles and error rates from terminal responses
   const loadResponseAnalytics = useCallback(async () => {
-    if (!circleId) return;
-    try {
-    const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString();
+    const requestScope = `${circleId}:${userId}`;
+    const generation = ++analyticsGenerationRef.current;
+    const canRetainSnapshot = analyticsScopeRef.current === requestScope;
 
-    const { data: responses } = await supabase
-      .from('office_terminal_responses')
-      .select('latency_ms, status, agent_name, error_message, created_at')
-      .eq('circle_id', circleId)
-      .gte('created_at', weekAgo);
-
-    if (!responses) return;
-
-    // Latency percentiles (from successful responses)
-    const latencies = responses
-      .filter(r => r.status === 'done' && r.latency_ms != null)
-      .map(r => r.latency_ms as number);
-    setLatencyPercentiles(computePercentiles(latencies));
-
-    // Error rates
-    const total = responses.length;
-    const errors = responses.filter(r => r.status === 'error').length;
-    const recentErrors = responses
-      .filter(r => r.status === 'error')
-      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-      .slice(0, 5)
-      .map(r => ({
-        agent: r.agent_name || 'Unknown',
-        error: r.error_message || 'Unknown error',
-        time: r.created_at,
-      }));
-    setErrorRateData({ total, errors, rate: total > 0 ? (errors / total) * 100 : 0, recentErrors });
-
-    // User-level usage: group messages by sender
-    const { data: messages } = await supabase
-      .from('office_terminal_messages')
-      .select('id, sender_id, model, created_at')
-      .eq('circle_id', circleId)
-      .gte('created_at', weekAgo);
-
-    if (messages && messages.length > 0) {
-      // Group by sender
-      const senderIds = [...new Set(messages.map(m => m.sender_id).filter(Boolean))];
-      const { data: profiles } = senderIds.length > 0
-        ? await supabase.from('profiles').select('id, display_name, username').in('id', senderIds)
-        : { data: [] };
-      const profileMap = new Map((profiles || []).map(p => [p.id, p]));
-
-      // Map messages to responses for token data
-      const msgIds = messages.map(m => m.id);
-      const { data: respData } = await supabase
-        .from('office_terminal_responses')
-        .select('message_id, token_count, model')
-        .in('message_id', msgIds);
-
-      const respByMsg = new Map<string, { tokens: number; model: string }>();
-      for (const r of (respData || [])) {
-        const existing = respByMsg.get(r.message_id);
-        respByMsg.set(r.message_id, {
-          tokens: (existing?.tokens || 0) + (r.token_count || 0),
-          model: r.model || existing?.model || 'unknown',
-        });
-      }
-
-      const byUser = new Map<string, { commands: number; tokens: number; models: Record<string, number>; lastActive: string }>();
-      for (const m of messages) {
-        const sid = m.sender_id || 'unknown';
-        const entry = byUser.get(sid) || { commands: 0, tokens: 0, models: {}, lastActive: '' };
-        entry.commands++;
-        const resp = respByMsg.get(m.id);
-        entry.tokens += resp?.tokens || 0;
-        const model = resp?.model || m.model || 'unknown';
-        entry.models[model] = (entry.models[model] || 0) + 1;
-        if (m.created_at > entry.lastActive) entry.lastActive = m.created_at;
-        byUser.set(sid, entry);
-      }
-
-      const usage: UserUsage[] = [];
-      for (const [senderId, data] of byUser) {
-        const profile = profileMap.get(senderId);
-        const topModel = Object.entries(data.models).sort((a, b) => b[1] - a[1])[0]?.[0] || 'unknown';
-        usage.push({
-          name: profile?.display_name || profile?.username || 'User',
-          commands: data.commands,
-          tokens: data.tokens,
-          cost: data.tokens * 0.0000005,
-          model: topModel
-            .replace('claude-haiku-4-5-20251001', 'Haiku')
-            .replace('claude-sonnet-4-6', 'Sonnet')
-            .replace('claude-opus-4-6', 'Opus')
-            .replace('blackswan', 'BlackSwan'),
-          lastActive: data.lastActive,
-        });
-      }
-      setUserUsage(usage.sort((a, b) => b.tokens - a.tokens));
+    setAnalyticsLoading(true);
+    setAnalyticsError(null);
+    setAnalyticsStale(false);
+    if (!canRetainSnapshot) {
+      setAnalytics(EMPTY_ANALYTICS);
+      setHasAnalyticsSnapshot(false);
+      setAnalyticsUpdatedAt(null);
     }
+
+    if (!circleId || !userId) {
+      if (analyticsGenerationRef.current === generation) {
+        setAnalyticsLoading(false);
+        setAnalyticsError('Analytics are unavailable until the circle and member scope are ready.');
+      }
+      return;
+    }
+
+    try {
+      const snapshotTime = Date.now();
+      const windowEnd = new Date(snapshotTime).toISOString();
+      const windowStart = new Date(snapshotTime - 7 * 86400000).toISOString();
+      const responseRows = await loadAllResponseRows(circleId, windowStart, windowEnd);
+
+      const latencies = responseRows
+        .filter(r => r.status === 'done' && r.latency_ms != null)
+        .map(r => r.latency_ms as number);
+      const nextLatencyPercentiles = computePercentiles(latencies);
+
+      const total = responseRows.length;
+      const errors = responseRows.filter(r => r.status === 'error').length;
+      const recentErrors = responseRows
+        .filter(r => r.status === 'error')
+        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+        .slice(0, 5)
+        .map(r => ({
+          agent: r.agent_name || 'Unknown',
+          error: r.error_message || 'Unknown error',
+          time: r.created_at,
+        }));
+      const nextErrorRateData: ErrorRateData = {
+        total,
+        errors,
+        rate: total > 0 ? (errors / total) * 100 : 0,
+        recentErrors,
+      };
+
+      const messageRows = await loadAllMessageRows(circleId, windowStart, windowEnd);
+      let nextUserUsage: UserUsage[] = [];
+
+      if (messageRows.length > 0) {
+        const senderIds = [...new Set(messageRows.map(m => m.sender_id).filter((id): id is string => Boolean(id)))];
+        const profiles = senderIds.length > 0 ? await loadProfiles(senderIds) : [];
+        const profileMap = new Map(profiles.map(p => [p.id, p]));
+
+        const msgIds = messageRows.map(m => m.id);
+        const responseUsageRows = msgIds.length > 0
+          ? await loadResponseUsageRows(msgIds, windowStart, windowEnd)
+          : [];
+
+        const respByMsg = new Map<string, { tokens: number; model: string }>();
+        for (const r of responseUsageRows) {
+          const existing = respByMsg.get(r.message_id);
+          respByMsg.set(r.message_id, {
+            tokens: (existing?.tokens || 0) + (r.token_count || 0),
+            model: r.model || existing?.model || 'unknown',
+          });
+        }
+
+        const byUser = new Map<string, { commands: number; tokens: number; models: Record<string, number>; lastActive: string }>();
+        for (const m of messageRows) {
+          const sid = m.sender_id || 'unknown';
+          const entry = byUser.get(sid) || { commands: 0, tokens: 0, models: {}, lastActive: '' };
+          entry.commands++;
+          const response = respByMsg.get(m.id);
+          entry.tokens += response?.tokens || 0;
+          const model = response?.model || m.model || 'unknown';
+          entry.models[model] = (entry.models[model] || 0) + 1;
+          if (m.created_at > entry.lastActive) entry.lastActive = m.created_at;
+          byUser.set(sid, entry);
+        }
+
+        const usage: UserUsage[] = [];
+        for (const [senderId, data] of byUser) {
+          const profile = profileMap.get(senderId);
+          const topModel = Object.entries(data.models).sort((a, b) => b[1] - a[1])[0]?.[0] || 'unknown';
+          usage.push({
+            name: profile?.display_name || profile?.username || 'User',
+            commands: data.commands,
+            tokens: data.tokens,
+            model: topModel
+              .replace('claude-haiku-4-5-20251001', 'Haiku')
+              .replace('claude-sonnet-4-6', 'Sonnet')
+              .replace('claude-opus-4-6', 'Opus')
+              .replace('blackswan', 'BlackSwan'),
+            lastActive: data.lastActive,
+          });
+        }
+        nextUserUsage = usage.sort((a, b) => b.tokens - a.tokens);
+      }
+
+      if (analyticsGenerationRef.current !== generation) return;
+      setAnalytics({
+        latencyPercentiles: nextLatencyPercentiles,
+        errorRateData: nextErrorRateData,
+        userUsage: nextUserUsage,
+      });
+      analyticsScopeRef.current = requestScope;
+      setHasAnalyticsSnapshot(true);
+      setAnalyticsUpdatedAt(new Date(windowEnd));
     } catch (err) {
       console.error('[OfficeAnalytics] Failed to load response analytics:', err);
+      if (analyticsGenerationRef.current !== generation) return;
+      setAnalyticsError('Circle analytics could not be loaded. Check your connection and try again.');
+      setAnalyticsStale(canRetainSnapshot);
+      setHasAnalyticsSnapshot(canRetainSnapshot);
+    } finally {
+      if (analyticsGenerationRef.current === generation) {
+        setAnalyticsLoading(false);
+      }
     }
-  }, [circleId]);
+  }, [circleId, userId]);
 
-  useEffect(() => { loadResponseAnalytics(); }, [loadResponseAnalytics]);
+  useEffect(() => {
+    void loadResponseAnalytics();
+    return () => {
+      analyticsGenerationRef.current += 1;
+    };
+  }, [loadResponseAnalytics]);
+
+  useEffect(() => {
+    const scheduleRefresh = () => {
+      if (usageRefreshTimerRef.current) clearTimeout(usageRefreshTimerRef.current);
+      usageRefreshTimerRef.current = setTimeout(() => {
+        usageRefreshTimerRef.current = null;
+        void loadResponseAnalytics();
+      }, 1200);
+    };
+    const handle = subscribeWithReconnect({
+      channelName: `analytics-usage-${circleId}`,
+      setup: channel => channel
+        .on('postgres_changes', {
+          event: '*',
+          schema: 'public',
+          table: 'office_terminal_responses',
+          filter: `circle_id=eq.${circleId}`,
+        }, scheduleRefresh)
+        .on('postgres_changes', {
+          event: '*',
+          schema: 'public',
+          table: 'office_terminal_messages',
+          filter: `circle_id=eq.${circleId}`,
+        }, scheduleRefresh),
+      onCatchUp: scheduleRefresh,
+    });
+
+    return () => {
+      if (usageRefreshTimerRef.current) {
+        clearTimeout(usageRefreshTimerRef.current);
+        usageRefreshTimerRef.current = null;
+      }
+      handle.unsubscribe();
+    };
+  }, [circleId, loadResponseAnalytics]);
+
+  const analyticsMatchesScope = analyticsScopeRef.current === currentAnalyticsScope;
+  const showAnalyticsSnapshot = hasAnalyticsSnapshot && analyticsMatchesScope;
+  const { latencyPercentiles, errorRateData, userUsage } = showAnalyticsSnapshot
+    ? analytics
+    : EMPTY_ANALYTICS;
 
   // Filter by scope
+  const scopedAgents = agentScopeKey === currentAnalyticsScope ? agents : [];
   const filtered = scope === 'mine'
-    ? agents.filter(a => a.ownerId === userId)
-    : agents;
+    ? scopedAgents.filter(a => a.ownerId === userId)
+    : scopedAgents;
 
   // Compute stats
   const totalTokensToday    = filtered.reduce((s, a) => s + (a.token_usage_today   ?? 0), 0);
@@ -354,13 +610,42 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
   const sortedAgents = [...filtered].sort((a, b) =>
     (b.token_usage_total ?? 0) - (a.token_usage_total ?? 0)
   );
+  const hasCircleActivity = errorRateData.total > 0 || userUsage.length > 0;
+  const analyticsStatusTitle = analyticsLoading
+    ? (showAnalyticsSnapshot ? 'Refreshing circle analytics' : 'Loading circle analytics')
+    : analyticsError
+      ? (analyticsStale && showAnalyticsSnapshot ? 'Circle analytics may be out of date' : 'Circle analytics unavailable')
+      : showAnalyticsSnapshot
+        ? (hasCircleActivity ? 'Circle analytics are current' : 'No circle terminal activity in the past 7 days')
+        : 'Preparing circle analytics';
+  const analyticsStatusDetail = analyticsError
+    ? (analyticsStale && showAnalyticsSnapshot
+        ? 'The last successful circle-wide snapshot remains visible below.'
+        : analyticsError)
+    : analyticsLoading && showAnalyticsSnapshot
+      ? 'The last successful circle-wide snapshot remains visible while this refresh runs.'
+      : showAnalyticsSnapshot && analyticsUpdatedAt
+        ? `Circle-wide request and member metrics updated ${analyticsUpdatedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.`
+        : 'Seven-day request and member metrics cover the entire circle.';
 
   return (
     <View style={styles.container}>
       {/* Scope toggle */}
       <View style={styles.toggleRow}>
         <Pressable
-          style={[styles.toggleBtn, scope === 'all' && styles.toggleBtnActive]}
+          accessibilityRole="button"
+          accessibilityLabel="Show all agent cards"
+          accessibilityHint="Changes the agent cards and agent breakdown only"
+          accessibilityState={{ selected: scope === 'all' }}
+          hitSlop={4}
+          onFocus={() => setFocusedControl('all')}
+          onBlur={() => setFocusedControl(null)}
+          style={({ pressed }) => [
+            styles.toggleBtn,
+            scope === 'all' && styles.toggleBtnActive,
+            focusedControl === 'all' && styles.controlFocused,
+            pressed && styles.controlPressed,
+          ]}
           onPress={() => setScope('all')}
         >
           <Text style={[styles.toggleText, scope === 'all' && styles.toggleTextActive]}>
@@ -368,7 +653,19 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
           </Text>
         </Pressable>
         <Pressable
-          style={[styles.toggleBtn, scope === 'mine' && styles.toggleBtnActive]}
+          accessibilityRole="button"
+          accessibilityLabel="Show my agent cards"
+          accessibilityHint="Changes the agent cards and agent breakdown only"
+          accessibilityState={{ selected: scope === 'mine' }}
+          hitSlop={4}
+          onFocus={() => setFocusedControl('mine')}
+          onBlur={() => setFocusedControl(null)}
+          style={({ pressed }) => [
+            styles.toggleBtn,
+            scope === 'mine' && styles.toggleBtnActive,
+            focusedControl === 'mine' && styles.controlFocused,
+            pressed && styles.controlPressed,
+          ]}
           onPress={() => setScope('mine')}
         >
           <Text style={[styles.toggleText, scope === 'mine' && styles.toggleTextActive]}>
@@ -376,6 +673,9 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
           </Text>
         </Pressable>
       </View>
+      <Text style={styles.scopeNote} accessibilityLiveRegion="polite">
+        Agent cards: {scope === 'mine' ? 'my agents' : 'all agents'} · 7-day request and member metrics: entire circle
+      </Text>
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scroll}>
         {/* All-Time Cumulative Stats */}
@@ -440,7 +740,7 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
         {/* Token Breakdown — Today */}
         {totalTokensToday > 0 && (
           <View style={styles.metricsCard}>
-            <Text style={styles.metricsTitle}>TOKEN BREAKDOWN (TODAY)</Text>
+            <Text style={styles.metricsTitle}>AGENT TOKEN BREAKDOWN (TODAY)</Text>
             <View style={styles.percentilesRow}>
               <View style={styles.percentileItem}>
                 <Text style={styles.percentileLabel}>INPUT</Text>
@@ -472,10 +772,44 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
           </View>
         )}
 
+        <View
+          style={[
+            styles.analyticsStatus,
+            analyticsError && styles.analyticsStatusError,
+            analyticsStale && showAnalyticsSnapshot && styles.analyticsStatusStale,
+          ]}
+          accessibilityRole={analyticsError ? 'alert' : undefined}
+          accessibilityLiveRegion="polite"
+        >
+          <View style={styles.analyticsStatusCopy}>
+            <Text style={styles.analyticsStatusTitle}>{analyticsStatusTitle}</Text>
+            <Text style={styles.analyticsStatusDetail}>{analyticsStatusDetail}</Text>
+          </View>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={analyticsError ? 'Retry circle analytics' : 'Refresh circle analytics'}
+            accessibilityState={{ disabled: analyticsLoading, busy: analyticsLoading }}
+            disabled={analyticsLoading}
+            onPress={() => { void loadResponseAnalytics(); }}
+            onFocus={() => setFocusedControl('refresh')}
+            onBlur={() => setFocusedControl(null)}
+            style={({ pressed }) => [
+              styles.refreshButton,
+              analyticsLoading && styles.refreshButtonDisabled,
+              focusedControl === 'refresh' && !analyticsLoading && styles.controlFocused,
+              pressed && !analyticsLoading && styles.controlPressed,
+            ]}
+          >
+            <Text style={styles.refreshButtonText}>
+              {analyticsLoading ? 'Refreshing…' : analyticsError ? 'Retry' : 'Refresh'}
+            </Text>
+          </Pressable>
+        </View>
+
         {/* Latency Percentiles */}
         {latencyPercentiles.count > 0 && (
           <View style={styles.metricsCard}>
-            <Text style={styles.metricsTitle}>LATENCY PERCENTILES (7D)</Text>
+            <Text style={styles.metricsTitle}>CIRCLE LATENCY PERCENTILES (7D)</Text>
             <View style={styles.percentilesRow}>
               <View style={styles.percentileItem}>
                 <Text style={styles.percentileLabel}>P50</Text>
@@ -505,7 +839,7 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
         {/* Success / Error Rate */}
         {errorRateData.total > 0 && (
           <View style={styles.metricsCard}>
-            <Text style={styles.metricsTitle}>SUCCESS RATE (7D)</Text>
+            <Text style={styles.metricsTitle}>CIRCLE SUCCESS RATE (7D)</Text>
             <View style={styles.errorRateRow}>
               <View style={styles.errorRateMain}>
                 <Text style={[styles.errorRateValue, {
@@ -544,7 +878,7 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
         {userUsage.length > 0 && (
           <View style={styles.agentList}>
             <View style={styles.listHeader}>
-              <Text style={styles.listTitle}>Usage by Member (7d)</Text>
+              <Text style={styles.listTitle}>Circle usage by member (7d)</Text>
               <Text style={styles.listSub}>{userUsage.length} active users</Text>
             </View>
             {userUsage.map((u, i) => (
@@ -552,12 +886,12 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
                 <View style={[rowStyles.dot, { backgroundColor: '#e8e8e8' }]} />
                 <View style={rowStyles.info}>
                   <Text style={rowStyles.name}>{u.name}</Text>
-                  <Text style={rowStyles.owner}>{u.commands} cmds / {u.model}</Text>
+                  <Text style={rowStyles.owner}>{u.model}</Text>
                 </View>
                 <Text style={[rowStyles.tokens, { color: tokenColor(u.tokens) }]}>
                   {fmtTokens(u.tokens)}
                 </Text>
-                <Text style={rowStyles.msgs}>${u.cost.toFixed(3)}</Text>
+                <Text style={rowStyles.msgs}>{u.commands} cmds</Text>
               </View>
             ))}
           </View>
@@ -610,10 +944,12 @@ const styles = StyleSheet.create({
   },
   toggleBtn: {
     flex: 1,
+    minHeight: 44,
     paddingVertical: 8,
     paddingHorizontal: 12,
     borderRadius: 20,
     alignItems: 'center',
+    justifyContent: 'center',
     backgroundColor: '#000000',
     borderWidth: 1,
     borderColor: '#2a2a2a',
@@ -629,6 +965,21 @@ const styles = StyleSheet.create({
   },
   toggleTextActive: {
     color: '#e8e8e8',
+  },
+  scopeNote: {
+    color: '#8b8b8b',
+    fontSize: 10,
+    lineHeight: 15,
+    paddingHorizontal: 14,
+    paddingBottom: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1a1a1a',
+  },
+  controlFocused: {
+    borderColor: '#a5b4fc',
+  },
+  controlPressed: {
+    opacity: 0.72,
   },
   scroll: {
     padding: 12,
@@ -672,6 +1023,60 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#1a1a1a',
     padding: 14,
+  },
+  analyticsStatus: {
+    minHeight: 64,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: '#111827',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#243047',
+    padding: 12,
+  },
+  analyticsStatusError: {
+    backgroundColor: '#1c1012',
+    borderColor: '#7f1d1d',
+  },
+  analyticsStatusStale: {
+    backgroundColor: '#1c170d',
+    borderColor: '#78350f',
+  },
+  analyticsStatusCopy: {
+    flex: 1,
+    minWidth: 190,
+  },
+  analyticsStatusTitle: {
+    color: '#f3f4f6',
+    fontSize: 12,
+    fontWeight: '700',
+    marginBottom: 3,
+  },
+  analyticsStatusDetail: {
+    color: '#a3a3a3',
+    fontSize: 10,
+    lineHeight: 15,
+  },
+  refreshButton: {
+    minWidth: 88,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#4f46e5',
+    backgroundColor: '#312e81',
+    paddingHorizontal: 14,
+  },
+  refreshButtonDisabled: {
+    opacity: 0.55,
+  },
+  refreshButtonText: {
+    color: '#eef2ff',
+    fontSize: 11,
+    fontWeight: '700',
   },
   metricsTitle: {
     fontSize: 11,

@@ -12,6 +12,8 @@
  *   - Supabase CLI is authenticated and the repo is linked
  * Optional exact-turn regression:
  *   CHAT_E2E_MESSAGE=hello CHAT_E2E_EXPECT=greeting-routing CHAT_E2E_WEB_SEARCH=1
+ * Optional Actions-only surface regression (does not send a chat turn):
+ *   CHAT_E2E_ACTIONS=1
  */
 
 import crypto from 'node:crypto';
@@ -52,6 +54,7 @@ if (
 const chatMessage = (process.env.CHAT_E2E_MESSAGE || '/help').trim();
 const expectedOutcome = process.env.CHAT_E2E_EXPECT || (chatMessage === '/help' ? 'help' : 'greeting-routing');
 const enableWebSearch = process.env.CHAT_E2E_WEB_SEARCH === '1';
+const enableActionsProbe = process.env.CHAT_E2E_ACTIONS === '1';
 if (!chatMessage || chatMessage.length > 240) throw new Error('Chat canary message must contain 1-240 characters.');
 if (!['help', 'greeting-routing'].includes(expectedOutcome)) throw new Error('Unsupported CHAT_E2E_EXPECT value.');
 
@@ -70,7 +73,9 @@ const consoleErrors = [];
 const webSearchRequests = [];
 const openSwanTaskRequests = [];
 const greetingToolPayloads = [];
+const actionsProbeChatSendRequests = [];
 let greetingSubmitted = false;
+let actionsProbeCapturingNetwork = false;
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -181,7 +186,13 @@ async function evaluate(expression) {
     returnByValue: true,
     awaitPromise: true,
   });
-  if (result.exceptionDetails) throw new Error(result.exceptionDetails.text || 'Browser evaluation failed.');
+  if (result.exceptionDetails) {
+    throw new Error(
+      result.exceptionDetails.exception?.description
+      || result.exceptionDetails.text
+      || 'Browser evaluation failed.',
+    );
+  }
   return result.result.value;
 }
 
@@ -218,6 +229,21 @@ async function connectChrome() {
     }
     if (message.method === 'Network.requestWillBeSent') {
       const request = message.params?.request;
+      if (
+        actionsProbeCapturingNetwork
+        && typeof request?.url === 'string'
+        && (
+          /\/functions\/v1\/(?:chat-stream|llm-proxy|swanbot-ai|swanbot-v2-ai|automation-executor|room-task-executor)(?:[/?]|$)/i.test(request.url)
+          || (
+            /\/rest\/v1\/messages(?:[?]|$)/i.test(request.url)
+            && !['GET', 'HEAD', 'OPTIONS'].includes(String(request.method || '').toUpperCase())
+          )
+        )
+      ) {
+        // Keep only a count. URLs and request bodies may carry authenticated
+        // context and are not needed to prove that prefill stayed local.
+        actionsProbeChatSendRequests.push(true);
+      }
       if (
         greetingSubmitted
         && typeof request?.url === 'string'
@@ -260,6 +286,298 @@ async function connectChrome() {
   await cdpCall('Network.enable');
   await cdpCall('Network.setCacheDisabled', { cacheDisabled: true });
   await cdpCall('Network.clearBrowserCache');
+}
+
+async function waitForBrowserValue(expression, label, timeoutMilliseconds = 15_000) {
+  const deadline = Date.now() + timeoutMilliseconds;
+  let lastValue = null;
+  while (Date.now() < deadline) {
+    lastValue = await evaluate(expression);
+    if (lastValue) return lastValue;
+    await delay(100);
+  }
+  throw new Error(`Actions probe timed out waiting for ${label}: ${JSON.stringify({ found: Boolean(lastValue) })}`);
+}
+
+function requireActionsProbe(condition, label, detail = {}) {
+  if (condition) return;
+  throw new Error(`Actions probe failed at ${label}: ${JSON.stringify(detail)}`);
+}
+
+async function openActionsMenu() {
+  const opened = await waitForBrowserValue(`(() => {
+    const trigger = document.querySelector('[data-testid="chat-actions-trigger"]');
+    if (!trigger || trigger.disabled || trigger.getAttribute('aria-disabled') === 'true') return null;
+    const rect = trigger.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    trigger.focus();
+    trigger.click();
+    return true;
+  })()`, 'an enabled chat-actions-trigger');
+  requireActionsProbe(opened === true, 'open-trigger', { opened: Boolean(opened) });
+
+  return waitForBrowserValue(`(() => {
+    const dialog = document.querySelector('[data-testid="chat-actions-menu"], #chat-actions-dialog');
+    const search = document.querySelector('[data-testid="chat-actions-search"]');
+    if (!dialog || !search) return null;
+    const dialogRect = dialog.getBoundingClientRect();
+    const searchRect = search.getBoundingClientRect();
+    if (!dialogRect.width || !dialogRect.height || !searchRect.width || !searchRect.height) return null;
+    return true;
+  })()`, 'the Actions dialog and search input');
+}
+
+async function waitForActionsMenuClosed() {
+  return waitForBrowserValue(`(() => {
+    const dialog = document.querySelector('[data-testid="chat-actions-menu"], #chat-actions-dialog');
+    if (!dialog) return true;
+    const rect = dialog.getBoundingClientRect();
+    const style = getComputedStyle(dialog);
+    return !rect.width || !rect.height || style.display === 'none' || style.visibility === 'hidden';
+  })()`, 'the Actions dialog to close');
+}
+
+async function runActionsSurfaceProbe() {
+  const originalViewport = await evaluate(`({
+    width: window.innerWidth,
+    height: window.innerHeight,
+    deviceScaleFactor: window.devicePixelRatio || 1,
+  })`);
+  const summary = {
+    enabled: true,
+    desktopDialogVisible: false,
+    desktopSearchVisible: false,
+    desktopViewportBounded: false,
+    desktopSuggestedHidden: false,
+    desktopCommonVisible: false,
+    desktopBrowseVisible: false,
+    desktopSectionsVisible: false,
+    prefillClosedDialog: false,
+    prefillReachedComposer: false,
+    prefillChatSendRequestCount: 0,
+    escapeClosedDialog: false,
+    escapeRestoredTriggerFocus: false,
+    mobileNoHorizontalOverflow: false,
+    mobileDialogViewportBounded: false,
+    mobileContentScrollable: false,
+    mobileClosedDialog: false,
+    viewportRestored: false,
+    passed: false,
+  };
+
+  try {
+    await cdpCall('Emulation.setDeviceMetricsOverride', {
+      width: 1280,
+      height: 800,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+    await delay(250);
+    await openActionsMenu();
+
+    const desktopState = await evaluate(`(() => {
+      const dialog = document.querySelector('[data-testid="chat-actions-menu"], #chat-actions-dialog');
+      const search = document.querySelector('[data-testid="chat-actions-search"]');
+      if (!dialog || !search) return null;
+      const visible = (element) => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const rect = dialog.getBoundingClientRect();
+      const text = String(dialog.innerText || '');
+      return {
+        dialogVisible: visible(dialog),
+        searchVisible: visible(search)
+          && /search actions/i.test(String(search.getAttribute('placeholder') || search.getAttribute('aria-label') || '')),
+        viewportBounded: rect.left >= -1
+          && rect.top >= -1
+          && rect.right <= window.innerWidth + 1
+          && rect.bottom <= window.innerHeight + 1,
+        suggestedHidden: !/Suggested/i.test(text),
+        commonVisible: /Common/i.test(text),
+        browseVisible: /Browse/i.test(text),
+      };
+    })()`);
+    summary.desktopDialogVisible = desktopState?.dialogVisible === true;
+    summary.desktopSearchVisible = desktopState?.searchVisible === true;
+    summary.desktopViewportBounded = desktopState?.viewportBounded === true;
+    summary.desktopSuggestedHidden = desktopState?.suggestedHidden === true;
+    summary.desktopCommonVisible = desktopState?.commonVisible === true;
+    summary.desktopBrowseVisible = desktopState?.browseVisible === true;
+    summary.desktopSectionsVisible = summary.desktopSuggestedHidden
+      && summary.desktopCommonVisible
+      && summary.desktopBrowseVisible;
+    requireActionsProbe(summary.desktopDialogVisible, 'desktop-dialog-visible', summary);
+    requireActionsProbe(summary.desktopSearchVisible, 'desktop-search-visible', summary);
+    requireActionsProbe(summary.desktopViewportBounded, 'desktop-dialog-bounds', summary);
+    requireActionsProbe(summary.desktopSectionsVisible, 'desktop-sections', summary);
+
+    const searchUpdated = await evaluate(`(() => {
+      const input = document.querySelector('[data-testid="chat-actions-search"]');
+      if (!input) return false;
+      input.focus();
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      if (!setter) return false;
+      setter.call(input, 'Summarize');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+    requireActionsProbe(searchUpdated === true, 'search-input', { updated: Boolean(searchUpdated) });
+
+    await waitForBrowserValue(`(() => {
+      const dialog = document.querySelector('[data-testid="chat-actions-menu"], #chat-actions-dialog');
+      if (!dialog || !/Search results/i.test(String(dialog.innerText || ''))) return null;
+      return [...dialog.querySelectorAll('[data-testid^="chat-action-"]')].some((candidate) => (
+        !String(candidate.getAttribute('data-testid') || '').startsWith('chat-action-section-')
+        && /^summarize$/i.test(String(candidate.getAttribute('aria-label') || '').trim())
+      ));
+    })()`, 'a Summarize search result');
+
+    actionsProbeChatSendRequests.length = 0;
+    actionsProbeCapturingNetwork = true;
+    try {
+      const resultClicked = await evaluate(`(() => {
+        const dialog = document.querySelector('[data-testid="chat-actions-menu"], #chat-actions-dialog');
+        if (!dialog) return false;
+        const result = [...dialog.querySelectorAll('[data-testid^="chat-action-"]')].find((candidate) => (
+          !String(candidate.getAttribute('data-testid') || '').startsWith('chat-action-section-')
+          && /^summarize$/i.test(String(candidate.getAttribute('aria-label') || '').trim())
+        ));
+        if (!result) return false;
+        result.click();
+        return true;
+      })()`);
+      requireActionsProbe(resultClicked === true, 'summarize-result-click', { clicked: Boolean(resultClicked) });
+      summary.prefillClosedDialog = await waitForActionsMenuClosed() === true;
+      summary.prefillReachedComposer = await waitForBrowserValue(`(() => {
+        const candidates = [...document.querySelectorAll('textarea,input,[contenteditable=true]')];
+        const composer = candidates.find((candidate) => (
+          candidate.getAttribute('type') !== 'search'
+          && /message|ask|chat|openswan|type/i.test([
+            candidate.getAttribute('placeholder'),
+            candidate.getAttribute('aria-label'),
+          ].filter(Boolean).join(' '))
+        )) || candidates.find((candidate) => candidate.tagName === 'TEXTAREA');
+        if (!composer) return null;
+        const value = composer.isContentEditable ? composer.textContent : composer.value;
+        return String(value || '').trimStart().toLowerCase().startsWith('/summarize') ? true : null;
+      })()`, 'the Summarize prefill in the composer') === true;
+      // Keep the capture open for one settled browser turn after both UI
+      // assertions so a deferred chat request cannot slip past the probe.
+      await delay(500);
+    } finally {
+      actionsProbeCapturingNetwork = false;
+    }
+
+    summary.prefillChatSendRequestCount = actionsProbeChatSendRequests.length;
+    requireActionsProbe(summary.prefillClosedDialog, 'prefill-dialog-close', summary);
+    requireActionsProbe(summary.prefillReachedComposer, 'prefill-composer', summary);
+    requireActionsProbe(summary.prefillChatSendRequestCount === 0, 'prefill-network-send', summary);
+
+    await openActionsMenu();
+    await waitForBrowserValue(`(() => {
+      const search = document.querySelector('[data-testid="chat-actions-search"]');
+      return search && document.activeElement === search ? true : null;
+    })()`, 'Actions search to receive initial focus');
+    // React attaches the modal's document/dialog listeners in a passive
+    // effect after focus lands. Yield one browser turn before dispatching.
+    await delay(100);
+    await cdpCall('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: 'Escape',
+      code: 'Escape',
+      windowsVirtualKeyCode: 27,
+      nativeVirtualKeyCode: 27,
+    });
+    await cdpCall('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: 'Escape',
+      code: 'Escape',
+      windowsVirtualKeyCode: 27,
+      nativeVirtualKeyCode: 27,
+    });
+    summary.escapeClosedDialog = await waitForActionsMenuClosed() === true;
+    summary.escapeRestoredTriggerFocus = await waitForBrowserValue(`(() => {
+      const trigger = document.querySelector('[data-testid="chat-actions-trigger"]');
+      return trigger && (document.activeElement === trigger || trigger.contains(document.activeElement)) ? true : null;
+    })()`, 'focus to return to the Actions trigger') === true;
+    requireActionsProbe(summary.escapeClosedDialog, 'escape-dialog-close', summary);
+    requireActionsProbe(summary.escapeRestoredTriggerFocus, 'escape-focus-return', summary);
+
+    await cdpCall('Emulation.setDeviceMetricsOverride', {
+      width: 390,
+      height: 844,
+      screenWidth: 390,
+      screenHeight: 844,
+      deviceScaleFactor: 1,
+      mobile: true,
+    });
+    await delay(300);
+    await openActionsMenu();
+    const mobileState = await evaluate(`(() => {
+      const dialog = document.querySelector('[data-testid="chat-actions-menu"], #chat-actions-dialog');
+      if (!dialog) return null;
+      const rect = dialog.getBoundingClientRect();
+      const scrollable = [dialog, ...dialog.querySelectorAll('*')].some((candidate) => {
+        const style = getComputedStyle(candidate);
+        return /auto|scroll/i.test(style.overflowY)
+          && candidate.clientHeight > 0
+          && candidate.scrollHeight > candidate.clientHeight + 1;
+      });
+      return {
+        noHorizontalOverflow: document.documentElement.scrollWidth <= window.innerWidth + 1
+          && (!document.body || document.body.scrollWidth <= window.innerWidth + 1),
+        dialogViewportBounded: rect.width > 0
+          && rect.height > 0
+          && rect.left >= -1
+          && rect.top >= -1
+          && rect.right <= window.innerWidth + 1
+          && rect.bottom <= window.innerHeight + 1,
+        contentScrollable: scrollable,
+      };
+    })()`);
+    summary.mobileNoHorizontalOverflow = mobileState?.noHorizontalOverflow === true;
+    summary.mobileDialogViewportBounded = mobileState?.dialogViewportBounded === true;
+    summary.mobileContentScrollable = mobileState?.contentScrollable === true;
+    requireActionsProbe(summary.mobileNoHorizontalOverflow, 'mobile-horizontal-overflow', summary);
+    requireActionsProbe(summary.mobileDialogViewportBounded, 'mobile-dialog-bounds', summary);
+    requireActionsProbe(summary.mobileContentScrollable, 'mobile-scrollable-content', summary);
+
+    const mobileCloseClicked = await evaluate(`(() => {
+      const close = document.querySelector('[data-testid="chat-actions-close"]');
+      if (!close) return false;
+      close.click();
+      return true;
+    })()`);
+    requireActionsProbe(mobileCloseClicked === true, 'mobile-close-control', { clicked: Boolean(mobileCloseClicked) });
+    summary.mobileClosedDialog = await waitForActionsMenuClosed() === true;
+    requireActionsProbe(summary.mobileClosedDialog, 'mobile-dialog-close', summary);
+  } finally {
+    actionsProbeCapturingNetwork = false;
+    try {
+      await evaluate(`(() => {
+        const close = document.querySelector('[data-testid="chat-actions-close"]');
+        close?.click?.();
+        return true;
+      })()`);
+    } catch { /* viewport restoration must still run */ }
+    await cdpCall('Emulation.clearDeviceMetricsOverride');
+    await delay(300);
+  }
+
+  const restoredViewport = await waitForBrowserValue(`(() => (
+    window.innerWidth === ${Number(originalViewport?.width) || 0}
+    && window.innerHeight === ${Number(originalViewport?.height) || 0}
+      ? { restored: true }
+      : null
+  ))()`, 'the original browser viewport');
+  summary.viewportRestored = restoredViewport?.restored === true;
+  requireActionsProbe(summary.viewportRestored, 'viewport-restore', {
+    restored: summary.viewportRestored,
+  });
+  summary.passed = true;
+  return summary;
 }
 
 async function runChatCanary(session) {
@@ -307,6 +625,41 @@ async function runChatCanary(session) {
       type: 'mouseReleased', x: tutorialSkipTarget.x, y: tutorialSkipTarget.y, button: 'left', clickCount: 1,
     });
     await delay(1_000);
+  }
+
+  // Optional semantic Actions probe. It runs before the normal message is
+  // placed in the composer, then restores the browser viewport so the existing
+  // canary path stays byte-for-byte equivalent when the flag is disabled.
+  const actionsProbe = enableActionsProbe
+    ? await runActionsSurfaceProbe()
+    : null;
+
+  if (actionsProbe) {
+    const browserState = JSON.parse(await evaluate(`JSON.stringify({
+      href: location.href,
+      body: (document.body?.innerText || '').slice(-7000),
+      sessionUserId: (() => {
+        try {
+          const key = Object.keys(localStorage)
+            .find((candidate) => candidate.startsWith('sb-') && candidate.endsWith('-auth-token'));
+          return key ? JSON.parse(localStorage.getItem(key) || 'null')?.user?.id || null : null;
+        } catch { return null; }
+      })(),
+    })`));
+    const lazyModuleFailures = [...exceptions, ...consoleErrors].filter((message) =>
+      /metro-require|ENOENT|authSession\.bundle|memoryIntentCore\.bundle|crossSurfaceReferenceResolverCore\.bundle|circleContextSnapshot\.bundle/i.test(message)
+    );
+    return {
+      route: browserState.href,
+      routeMatchesRequestedCircle: browserState.href.includes(`/circle/${circleId}/chat`),
+      sessionMatchesTemporaryUser: browserState.sessionUserId === userId,
+      expectedOutcome: 'actions-surface',
+      webSearchEnabled: enableWebSearch,
+      lazyModuleFailures: lazyModuleFailures.length,
+      bootstrapProbe,
+      actionsProbe,
+      bodyTail: browserState.body.slice(-700),
+    };
   }
 
   const composer = await evaluate(`(() => {
@@ -365,6 +718,15 @@ async function runChatCanary(session) {
     })}`);
   }
 
+  await waitForBrowserValue(`(() => {
+    const composer = document.querySelector('textarea');
+    const send = document.querySelector('[data-testid="chat-send-button"]');
+    if (!composer || !send) return null;
+    const value = String(composer.value || '').trim();
+    const enabled = !send.disabled && send.getAttribute('aria-disabled') !== 'true';
+    return value === ${JSON.stringify(chatMessage)} && enabled ? true : null;
+  })()`, 'the exact chat draft and enabled send control');
+
   const sentAt = new Date(Date.now() - 1_000).toISOString();
   await delay(400);
   if (chatMessage.startsWith('/')) {
@@ -405,21 +767,9 @@ async function runChatCanary(session) {
   greetingSubmitted = expectedOutcome === 'greeting-routing';
   let sendControl = null;
   const visualSendTarget = await evaluate(`(() => {
-    const composer = document.querySelector('textarea');
-    if (!composer) return null;
-    const composerRect = composer.getBoundingClientRect();
-    const exactArrows = [...document.querySelectorAll('*')]
-      .filter((candidate) => String(candidate.textContent || '').trim() === '↑')
-      .map((candidate) => {
-        const pressable = candidate.closest('button,[role=button],[tabindex="0"]') || candidate;
-        const rect = pressable.getBoundingClientRect();
-        const dx = (rect.left + rect.width / 2) - composerRect.right;
-        const dy = (rect.top + rect.height / 2) - (composerRect.top + composerRect.height / 2);
-        return { rect, distance: Math.hypot(dx, dy) };
-      })
-      .filter(({ rect }) => rect.width > 0 && rect.height > 0)
-      .sort((a, b) => a.distance - b.distance);
-    const rect = exactArrows[0]?.rect;
+    const send = document.querySelector('[data-testid="chat-send-button"]');
+    if (!send || send.disabled || send.getAttribute('aria-disabled') === 'true') return null;
+    const rect = send.getBoundingClientRect();
     return rect ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : null;
   })()`);
   if (visualSendTarget) {
@@ -537,6 +887,7 @@ async function runChatCanary(session) {
     assistantReplySurface: persistedAssistantReply?.surface || null,
     assistantReplyCharacters: persistedAssistantReply?.visibleCharacters || 0,
     bootstrapProbe,
+    ...(actionsProbe ? { actionsProbe } : {}),
     bodyTail: browserState.body.slice(-700),
   };
 }
@@ -562,7 +913,10 @@ async function cleanup() {
     `DELETE FROM public.profiles WHERE id = '${userId}'::uuid;`,
     `DELETE FROM auth.users WHERE id = '${userId}'::uuid;`,
   ].filter(Boolean).join(' ');
-  execFileSync('npx', ['supabase', 'db', 'query', '--linked', sql], {
+  const supabaseCli = fs.existsSync('node_modules/.bin/supabase')
+    ? 'node_modules/.bin/supabase'
+    : 'supabase';
+  execFileSync(supabaseCli, ['db', 'query', '--linked', sql], {
     cwd: process.cwd(),
     stdio: 'pipe',
     timeout: 30_000,
@@ -639,10 +993,32 @@ try {
   };
 
   result = await runChatCanary(signup);
-  if (expectedOutcome === 'help' && !result.helpVisible) {
+  if (enableActionsProbe) {
+    const probe = result.actionsProbe;
+    const probePassed = probe?.enabled === true
+      && probe.desktopDialogVisible === true
+      && probe.desktopSearchVisible === true
+      && probe.desktopViewportBounded === true
+      && probe.desktopSectionsVisible === true
+      && probe.prefillClosedDialog === true
+      && probe.prefillReachedComposer === true
+      && probe.prefillChatSendRequestCount === 0
+      && probe.escapeClosedDialog === true
+      && probe.escapeRestoredTriggerFocus === true
+      && probe.mobileNoHorizontalOverflow === true
+      && probe.mobileDialogViewportBounded === true
+      && probe.mobileContentScrollable === true
+      && probe.mobileClosedDialog === true
+      && probe.viewportRestored === true
+      && probe.passed === true;
+    if (!probePassed) {
+      throw new Error(`The authenticated Actions probe did not pass: ${JSON.stringify(probe || { enabled: false })}`);
+    }
+  }
+  if (!enableActionsProbe && expectedOutcome === 'help' && !result.helpVisible) {
     throw new Error(`The deterministic /help response did not render: ${JSON.stringify(result)}`);
   }
-  if (expectedOutcome === 'greeting-routing') {
+  if (!enableActionsProbe && expectedOutcome === 'greeting-routing') {
     if (!result.submittedMessageVisible) {
       throw new Error(`The submitted greeting did not render: ${JSON.stringify(result)}`);
     }

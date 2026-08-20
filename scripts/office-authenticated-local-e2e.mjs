@@ -6,13 +6,15 @@
  * circle. It uses an ephemeral headless system-Chrome context rather than the
  * persistent browser bridge, exercises desktop and compact web editing, then
  * opens the built-in OpenSwan popup in two same-origin tabs for reduced-motion,
- * responsive-modal, focus, and concurrent auth-refresh lifecycle proof. It
- * deletes all temporary server state in a finally block.
+ * every advertised read-only route, 390px responsive-modal containment, focus,
+ * and concurrent auth-refresh lifecycle proof. It deletes all temporary server
+ * state in a finally block.
  *
  * Run:
  *   RUN_LIVE_OFFICE_E2E=1 \
  *   OFFICE_E2E_ALLOW_DISPOSABLE_FIXTURE=1 \
  *   OFFICE_E2E_EXPECTED_PROJECT_REF=<linked-project-ref> \
+ *   OFFICE_E2E_EXPECTED_APP_ARTIFACT_SHA256=<64-lowercase-hex-digest> \
  *   node scripts/office-authenticated-local-e2e.mjs
  *
  * A non-local OFFICE_E2E_APP_URL additionally requires
@@ -82,6 +84,12 @@ if (
 }
 if (!isLocalAppTarget && process.env.RUN_REMOTE_OFFICE_E2E !== '1') {
   throw new Error('Refusing non-local Office target without RUN_REMOTE_OFFICE_E2E=1.');
+}
+const expectedAppArtifactSha256 = process.env.OFFICE_E2E_EXPECTED_APP_ARTIFACT_SHA256?.trim().toLowerCase();
+if (!expectedAppArtifactSha256 || !/^[a-f0-9]{64}$/.test(expectedAppArtifactSha256)) {
+  throw new Error(
+    'Set OFFICE_E2E_EXPECTED_APP_ARTIFACT_SHA256 to the exact 64-character SHA-256 of the tested app entry artifact.',
+  );
 }
 
 const marker = `${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
@@ -242,11 +250,28 @@ function isOfficeCanaryEssentialRequest(requestUrl) {
     || /\/rest\/v1\/office_layouts(?:\?|$)|\/rest\/v1\/rpc\/save_office_layout_v2(?:\?|$)/i.test(requestUrl);
 }
 
+const POPUP_CONSOLE_ERROR_ALLOWLIST = Object.freeze([
+  {
+    id: 'missing-favicon',
+    message: /^Failed to load resource: the server responded with a status of 404\b/i,
+    url: /\/favicon\.ico(?:\?|$)/i,
+  },
+]);
+
+function classifyAllowedPopupConsoleError(text, location) {
+  const url = String(location?.url || '');
+  return POPUP_CONSOLE_ERROR_ALLOWLIST.find((entry) => (
+    entry.message.test(text) && entry.url.test(url)
+  ))?.id || null;
+}
+
 function attachDiagnostics(page, viewport) {
   const record = {
     viewport,
     pageErrors: [],
     consoleErrors: [],
+    consoleErrorDetails: [],
+    consoleErrorReads: [],
     failedRequests: [],
     serverErrors: [],
     layoutResponses: [],
@@ -254,11 +279,41 @@ function attachDiagnostics(page, viewport) {
     supabaseHosts: new Set(),
     bundleIdentity: null,
     failureScreenshot: null,
+    popupConsoleCaptureActive: false,
+    popupConsoleErrors: [],
+    popupAllowedConsoleErrors: [],
+    popupSectionErrors: [],
   };
   diagnostics.push(record);
   page.on('pageerror', (error) => record.pageErrors.push(String(error?.message || error).slice(0, 500)));
   page.on('console', (message) => {
-    if (message.type() === 'error') record.consoleErrors.push(message.text().slice(0, 500));
+    if (message.type() !== 'error') return;
+    const text = message.text().slice(0, 500);
+    record.consoleErrors.push(text);
+    const detailRead = Promise.all(message.args().map(async (argument) => {
+      try {
+        const value = await argument.jsonValue();
+        if (typeof value === 'string') return value.slice(0, 2_000);
+        const serialized = JSON.stringify(value);
+        return (serialized === undefined ? String(value) : serialized).slice(0, 2_000);
+      } catch {
+        return argument.toString().slice(0, 2_000);
+      }
+    })).then((args) => {
+      record.consoleErrorDetails.push({ text, args });
+    });
+    record.consoleErrorReads.push(detailRead);
+    if (!record.popupConsoleCaptureActive) return;
+    const location = message.location();
+    const evidence = {
+      text,
+      url: String(location?.url || '').slice(0, 500),
+      lineNumber: Number(location?.lineNumber) || 0,
+      columnNumber: Number(location?.columnNumber) || 0,
+    };
+    const allowlistId = classifyAllowedPopupConsoleError(text, location);
+    if (allowlistId) record.popupAllowedConsoleErrors.push({ ...evidence, allowlistId });
+    else record.popupConsoleErrors.push(evidence);
   });
   page.on('requestfailed', (request) => {
     record.failedRequests.push(`${request.method()} ${request.url()} ${request.failure()?.errorText || ''}`.slice(0, 700));
@@ -287,31 +342,92 @@ function attachDiagnostics(page, viewport) {
   return record;
 }
 
+function assertNoReactUpdateLoopErrors(record, label) {
+  const updateLoopPattern = /Maximum update depth exceeded|Too many re-renders/i;
+  const failures = [...record.pageErrors, ...record.consoleErrors]
+    .filter((message) => updateLoopPattern.test(message));
+  if (failures.length > 0) {
+    throw new Error(`${label} observed a React update loop: ${JSON.stringify(failures.slice(0, 3))}.`);
+  }
+}
+
 async function readBundleIdentity(page) {
-  const resources = await page.evaluate(() => Array.from(new Set(
-    performance.getEntriesByType('resource')
-      .map((entry) => {
-        try {
-          const url = new URL(entry.name);
-          return (
-            url.pathname.includes('/_expo/static/js/web/')
-            || /\.bundle$/i.test(url.pathname)
-          ) ? url.pathname : null;
-        } catch {
-          return null;
-        }
-      })
-      .filter(Boolean),
-  )).sort());
+  const resources = await page.evaluate(() => {
+    const byKey = new Map();
+    for (const entry of performance.getEntriesByType('resource')) {
+      try {
+        const url = new URL(entry.name);
+        if (url.origin !== location.origin) continue;
+        if (!url.pathname.includes('/_expo/static/js/web/') && !/\.bundle$/i.test(url.pathname)) continue;
+        const key = `${url.pathname}${url.search}`;
+        byKey.set(key, { key, url: url.href, pathname: url.pathname });
+      } catch {
+        // Non-URL browser resources cannot identify the tested app artifact.
+      }
+    }
+    return Array.from(byKey.values()).sort((left, right) => left.key.localeCompare(right.key));
+  });
   if (resources.length === 0) throw new Error('Office canary observed no Expo web bundle resources.');
+  const entryResources = resources.filter((resource) => (
+    /\/(?:index|__common)-[^/]+\.js$/i.test(resource.pathname)
+    || /\/index(?:\.[cm]?[jt]sx?)?\.bundle$/i.test(resource.pathname)
+  ));
+  if (entryResources.length === 0) {
+    throw new Error('Office canary observed no exact Expo entry resource to bind as the tested app artifact.');
+  }
+  const entryContentBindings = await page.evaluate(async (entries) => {
+    const toHex = (bytes) => Array.from(new Uint8Array(bytes))
+      .map((value) => value.toString(16).padStart(2, '0'))
+      .join('');
+    return Promise.all(entries.map(async (entry) => {
+      const response = await fetch(entry.url, { cache: 'no-store', credentials: 'same-origin' });
+      if (!response.ok) throw new Error(`App entry artifact ${entry.key} returned ${response.status}.`);
+      const body = await response.arrayBuffer();
+      return {
+        key: entry.key,
+        contentSha256: toHex(await crypto.subtle.digest('SHA-256', body)),
+        byteLength: body.byteLength,
+      };
+    }));
+  }, entryResources);
+  const artifactBinding = entryContentBindings
+    .map((entry) => `${entry.key}\0${entry.contentSha256}\0${entry.byteLength}`)
+    .join('\n');
   return {
-    resourceManifestSha256: crypto.createHash('sha256').update(resources.join('\n')).digest('hex'),
+    resourceManifestSha256: crypto.createHash('sha256').update(resources.map((entry) => entry.key).join('\n')).digest('hex'),
+    appArtifactSha256: crypto.createHash('sha256').update(artifactBinding).digest('hex'),
     resourceCount: resources.length,
-    entryResources: resources.filter((resource) => (
-      /\/(?:index|__common)-[^/]+\.js$/.test(resource)
-      || /\/index\.bundle$/.test(resource)
-    )).slice(0, 8),
+    entryResources: entryContentBindings.slice(0, 8),
   };
+}
+
+function assertExpectedAppArtifact(identity, label) {
+  if (identity?.appArtifactSha256 !== expectedAppArtifactSha256) {
+    throw new Error(
+      `${label} app artifact mismatch: expected ${expectedAppArtifactSha256}, observed ${identity?.appArtifactSha256 || 'none'}.`,
+    );
+  }
+}
+
+async function preflightExpectedAppArtifact() {
+  const context = await browser.newContext({ viewport: { width: 1180, height: 820 } });
+  const page = await context.newPage();
+  try {
+    await page.goto(`${appBaseUrl}/login`, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await page.waitForFunction(() => performance.getEntriesByType('resource').some((entry) => {
+      try {
+        const url = new URL(entry.name);
+        return url.pathname.includes('/_expo/static/js/web/') || /\.bundle$/i.test(url.pathname);
+      } catch {
+        return false;
+      }
+    }), undefined, { timeout: 30_000 });
+    const identity = await readBundleIdentity(page);
+    assertExpectedAppArtifact(identity, 'Preflight');
+    return identity;
+  } finally {
+    await closePlaywrightResource(context, 'app-artifact-preflight-context-close');
+  }
 }
 
 async function settleFailureEvidence(page, record, screenshotPath) {
@@ -370,6 +486,7 @@ async function openAuthenticatedOffice(context, session, viewportName, options =
     );
   }
   record.bundleIdentity = await readBundleIdentity(page);
+  assertExpectedAppArtifact(record.bundleIdentity, viewportName);
   return { page, record };
 }
 
@@ -1137,6 +1254,32 @@ async function runDesktopCanary(session) {
       'Spotify Jukebox',
       { x: 0.36, y: 0.40 },
     );
+    const catalogItemsOverlap = (
+      buttonPanel.x < spotifySetup.x + spotifySetup.width
+      && buttonPanel.x + buttonPanel.width > spotifySetup.x
+      && buttonPanel.y < spotifySetup.y + spotifySetup.height
+      && buttonPanel.y + buttonPanel.height > spotifySetup.y
+    );
+    if (catalogItemsOverlap) {
+      const spotifyFloorItem = page.getByTestId(`office-floor-item-${spotifySetup.id}`);
+      await dragLocatorByFloorDelta(page, canvas, spotifyFloorItem, 192, 0);
+      const movedSpotify = await waitForPlacedAddonGeometry(
+        page,
+        'spotify_jukebox',
+        spotifySetup.id,
+        (geometry) => geometry.x === spotifySetup.x + 192 && geometry.y === spotifySetup.y,
+        'The deterministic Office fixture could not separate overlapping interactive add-ons.',
+      );
+      const stillOverlapping = (
+        buttonPanel.x < movedSpotify.x + movedSpotify.width
+        && buttonPanel.x + buttonPanel.width > movedSpotify.x
+        && buttonPanel.y < movedSpotify.y + movedSpotify.height
+        && buttonPanel.y + buttonPanel.height > movedSpotify.y
+      );
+      if (stillOverlapping) {
+        throw new Error('The deterministic Office fixture left Button Panel obscured by Spotify Jukebox.');
+      }
+    }
     await page.getByLabel('Office tools', { exact: true }).click();
     await page.getByLabel('Done', { exact: true }).click();
     await page.getByTestId('office-editor-open').waitFor({ state: 'detached', timeout: 15_000 });
@@ -1342,6 +1485,7 @@ async function runDesktopCanary(session) {
     }
     progress('desktop:floor-delete-reload-verified');
 
+    assertNoReactUpdateLoopErrors(record, 'Desktop Office');
     const lazyFailures = record.consoleErrors.filter((message) =>
       /metro-require|ENOENT|authSession\.bundle|memoryIntentCore\.bundle|crossSurfaceReferenceResolverCore\.bundle|circleContextSnapshot\.bundle/i.test(message)
     );
@@ -1462,6 +1606,7 @@ async function runMobileCanary(session) {
     await page.screenshot({ path: mobileScreenshot, fullPage: true });
     progress('mobile:placement-screenshot-complete');
 
+    assertNoReactUpdateLoopErrors(record, 'Mobile Office');
     const lazyFailures = record.consoleErrors.filter((message) =>
       /metro-require|ENOENT|authSession\.bundle|memoryIntentCore\.bundle|crossSurfaceReferenceResolverCore\.bundle|circleContextSnapshot\.bundle/i.test(message)
     );
@@ -1531,14 +1676,209 @@ async function selectAgentCustomize(page) {
   ), undefined, { timeout: 15_000 });
 }
 
+function startPopupDiagnostics(record) {
+  record.popupConsoleErrors = [];
+  record.popupAllowedConsoleErrors = [];
+  record.popupSectionErrors = [];
+  record.popupConsoleCaptureActive = true;
+}
+
+function stopPopupDiagnostics(record) {
+  if (record) record.popupConsoleCaptureActive = false;
+}
+
+async function assertPopupSectionHealthy(page, record, label) {
+  const errors = await page.locator('#uc-agent-panel-root').evaluate((root) => {
+    const alerts = Array.from(root.querySelectorAll('[role="alert"]'))
+      .map((element) => element.textContent?.replace(/\s+/g, ' ').trim() || '')
+      .filter(Boolean);
+    const fallback = Array.from(root.querySelectorAll('*'))
+      .find((element) => element.textContent?.trim() === 'This section could not load');
+    return Array.from(new Set([
+      ...alerts,
+      ...(fallback ? ['This section could not load'] : []),
+    ])).slice(0, 12);
+  });
+  await Promise.allSettled(record.consoleErrorReads);
+  if (record.popupConsoleErrors.length > 0) {
+    const updateLoopStacks = await page.evaluate(() => (
+      Array.isArray(globalThis.__officeUpdateLoopStacks)
+        ? globalThis.__officeUpdateLoopStacks.slice(-3)
+        : []
+    ));
+    const details = record.consoleErrorDetails.filter((entry) => (
+      /Maximum update depth exceeded|Too many re-renders/i.test(entry.text)
+    ));
+    throw new Error(
+      `${label} observed non-allowlisted console errors: ${JSON.stringify({ errors: record.popupConsoleErrors.slice(-5), details: details.slice(-3), updateLoopStacks })}.`,
+    );
+  }
+  if (errors.length === 0) return;
+  record.popupSectionErrors.push(...errors.map((message) => `${label}: ${message}`.slice(0, 700)));
+  throw new Error(`${label} exposed ${errors.length} popup section error(s): ${JSON.stringify(errors)}.`);
+}
+
+async function waitForAgentPanelRouteSettled(page, destinationLabel, routeLabel, expectedSectionLabel) {
+  await page.waitForFunction(({ destination, route, section }) => {
+    const root = document.getElementById('uc-agent-panel-root');
+    if (!root) return false;
+    const controls = Array.from(root.querySelectorAll('[aria-label]'));
+    const destinationControl = controls.find(
+      (element) => element.getAttribute('aria-label') === destination,
+    );
+    const routeControl = route
+      ? controls.find((element) => element.getAttribute('aria-label') === route)
+      : null;
+    const tabpanel = root.querySelector('#uc-agent-panel-tabpanel');
+    const loadingLeaf = Array.from(root.querySelectorAll('*')).some((element) => (
+      element.children.length === 0
+      && /^Loading\s+.+(?:…|\.\.\.)$/u.test(element.textContent?.trim() || '')
+    ));
+    const labelledBy = tabpanel?.getAttribute('aria-labelledby');
+    const activeControl = routeControl || destinationControl;
+    return destinationControl?.getAttribute('aria-selected') === 'true'
+      && (!route || routeControl?.getAttribute('aria-selected') === 'true')
+      && destinationControl?.getAttribute('aria-controls') === 'uc-agent-panel-tabpanel'
+      && (!routeControl || routeControl.getAttribute('aria-controls') === 'uc-agent-panel-tabpanel')
+      && tabpanel?.getAttribute('role') === 'tabpanel'
+      && tabpanel?.getAttribute('aria-label') === section
+      && Boolean(activeControl?.id)
+      && labelledBy === activeControl?.id
+      && !loadingLeaf;
+  }, {
+    destination: destinationLabel,
+    route: routeLabel,
+    section: expectedSectionLabel,
+  }, { timeout: 30_000 });
+}
+
+async function assertVisitedAgentPanelRoute(page, record, destinationLabel, routeLabel, expectedSectionLabel) {
+  await waitForAgentPanelRouteSettled(page, destinationLabel, routeLabel, expectedSectionLabel);
+  const label = routeLabel || destinationLabel;
+  await assertPopupSectionHealthy(page, record, `Agent popup route ${label}`);
+  if (record.popupConsoleErrors.length > 0) {
+    throw new Error(
+      `Agent popup route ${label} observed non-allowlisted console errors: ${JSON.stringify(record.popupConsoleErrors.slice(-5))}.`,
+    );
+  }
+}
+
+async function visitEveryAvailableAgentPanelRoute(page, record) {
+  const root = page.locator('#uc-agent-panel-root');
+  const destinationLabels = await root.evaluate((element) => {
+    const destinationList = Array.from(element.querySelectorAll('[role="tablist"]')).find(
+      (candidate) => candidate.getAttribute('aria-label') === 'Agent panel destinations',
+    );
+    if (!destinationList) return [];
+    return Array.from(destinationList.querySelectorAll('[role="tab"]'))
+      .map((control) => control.getAttribute('aria-label'))
+      .filter((label) => typeof label === 'string' && label.endsWith(' destination'));
+  });
+  if (destinationLabels.length === 0) {
+    throw new Error('The Agent popup exposed no available primary destinations.');
+  }
+
+  const visited = [];
+  for (const destinationLabel of destinationLabels) {
+    await root.getByLabel(destinationLabel, { exact: true }).click();
+    const destinationName = destinationLabel.replace(/ destination$/, '');
+    await page.waitForFunction(({ destination, groupName }) => {
+      const panelRoot = document.getElementById('uc-agent-panel-root');
+      if (!panelRoot) return false;
+      const destinationControl = Array.from(panelRoot.querySelectorAll('[aria-label]')).find(
+        (element) => element.getAttribute('aria-label') === destination,
+      );
+      if (!destinationControl?.id || destinationControl.getAttribute('aria-selected') !== 'true') return false;
+      const tabpanel = panelRoot.querySelector('#uc-agent-panel-tabpanel');
+      const routeList = Array.from(panelRoot.querySelectorAll('[role="tablist"]')).find(
+        (candidate) => candidate.getAttribute('aria-label') === `${groupName} sections`,
+      );
+      const visibleRoutes = routeList?.querySelectorAll('[role="tab"]').length || 0;
+      return visibleRoutes > 0 || tabpanel?.getAttribute('aria-labelledby') === destinationControl.id;
+    }, { destination: destinationLabel, groupName: destinationName }, { timeout: 15_000 });
+    const routeLabels = await root.evaluate((element, groupName) => {
+      const routeList = Array.from(element.querySelectorAll('[role="tablist"]')).find(
+        (candidate) => candidate.getAttribute('aria-label') === `${groupName} sections`,
+      );
+      if (!routeList) return [];
+      return Array.from(routeList.querySelectorAll('[role="tab"]'))
+        .map((control) => control.getAttribute('aria-label'))
+        .filter((label) => typeof label === 'string' && label.endsWith(' tab'));
+    }, destinationName);
+
+    if (routeLabels.length === 0) {
+      await page.waitForFunction((destination) => {
+        const root = document.getElementById('uc-agent-panel-root');
+        const destinationControl = Array.from(root?.querySelectorAll('[aria-label]') || []).find(
+          (element) => element.getAttribute('aria-label') === destination,
+        );
+        return destinationControl?.getAttribute('aria-selected') === 'true'
+          && Boolean(root?.querySelector('#uc-agent-panel-tabpanel')?.getAttribute('aria-label'));
+      }, destinationLabel, { timeout: 15_000 });
+      const sectionLabel = await root.locator('#uc-agent-panel-tabpanel').getAttribute('aria-label');
+      if (!sectionLabel?.endsWith(' section')) {
+        throw new Error(`${destinationLabel} exposed no exact single-route tabpanel label.`);
+      }
+      await assertVisitedAgentPanelRoute(page, record, destinationLabel, null, sectionLabel);
+      visited.push({ destination: destinationLabel, routes: [sectionLabel] });
+      continue;
+    }
+
+    const routes = [];
+    for (const routeLabel of routeLabels) {
+      await root.getByLabel(routeLabel, { exact: true }).click();
+      const sectionLabel = `${routeLabel.replace(/ tab$/, '')} section`;
+      await assertVisitedAgentPanelRoute(page, record, destinationLabel, routeLabel, sectionLabel);
+      routes.push(sectionLabel);
+    }
+    visited.push({ destination: destinationLabel, routes });
+  }
+  return visited;
+}
+
+async function readSelectedAgentPanelRoute(page) {
+  return page.locator('#uc-agent-panel-root').evaluate((root) => {
+    const selectedDestinations = Array.from(root.querySelectorAll('[aria-label$=" destination"][aria-selected="true"]'));
+    const selectedRoutes = Array.from(root.querySelectorAll('[aria-label$=" tab"][aria-selected="true"]'));
+    const tabpanel = root.querySelector('#uc-agent-panel-tabpanel');
+    return {
+      destination: selectedDestinations[0]?.getAttribute('aria-label') || null,
+      destinationCount: selectedDestinations.length,
+      route: selectedRoutes[0]?.getAttribute('aria-label') || null,
+      routeCount: selectedRoutes.length,
+      section: tabpanel?.getAttribute('aria-label') || null,
+      labelledBy: tabpanel?.getAttribute('aria-labelledby') || null,
+    };
+  });
+}
+
+function assertSameAgentPanelRoute(actual, expected, label) {
+  if (
+    actual.destinationCount !== 1
+    || actual.routeCount > 1
+    || actual.destination !== expected.destination
+    || actual.route !== expected.route
+    || actual.section !== expected.section
+    || actual.labelledBy !== expected.labelledBy
+  ) {
+    throw new Error(`${label} discarded the active Agent popup route: ${JSON.stringify({ expected, actual })}.`);
+  }
+}
+
 async function readAgentPopupEvidence(page) {
   return page.locator('#uc-agent-panel-root').evaluate((root) => {
     const rect = root.getBoundingClientRect();
     const rootStyle = getComputedStyle(root);
-    const backdrop = document.querySelector('.uc-agent-panel-backdrop');
+    const backdrop = document.querySelector('[data-testid="agent-panel-backdrop"]');
     const backdropStyle = backdrop ? getComputedStyle(backdrop) : null;
     const dockControl = Array.from(document.querySelectorAll('[aria-label]')).find(
       (element) => element.getAttribute('aria-label') === 'Dock agent panel to the right',
+    );
+    const popOutControl = Array.from(document.querySelectorAll('[aria-label]')).find(
+      (element) => element.getAttribute('aria-label') === 'Open agent panel as a centered pop-up',
+    );
+    const resizeControl = Array.from(document.querySelectorAll('[aria-label]')).find(
+      (element) => element.getAttribute('aria-label') === 'Resize docked agent panel',
     );
     const titleId = root.getAttribute('aria-labelledby');
     return {
@@ -1562,7 +1902,11 @@ async function readAgentPopupEvidence(page) {
       animationDuration: rootStyle.animationDuration,
       transitionDuration: rootStyle.transitionDuration,
       backdropTransitionDuration: backdropStyle?.transitionDuration || null,
+      backdropPresent: Boolean(backdrop),
       dockControlVisible: Boolean(dockControl && dockControl.getBoundingClientRect().width > 0),
+      popOutControlVisible: Boolean(popOutControl && popOutControl.getBoundingClientRect().width > 0),
+      resizeControlVisible: Boolean(resizeControl && resizeControl.getBoundingClientRect().width > 0),
+      resizeValueNow: resizeControl?.getAttribute('aria-valuenow') || null,
       overviewSelected: document.querySelector('[aria-label="Overview destination"]')?.getAttribute('aria-selected') === 'true',
       customizeSelected: document.querySelector('[aria-label="Customize tab"]')?.getAttribute('aria-selected') === 'true',
     };
@@ -1578,7 +1922,10 @@ async function waitForResponsiveAgentPopup(page, expectedDockControlVisible) {
       (element) => element.getAttribute('aria-label') === 'Dock agent panel to the right',
     );
     const dockVisible = Boolean(dockControl && dockControl.getBoundingClientRect().width > 0);
+    const backdrop = document.querySelector('[data-testid="agent-panel-backdrop"]');
     return dockVisible === expectDock
+      && root.getAttribute('aria-modal') === 'true'
+      && Boolean(backdrop)
       && rect.width >= 280
       && rect.height >= 280
       && rect.left >= -1
@@ -1595,6 +1942,9 @@ function assertAgentPopupEvidence(evidence, label, expectedDockControlVisible) {
     || evidence.ariaModal !== 'true'
     || evidence.titleId !== 'uc-agent-panel-title'
     || evidence.title !== 'OpenSwan'
+    || !evidence.backdropPresent
+    || evidence.popOutControlVisible
+    || evidence.resizeControlVisible
   ) {
     throw new Error(`${label} did not retain the exact labelled modal-dialog contract: ${JSON.stringify(evidence)}.`);
   }
@@ -1610,6 +1960,10 @@ function assertAgentPopupEvidence(evidence, label, expectedDockControlVisible) {
     || evidence.rect.bottom > evidence.viewport.height + margin
   ) {
     throw new Error(`${label} escaped the live viewport: ${JSON.stringify(evidence)}.`);
+  }
+  const horizontalCenter = evidence.rect.left + (evidence.rect.width / 2);
+  if (Math.abs(horizontalCenter - (evidence.viewport.width / 2)) > 2) {
+    throw new Error(`${label} did not use centered modal geometry: ${JSON.stringify(evidence)}.`);
   }
   if (!evidence.reducedMotionMatches) {
     throw new Error(`${label} lost the reduced-motion browser preference.`);
@@ -1628,6 +1982,134 @@ function assertAgentPopupEvidence(evidence, label, expectedDockControlVisible) {
   if (evidence.dockControlVisible !== expectedDockControlVisible) {
     throw new Error(`${label} exposed the wrong responsive docking affordance: ${JSON.stringify(evidence)}.`);
   }
+}
+
+async function verifyCompactCenteredAgentPopupLifecycle(page, record) {
+  const beforeRoute = await readSelectedAgentPanelRoute(page);
+  if (beforeRoute.destinationCount !== 1 || beforeRoute.routeCount > 1 || !beforeRoute.section) {
+    throw new Error(`Desktop Agent popup exposed ambiguous selected-route semantics: ${JSON.stringify(beforeRoute)}.`);
+  }
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.waitForFunction(() => innerWidth === 390 && innerHeight === 844);
+  await waitForResponsiveAgentPopup(page, false);
+  const compactEvidence = await readAgentPopupEvidence(page);
+  assertAgentPopupEvidence(compactEvidence, '390x844 centered Agent popup', false);
+  const compactRoute = await readSelectedAgentPanelRoute(page);
+  assertSameAgentPanelRoute(compactRoute, beforeRoute, '390x844 viewport transition');
+  const compactDocument = await page.evaluate(() => ({
+    clientWidth: document.documentElement.clientWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+    bodyClientWidth: document.body?.clientWidth || 0,
+    bodyScrollWidth: document.body?.scrollWidth || 0,
+  }));
+  if (
+    compactDocument.scrollWidth > compactDocument.clientWidth + 1
+    || compactDocument.bodyScrollWidth > compactDocument.bodyClientWidth + 1
+  ) {
+    throw new Error(`390x844 Agent popup introduced document horizontal overflow: ${JSON.stringify(compactDocument)}.`);
+  }
+  await assertPopupSectionHealthy(page, record, '390x844 active Agent popup route');
+  if (record.popupConsoleErrors.length > 0) {
+    throw new Error(
+      `390x844 Agent popup observed non-allowlisted console errors: ${JSON.stringify(record.popupConsoleErrors.slice(-5))}.`,
+    );
+  }
+
+  await page.setViewportSize({ width: 1180, height: 820 });
+  await page.waitForFunction(() => innerWidth === 1180 && innerHeight === 820);
+  await waitForResponsiveAgentPopup(page, true);
+  const restoredEvidence = await readAgentPopupEvidence(page);
+  assertAgentPopupEvidence(restoredEvidence, 'Restored desktop Agent popup after 390x844', true);
+  const restoredRoute = await readSelectedAgentPanelRoute(page);
+  assertSameAgentPanelRoute(restoredRoute, beforeRoute, '390x844 desktop restoration');
+  await assertPopupSectionHealthy(page, record, 'Restored desktop active Agent popup route');
+
+  return {
+    viewport: '390x844',
+    modalContained: true,
+    documentHorizontalOverflow: false,
+    retainedRoute: beforeRoute,
+    restoredDesktopViewport: '1180x820',
+  };
+}
+
+async function waitForDockedAgentPopup(page, expectedWidth = null) {
+  await page.waitForFunction((width) => {
+    const root = document.getElementById('uc-agent-panel-root');
+    if (!root) return false;
+    const rect = root.getBoundingClientRect();
+    const backdrop = document.querySelector('[data-testid="agent-panel-backdrop"]');
+    const popOutControl = Array.from(document.querySelectorAll('[aria-label]')).find(
+      (element) => element.getAttribute('aria-label') === 'Open agent panel as a centered pop-up',
+    );
+    const resizeControl = Array.from(document.querySelectorAll('[aria-label]')).find(
+      (element) => element.getAttribute('aria-label') === 'Resize docked agent panel',
+    );
+    return root.getAttribute('aria-modal') === null
+      && !backdrop
+      && Boolean(popOutControl && popOutControl.getBoundingClientRect().width > 0)
+      && Boolean(resizeControl && resizeControl.getBoundingClientRect().width > 0)
+      && rect.left >= -1
+      && rect.top >= -1
+      && rect.right <= innerWidth + 1
+      && rect.bottom <= innerHeight + 1
+      && Math.abs(rect.right - innerWidth) <= 1
+      && (width === null || Math.abs(rect.width - width) <= 1);
+  }, expectedWidth, { timeout: 15_000 });
+}
+
+function assertDockedAgentPopupEvidence(evidence, label, expectedWidth = null) {
+  const hasMotion = (duration) => String(duration || '')
+    .split(',')
+    .some((value) => Number.parseFloat(value) > 0);
+  if (
+    evidence.role !== 'dialog'
+    || evidence.ariaModal !== null
+    || evidence.titleId !== 'uc-agent-panel-title'
+    || evidence.title !== 'OpenSwan'
+    || evidence.backdropPresent
+    || evidence.dockControlVisible
+    || !evidence.popOutControlVisible
+    || !evidence.resizeControlVisible
+  ) {
+    throw new Error(`${label} did not retain exact non-modal dock semantics: ${JSON.stringify(evidence)}.`);
+  }
+  if (
+    evidence.rect.width < 280
+    || evidence.rect.height < 280
+    || evidence.rect.left < -1
+    || evidence.rect.top < -1
+    || evidence.rect.right > evidence.viewport.width + 1
+    || evidence.rect.bottom > evidence.viewport.height + 1
+    || Math.abs(evidence.rect.right - evidence.viewport.width) > 1
+  ) {
+    throw new Error(`${label} escaped the docked viewport edge: ${JSON.stringify(evidence)}.`);
+  }
+  if (expectedWidth !== null && Math.abs(evidence.rect.width - expectedWidth) > 1) {
+    throw new Error(`${label} did not retain the expected clamped width ${expectedWidth}: ${JSON.stringify(evidence)}.`);
+  }
+  if (
+    !evidence.reducedMotionMatches
+    || (evidence.animationName && evidence.animationName !== 'none')
+    || hasMotion(evidence.animationDuration)
+    || hasMotion(evidence.transitionDuration)
+  ) {
+    throw new Error(`${label} exposed motion under reduced motion: ${JSON.stringify(evidence)}.`);
+  }
+}
+
+async function resizeDockedAgentPopupToMaximum(page) {
+  const handle = page.getByLabel('Resize docked agent panel', { exact: true });
+  await handle.focus();
+  for (let press = 0; press < 20; press += 1) await page.keyboard.press('ArrowLeft');
+  await waitForDockedAgentPopup(page, 720);
+  const evidence = await readAgentPopupEvidence(page);
+  assertDockedAgentPopupEvidence(evidence, 'Maximum-width docked Agent popup', 720);
+  if (Number(evidence.resizeValueNow) !== 720) {
+    throw new Error(`Docked resize semantics did not report the 720px maximum: ${JSON.stringify(evidence)}.`);
+  }
+  return evidence;
 }
 
 async function closeAgentPopupAndVerifyFocus(page) {
@@ -1676,7 +2158,7 @@ async function verifyCenteredHeaderBackdropIsolation(page) {
 
   const backdropEvidence = await page.evaluate(() => {
     const root = document.getElementById('uc-agent-panel-root');
-    const backdrop = document.querySelector('.uc-agent-panel-backdrop');
+    const backdrop = document.querySelector('[data-testid="agent-panel-backdrop"]');
     if (!root || !backdrop) return null;
     const rootRect = root.getBoundingClientRect();
     const point = {
@@ -1716,7 +2198,7 @@ async function verifyCenteredHeaderBackdropIsolation(page) {
       backdropPointerEvents: style.pointerEvents,
       backdropZIndex: style.zIndex,
       panelZIndex: getComputedStyle(root).zIndex,
-      floatingChatVisible,
+      floatingChatVisible: floatingVisible,
       floatingChatZIndex: floatingChat ? getComputedStyle(floatingChat).zIndex : null,
       floatingChatPoint,
       floatingChatBackdropHit,
@@ -1876,6 +2358,21 @@ async function runAgentPopupCanary(session) {
     viewport: { width: 1180, height: 820 },
     reducedMotion: 'reduce',
   });
+  await context.addInitScript(() => {
+    const captured = [];
+    Object.defineProperty(globalThis, '__officeUpdateLoopStacks', {
+      configurable: true,
+      value: captured,
+    });
+    const originalError = console.error;
+    console.error = function (...args) {
+      const text = args.map((value) => String(value)).join(' ');
+      if (/Maximum update depth exceeded|Too many re-renders/i.test(text) && captured.length < 5) {
+        captured.push({ text: text.slice(0, 500), stack: String(new Error().stack || '').slice(0, 4_000) });
+      }
+      return originalError.apply(this, args);
+    };
+  });
   let firstPage = null;
   let secondPage = null;
   let firstRecord = null;
@@ -1895,13 +2392,14 @@ async function runAgentPopupCanary(session) {
     progress('agent-popup:two-tabs-ready');
 
     if (
-      firstRecord.bundleIdentity?.resourceManifestSha256
-      !== secondRecord.bundleIdentity?.resourceManifestSha256
+      firstRecord.bundleIdentity?.appArtifactSha256
+      !== secondRecord.bundleIdentity?.appArtifactSha256
     ) {
-      throw new Error('The two popup tabs loaded different Expo bundle resource manifests.');
+      throw new Error('The two popup tabs loaded different Expo entry artifacts.');
     }
 
     await openFloatingChatBehindOffice(firstPage);
+    startPopupDiagnostics(firstRecord);
     await openOpenSwanAgentPopup(firstPage);
     let landscapeEvidence = await readAgentPopupEvidence(firstPage);
     assertAgentPopupEvidence(landscapeEvidence, 'Landscape Agent popup', true);
@@ -1909,6 +2407,7 @@ async function runAgentPopupCanary(session) {
       throw new Error('The Agent popup did not open at the Overview destination.');
     }
     await waitForExactPopupAuthorityReady(firstPage);
+    await assertPopupSectionHealthy(firstPage, firstRecord, 'First-tab Overview');
     const headerAreaBackdropIsolation = await verifyCenteredHeaderBackdropIsolation(firstPage);
     progress('agent-popup:centered-header-and-chat-backdrop-isolation-verified');
 
@@ -1923,6 +2422,7 @@ async function runAgentPopupCanary(session) {
     if (previewAnimationCount !== 0) {
       throw new Error(`The reduced-motion appearance preview retained ${previewAnimationCount} running animation(s).`);
     }
+    await assertPopupSectionHealthy(firstPage, firstRecord, 'First-tab Customize');
     progress('agent-popup:reduced-motion-preview-verified');
 
     await firstPage.setViewportSize({ width: 820, height: 1180 });
@@ -1933,6 +2433,7 @@ async function runAgentPopupCanary(session) {
     if (!portraitEvidence.customizeSelected) {
       throw new Error('Tablet portrait resize discarded the active Customize section.');
     }
+    await assertPopupSectionHealthy(firstPage, firstRecord, 'Portrait Customize');
 
     await firstPage.setViewportSize({ width: 1180, height: 820 });
     await firstPage.waitForFunction(() => innerWidth === 1180 && innerHeight === 820);
@@ -1944,6 +2445,49 @@ async function runAgentPopupCanary(session) {
     }
     progress('agent-popup:responsive-modal-verified');
 
+    await firstPage.getByLabel('Dock agent panel to the right', { exact: true }).click();
+    await waitForDockedAgentPopup(firstPage, 480);
+    const initialDockEvidence = await readAgentPopupEvidence(firstPage);
+    assertDockedAgentPopupEvidence(initialDockEvidence, 'Initial docked Agent popup', 480);
+    if (!initialDockEvidence.customizeSelected) {
+      throw new Error('Docking discarded the active Customize section.');
+    }
+    const maximumDockEvidence = await resizeDockedAgentPopupToMaximum(firstPage);
+    await assertPopupSectionHealthy(firstPage, firstRecord, 'Maximum-width docked Customize');
+
+    await firstPage.setViewportSize({ width: 620, height: 900 });
+    await firstPage.waitForFunction(() => innerWidth === 620 && innerHeight === 900);
+    await waitForResponsiveAgentPopup(firstPage, false);
+    await firstPage.waitForFunction(() => localStorage.getItem('uc_agent_panel_side_w_v1') === '540');
+    const compactDockFallbackEvidence = await readAgentPopupEvidence(firstPage);
+    assertAgentPopupEvidence(compactDockFallbackEvidence, 'Compact fallback for docked Agent popup', false);
+    if (!compactDockFallbackEvidence.customizeSelected) {
+      throw new Error('The dock-to-compact breakpoint transition discarded Customize.');
+    }
+
+    await firstPage.setViewportSize({ width: 1180, height: 820 });
+    await firstPage.waitForFunction(() => innerWidth === 1180 && innerHeight === 820);
+    await waitForDockedAgentPopup(firstPage, 540);
+    const restoredDockEvidence = await readAgentPopupEvidence(firstPage);
+    assertDockedAgentPopupEvidence(restoredDockEvidence, 'Restored docked Agent popup', 540);
+    if (!restoredDockEvidence.customizeSelected) {
+      throw new Error('The compact-to-dock breakpoint restoration discarded Customize.');
+    }
+    await firstPage.getByLabel('Open agent panel as a centered pop-up', { exact: true }).click();
+    await waitForResponsiveAgentPopup(firstPage, true);
+    landscapeEvidence = await readAgentPopupEvidence(firstPage);
+    assertAgentPopupEvidence(landscapeEvidence, 'Re-centered Agent popup after dock lifecycle', true);
+    await assertPopupSectionHealthy(firstPage, firstRecord, 'Re-centered Customize');
+    progress('agent-popup:docked-resize-breakpoint-restoration-verified');
+
+    const availablePanelRoutes = await visitEveryAvailableAgentPanelRoute(firstPage, firstRecord);
+    await selectAgentCustomize(firstPage);
+    await assertPopupSectionHealthy(firstPage, firstRecord, 'Customize restored after available-route sweep');
+    progress('agent-popup:all-available-routes-verified');
+    const compactCenteredLifecycle = await verifyCompactCenteredAgentPopupLifecycle(firstPage, firstRecord);
+    progress('agent-popup:390x844-centered-route-retention-verified');
+
+    startPopupDiagnostics(secondRecord);
     await openOpenSwanAgentPopup(secondPage);
     const secondTabEvidence = await readAgentPopupEvidence(secondPage);
     assertAgentPopupEvidence(secondTabEvidence, 'Second-tab Agent popup', true);
@@ -1951,7 +2495,12 @@ async function runAgentPopupCanary(session) {
       throw new Error('The second tab did not open the same exact OpenSwan Overview projection.');
     }
     await waitForExactPopupAuthorityReady(secondPage);
+    await assertPopupSectionHealthy(secondPage, secondRecord, 'Second-tab Overview');
     await selectAgentCustomize(secondPage);
+    await Promise.all([
+      assertPopupSectionHealthy(firstPage, firstRecord, 'Pre-refresh first-tab Customize'),
+      assertPopupSectionHealthy(secondPage, secondRecord, 'Pre-refresh second-tab Customize'),
+    ]);
     const preRefreshFirstEvidence = await readAgentPopupEvidence(firstPage);
     const preRefreshSecondEvidence = await readAgentPopupEvidence(secondPage);
     if (!preRefreshFirstEvidence.customizeSelected || !preRefreshSecondEvidence.customizeSelected) {
@@ -1994,6 +2543,10 @@ async function runAgentPopupCanary(session) {
       waitForExactPopupAuthorityReady(firstPage),
       waitForExactPopupAuthorityReady(secondPage),
     ]);
+    await Promise.all([
+      assertPopupSectionHealthy(firstPage, firstRecord, 'Refreshed first-tab Overview'),
+      assertPopupSectionHealthy(secondPage, secondRecord, 'Refreshed second-tab Overview'),
+    ]);
     progress('agent-popup:multi-tab-authority-refresh-verified');
 
     const refreshedFirstEvidence = await readAgentPopupEvidence(firstPage);
@@ -2011,17 +2564,29 @@ async function runAgentPopupCanary(session) {
     );
     await closeAgentPopupAndVerifyFocus(firstPage);
     await closeAgentPopupAndVerifyFocus(secondPage);
+    stopPopupDiagnostics(firstRecord);
+    stopPopupDiagnostics(secondRecord);
     progress('agent-popup:focus-restoration-verified');
 
     const records = [firstRecord, secondRecord];
+    await Promise.allSettled(records.flatMap((record) => record.consoleErrorReads));
+    records.forEach((record) => assertNoReactUpdateLoopErrors(record, `Agent popup ${record.viewport}`));
     const pageErrors = records.flatMap((record) => record.pageErrors);
     const serverErrors = records.flatMap((record) => record.serverErrors);
+    const popupConsoleErrors = records.flatMap((record) => record.popupConsoleErrors);
+    const popupSectionErrors = records.flatMap((record) => record.popupSectionErrors);
     const essentialRequestFailures = records.flatMap((record) => record.failedRequests).filter((message) => {
       const requestUrl = message.match(/^\S+\s+(\S+)/)?.[1] || '';
       return isOfficeCanaryEssentialRequest(requestUrl);
     });
     if (pageErrors.length > 0) throw new Error(`Agent popup tabs observed ${pageErrors.length} uncaught page error(s).`);
     if (serverErrors.length > 0) throw new Error(`Agent popup tabs observed ${serverErrors.length} essential HTTP 5xx response(s).`);
+    if (popupConsoleErrors.length > 0) {
+      throw new Error(`Agent popup tabs observed ${popupConsoleErrors.length} non-allowlisted popup console error(s): ${JSON.stringify(popupConsoleErrors.slice(0, 5))}.`);
+    }
+    if (popupSectionErrors.length > 0) {
+      throw new Error(`Agent popup tabs observed ${popupSectionErrors.length} visible section error(s): ${JSON.stringify(popupSectionErrors.slice(0, 5))}.`);
+    }
     if (essentialRequestFailures.length > 0) {
       throw new Error(`Agent popup tabs observed ${essentialRequestFailures.length} essential request failure(s).`);
     }
@@ -2030,17 +2595,33 @@ async function runAgentPopupCanary(session) {
       routes: [firstPage.url(), secondPage.url()],
       agent: 'OpenSwan',
       sameBundleManifest: true,
+      expectedAppArtifactSha256,
       multiTabAuthorityRefresh: 'converged',
       tokenRefreshEvents: authRefreshEvidence,
       responsiveWebTabletViewports: ['1180x820', '820x1180', '1180x820'],
+      availablePanelRoutes,
+      compactCenteredLifecycle,
+      dockedWebLifecycle: {
+        initialWidth: initialDockEvidence.rect.width,
+        maximumClampedWidth: maximumDockEvidence.rect.width,
+        compactModalFallback: '620x900',
+        restoredWidth: restoredDockEvidence.rect.width,
+        restoredAsDock: true,
+        returnedToCenteredPopup: true,
+      },
       reducedMotionPreviewAnimations: previewAnimationCount,
       headerAreaBackdropIsolation,
       focusRestoredInBothTabs: true,
       pageErrors: 0,
+      popupConsoleErrors: 0,
+      popupAllowedConsoleErrors: records.flatMap((record) => record.popupAllowedConsoleErrors),
+      popupSectionErrors: 0,
       serverErrors: 0,
       screenshot: agentPopupScreenshot,
     };
   } catch (error) {
+    stopPopupDiagnostics(firstRecord);
+    stopPopupDiagnostics(secondRecord);
     await Promise.all([
       settleFailureEvidence(firstPage, firstRecord, agentPopupFirstFailureScreenshot),
       settleFailureEvidence(secondPage, secondRecord, agentPopupSecondFailureScreenshot),
@@ -2166,10 +2747,15 @@ for (const [signal, exitCode] of [['SIGINT', 130], ['SIGTERM', 143]]) {
 
 let result = null;
 let runFailure = null;
+let appArtifactPreflight = null;
 try {
   // Verify cleanup authority before creating any temporary server state.
   await managementDatabaseQuery('select 1 as cleanup_authority_ready;');
   progress('preflight:cleanup-authority-ready');
+  browser = await chromium.launch({ channel: 'chrome', headless: true });
+  progress('browser:ephemeral-headless-launched');
+  appArtifactPreflight = await preflightExpectedAppArtifact();
+  progress('preflight:app-artifact-digest-verified');
   const signup = await supabaseRequest('/auth/v1/signup', {
     method: 'POST',
     body: JSON.stringify({
@@ -2219,8 +2805,6 @@ try {
     throw new Error('Temporary circle membership is not visible to the temporary user.');
   }
 
-  browser = await chromium.launch({ channel: 'chrome', headless: true });
-  progress('browser:ephemeral-headless-launched');
   const desktop = await runDesktopCanary(signup);
   progress('desktop:complete');
   const mobile = await runMobileCanary(signup);
@@ -2232,6 +2816,11 @@ try {
     temporarySignup: true,
     temporaryCircle: true,
     browserMode: 'ephemeral-headless-system-chrome',
+    appArtifact: {
+      expectedSha256: expectedAppArtifactSha256,
+      observedSha256: appArtifactPreflight.appArtifactSha256,
+      entryResources: appArtifactPreflight.entryResources,
+    },
     desktop,
     mobile,
     agentPopup,
@@ -2242,6 +2831,12 @@ try {
       failedRequests: entry.failedRequests.length,
       serverErrors: entry.serverErrors.length,
       sampleConsoleErrors: entry.consoleErrors.slice(0, 3),
+      updateLoopConsoleDetails: entry.consoleErrorDetails.filter((detail) => (
+        /Maximum update depth exceeded|Too many re-renders/i.test(detail.text)
+      )).slice(0, 3),
+      popupConsoleErrors: entry.popupConsoleErrors.slice(0, 5),
+      popupAllowedConsoleErrors: entry.popupAllowedConsoleErrors.slice(0, 5),
+      popupSectionErrors: entry.popupSectionErrors.slice(0, 5),
       sampleFailedRequests: entry.failedRequests.slice(0, 3),
       sampleServerErrors: entry.serverErrors.slice(0, 3),
       layoutResponses: entry.layoutResponses.slice(-12),
@@ -2277,6 +2872,12 @@ if (runFailure || cleanupFailure) {
       pageErrors: entry.pageErrors.length,
       consoleErrors: entry.consoleErrors.length,
       sampleConsoleErrors: entry.consoleErrors.slice(-5),
+      updateLoopConsoleDetails: entry.consoleErrorDetails.filter((detail) => (
+        /Maximum update depth exceeded|Too many re-renders/i.test(detail.text)
+      )).slice(-3),
+      popupConsoleErrors: entry.popupConsoleErrors.slice(-8),
+      popupAllowedConsoleErrors: entry.popupAllowedConsoleErrors.slice(-8),
+      popupSectionErrors: entry.popupSectionErrors.slice(-8),
       failedRequests: entry.failedRequests.slice(-8),
       serverErrors: entry.serverErrors.slice(-5),
       layoutResponses: entry.layoutResponses.slice(-12),

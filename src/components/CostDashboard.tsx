@@ -1,4 +1,4 @@
-// Cost Analytics Dashboard - The #1 fundable feature
+// Cost Analytics Dashboard - period-aligned response and token estimates
 import React, { useMemo, useEffect, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, Pressable, Platform, Modal } from 'react-native';
 import { OpenSwanSession } from '../lib/openswanService';
@@ -17,14 +17,16 @@ import {
 } from '../lib/dataExport';
 
 interface CostData {
+  periodCost: number;
+  responseCount: number;
   today: number;
-  todayChange: number;
+  todayChange: number | null;
   week: number;
-  weekChange: number;
+  weekChange: number | null;
   month: number;
-  monthChange: number;
+  monthChange: number | null;
   dailyHistory: Array<{ date: string; cost: number }>;
-  topSpenders: Array<{ name: string; cost: number; percentage: number; sessions: number }>;
+  topSpenders: Array<{ name: string; cost: number; percentage: number; responses: number }>;
   insights: Array<{ type: 'warning' | 'tip' | 'success'; text: string }>;
   modelBreakdown: Array<{ model: string; cost: number; tokens: number; percentage: number; color: string }>;
   tokenBreakdown: { input: number; output: number; cached: number; newInput: number; total: number };
@@ -35,15 +37,26 @@ interface Props {
   agents: OfficeAgent[];
   sessionTags: Map<string, SessionTag[]>;
   accentColor?: string;
+  costAuthority?: 'recorded' | 'estimated';
 }
 
 const STORAGE_KEY_DATE_RANGE = '@cost_dashboard_date_range';
 
-export default function CostDashboard({ sessions, agents, sessionTags, accentColor = '#e8e8e8' }: Props) {
+export default function CostDashboard({
+  sessions,
+  agents,
+  sessionTags,
+  accentColor = '#e8e8e8',
+  costAuthority = 'recorded',
+}: Props) {
   const [dateRange, setDateRange] = useState<7 | 30 | 90>(30);
   const [showExportModal, setShowExportModal] = useState(false);
   const [exportStatus, setExportStatus] = useState<string>('');
   const costData = useMemo(() => calculateCostData(sessions, dateRange), [sessions, dateRange]);
+  const dailyTrend = useMemo(
+    () => calculateDailyTrend(costData.dailyHistory),
+    [costData.dailyHistory],
+  );
 
   // Load saved date range preference on mount
   useEffect(() => {
@@ -67,10 +80,10 @@ export default function CostDashboard({ sessions, agents, sessionTags, accentCol
   if (sessions.length === 0) {
     return (
       <View style={styles.emptyContainer}>
-        <Text style={styles.emptyIcon}>📊</Text>
-        <Text style={styles.emptyTitle}>No Agent Data Yet</Text>
+        <Text style={styles.emptyIcon}>$</Text>
+        <Text style={styles.emptyTitle} accessibilityRole="header">No usage receipts yet</Text>
         <Text style={styles.emptyText}>
-          Connect your agents to see cost analytics, spending trends, and optimization insights.
+          Recorded agent responses will appear here after this circle starts producing usage.
         </Text>
       </View>
     );
@@ -146,13 +159,16 @@ export default function CostDashboard({ sessions, agents, sessionTags, accentCol
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
       {/* Header with controls */}
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>COST ANALYTICS</Text>
+        <Text style={styles.headerTitle} accessibilityRole="header">COST ANALYTICS</Text>
         <View style={styles.headerControls}>
           {/* Date Range Selector */}
-          <View style={styles.dateRangeSelector}>
+          <View style={styles.dateRangeSelector} accessibilityRole="tablist">
             {[7, 30, 90].map(days => (
               <Pressable
                 key={days}
+                accessibilityRole="tab"
+                accessibilityLabel={`Show ${days} days of cost history`}
+                accessibilityState={{ selected: dateRange === days }}
                 onPress={() => handleDateRangeChange(days as 7 | 30 | 90)}
                 style={[
                   styles.dateRangeBtn,
@@ -172,6 +188,8 @@ export default function CostDashboard({ sessions, agents, sessionTags, accentCol
           
           {/* Export Button */}
           <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Export cost data"
             style={[styles.exportBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
             onPress={() => setShowExportModal(true)}
           >
@@ -180,27 +198,37 @@ export default function CostDashboard({ sessions, agents, sessionTags, accentCol
         </View>
       </View>
 
+      {costAuthority === 'estimated' && (
+        <View style={styles.costAuthorityNotice} accessibilityRole="summary">
+          <Text style={styles.costAuthorityTitle}>ESTIMATED COST VIEW</Text>
+          <Text style={styles.costAuthorityText}>
+            Backpack converts recorded token counts with a flat rate. Use these totals for direction,
+            not as provider billing receipts.
+          </Text>
+        </View>
+      )}
+
       {/* Total Summary Banner */}
       <View style={[styles.summaryBanner, { borderLeftColor: accentColor }]}>
         <View style={styles.summaryRow}>
           <View style={styles.summaryItem}>
-            <Text style={styles.summaryLabel}>Total Sessions</Text>
+            <Text style={styles.summaryLabel}>Cost ({dateRange}d)</Text>
             <Text style={[styles.summaryValue, { color: accentColor }]}>
-              {sessions.length}
+              ${costData.periodCost.toFixed(2)}
             </Text>
           </View>
           <View style={styles.summaryDivider} />
           <View style={styles.summaryItem}>
-            <Text style={styles.summaryLabel}>Avg Cost/Session</Text>
+            <Text style={styles.summaryLabel}>Responses ({dateRange}d)</Text>
             <Text style={[styles.summaryValue, { color: accentColor }]}>
-              ${sessions.length > 0 ? (costData.month / sessions.length).toFixed(3) : '0.00'}
+              {costData.responseCount}
             </Text>
           </View>
           <View style={styles.summaryDivider} />
           <View style={styles.summaryItem}>
-            <Text style={styles.summaryLabel}>Total Tokens</Text>
+            <Text style={styles.summaryLabel}>Avg Cost/Response</Text>
             <Text style={[styles.summaryValue, { color: accentColor }]}>
-              {formatTokenCount(sessions.reduce((sum, s) => sum + (s.totalInputTokens || 0) + (s.totalOutputTokens || 0), 0))}
+              ${costData.responseCount > 0 ? (costData.periodCost / costData.responseCount).toFixed(3) : '0.000'}
             </Text>
           </View>
         </View>
@@ -215,13 +243,13 @@ export default function CostDashboard({ sessions, agents, sessionTags, accentCol
           accentColor={accentColor}
         />
         <CostCard
-          label="THIS WEEK"
+          label="LAST 7 DAYS"
           value={costData.week}
           change={costData.weekChange}
           accentColor={accentColor}
         />
         <CostCard
-          label="THIS MONTH"
+          label="LAST 30 DAYS"
           value={costData.month}
           change={costData.monthChange}
           accentColor={accentColor}
@@ -251,21 +279,8 @@ export default function CostDashboard({ sessions, agents, sessionTags, accentCol
             </View>
             <View style={styles.trendItem}>
               <Text style={styles.trendLabel}>TREND</Text>
-              <Text style={[styles.trendValue, { color: (() => {
-                const first = costData.dailyHistory.slice(0, Math.floor(costData.dailyHistory.length / 2));
-                const second = costData.dailyHistory.slice(Math.floor(costData.dailyHistory.length / 2));
-                const firstAvg = first.reduce((s, d) => s + d.cost, 0) / (first.length || 1);
-                const secondAvg = second.reduce((s, d) => s + d.cost, 0) / (second.length || 1);
-                return secondAvg > firstAvg ? '#ef4444' : '#22c55e';
-              })() }]}>
-                {(() => {
-                  const first = costData.dailyHistory.slice(0, Math.floor(costData.dailyHistory.length / 2));
-                  const second = costData.dailyHistory.slice(Math.floor(costData.dailyHistory.length / 2));
-                  const firstAvg = first.reduce((s, d) => s + d.cost, 0) / (first.length || 1);
-                  const secondAvg = second.reduce((s, d) => s + d.cost, 0) / (second.length || 1);
-                  const change = firstAvg > 0 ? ((secondAvg - firstAvg) / firstAvg) * 100 : 0;
-                  return `${change > 0 ? '▲' : '▼'} ${Math.abs(change).toFixed(0)}%`;
-                })()}
+              <Text style={[styles.trendValue, { color: dailyTrend.color }]}>
+                {dailyTrend.label}
               </Text>
             </View>
           </View>
@@ -274,7 +289,7 @@ export default function CostDashboard({ sessions, agents, sessionTags, accentCol
 
       {/* Per-Model Cost Breakdown */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>COST BY MODEL</Text>
+        <Text style={styles.sectionTitle}>COST BY MODEL · {dateRange} DAYS</Text>
         <View style={styles.spendersContainer}>
           {costData.modelBreakdown.map((m, i) => (
             <View key={i} style={styles.modelRow}>
@@ -299,7 +314,7 @@ export default function CostDashboard({ sessions, agents, sessionTags, accentCol
 
       {/* Token Breakdown */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>TOKEN BREAKDOWN</Text>
+        <Text style={styles.sectionTitle}>TOKEN BREAKDOWN · {dateRange} DAYS</Text>
         <View style={styles.tokenGrid}>
           <View style={styles.tokenCard}>
             <Text style={styles.tokenLabel}>INPUT</Text>
@@ -330,21 +345,28 @@ export default function CostDashboard({ sessions, agents, sessionTags, accentCol
         <View style={styles.tokenBarContainer}>
           {costData.tokenBreakdown.total > 0 && (
             <View style={styles.tokenBarRow}>
-              <View style={[styles.tokenBarSegment, { flex: costData.tokenBreakdown.input || 1, backgroundColor: '#3b82f6' }]} />
-              <View style={[styles.tokenBarSegment, { flex: costData.tokenBreakdown.output || 1, backgroundColor: '#a855f7' }]} />
+              {costData.tokenBreakdown.newInput > 0 && (
+                <View style={[styles.tokenBarSegment, { flex: costData.tokenBreakdown.newInput, backgroundColor: '#3b82f6' }]} />
+              )}
+              {costData.tokenBreakdown.cached > 0 && (
+                <View style={[styles.tokenBarSegment, { flex: costData.tokenBreakdown.cached, backgroundColor: '#22c55e' }]} />
+              )}
+              {costData.tokenBreakdown.output > 0 && (
+                <View style={[styles.tokenBarSegment, { flex: costData.tokenBreakdown.output, backgroundColor: '#a855f7' }]} />
+              )}
             </View>
           )}
           <View style={styles.tokenBarLegend}>
-            <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#3b82f6' }]} /><Text style={styles.legendText}>Input</Text></View>
-            <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#a855f7' }]} /><Text style={styles.legendText}>Output</Text></View>
+            <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#3b82f6' }]} /><Text style={styles.legendText}>New input</Text></View>
             <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#22c55e' }]} /><Text style={styles.legendText}>Cached</Text></View>
+            <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#a855f7' }]} /><Text style={styles.legendText}>Output</Text></View>
           </View>
         </View>
       </View>
 
       {/* Top Spenders */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>TOP SPENDERS</Text>
+        <Text style={styles.sectionTitle}>TOP SPENDERS · {dateRange} DAYS</Text>
         <View style={styles.spendersContainer}>
           {costData.topSpenders.slice(0, 5).map((spender, i) => (
             <SpenderRow key={i} {...spender} rank={i + 1} accentColor={accentColor} />
@@ -382,7 +404,7 @@ export default function CostDashboard({ sessions, agents, sessionTags, accentCol
         >
           <Text style={styles.modalTitle}>📥 EXPORT DATA</Text>
           <Text style={styles.modalDesc}>
-            Export {agents.length} agents and {sessions.length} sessions
+            Export the available agent summary as CSV or JSON.
           </Text>
 
           {exportStatus !== '' && (
@@ -446,11 +468,15 @@ export default function CostDashboard({ sessions, agents, sessionTags, accentCol
 function CostCard({ label, value, change, accentColor }: {
   label: string;
   value: number;
-  change: number;
+  change: number | null;
   accentColor: string;
 }) {
-  const isPositive = change > 0;
-  const changeColor = isPositive ? '#ef4444' : '#22c55e'; // Red = bad (spent more), Green = good (spent less)
+  const isPositive = change !== null && change > 0;
+  const isNeutral = change === null || change === 0;
+  const changeColor = isNeutral ? '#6f6f6f' : isPositive ? '#ef4444' : '#22c55e';
+  const changeLabel = change === null
+    ? '— no prior baseline'
+    : `${isNeutral ? '—' : isPositive ? '▲' : '▼'} ${Math.abs(change).toFixed(1)}%`;
   
   return (
     <View style={styles.costCard}>
@@ -460,7 +486,7 @@ function CostCard({ label, value, change, accentColor }: {
       </Text>
       <View style={styles.changeRow}>
         <Text style={[styles.changeText, { color: changeColor }]}>
-          {isPositive ? '▲' : '▼'} {Math.abs(change).toFixed(1)}%
+          {changeLabel}
         </Text>
       </View>
     </View>
@@ -510,11 +536,11 @@ function MiniBarChart({ data, accentColor }: {
 
 // ─── Spender Row ─────────────────────────────────────────
 
-function SpenderRow({ name, cost, percentage, sessions, rank, accentColor }: {
+function SpenderRow({ name, cost, percentage, responses, rank, accentColor }: {
   name: string;
   cost: number;
   percentage: number;
-  sessions: number;
+  responses: number;
   rank: number;
   accentColor: string;
 }) {
@@ -526,7 +552,7 @@ function SpenderRow({ name, cost, percentage, sessions, rank, accentColor }: {
         <Text style={styles.spenderEmoji}>{emoji}</Text>
         <View style={styles.spenderInfo}>
           <Text style={styles.spenderName}>{name}</Text>
-          <Text style={styles.spenderSessions}>{sessions} sessions</Text>
+          <Text style={styles.spenderSessions}>{responses} responses</Text>
         </View>
       </View>
       
@@ -542,7 +568,7 @@ function SpenderRow({ name, cost, percentage, sessions, rank, accentColor }: {
         <View
           style={[
             styles.spenderBarFill,
-            { width: (percentage + '%') as any, backgroundColor: accentColor },
+            { width: (`${Math.min(100, Math.max(0, percentage))}%`) as any, backgroundColor: accentColor },
           ]}
         />
       </View>
@@ -583,117 +609,107 @@ function formatTokenCount(tokens: number): string {
 // ─── Data Calculation ────────────────────────────────────
 
 function calculateCostData(sessions: OpenSwanSession[], dateRange: 7 | 30 | 90 = 30): CostData {
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
-  const weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
-  const twoWeeksAgo = new Date(today.getTime() - 14 * 24 * 60 * 60 * 1000);
-  const monthAgo = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
-  const twoMonthsAgo = new Date(today.getTime() - 60 * 24 * 60 * 60 * 1000);
+  const today = startOfLocalDay(new Date());
+  const tomorrow = shiftLocalDays(today, 1);
+  const yesterday = shiftLocalDays(today, -1);
+  const sevenDayStart = shiftLocalDays(today, -6);
+  const previousSevenDayStart = shiftLocalDays(sevenDayStart, -7);
+  const thirtyDayStart = shiftLocalDays(today, -29);
+  const previousThirtyDayStart = shiftLocalDays(thirtyDayStart, -30);
+  const selectedStart = shiftLocalDays(today, 1 - dateRange);
 
-  // Calculate costs by time period
-  let todayCost = 0;
-  let yesterdayCost = 0;
-  let thisWeekCost = 0;
-  let lastWeekCost = 0;
-  let thisMonthCost = 0;
-  let lastMonthCost = 0;
+  const datedResponses = sessions.flatMap((response) => {
+    const occurredAt = parseResponseDate(response);
+    return occurredAt ? [{ response, occurredAt }] : [];
+  });
+  const responsesBetween = (start: Date, end: Date) => datedResponses.filter(
+    ({ occurredAt }) => occurredAt >= start && occurredAt < end,
+  );
+  const costFor = (rows: typeof datedResponses) => rows.reduce(
+    (sum, { response }) => sum + nonNegativeMetric(response.totalCost),
+    0,
+  );
 
-  const agentCosts: Record<string, { cost: number; sessions: number }> = {};
+  const selectedResponses = responsesBetween(selectedStart, tomorrow);
+  const periodCost = costFor(selectedResponses);
+  const todayCost = costFor(responsesBetween(today, tomorrow));
+  const yesterdayCost = costFor(responsesBetween(yesterday, today));
+  const thisWeekCost = costFor(responsesBetween(sevenDayStart, tomorrow));
+  const lastWeekCost = costFor(responsesBetween(previousSevenDayStart, sevenDayStart));
+  const thisMonthCost = costFor(responsesBetween(thirtyDayStart, tomorrow));
+  const lastMonthCost = costFor(responsesBetween(previousThirtyDayStart, thirtyDayStart));
+
+  const agentCosts: Record<string, { cost: number; responses: number }> = {};
   const dailyCosts: Record<string, number> = {};
   const modelCosts: Record<string, { cost: number; tokens: number }> = {};
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
   let totalCachedTokens = 0;
 
-  sessions.forEach(s => {
-    const cost = s.totalCost || 0;
-    const sessionDate = s.lastActivity ? new Date(s.lastActivity) : new Date();
+  selectedResponses.forEach(({ response, occurredAt }) => {
+    const cost = nonNegativeMetric(response.totalCost);
+    const inputTokens = nonNegativeMetric(response.totalInputTokens);
+    const outputTokens = nonNegativeMetric(response.totalOutputTokens);
+    const cachedTokens = Math.min(inputTokens, nonNegativeMetric(response.cachedTokens));
+    const agentName = response.agentId || 'unknown';
+    const model = response.model || 'unknown';
 
-    // Time period totals
-    if (sessionDate >= today) todayCost += cost;
-    if (sessionDate >= yesterday && sessionDate < today) yesterdayCost += cost;
-    if (sessionDate >= weekAgo) thisWeekCost += cost;
-    if (sessionDate >= twoWeeksAgo && sessionDate < weekAgo) lastWeekCost += cost;
-    if (sessionDate >= monthAgo) thisMonthCost += cost;
-    if (sessionDate >= twoMonthsAgo && sessionDate < monthAgo) lastMonthCost += cost;
-
-    // Agent totals
-    const agentName = s.agentId || 'unknown';
-    if (!agentCosts[agentName]) agentCosts[agentName] = { cost: 0, sessions: 0 };
+    if (!agentCosts[agentName]) agentCosts[agentName] = { cost: 0, responses: 0 };
     agentCosts[agentName].cost += cost;
-    agentCosts[agentName].sessions += 1;
+    agentCosts[agentName].responses += 1;
 
-    // Model totals
-    const model = s.model || 'unknown';
     if (!modelCosts[model]) modelCosts[model] = { cost: 0, tokens: 0 };
     modelCosts[model].cost += cost;
-    modelCosts[model].tokens += (s.totalInputTokens || 0) + (s.totalOutputTokens || 0);
+    modelCosts[model].tokens += inputTokens + outputTokens;
 
-    // Token breakdown
-    totalInputTokens += s.totalInputTokens || 0;
-    totalOutputTokens += s.totalOutputTokens || 0;
-    totalCachedTokens += s.cachedTokens || 0;
+    totalInputTokens += inputTokens;
+    totalOutputTokens += outputTokens;
+    totalCachedTokens += cachedTokens;
 
-    // Daily totals (last 30 days)
-    const dateKey = sessionDate.toISOString().split('T')[0];
+    const dateKey = localDateKey(occurredAt);
     dailyCosts[dateKey] = (dailyCosts[dateKey] || 0) + cost;
   });
 
-  // Calculate % changes
-  const todayChange = yesterdayCost > 0 ? ((todayCost - yesterdayCost) / yesterdayCost) * 100 : 0;
-  const weekChange = lastWeekCost > 0 ? ((thisWeekCost - lastWeekCost) / lastWeekCost) * 100 : 0;
-  const monthChange = lastMonthCost > 0 ? ((thisMonthCost - lastMonthCost) / lastMonthCost) * 100 : 0;
+  const todayChange = percentageChange(todayCost, yesterdayCost);
+  const weekChange = percentageChange(thisWeekCost, lastWeekCost);
+  const monthChange = percentageChange(thisMonthCost, lastMonthCost);
 
-  // Build daily history (last N days based on dateRange)
   const dailyHistory: Array<{ date: string; cost: number }> = [];
   for (let i = dateRange - 1; i >= 0; i--) {
-    const d = new Date(today.getTime() - i * 24 * 60 * 60 * 1000);
-    const dateKey = d.toISOString().split('T')[0];
+    const dateKey = localDateKey(shiftLocalDays(today, -i));
     dailyHistory.push({ date: dateKey, cost: dailyCosts[dateKey] || 0 });
   }
 
-  // Top spenders
   const topSpenders = Object.entries(agentCosts)
     .map(([name, data]) => ({
       name,
       cost: data.cost,
-      sessions: data.sessions,
-      percentage: thisMonthCost > 0 ? (data.cost / thisMonthCost) * 100 : 0,
+      responses: data.responses,
+      percentage: boundedPercentage(data.cost, periodCost),
     }))
     .sort((a, b) => b.cost - a.cost);
 
-  // Generate insights
   const insights: Array<{ type: 'warning' | 'tip' | 'success'; text: string }> = [];
 
-  if (todayChange > 50) {
-    insights.push({ type: 'warning', text: `Spending up ${todayChange.toFixed(0)}% today vs yesterday` });
+  if (todayChange !== null && todayChange > 50) {
+    insights.push({ type: 'warning', text: `Spend is up ${todayChange.toFixed(0)}% today versus yesterday.` });
   }
 
   if (topSpenders[0]?.percentage > 60) {
     insights.push({
       type: 'tip',
-      text: `${topSpenders[0].name} accounts for ${topSpenders[0].percentage.toFixed(0)}% of spend. Consider optimizing.`,
+      text: `${topSpenders[0].name} accounts for ${topSpenders[0].percentage.toFixed(0)}% of selected-period spend. Review routing and workload fit before changing models.`,
     });
   }
 
-  if (thisMonthCost < lastMonthCost && lastMonthCost > 0) {
+  if (monthChange !== null && thisMonthCost < lastMonthCost) {
     insights.push({
       type: 'success',
-      text: `Great! You're spending ${Math.abs(monthChange).toFixed(0)}% less than last month.`,
+      text: `Spend is ${Math.abs(monthChange).toFixed(0)}% lower than the previous 30-day period.`,
     });
   }
 
-  // Suggest cheaper models for high-cost agents
-  const expensiveAgent = topSpenders.find(s => s.cost > thisMonthCost * 0.4);
-  if (expensiveAgent) {
-    insights.push({
-      type: 'tip',
-      text: `Switch ${expensiveAgent.name} to Haiku for simple tasks → Save ~60% on cost`,
-    });
-  }
-
-  // Model breakdown
+  // Model breakdown for the same selected local-calendar period.
   const MODEL_COLORS: Record<string, string> = {
     'blackswan': '#a855f7',
     'claude-haiku-4-5-20251001': '#22c55e',
@@ -702,7 +718,6 @@ function calculateCostData(sessions: OpenSwanSession[], dateRange: 7 | 30 | 90 =
     'mixed': '#6366f1',
     'unknown': '#6f6f6f',
   };
-  const totalModelCost = Object.values(modelCosts).reduce((s, m) => s + m.cost, 0) || 1;
   const modelBreakdown = Object.entries(modelCosts)
     .map(([model, data]) => ({
       model: model.replace('claude-haiku-4-5-20251001', 'Haiku')
@@ -713,7 +728,7 @@ function calculateCostData(sessions: OpenSwanSession[], dateRange: 7 | 30 | 90 =
                    .replace('unknown', 'Unknown'),
       cost: data.cost,
       tokens: data.tokens,
-      percentage: (data.cost / totalModelCost) * 100,
+      percentage: boundedPercentage(data.cost, periodCost),
       color: MODEL_COLORS[model] || '#6f6f6f',
     }))
     .sort((a, b) => b.cost - a.cost);
@@ -728,6 +743,8 @@ function calculateCostData(sessions: OpenSwanSession[], dateRange: 7 | 30 | 90 =
   };
 
   return {
+    periodCost,
+    responseCount: selectedResponses.length,
     today: todayCost,
     todayChange,
     week: thisWeekCost,
@@ -742,10 +759,69 @@ function calculateCostData(sessions: OpenSwanSession[], dateRange: 7 | 30 | 90 =
   };
 }
 
+function startOfLocalDay(value: Date): Date {
+  return new Date(value.getFullYear(), value.getMonth(), value.getDate());
+}
+
+function shiftLocalDays(value: Date, dayOffset: number): Date {
+  return new Date(value.getFullYear(), value.getMonth(), value.getDate() + dayOffset);
+}
+
+function parseResponseDate(response: OpenSwanSession): Date | null {
+  if (!response.lastActivity) return null;
+  const parsed = new Date(response.lastActivity);
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+
+function localDateKey(value: Date): string {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function nonNegativeMetric(value: number | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+function percentageChange(current: number, previous: number): number | null {
+  return previous > 0 ? ((current - previous) / previous) * 100 : null;
+}
+
+function boundedPercentage(value: number, total: number): number {
+  if (total <= 0) return 0;
+  return Math.min(100, Math.max(0, (value / total) * 100));
+}
+
+function calculateDailyTrend(data: Array<{ date: string; cost: number }>): {
+  color: string;
+  label: string;
+} {
+  const midpoint = Math.floor(data.length / 2);
+  const first = data.slice(0, midpoint);
+  const second = data.slice(midpoint);
+  const firstAverage = first.reduce((sum, day) => sum + day.cost, 0) / (first.length || 1);
+  const secondAverage = second.reduce((sum, day) => sum + day.cost, 0) / (second.length || 1);
+
+  if (firstAverage <= 0) {
+    return {
+      color: '#6f6f6f',
+      label: secondAverage > 0 ? '— no prior baseline' : '— 0%',
+    };
+  }
+
+  const change = ((secondAverage - firstAverage) / firstAverage) * 100;
+  if (change === 0) return { color: '#6f6f6f', label: '— 0%' };
+  return {
+    color: change > 0 ? '#ef4444' : '#22c55e',
+    label: `${change > 0 ? '▲' : '▼'} ${Math.abs(change).toFixed(0)}%`,
+  };
+}
+
 function formatDate(dateStr: string): string {
   if (!dateStr) return '';
-  const d = new Date(dateStr);
-  return `${d.getMonth() + 1}/${d.getDate()}`;
+  const [, month, day] = dateStr.split('-');
+  return month && day ? `${Number(month)}/${Number(day)}` : dateStr;
 }
 
 // ─── Styles ──────────────────────────────────────────────
@@ -798,6 +874,27 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
   },
+  costAuthorityNotice: {
+    marginBottom: 16,
+    paddingHorizontal: 13,
+    paddingVertical: 11,
+    borderWidth: 1,
+    borderColor: '#f59e0b44',
+    borderRadius: 10,
+    backgroundColor: '#f59e0b0d',
+  },
+  costAuthorityTitle: {
+    color: '#e9c46a',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 1.1,
+    marginBottom: 3,
+  },
+  costAuthorityText: {
+    color: '#a79a7f',
+    fontSize: 11,
+    lineHeight: 16,
+  },
 
   // Date Range Selector
   dateRangeSelector: {
@@ -805,6 +902,8 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   dateRangeBtn: {
+    minHeight: 44,
+    justifyContent: 'center',
     paddingHorizontal: 16,
     paddingVertical: 8,
     borderRadius: 6,
@@ -827,6 +926,8 @@ const styles = StyleSheet.create({
 
   // Export Button
   exportBtn: {
+    minHeight: 44,
+    justifyContent: 'center',
     paddingHorizontal: 16,
     paddingVertical: 8,
     borderRadius: 6,

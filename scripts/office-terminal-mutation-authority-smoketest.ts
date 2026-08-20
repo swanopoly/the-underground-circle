@@ -252,8 +252,9 @@ async function main(): Promise<void> {
     'component gates local removal on the exact immutable receipt',
   );
   assert(
-    componentSource.includes("onDelete={item.id.startsWith('local-') || item.senderId === userId ? handleDelete : undefined}"),
-    'delete affordance is shown only for local rows or the current sender',
+    /onDelete=\{!readOnly\s*&&\s*\(item\.id\.startsWith\('local-'\)\s*\|\|\s*item\.senderId\s*===\s*userId\)\s*\?\s*handleDelete\s*:\s*undefined\}/
+      .test(componentSource),
+    'delete affordance is shown only for writable local rows or the current sender',
   );
 
   const sendHandler = sourceSection(

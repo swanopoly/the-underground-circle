@@ -41,6 +41,7 @@ import {
   type OpenSwanWebSearchResult,
 } from '../../../../lib/openswanService';
 import { MONO, formatRelativeTime } from './AgentPanelShared';
+import { cronJobControlSnapshotMatches } from './agentCronControlCore';
 
 type PanelOpenSwanConfig = OpenSwanConfig & { connection: AgentConnection };
 
@@ -150,12 +151,15 @@ export function OpenSwanFrontendPanel({
   const [sessionHistory, setSessionHistory] = useState<Array<{ role: string; content: string }> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [taskInput, setTaskInput] = useState('');
-  const [messageInput, setMessageInput] = useState('');
   const [spawnInput, setSpawnInput] = useState('');
   const [memoryQuery, setMemoryQuery] = useState('');
   const [memoryResult, setMemoryResult] = useState('');
+  const [memoryResultQuery, setMemoryResultQuery] = useState('');
+  const [memorySearchState, setMemorySearchState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [webQuery, setWebQuery] = useState('');
   const [webResults, setWebResults] = useState<OpenSwanWebSearchResult[]>([]);
+  const [webResultQuery, setWebResultQuery] = useState('');
+  const [webSearchState, setWebSearchState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [actionState, setActionState] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [advancedLaneState, setAdvancedLaneState] = useState<AdvancedLaneState>(() => buildAdvancedLaneState('idle'));
@@ -168,9 +172,14 @@ export function OpenSwanFrontendPanel({
   const [loadedConnectionId, setLoadedConnectionId] = useState<string | null>(null);
   const [loadedConnectionFingerprint, setLoadedConnectionFingerprint] = useState<OpenSwanConnectionFingerprint | null>(null);
   const sessionRefreshGeneration = useRef(0);
+  const bindingReadGeneration = useRef(0);
+  const advancedOpenRef = useRef(advancedOpen);
+  advancedOpenRef.current = advancedOpen;
   const essentialSnapshotLoaded = useRef(false);
   const refreshInFlight = useRef(false);
   const actionInFlight = useRef(false);
+  const actionSequence = useRef(0);
+  const activeActionId = useRef<number | null>(null);
 
   const resolveConfig = useCallback(async (): Promise<PanelOpenSwanConfig | null> => {
     if (!hasCurrentPanelAuthority(identityAuthority, isIdentityAuthorityCurrent)) {
@@ -194,12 +203,23 @@ export function OpenSwanFrontendPanel({
   const refresh = useCallback(async () => {
     if (refreshInFlight.current) return;
     const generation = ++sessionRefreshGeneration.current;
+    activeActionId.current = null;
+    actionInFlight.current = false;
+    setActionState(null);
     refreshInFlight.current = true;
     setRefreshing(true);
     setError(null);
     setLoadedConnectionId(null);
     setLoadedConnectionFingerprint(null);
     setSessions([]);
+    setMemoryResult('');
+    setMemoryResultQuery('');
+    setMemorySearchState('idle');
+    setWebResults([]);
+    setWebResultQuery('');
+    setWebSearchState('idle');
+    setActionNotice(null);
+    setBindingNotice(null);
     if (advancedOpen) setAdvancedLaneState(buildAdvancedLaneState('loading'));
     try {
       const config = await resolveConfig();
@@ -316,12 +336,25 @@ export function OpenSwanFrontendPanel({
       setSessionBindings({});
       setBindingLoadState('idle');
       setBindingLoadError(null);
+      setMemoryResult('');
+      setMemoryResultQuery('');
+      setMemorySearchState('idle');
+      setWebResults([]);
+      setWebResultQuery('');
+      setWebSearchState('idle');
+      setActionNotice(null);
+      setBindingNotice(null);
+      activeActionId.current = null;
+      actionInFlight.current = false;
+      setActionState(null);
       return;
     }
     void refresh();
     return () => {
       sessionRefreshGeneration.current += 1;
       refreshInFlight.current = false;
+      activeActionId.current = null;
+      actionInFlight.current = false;
     };
   }, [advancedOpen, refresh]);
 
@@ -329,12 +362,23 @@ export function OpenSwanFrontendPanel({
     label: string,
     fn: (config: OpenSwanConfig) => Promise<PanelActionResult>,
   ) => {
-    if (actionInFlight.current) return;
+    if (actionInFlight.current) return false;
+    const capturedRefreshGeneration = sessionRefreshGeneration.current;
     const capturedAuthority = identityAuthority;
+    const capturedConnectionFingerprint = loadedConnectionFingerprint;
+    const actionId = ++actionSequence.current;
+    const invocationIsCurrent = () => (
+      activeActionId.current === actionId
+      &&
+      capturedRefreshGeneration === sessionRefreshGeneration.current
+      && advancedOpenRef.current
+      && hasCurrentPanelAuthority(capturedAuthority, isIdentityAuthorityCurrent)
+    );
     if (!hasCurrentPanelAuthority(capturedAuthority, isIdentityAuthorityCurrent)) {
       setError('This Office session changed. Reopen the agent before using runtime tools.');
-      return;
+      return false;
     }
+    activeActionId.current = actionId;
     actionInFlight.current = true;
     setActionState(label);
     setError(null);
@@ -344,31 +388,46 @@ export function OpenSwanFrontendPanel({
       if (!config) throw new Error('OpenSwan connection is not available');
       if (
         refreshInFlight.current
-        || !loadedConnectionFingerprint
-        || !matchesOpenSwanConnectionFingerprint(loadedConnectionFingerprint, config.connection)
+        || !capturedConnectionFingerprint
+        || !matchesOpenSwanConnectionFingerprint(capturedConnectionFingerprint, config.connection)
       ) {
         throw new Error('OpenSwan session evidence is stale for this connection. Refresh before sending.');
       }
       const result = await fn(config);
       if (!result.ok) throw new Error(result.error);
-      if (!isIdentityAuthorityCurrent(capturedAuthority)) return;
+      if (!invocationIsCurrent()) return false;
+      const latestConfig = await resolveConfig();
+      if (!invocationIsCurrent()) return false;
+      if (
+        !latestConfig
+        || !matchesOpenSwanConnectionFingerprint(capturedConnectionFingerprint, latestConfig.connection)
+      ) {
+        throw new Error('The OpenSwan connection changed while this action was running. Refresh before retrying.');
+      }
       result.commit?.();
       setActionNotice(result.summary.slice(0, 360));
-      await refresh();
+      return true;
     } catch (e: any) {
-      setActionNotice(null);
-      setError(e?.message || `Failed to ${label.toLowerCase()}`);
+      if (invocationIsCurrent()) {
+        setActionNotice(null);
+      }
+      return false;
     } finally {
-      actionInFlight.current = false;
-      setActionState(null);
+      if (activeActionId.current === actionId) {
+        activeActionId.current = null;
+        actionInFlight.current = false;
+        setActionState(null);
+      }
     }
-  }, [identityAuthority, isIdentityAuthorityCurrent, loadedConnectionFingerprint, refresh, resolveConfig]);
+  }, [identityAuthority, isIdentityAuthorityCurrent, loadedConnectionFingerprint, resolveConfig]);
 
   const exactSessionMatches = sessions.filter(
     (session) => session.sessionKey === agent.sessionKey,
   );
   const activeSession = exactSessionMatches.length === 1 ? exactSessionMatches[0] : null;
   const refreshPublishedBindings = useCallback(async () => {
+    const readGeneration = ++bindingReadGeneration.current;
+    const sessionGeneration = sessionRefreshGeneration.current;
     if (
       !advancedOpen
       || !circleId
@@ -383,11 +442,17 @@ export function OpenSwanFrontendPanel({
       return;
     }
     const capturedAuthority = identityAuthority;
+    const readIsCurrent = () => (
+      readGeneration === bindingReadGeneration.current
+      && sessionGeneration === sessionRefreshGeneration.current
+      && advancedOpenRef.current
+      && isIdentityAuthorityCurrent(capturedAuthority)
+    );
     setBindingLoadState('loading');
     setBindingLoadError(null);
     try {
       const ownedResult = await getUserCircleAgentsExact(circleId, capturedAuthority);
-      if (!isIdentityAuthorityCurrent(capturedAuthority)) return;
+      if (!readIsCurrent()) return;
       if (!ownedResult.ok) throw new Error(ownedResult.error);
       const ownedAgents = ownedResult.agents.filter((officeAgent) => (
         officeAgent.ownerId === userId
@@ -398,7 +463,7 @@ export function OpenSwanFrontendPanel({
         ownedAgents.map((officeAgent) => officeAgent.id),
         capturedAuthority,
       );
-      if (!isIdentityAuthorityCurrent(capturedAuthority)) return;
+      if (!readIsCurrent()) return;
       if (!bindingResult.ok) throw new Error(bindingResult.error);
       setPublishedOpenSwanAgents(ownedAgents);
       setSessionBindings(Object.fromEntries(ownedAgents.map((officeAgent) => (
@@ -406,7 +471,7 @@ export function OpenSwanFrontendPanel({
       ))));
       setBindingLoadState('ready');
     } catch {
-      if (!isIdentityAuthorityCurrent(capturedAuthority)) return;
+      if (!readIsCurrent()) return;
       setBindingLoadState('error');
       setBindingLoadError('Published Office agents and private session bindings could not be verified. Retry before changing routes.');
     }
@@ -446,7 +511,14 @@ export function OpenSwanFrontendPanel({
       setBindingNotice('This exact OpenSwan connection and session must be live before it can be linked.');
       return;
     }
-    const currentBinding = sessionBindings[officeAgent.id];
+    if (
+      bindingLoadState !== 'ready'
+      || !Object.prototype.hasOwnProperty.call(sessionBindings, officeAgent.id)
+    ) {
+      setBindingNotice('The current session route is not verified. Refresh before linking it.');
+      return;
+    }
+    const currentBinding = sessionBindings[officeAgent.id] ?? null;
     const movingBinding = Boolean(
       currentBinding
       && (currentBinding.agentBotId !== bindingTarget.agentBotId
@@ -493,26 +565,39 @@ export function OpenSwanFrontendPanel({
         setBindingNotice('The exact session could not be re-verified. Refresh before linking this route.');
         return;
       }
-      const savedBinding = await setOfficeAgentSessionBinding(
+      const bindingResult = await setOfficeAgentSessionBinding(
         bindingTarget.officeAgentId,
         bindingTarget.agentBotId,
         bindingTarget.sessionKey,
-        capturedAuthority,
+        currentBinding,
+        {
+          authority: capturedAuthority,
+          isAuthorityCurrent: isIdentityAuthorityCurrent,
+        },
       );
       if (!isIdentityAuthorityCurrent(capturedAuthority)) return;
+      if (!bindingResult.ok) {
+        await refreshPublishedBindings();
+        if (!isIdentityAuthorityCurrent(capturedAuthority)) return;
+        setBindingNotice(bindingResult.error);
+        return;
+      }
+      const savedBinding = bindingResult.receipt.resultBinding;
       if (
-        savedBinding.officeAgentId !== bindingTarget.officeAgentId
+        !savedBinding
+        || savedBinding.officeAgentId !== bindingTarget.officeAgentId
         || savedBinding.agentBotId !== bindingTarget.agentBotId
         || savedBinding.sessionKey !== bindingTarget.sessionKey
       ) throw new Error('The exact saved route did not match the requested session.');
       await refreshPublishedBindings();
+      if (!isIdentityAuthorityCurrent(capturedAuthority)) return;
       setBindingNotice(`${officeAgent.name} now routes to this exact OpenSwan session.`);
     } catch (bindingError: any) {
       setBindingNotice(bindingError?.message || 'The exact session binding could not be saved.');
     } finally {
       setBindingAction(null);
     }
-  }, [activeSession, agent.sessionKey, exactSessionMatches.length, identityAuthority, isIdentityAuthorityCurrent, loadedConnectionFingerprint, loadedConnectionId, refreshPublishedBindings, refreshing, resolveConfig, runtimeConnectionId, sessionBindings]);
+  }, [activeSession, agent.sessionKey, bindingLoadState, exactSessionMatches.length, identityAuthority, isIdentityAuthorityCurrent, loadedConnectionFingerprint, loadedConnectionId, refreshPublishedBindings, refreshing, resolveConfig, runtimeConnectionId, sessionBindings]);
 
   const unbindPublishedAgent = useCallback(async (officeAgent: CircleOfficeAgent) => {
     const capturedAuthority = identityAuthority;
@@ -531,23 +616,26 @@ export function OpenSwanFrontendPanel({
     setBindingAction(officeAgent.id);
     setBindingNotice(null);
     try {
-      const currentResult = await readOfficeAgentSessionBindingsBatch([officeAgent.id], capturedAuthority);
+      const clearResult = await clearOfficeAgentSessionBinding(
+        officeAgent.id,
+        expectedBinding,
+        {
+          authority: capturedAuthority,
+          isAuthorityCurrent: isIdentityAuthorityCurrent,
+        },
+      );
       if (!isIdentityAuthorityCurrent(capturedAuthority)) return;
-      const currentBinding = currentResult.ok ? currentResult.bindings.get(officeAgent.id) : null;
-      if (
-        !currentResult.ok
-        || !currentBinding
-        || currentBinding.id !== expectedBinding.id
-        || currentBinding.agentBotId !== expectedBinding.agentBotId
-        || currentBinding.sessionKey !== expectedBinding.sessionKey
-      ) {
-        setBindingNotice('The session route changed while confirmation was open. Refresh before unbinding it.');
+      if (!clearResult.ok) {
+        await refreshPublishedBindings();
+        if (!isIdentityAuthorityCurrent(capturedAuthority)) return;
+        setBindingNotice(clearResult.error);
         return;
       }
-      const cleared = await clearOfficeAgentSessionBinding(officeAgent.id, capturedAuthority);
-      if (!isIdentityAuthorityCurrent(capturedAuthority)) return;
-      if (!cleared) throw new Error('The binding was not cleared. Refresh its current state and retry.');
+      if (clearResult.receipt.resultBinding !== null) {
+        throw new Error('The exact clear receipt still contained a session route.');
+      }
       await refreshPublishedBindings();
+      if (!isIdentityAuthorityCurrent(capturedAuthority)) return;
       setBindingNotice(`${officeAgent.name} is no longer linked to an OpenSwan session.`);
     } catch (bindingError: any) {
       setBindingNotice(bindingError?.message || 'The session binding could not be cleared.');
@@ -678,8 +766,8 @@ export function OpenSwanFrontendPanel({
         </View>
         ) : null}
 
-        {error ? <Text style={{ color: '#ef4444', fontSize: 12, fontFamily: MONO, marginTop: 8 }}>{error}</Text> : null}
-        {actionNotice ? <Text style={{ color: '#22c55e', fontSize: 11, fontFamily: MONO, lineHeight: 16, marginTop: 8 }}>{actionNotice}</Text> : null}
+        {error ? <Text accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ color: '#ef4444', fontSize: 12, fontFamily: MONO, marginTop: 8 }}>{error}</Text> : null}
+        {actionNotice ? <Text accessibilityLiveRegion="polite" style={{ color: '#22c55e', fontSize: 11, fontFamily: MONO, lineHeight: 16, marginTop: 8 }}>{actionNotice}</Text> : null}
         {isBlackSwanRuntime ? (
           <Text style={{ color: '#b0b0ba', fontSize: 11, fontFamily: MONO, marginTop: 8, lineHeight: 16 }}>
             BlackSwan is the sovereign Pixel Agent. OpenSwan is the coding runtime and delegation fabric behind it.
@@ -703,6 +791,7 @@ export function OpenSwanFrontendPanel({
           <TextInput
             value={taskInput}
             onChangeText={setTaskInput}
+            accessibilityLabel="Task draft for Chat"
             placeholder="What should this agent do?"
             placeholderTextColor="#606075"
             multiline
@@ -758,8 +847,8 @@ export function OpenSwanFrontendPanel({
             </Text>
           ) : null}
           {bindingLoadState === 'loading' ? (
-            <View style={{ minHeight: 44, justifyContent: 'center' }}>
-              <ActivityIndicator size="small" color={accentColor} />
+            <View accessibilityLiveRegion="polite" style={{ minHeight: 44, justifyContent: 'center' }}>
+              <ActivityIndicator accessibilityRole="progressbar" accessibilityLabel="Loading published Office agent bindings" size="small" color={accentColor} />
             </View>
           ) : bindingLoadState === 'error' ? (
             <View accessibilityRole="alert" style={{ gap: 8, borderWidth: 1, borderColor: '#ef444440', backgroundColor: '#ef444410', borderRadius: 3, padding: 9 }}>
@@ -819,7 +908,7 @@ export function OpenSwanFrontendPanel({
             );
           }) : null}
           {bindingNotice ? (
-            <Text style={{ color: '#b0b0ba', fontSize: 11, lineHeight: 16, fontFamily: MONO }}>{bindingNotice}</Text>
+            <Text accessibilityLiveRegion="polite" style={{ color: '#b0b0ba', fontSize: 11, lineHeight: 16, fontFamily: MONO }}>{bindingNotice}</Text>
           ) : null}
           <Text style={{ color: '#606070', fontSize: 10, lineHeight: 15, fontFamily: MONO }}>
             The private connection row and session key are stored owner-only. The bridge token stays on this device.
@@ -840,7 +929,7 @@ export function OpenSwanFrontendPanel({
       <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 4, padding: 12, gap: 10 }}>
         <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>SESSION COCKPIT</Text>
         {loading ? (
-          <ActivityIndicator size="small" color={accentColor} />
+          <ActivityIndicator accessibilityRole="progressbar" accessibilityLabel="Loading exact OpenSwan session" size="small" color={accentColor} />
         ) : activeSession ? (
           <>
             <View style={{ backgroundColor: '#111118', borderWidth: 1, borderColor: accentColor + '30', borderRadius: 3, padding: 12 }}>
@@ -932,35 +1021,12 @@ export function OpenSwanFrontendPanel({
         <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>CONNECTED-AGENT TOOLS</Text>
         <View style={{ gap: 10 }}>
           <View style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 10, gap: 6 }}>
-            <Text style={{ color: '#808090', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>DRAFT FOR CHAT</Text>
-            <View style={{ flexDirection: 'row', gap: 6 }}>
-              <TextInput
-                value={messageInput}
-                onChangeText={setMessageInput}
-                placeholder="send a session message..."
-                placeholderTextColor="#606075"
-                style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
-              />
-              <ActionButton
-                label="OPEN CHAT"
-                loadingKey="Open Chat"
-                color={accentColor}
-                borderColor={accentColor + '40'}
-                disabled={!onOpenInChat || !messageInput.trim()}
-                onPress={() => {
-                  if (!onOpenInChat || !messageInput.trim()) return;
-                  onOpenInChat(messageInput.trim());
-                }}
-              />
-            </View>
-          </View>
-
-          <View style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 10, gap: 6 }}>
             <Text style={{ color: '#808090', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>SPAWN SUBAGENT</Text>
             <View style={{ flexDirection: 'row', gap: 6 }}>
               <TextInput
                 value={spawnInput}
                 onChangeText={setSpawnInput}
+                accessibilityLabel="Subagent task draft for Chat"
                 placeholder="delegate a background task..."
                 placeholderTextColor="#606075"
                 style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
@@ -989,6 +1055,7 @@ export function OpenSwanFrontendPanel({
             <TextInput
               value={memoryQuery}
               onChangeText={setMemoryQuery}
+              accessibilityLabel="Runtime memory search query"
               placeholder="search runtime memory..."
               placeholderTextColor="#606075"
               style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
@@ -998,19 +1065,49 @@ export function OpenSwanFrontendPanel({
               loadingKey="Search memory"
               color="#22c55e"
               borderColor="#22c55e40"
-              onPress={() => memoryQuery.trim() && runAction('Search memory', async (config) => {
-                const result = await searchMemory(config, memoryQuery.trim());
-                if (!result.ok) return { ok: false, error: 'Runtime memory search failed. Check the OpenSwan tool connection and retry.' };
-                const reply = result.reply || 'No matching runtime memory was returned.';
-                return {
-                  ok: true,
-                  summary: `Memory search completed for "${memoryQuery.trim()}".`,
-                  commit: () => setMemoryResult(reply),
-                };
-              })}
+              disabled={!memoryQuery.trim()}
+              onPress={() => {
+                const query = memoryQuery.trim();
+                if (!query) return;
+                const searchGeneration = sessionRefreshGeneration.current;
+                const searchAuthority = identityAuthority;
+                setMemoryResult('');
+                setMemoryResultQuery('');
+                setMemorySearchState('loading');
+                void runAction('Search memory', async (config) => {
+                  const result = await searchMemory(config, query);
+                  if (!result.ok) return { ok: false, error: 'Runtime memory search failed. Check the OpenSwan tool connection and retry.' };
+                  const reply = result.reply || 'No matching runtime memory was returned.';
+                  return {
+                    ok: true,
+                    summary: `Memory search completed for "${query}".`,
+                    commit: () => {
+                      setMemoryResult(reply);
+                      setMemoryResultQuery(query);
+                    },
+                  };
+                }).then(ok => {
+                  if (
+                    searchGeneration === sessionRefreshGeneration.current
+                    && advancedOpenRef.current
+                    && hasCurrentPanelAuthority(searchAuthority, isIdentityAuthorityCurrent)
+                  ) {
+                    setMemorySearchState(ok ? 'ready' : 'error');
+                  }
+                });
+              }}
             />
           </View>
-          {memoryResult ? <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, lineHeight: 16 }} selectable>{memoryResult}</Text> : null}
+          {memorySearchState === 'loading' ? (
+            <Text accessibilityLiveRegion="polite" style={{ color: '#38bdf8', fontSize: 11, fontFamily: MONO }}>Searching verified runtime memory…</Text>
+          ) : memorySearchState === 'error' ? (
+            <Text accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ color: '#f0a09b', fontSize: 11, fontFamily: MONO }}>Runtime memory search failed. Check the connection and retry.</Text>
+          ) : memorySearchState === 'ready' && memoryResultQuery ? (
+            <View style={{ gap: 4 }}>
+              <Text style={{ color: '#22c55e', fontSize: 10, fontFamily: MONO }} numberOfLines={2}>RESULTS FOR “{memoryResultQuery}”</Text>
+              <Text accessibilityLiveRegion="polite" style={{ color: '#808090', fontSize: 11, fontFamily: MONO, lineHeight: 16 }} selectable>{memoryResult || 'No matching runtime memory was returned.'}</Text>
+            </View>
+          ) : null}
         </View>
 
         <View style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 10, gap: 6 }}>
@@ -1019,6 +1116,7 @@ export function OpenSwanFrontendPanel({
             <TextInput
               value={webQuery}
               onChangeText={setWebQuery}
+              accessibilityLabel="Runtime web search query"
               placeholder="research a topic..."
               placeholderTextColor="#606075"
               style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
@@ -1028,19 +1126,49 @@ export function OpenSwanFrontendPanel({
               loadingKey="Web search"
               color="#14b8a6"
               borderColor="#14b8a640"
-              onPress={() => webQuery.trim() && runAction('Web search', async (config) => {
-                const result = await runWebSearch(config, webQuery.trim());
-                if (!result.ok) return { ok: false, error: 'Runtime web search failed. Check the OpenSwan tool connection and retry.' };
-                const results = result.results || [];
-                return {
-                  ok: true,
-                  summary: `Web search for "${webQuery.trim()}" returned ${results.length} results.`,
-                  commit: () => setWebResults(results),
-                };
-              })}
+              disabled={!webQuery.trim()}
+              onPress={() => {
+                const query = webQuery.trim();
+                if (!query) return;
+                const searchGeneration = sessionRefreshGeneration.current;
+                const searchAuthority = identityAuthority;
+                setWebResults([]);
+                setWebResultQuery('');
+                setWebSearchState('loading');
+                void runAction('Web search', async (config) => {
+                  const result = await runWebSearch(config, query);
+                  if (!result.ok) return { ok: false, error: 'Runtime web search failed. Check the OpenSwan tool connection and retry.' };
+                  const results = result.results || [];
+                  return {
+                    ok: true,
+                    summary: `Web search for "${query}" returned ${results.length} results.`,
+                    commit: () => {
+                      setWebResults(results);
+                      setWebResultQuery(query);
+                    },
+                  };
+                }).then(ok => {
+                  if (
+                    searchGeneration === sessionRefreshGeneration.current
+                    && advancedOpenRef.current
+                    && hasCurrentPanelAuthority(searchAuthority, isIdentityAuthorityCurrent)
+                  ) {
+                    setWebSearchState(ok ? 'ready' : 'error');
+                  }
+                });
+              }}
             />
           </View>
-          {webResults.length > 0 ? (
+          {webSearchState === 'ready' && webResultQuery ? (
+            <Text style={{ color: '#14b8a6', fontSize: 10, fontFamily: MONO }} numberOfLines={2}>RESULTS FOR “{webResultQuery}”</Text>
+          ) : null}
+          {webSearchState === 'loading' ? (
+            <Text accessibilityLiveRegion="polite" style={{ color: '#38bdf8', fontSize: 11, fontFamily: MONO }}>Searching the web through this exact runtime…</Text>
+          ) : webSearchState === 'error' ? (
+            <Text accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ color: '#f0a09b', fontSize: 11, fontFamily: MONO }}>Runtime web search failed. Check the connection and retry.</Text>
+          ) : webSearchState === 'ready' && webResults.length === 0 ? (
+            <Text accessibilityLiveRegion="polite" style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>No verified web results were returned.</Text>
+          ) : webSearchState === 'ready' ? (
             <View style={{ gap: 6 }}>
               {webResults.slice(0, 4).map((result, index) => (
                 <View key={result.url} style={{ paddingVertical: 6, borderBottomWidth: index < Math.min(webResults.length, 4) - 1 ? 1 : 0, borderBottomColor: '#171724' }}>
@@ -1250,6 +1378,8 @@ export function CronJobsPanel({
     const confirmationScopeKey = cronScopeKey;
     const expectedFingerprint = verifiedConnectionFingerprint;
     const expectedJobs = visibleJobs;
+    const expectedJob = expectedJobs.find(job => job.id === jobId) || null;
+    const actionPatch = patch && typeof patch === 'object' ? { ...patch } : patch;
     actionInFlight.current = true;
     // Gate destructive or side-effect-heavy actions behind a confirmation.
     // "run" is mostly harmless but we still prompt because it can trigger a
@@ -1260,9 +1390,9 @@ export function CronJobsPanel({
       if (action === 'remove') {
         const ok = await confirm(`Delete cron job "${niceName}"? This can't be undone.`);
         if (!ok) return;
-      } else if (action === 'update' && patch && typeof patch.enabled === 'boolean') {
-        const nextState = patch.enabled ? 'Enable' : 'Disable';
-        const consequence = patch.enabled
+      } else if (action === 'update' && actionPatch && typeof actionPatch.enabled === 'boolean') {
+        const nextState = actionPatch.enabled ? 'Enable' : 'Disable';
+        const consequence = actionPatch.enabled
           ? 'It may begin running external work as soon as its next scheduled time.'
           : 'It will stop running on its schedule until re-enabled.';
         const ok = await confirm(`${nextState} cron job "${niceName}"? ${consequence}`);
@@ -1279,6 +1409,7 @@ export function CronJobsPanel({
         || !expectedFingerprint
         || !hasCurrentPanelAuthority(identityAuthority, isIdentityAuthorityCurrent)
         || expectedJobs.filter(job => job.id === jobId).length !== 1
+        || !expectedJob
       ) {
         setError('The verified cron snapshot changed while confirmation was open. Refresh before trying again.');
         return;
@@ -1292,7 +1423,37 @@ export function CronJobsPanel({
         setError('No cron action was sent because the verified connection no longer matches.');
         return;
       }
-      const result = await manageCronJob(config, action, jobId, patch);
+      const preflightInventory = await listCronJobs(config);
+      if (!hasCurrentPanelAuthority(identityAuthority, isIdentityAuthorityCurrent)) return;
+      const preflightConfig = await resolveConfig();
+      const currentJobMatches = preflightInventory.ok && preflightInventory.supported
+        ? preflightInventory.jobs.filter(job => job.id === jobId)
+        : [];
+      if (!preflightInventory.ok || !preflightInventory.supported) {
+        setLoadError('The cron inventory could not be re-verified after confirmation. Refresh before trying again.');
+        setError('No cron action was sent because the exact current job could not be verified.');
+        return;
+      }
+      if (
+        confirmationGeneration !== refreshGeneration.current
+        || confirmationScopeKey !== cronScopeKey
+        || !preflightConfig
+        || !matchesOpenSwanConnectionFingerprint(expectedFingerprint, preflightConfig.connection)
+        || currentJobMatches.length !== 1
+        || !cronJobControlSnapshotMatches(expectedJob, currentJobMatches[0])
+      ) {
+        if (preflightConfig) {
+          setJobs(preflightInventory.jobs);
+          setConnection(preflightConfig.connection);
+          setVerifiedConnectionFingerprint(expectedFingerprint);
+          setVerifiedScopeKey(cronScopeKey);
+          setLastRefreshedAt(new Date().toISOString());
+        }
+        setLoadError('The cron job changed after it was displayed. Review the refreshed inventory before trying again.');
+        setError('No cron action was sent because the exact job no longer matches the confirmed snapshot.');
+        return;
+      }
+      const result = await manageCronJob(preflightConfig, action, jobId, actionPatch);
       if (!hasCurrentPanelAuthority(identityAuthority, isIdentityAuthorityCurrent)) return;
       if (!result.ok) {
         setError(result.error || 'Cron action failed.');
@@ -1332,7 +1493,7 @@ export function CronJobsPanel({
         : verifyCronJobPostcondition(inventory.jobs, {
           action,
           jobId,
-          ...(action === 'update' && typeof patch?.enabled === 'boolean' ? { enabled: patch.enabled } : {}),
+          ...(action === 'update' && typeof actionPatch?.enabled === 'boolean' ? { enabled: actionPatch.enabled } : {}),
         });
       if (!postcondition) {
         setActionNotice('OpenSwan accepted the action, but the exact schedule state did not confirm it.');
@@ -1365,11 +1526,22 @@ export function CronJobsPanel({
     }
   };
 
+  const normalizedNewJob = {
+    ...newJob,
+    name: newJob.name.trim(),
+    schedule: newJob.schedule.trim(),
+    task: newJob.task.trim(),
+  };
+  const newJobInputComplete = Boolean(
+    normalizedNewJob.name && normalizedNewJob.schedule && normalizedNewJob.task,
+  );
+
   const handleCreate = async () => {
     if (actionInFlight.current) return;
     if (mutationsUnavailable) return;
-    if (!newJob.name || !newJob.schedule || !newJob.task) return;
-    if (!isLikelyCronExpression(newJob.schedule)) {
+    const createPayload = normalizedNewJob;
+    if (!newJobInputComplete) return;
+    if (!isLikelyCronExpression(createPayload.schedule)) {
       setError('Enter a valid cron expression like 0 9 * * *.');
       return;
     }
@@ -1380,7 +1552,7 @@ export function CronJobsPanel({
     let mutationAccepted = false;
     try {
       const confirmed = await confirm(
-        `Create scheduled job "${newJob.name}" with schedule "${newJob.schedule}" for the ${newJob.sessionTarget} session target?`,
+        `Create scheduled job "${createPayload.name}" with schedule "${createPayload.schedule}" for the ${createPayload.sessionTarget} session target?`,
       );
       if (!confirmed) return;
       if (
@@ -1401,12 +1573,7 @@ export function CronJobsPanel({
         setError('No cron job was created because the verified connection no longer matches.');
         return;
       }
-      const result = await createCronJob(config, {
-        name: newJob.name,
-        schedule: newJob.schedule,
-        task: newJob.task,
-        sessionTarget: newJob.sessionTarget,
-      });
+      const result = await createCronJob(config, createPayload);
       if (!hasCurrentPanelAuthority(identityAuthority, isIdentityAuthorityCurrent)) return;
       if (!result.ok) {
         setError(result.error || 'Failed to create cron job.');
@@ -1434,9 +1601,9 @@ export function CronJobsPanel({
       if (!inventory.ok || !inventory.supported || !verifyCronJobPostcondition(inventory.jobs, {
         action: 'create',
         jobId: result.jobId,
-        name: newJob.name,
-        schedule: newJob.schedule,
-        sessionTarget: newJob.sessionTarget,
+        name: createPayload.name,
+        schedule: createPayload.schedule,
+        sessionTarget: createPayload.sessionTarget,
       })) {
         setActionNotice(`OpenSwan accepted cron job ${result.jobId}, but its exact postcondition was not verified.`);
         setLoadError('Inspect the connection inventory before retrying cron creation.');
@@ -1537,7 +1704,7 @@ export function CronJobsPanel({
         </View>
       ) : null}
 
-      {error && <Text style={{ color: '#ef4444', fontSize: 12, fontFamily: MONO }}>{error}</Text>}
+      {error && <Text accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ color: '#ef4444', fontSize: 12, fontFamily: MONO }}>{error}</Text>}
       {actionNotice && (
         <Text accessibilityLiveRegion="polite" style={{ color: '#22c55e', fontSize: 12, fontFamily: MONO, lineHeight: 18 }}>
           {actionNotice}
@@ -1571,7 +1738,7 @@ export function CronJobsPanel({
           <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, lineHeight: 17 }}>
             Isolated starts a fresh runtime context. Main targets the connection&apos;s main OpenSwan session. Ambiguous current-session targeting is not supported here.
           </Text>
-          <Pressable accessibilityRole="button" accessibilityLabel="Create connection cron job" accessibilityState={{ disabled: !newJob.name || !newJob.schedule || !newJob.task || actionLoading !== null || mutationsUnavailable, busy: actionLoading === 'create' }} onPress={handleCreate} disabled={!newJob.name || !newJob.schedule || !newJob.task || actionLoading !== null || mutationsUnavailable} style={[{ minHeight: 44, backgroundColor: '#22c55e15', borderWidth: 1, borderColor: '#22c55e40', borderRadius: 2, paddingVertical: 6, alignItems: 'center', justifyContent: 'center', opacity: !newJob.name || !newJob.schedule || !newJob.task || actionLoading !== null || mutationsUnavailable ? 0.5 : 1 }, Platform.OS === 'web' && { cursor: !newJob.name || !newJob.schedule || !newJob.task || actionLoading !== null || mutationsUnavailable ? 'default' : 'pointer' } as any]}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Create connection cron job" accessibilityState={{ disabled: !newJobInputComplete || actionLoading !== null || mutationsUnavailable, busy: actionLoading === 'create' }} onPress={handleCreate} disabled={!newJobInputComplete || actionLoading !== null || mutationsUnavailable} style={[{ minHeight: 44, backgroundColor: '#22c55e15', borderWidth: 1, borderColor: '#22c55e40', borderRadius: 2, paddingVertical: 6, alignItems: 'center', justifyContent: 'center', opacity: !newJobInputComplete || actionLoading !== null || mutationsUnavailable ? 0.5 : 1 }, Platform.OS === 'web' && { cursor: !newJobInputComplete || actionLoading !== null || mutationsUnavailable ? 'default' : 'pointer' } as any]}>
             <Text style={{ color: '#22c55e', fontSize: 13, fontWeight: '700', fontFamily: MONO }}>{actionLoading === 'create' ? 'CREATING...' : 'CREATE JOB'}</Text>
           </Pressable>
         </View>
@@ -1579,7 +1746,7 @@ export function CronJobsPanel({
 
       <View>
         {loading && !hasVerifiedSnapshot ? (
-          <ActivityIndicator size="small" color={accentColor} style={{ padding: 20 }} />
+          <ActivityIndicator accessibilityRole="progressbar" accessibilityLabel="Loading connection cron jobs" size="small" color={accentColor} style={{ padding: 20 }} />
         ) : !hasVerifiedSnapshot ? null : visibleJobs.length === 0 ? (
           <Text style={{ color: '#808090', fontSize: 13, fontFamily: MONO, fontStyle: 'italic', padding: 12, textAlign: 'center' }}>No cron jobs configured. Click + NEW to create one.</Text>
         ) : (

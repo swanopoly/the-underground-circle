@@ -687,7 +687,7 @@ assert(
 
 assert(
   /mutationReplayBlocked/.test(chatTabSource)
-    && /!mutationReplayBlocked\s*&&\s*item\.recoveryOptions/.test(chatTabSource)
+    && /const hasRecoveryOptions = !isInactiveDesignTask\s*&& !mutationReplayBlocked\s*&& !!\(item\.recoveryOptions/.test(chatTabSource)
     && /readOnly=\{isInactiveDesignTaskMessage\(item\) \|\| mutationReplayBlocked\}/.test(chatTabSource),
   'persisted manual-verification-only computer rows cannot render retry recovery or Run again controls',
 );

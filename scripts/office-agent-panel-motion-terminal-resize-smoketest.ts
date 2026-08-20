@@ -44,14 +44,35 @@ check(
 );
 check(
   panel.includes('stopPanelAnimation();\n    };')
-    && panel.includes('[agent, isDesktop, reduceMotion, setBackdropOn, startPanelAnimation, stopPanelAnimation]'),
+    && panel.includes('const panelOpen = !!agent;')
+    && panel.includes('[panelOpen, isDesktop, reduceMotion, setBackdropOn, startPanelAnimation, stopPanelAnimation]')
+    && !panel.includes('[agent, isDesktop, reduceMotion, setBackdropOn, startPanelAnimation, stopPanelAnimation]'),
   'preference changes and unmount stop the currently running animation',
+);
+check(
+  panel.includes('previouslyOpenRef.current = panelOpen;')
+    && panel.includes('const isOpening = !!agent && !wasOpen;'),
+  'a same-subject roster object refresh cannot restart the panel entrance animation',
+);
+const webLifecycleStart = panel.indexOf("if (Platform.OS === 'web') {", panel.indexOf('const panelOpen = !!agent;'));
+const nativeLifecycleStart = panel.indexOf('\n    stopPanelAnimation();', webLifecycleStart);
+const webLifecycle = panel.slice(webLifecycleStart, nativeLifecycleStart);
+check(
+  webLifecycleStart >= 0
+    && nativeLifecycleStart > webLifecycleStart
+    && webLifecycle.includes('setBackdropOn(reduceMotion || !isOpening);')
+    && !webLifecycle.includes('.setValue(')
+    && !webLifecycle.includes('stopPanelAnimation(')
+    && !webLifecycle.includes('startPanelAnimation('),
+  'web popup mount and cleanup use CSS/backdrop state without notifying AnimatedProps during passive effects',
 );
 check(
   panel.includes('reduceMotion={reduceMotion}')
     && shell.includes('reduceMotion: boolean;')
-    && shell.includes("animationType={reduceMotion ? 'none' : 'fade'}"),
-  'the fail-static preference also owns the native Modal boundary animation',
+    && shell.includes("animationType={reduceMotion ? 'none' : 'fade'}")
+    && shell.includes("transition: reduceMotion ? 'none' : 'opacity 280ms")
+    && shell.includes("? ({ transition: reduceMotion ? 'none' : panelTransition } as any)"),
+  'the fail-static preference owns native Modal, web panel, and backdrop motion',
 );
 
 check(

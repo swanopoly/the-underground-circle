@@ -18,6 +18,7 @@ const app = read('App.tsx');
 const supabase = read('src/lib/supabase.ts');
 const panel = read('src/screens/circles/tabs/office/AgentPanel.tsx');
 const shell = read('src/screens/circles/tabs/office/AgentPanelShell.tsx');
+const webPortal = read('src/screens/circles/tabs/office/AgentPanelWebPortal.web.tsx');
 const layout = read('src/screens/circles/tabs/office/useAgentPanelLayout.ts');
 const floatingChat = read('src/components/FloatingChat.tsx');
 
@@ -49,10 +50,20 @@ const fixtureLane = section(
 check(
   canary.includes("if (process.env.RUN_LIVE_OFFICE_E2E !== '1')")
     && canary.includes('OFFICE_E2E_EXPECTED_PROJECT_REF')
+    && canary.includes('OFFICE_E2E_EXPECTED_APP_ARTIFACT_SHA256')
     && canary.includes('expectedProjectRef !== supabaseProjectRef')
     && canary.includes("process.env.OFFICE_E2E_ALLOW_DISPOSABLE_FIXTURE !== '1'")
     && canary.includes("!isLocalAppTarget && process.env.RUN_REMOTE_OFFICE_E2E !== '1'"),
   'the authenticated browser canary requires live, exact-project, destructive-fixture, and remote-target acknowledgements',
+);
+check(
+  canary.includes("!/^[a-f0-9]{64}$/.test(expectedAppArtifactSha256)")
+    && canary.includes('/\\/index(?:\\.[cm]?[jt]sx?)?\\.bundle$/i')
+    && canary.includes("fetch(entry.url, { cache: 'no-store', credentials: 'same-origin' })")
+    && canary.includes("crypto.subtle.digest('SHA-256', body)")
+    && canary.includes("appArtifactSha256: crypto.createHash('sha256').update(artifactBinding).digest('hex')")
+    && canary.includes('identity?.appArtifactSha256 !== expectedAppArtifactSha256'),
+  'the expected app artifact is a real operator-supplied SHA-256 over same-origin entry-resource content, not a tab-only path comparison',
 );
 check(
   packageJson.includes('"smoke:office-agent-popup-live-canary-contract": "npx tsx scripts/office-agent-popup-live-canary-contract-smoketest.ts"')
@@ -62,8 +73,18 @@ check(
 );
 check(
   fixtureLane.indexOf("managementDatabaseQuery('select 1 as cleanup_authority_ready;')")
-    < fixtureLane.indexOf("supabaseRequest('/auth/v1/signup'"),
-  'cleanup authority is proven before the disposable user is created',
+    < fixtureLane.indexOf('appArtifactPreflight = await preflightExpectedAppArtifact()')
+    && fixtureLane.indexOf('appArtifactPreflight = await preflightExpectedAppArtifact()')
+      < fixtureLane.indexOf("supabaseRequest('/auth/v1/signup'"),
+  'cleanup authority and the expected app artifact are proven before the disposable user is created',
+);
+check(
+  canary.includes('assertExpectedAppArtifact(record.bundleIdentity, viewportName)')
+    && popupLane.includes('firstRecord.bundleIdentity?.appArtifactSha256')
+    && popupLane.includes('!== secondRecord.bundleIdentity?.appArtifactSha256')
+    && !popupLane.includes('resourceManifestSha256')
+    && popupLane.includes('expectedAppArtifactSha256,'),
+  'preflight and every authenticated page remain bound to the expected entry artifact while incidental lazy-resource timing cannot create a false mismatch',
 );
 check(
   canary.includes('await cleanup();')
@@ -129,6 +150,7 @@ check(
 );
 check(
   floatingChat.includes('zIndex: 9000')
+    && webPortal.includes('createPortal(children, document.body)')
     && canary.includes('!Number.isFinite(floatingChatZIndex)')
     && canary.includes('backdropZIndex <= floatingChatZIndex')
     && canary.includes('panelZIndex <= backdropZIndex'),
@@ -148,11 +170,78 @@ check(
   'each rotation proves viewport containment and responsive dock visibility',
 );
 check(
+  popupLane.includes("getByLabel('Dock agent panel to the right', { exact: true }).click()")
+    && popupLane.includes('waitForDockedAgentPopup(firstPage, 480)')
+    && popupLane.includes('resizeDockedAgentPopupToMaximum(firstPage)')
+    && canary.includes("page.getByLabel('Resize docked agent panel', { exact: true })")
+    && canary.includes("await page.keyboard.press('ArrowLeft')")
+    && canary.includes("Number(evidence.resizeValueNow) !== 720"),
+  'the live lane activates the non-modal dock and verifies its keyboard resize maximum plus semantic value',
+);
+check(
+  popupLane.includes('setViewportSize({ width: 620, height: 900 })')
+    && popupLane.includes("localStorage.getItem('uc_agent_panel_side_w_v1') === '540'")
+    && popupLane.includes("assertAgentPopupEvidence(compactDockFallbackEvidence, 'Compact fallback for docked Agent popup', false)")
+    && popupLane.includes('waitForDockedAgentPopup(firstPage, 540)')
+    && popupLane.includes("getByLabel('Open agent panel as a centered pop-up', { exact: true }).click()"),
+  'a docked popup crosses to compact modal-sheet semantics, clamps saved width, restores the dock, and can return to centered mode',
+);
+check(
+  canary.includes("root.getAttribute('aria-modal') === null")
+    && canary.includes('!backdrop')
+    && canary.includes("element.getAttribute('aria-label') === 'Open agent panel as a centered pop-up'")
+    && canary.includes('Math.abs(rect.right - innerWidth) <= 1'),
+  'docked evidence explicitly rejects modal/backdrop semantics and pins the panel to the live right viewport edge',
+);
+check(
   popupLane.includes("getByRole('img', { name: 'Appearance preview for OpenSwan' })")
     && popupLane.includes("element.getAnimations({ subtree: true })")
+    && shell.includes('testID="agent-panel-backdrop"')
+    && canary.includes("document.querySelector('[data-testid=\"agent-panel-backdrop\"]')")
     && canary.includes("matchMedia('(prefers-reduced-motion: reduce)').matches")
     && canary.includes('hasMotion(evidence.backdropTransitionDuration)'),
   'reduced motion is checked at media, dialog/backdrop, and live Customize-preview levels',
+);
+check(
+  canary.includes('async function visitEveryAvailableAgentPanelRoute(page, record)')
+    && canary.includes("candidate.getAttribute('aria-label') === 'Agent panel destinations'")
+    && canary.includes("candidate.getAttribute('aria-label') === `${groupName} sections`")
+    && canary.includes('for (const destinationLabel of destinationLabels)')
+    && canary.includes('for (const routeLabel of routeLabels)')
+    && canary.includes("return visibleRoutes > 0 || tabpanel?.getAttribute('aria-labelledby') === destinationControl.id;")
+    && canary.includes("root.locator('#uc-agent-panel-tabpanel').getAttribute('aria-label')")
+    && canary.includes("if (!sectionLabel?.endsWith(' section'))")
+    && popupLane.includes('visitEveryAvailableAgentPanelRoute(firstPage, firstRecord)')
+    && popupLane.includes('availablePanelRoutes,'),
+  'the live canary discovers and visits every route actually advertised by the exact popup capability snapshot',
+);
+check(
+  canary.includes('async function waitForAgentPanelRouteSettled(')
+    && canary.includes("destinationControl?.getAttribute('aria-selected') === 'true'")
+    && canary.includes("routeControl?.getAttribute('aria-selected') === 'true'")
+    && canary.includes("tabpanel?.getAttribute('role') === 'tabpanel'")
+    && canary.includes("labelledBy === activeControl?.id")
+    && canary.includes('/^Loading\\s+.+(?:…|\\.\\.\\.)$/u')
+    && canary.includes('assertVisitedAgentPanelRoute(page, record, destinationLabel'),
+  'each discovered route must settle its lazy loader and expose coherent selected-tab and labelled-tabpanel semantics',
+);
+check(
+  canary.includes('await assertPopupSectionHealthy(page, record, `Agent popup route ${label}`);')
+    && canary.includes('`Agent popup route ${label} observed non-allowlisted console errors:')
+    && popupLane.includes("assertPopupSectionHealthy(firstPage, firstRecord, 'Customize restored after available-route sweep')"),
+  'every live route fails immediately on a section fallback, alert, or non-allowlisted console error without invoking route actions',
+);
+check(
+  canary.includes('async function verifyCompactCenteredAgentPopupLifecycle(page, record)')
+    && canary.includes('setViewportSize({ width: 390, height: 844 })')
+    && canary.includes("assertAgentPopupEvidence(compactEvidence, '390x844 centered Agent popup', false)")
+    && canary.includes('compactDocument.scrollWidth > compactDocument.clientWidth + 1')
+    && canary.includes('compactDocument.bodyScrollWidth > compactDocument.bodyClientWidth + 1')
+    && canary.includes("assertSameAgentPanelRoute(compactRoute, beforeRoute, '390x844 viewport transition')")
+    && canary.includes("assertSameAgentPanelRoute(restoredRoute, beforeRoute, '390x844 desktop restoration')")
+    && popupLane.includes('verifyCompactCenteredAgentPopupLifecycle(firstPage, firstRecord)')
+    && popupLane.includes('compactCenteredLifecycle,'),
+  'the same centered popup reaches 390x844 without viewport escape or document overflow and retains its exact route after desktop restoration',
 );
 
 check(
@@ -172,7 +261,7 @@ check(
   'the live lane exercises the app Supabase client with its default cross-tab Web Lock and observes exact-user refresh events',
 );
 check(
-  (popupLane.match(/selectAgentCustomize\(/g) || []).length === 2
+  (popupLane.match(/selectAgentCustomize\(/g) || []).length >= 3
     && popupLane.includes('!preRefreshFirstEvidence.customizeSelected || !preRefreshSecondEvidence.customizeSelected')
     && !popupLane.includes('accessTokenRotated'),
   'both tabs hold a non-Overview route before refresh and do not use token-string inequality as a lifecycle oracle',
@@ -204,6 +293,36 @@ check(
     && popupLane.includes("7_500,\n      'Agent popup evidence screenshot',"),
   'auth/app request failures, uncaught errors, essential 5xx responses, and a stalled evidence capture fail the live lane',
 );
+check(
+  canary.includes('POPUP_CONSOLE_ERROR_ALLOWLIST')
+    && canary.includes("id: 'missing-favicon'")
+    && canary.includes("url: /\\/favicon\\.ico(?:\\?|$)/i")
+    && canary.includes('record.popupConsoleCaptureActive')
+    && popupLane.includes('startPopupDiagnostics(firstRecord)')
+    && popupLane.includes('startPopupDiagnostics(secondRecord)')
+    && popupLane.includes('popupConsoleErrors.length > 0')
+    && canary.includes('record.consoleErrorDetails.push({ text, args });')
+    && canary.includes('updateLoopConsoleDetails:'),
+  'console errors are scoped to the mounted popup and fail completion unless they match the single URL-and-message favicon exception',
+);
+check(
+  canary.includes('function assertNoReactUpdateLoopErrors(record, label)')
+    && canary.includes('/Maximum update depth exceeded|Too many re-renders/i')
+    && canary.includes("assertNoReactUpdateLoopErrors(record, 'Desktop Office')")
+    && canary.includes("assertNoReactUpdateLoopErrors(record, 'Mobile Office')")
+    && popupLane.includes('assertNoReactUpdateLoopErrors(record, `Agent popup ${record.viewport}`)'),
+  'desktop, mobile, and popup lanes all reject the React update-loop signature even before popup-only console capture begins',
+);
+check(
+  canary.includes("root.querySelectorAll('[role=\"alert\"]')")
+    && canary.includes("element.textContent?.trim() === 'This section could not load'")
+    && popupLane.includes("assertPopupSectionHealthy(firstPage, firstRecord, 'First-tab Overview')")
+    && popupLane.includes("assertPopupSectionHealthy(firstPage, firstRecord, 'First-tab Customize')")
+    && popupLane.includes("assertPopupSectionHealthy(secondPage, secondRecord, 'Pre-refresh second-tab Customize')")
+    && popupLane.includes("assertPopupSectionHealthy(secondPage, secondRecord, 'Refreshed second-tab Overview')")
+    && popupLane.includes('popupSectionErrors.length > 0'),
+  'visible section alerts and render fallbacks fail the popup lane across initial, routed, and post-refresh states',
+);
 
 check(
   panel.includes("const supportsDockedPanel = !!isDesktop && Platform.OS === 'web';")
@@ -214,6 +333,8 @@ check(
 );
 check(
   popupLane.includes('responsiveWebTabletViewports')
+    && popupLane.includes('dockedWebLifecycle')
+    && popupLane.includes('compactCenteredLifecycle')
     && !popupLane.includes('nativeTabletVerified')
     && !popupLane.includes('voiceOverVerified')
     && !popupLane.includes('talkBackVerified')

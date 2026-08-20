@@ -6,6 +6,7 @@ const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
 const npmScripts = [
   'check:public-env-security',
+  'smoke:production-dependency-audit',
   'smoke:dependency-override-compat',
   'smoke:expo-image-asset-guard',
   'check:expo-image-assets',
@@ -65,6 +66,6 @@ for (const script of npmScripts) {
 }
 
 run(['ls', '--depth=0'], 'top-level dependency tree');
-run(['audit', '--omit=dev', '--audit-level=high'], 'production dependency audit (high/critical gate)');
+run(['run', 'check:production-dependency-audit'], 'production dependency audit (high/critical gate)');
 
 console.log('\n[security-release] PASS');

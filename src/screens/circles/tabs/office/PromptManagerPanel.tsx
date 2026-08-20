@@ -2,15 +2,16 @@
 // Langfuse-style prompt management UI: list, edit, version, label, test
 // ─────────────────────────────────────────────────────────────────────────────
 
-import React, { useState, useCallback } from 'react';
+import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, Pressable, TextInput,
   Platform, Modal, ActivityIndicator, Alert,
 } from 'react-native';
 import {
   Prompt, PromptVersion, PromptLabel, PromptConfig, PromptType,
+  PromptManagerScope, promptManagerScopeKey,
   usePrompts, usePromptDetail,
-  createPrompt, updatePrompt, deletePrompt,
+  createPrompt, deletePrompt,
   createVersion, setLabel, removeLabel, rollbackToVersion,
   extractVariables, compile,
 } from '../../../../lib/promptManager';
@@ -22,6 +23,90 @@ interface Props {
 }
 
 type DetailTab = 'edit' | 'versions' | 'labels' | 'test';
+
+interface MutationError {
+  message: string;
+  retry?: () => void;
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
+function confirmPromptDelete(promptName: string): Promise<boolean> {
+  const message = `Delete “${promptName}”? All versions and labels will be lost.`;
+  if (Platform.OS === 'web' && typeof window !== 'undefined') {
+    return Promise.resolve(window.confirm(message));
+  }
+  return new Promise(resolve => {
+    Alert.alert('Delete prompt?', message, [
+      { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+      { text: 'Delete', style: 'destructive', onPress: () => resolve(true) },
+    ], { cancelable: true, onDismiss: () => resolve(false) });
+  });
+}
+
+function MutationNotice({ error, onDismiss }: { error: MutationError; onDismiss: () => void }) {
+  return (
+    <View
+      style={s.mutationNotice}
+      accessible
+      accessibilityRole="alert"
+      accessibilityLiveRegion="assertive"
+      accessibilityLabel={error.message}
+    >
+      <Text style={s.mutationNoticeText}>{error.message}</Text>
+      <View style={s.mutationNoticeActions}>
+        {error.retry ? (
+          <Pressable
+            style={s.mutationNoticeButton}
+            onPress={error.retry}
+            accessibilityRole="button"
+            accessibilityLabel="Retry failed prompt action"
+          >
+            <Text style={s.mutationNoticeButtonText}>RETRY</Text>
+          </Pressable>
+        ) : null}
+        <Pressable
+          style={s.mutationNoticeButton}
+          onPress={onDismiss}
+          accessibilityRole="button"
+          accessibilityLabel="Dismiss error"
+        >
+          <Text style={s.mutationNoticeButtonText}>DISMISS</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+function PromptLoadNotice({ message, retry, refreshing = false }: {
+  message: string;
+  retry: () => void;
+  refreshing?: boolean;
+}) {
+  return (
+    <View
+      style={s.mutationNotice}
+      accessible
+      accessibilityRole="alert"
+      accessibilityLiveRegion="polite"
+      accessibilityLabel={message}
+    >
+      <Text style={s.mutationNoticeText}>{message}</Text>
+      <Pressable
+        style={[s.mutationNoticeButton, refreshing && s.disabled]}
+        onPress={retry}
+        disabled={refreshing}
+        accessibilityRole="button"
+        accessibilityLabel="Retry loading prompts"
+        accessibilityState={{ disabled: refreshing, busy: refreshing }}
+      >
+        <Text style={s.mutationNoticeButtonText}>{refreshing ? 'RETRYING…' : 'RETRY'}</Text>
+      </Pressable>
+    </View>
+  );
+}
 
 // ─── Known models for config dropdown ───────────────────────────────────────
 const MODEL_OPTIONS = [
@@ -40,8 +125,14 @@ function labelColor(label: string): string {
   return '#6b7280';
 }
 
-export default function PromptManagerPanel({ circleId, userId, accentColor = '#6366f1' }: Props) {
-  const { prompts, loading, refresh } = usePrompts(circleId);
+export default function PromptManagerPanel(props: Props) {
+  const scopeKey = promptManagerScopeKey({ userId: props.userId, circleId: props.circleId });
+  return <ScopedPromptManagerPanel key={scopeKey} {...props} />;
+}
+
+function ScopedPromptManagerPanel({ circleId, userId, accentColor = '#6366f1' }: Props) {
+  const scope: PromptManagerScope = { circleId, userId };
+  const { prompts, loading, refreshing, error: loadError, refresh } = usePrompts(circleId, userId);
   const [selected, setSelected] = useState<Prompt | null>(null);
   const [detailTab, setDetailTab] = useState<DetailTab>('edit');
   const [showCreate, setShowCreate] = useState(false);
@@ -54,6 +145,8 @@ export default function PromptManagerPanel({ circleId, userId, accentColor = '#6
   const [newDesc, setNewDesc] = useState('');
   const [newShared, setNewShared] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [mutationError, setMutationError] = useState<MutationError | null>(null);
 
   const filtered = prompts.filter(p => {
     if (filter === 'mine' && p.ownerId !== userId) return false;
@@ -65,30 +158,48 @@ export default function PromptManagerPanel({ circleId, userId, accentColor = '#6
   const handleCreate = async () => {
     if (!newName.trim()) return;
     setCreating(true);
-    const p = await createPrompt({
-      name: newName.trim(),
-      type: newType,
-      circleId,
-      description: newDesc.trim() || undefined,
-      isShared: newShared,
-    });
-    setCreating(false);
-    if (p) {
+    setMutationError(null);
+    try {
+      const p = await createPrompt({
+        name: newName.trim(),
+        type: newType,
+        circleId,
+        description: newDesc.trim() || undefined,
+        isShared: newShared,
+      }, scope);
+      if (!p) throw new Error('The prompt could not be created. Your draft is still here.');
+      await refresh();
       setShowCreate(false);
       setNewName(''); setNewDesc(''); setNewType('text'); setNewShared(false);
-      await refresh();
       setSelected(p);
       setDetailTab('edit');
+    } catch (createError) {
+      setMutationError({
+        message: errorMessage(createError, 'The prompt could not be created. Your draft is still here.'),
+        retry: () => { void handleCreate(); },
+      });
+    } finally {
+      setCreating(false);
     }
   };
 
   const handleDelete = async (p: Prompt) => {
-    if (Platform.OS === 'web') {
-      if (!window.confirm(`Delete prompt "${p.name}"? All versions will be lost.`)) return;
+    if (!(await confirmPromptDelete(p.name))) return;
+    setDeleting(true);
+    setMutationError(null);
+    try {
+      const deleted = await deletePrompt(p.id, scope);
+      if (!deleted) throw new Error(`“${p.name}” could not be deleted.`);
+      await refresh();
+      setSelected(null);
+    } catch (deleteError) {
+      setMutationError({
+        message: errorMessage(deleteError, `“${p.name}” could not be deleted.`),
+        retry: () => { void handleDelete(p); },
+      });
+    } finally {
+      setDeleting(false);
     }
-    await deletePrompt(p.id);
-    setSelected(null);
-    refresh();
   };
 
   // ─── Render ─────────────────────────────────────────────────────────────
@@ -101,8 +212,12 @@ export default function PromptManagerPanel({ circleId, userId, accentColor = '#6
         onTabChange={setDetailTab}
         onBack={() => { setSelected(null); refresh(); }}
         onDelete={() => handleDelete(selected)}
+        deleting={deleting}
+        mutationError={mutationError}
+        onDismissError={() => setMutationError(null)}
         accentColor={accentColor}
         userId={userId}
+        circleId={circleId}
       />
     );
   }
@@ -119,6 +234,18 @@ export default function PromptManagerPanel({ circleId, userId, accentColor = '#6
           <Text style={s.createBtnText}>+ NEW</Text>
         </Pressable>
       </View>
+
+      {mutationError && !showCreate ? (
+        <MutationNotice error={mutationError} onDismiss={() => setMutationError(null)} />
+      ) : null}
+
+      {loadError ? (
+        <PromptLoadNotice
+          message={prompts.length > 0 ? `${loadError} Showing the last confirmed list.` : loadError}
+          retry={() => { void refresh(); }}
+          refreshing={refreshing}
+        />
+      ) : null}
 
       {/* Search + filter */}
       <View style={s.filterRow}>
@@ -148,7 +275,7 @@ export default function PromptManagerPanel({ circleId, userId, accentColor = '#6
       {/* List */}
       {loading ? (
         <ActivityIndicator color={accentColor} style={{ marginTop: 40 }} />
-      ) : filtered.length === 0 ? (
+      ) : loadError && prompts.length === 0 ? null : filtered.length === 0 ? (
         <View style={s.empty}>
           <Text style={s.emptyIcon}>📝</Text>
           <Text style={s.emptyText}>
@@ -176,6 +303,10 @@ export default function PromptManagerPanel({ circleId, userId, accentColor = '#6
         <Pressable style={s.modalOverlay} onPress={() => setShowCreate(false)}>
           <Pressable style={s.modalCard} onPress={(e) => e.stopPropagation()}>
             <Text style={s.modalTitle}>NEW PROMPT</Text>
+
+            {mutationError ? (
+              <MutationNotice error={mutationError} onDismiss={() => setMutationError(null)} />
+            ) : null}
 
             <Text style={s.fieldLabel}>NAME</Text>
             <TextInput
@@ -231,7 +362,7 @@ export default function PromptManagerPanel({ circleId, userId, accentColor = '#6
                 <Text style={s.modalCancelText}>CANCEL</Text>
               </Pressable>
               <Pressable
-                onPress={handleCreate}
+              onPress={() => { void handleCreate(); }}
                 disabled={creating || !newName.trim()}
                 style={[s.modalSaveBtn, { backgroundColor: accentColor, opacity: creating || !newName.trim() ? 0.5 : 1 },
                   Platform.OS === 'web' && { cursor: 'pointer' } as any]}
@@ -285,16 +416,40 @@ function PromptListItem({ prompt, isOwn, onPress, accentColor }: {
 
 // ─── Prompt Detail View ─────────────────────────────────────────────────────
 
-function PromptDetail({ prompt, tab, onTabChange, onBack, onDelete, accentColor, userId }: {
+function PromptDetail({
+  prompt,
+  tab,
+  onTabChange,
+  onBack,
+  onDelete,
+  deleting,
+  mutationError,
+  onDismissError,
+  accentColor,
+  userId,
+  circleId,
+}: {
   prompt: Prompt;
   tab: DetailTab;
   onTabChange: (t: DetailTab) => void;
   onBack: () => void;
   onDelete: () => void;
+  deleting: boolean;
+  mutationError: MutationError | null;
+  onDismissError: () => void;
   accentColor: string;
   userId: string;
+  circleId: string;
 }) {
-  const { versions, labels, loading, refresh } = usePromptDetail(prompt.id);
+  const scope: PromptManagerScope = { circleId, userId };
+  const {
+    versions,
+    labels,
+    loading,
+    refreshing,
+    error: detailError,
+    refresh,
+  } = usePromptDetail(prompt.id, circleId, userId);
   const isOwn = prompt.ownerId === userId;
 
   return (
@@ -309,11 +464,32 @@ function PromptDetail({ prompt, tab, onTabChange, onBack, onDelete, accentColor,
           <Text style={[s.typeBadgeText, { color: accentColor }]}>{prompt.type.toUpperCase()}</Text>
         </View>
         {isOwn && (
-          <Pressable onPress={onDelete} style={[s.deleteBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-            <Text style={s.deleteBtnText}>🗑️</Text>
+          <Pressable
+            onPress={onDelete}
+            disabled={deleting}
+            accessibilityRole="button"
+            accessibilityLabel={`Delete ${prompt.name}`}
+            accessibilityState={{ disabled: deleting, busy: deleting }}
+            style={[s.deleteBtn, deleting && s.disabled, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={s.deleteBtnText}>{deleting ? '…' : '🗑️'}</Text>
           </Pressable>
         )}
       </View>
+
+      {mutationError ? (
+        <MutationNotice error={mutationError} onDismiss={onDismissError} />
+      ) : null}
+
+      {detailError ? (
+        <PromptLoadNotice
+          message={versions.length > 0 || labels.length > 0
+            ? `${detailError} Showing the last confirmed detail.`
+            : detailError}
+          retry={() => { void refresh(); }}
+          refreshing={refreshing}
+        />
+      ) : null}
 
       {/* Tabs */}
       <View style={s.tabRow}>
@@ -333,7 +509,7 @@ function PromptDetail({ prompt, tab, onTabChange, onBack, onDelete, accentColor,
 
       {loading ? (
         <ActivityIndicator color={accentColor} style={{ marginTop: 40 }} />
-      ) : (
+      ) : detailError && versions.length === 0 && labels.length === 0 ? null : (
         <ScrollView style={s.list} contentContainerStyle={{ paddingBottom: 40 }}>
           {tab === 'edit' && (
             <EditTab
@@ -343,6 +519,7 @@ function PromptDetail({ prompt, tab, onTabChange, onBack, onDelete, accentColor,
               isOwn={isOwn}
               accentColor={accentColor}
               onRefresh={refresh}
+              scope={scope}
             />
           )}
           {tab === 'versions' && (
@@ -356,6 +533,7 @@ function PromptDetail({ prompt, tab, onTabChange, onBack, onDelete, accentColor,
               isOwn={isOwn}
               accentColor={accentColor}
               onRefresh={refresh}
+              scope={scope}
             />
           )}
           {tab === 'test' && (
@@ -374,9 +552,10 @@ function PromptDetail({ prompt, tab, onTabChange, onBack, onDelete, accentColor,
 
 // ─── Edit Tab ───────────────────────────────────────────────────────────────
 
-function EditTab({ prompt, versions, labels, isOwn, accentColor, onRefresh }: {
+function EditTab({ prompt, versions, labels, isOwn, accentColor, onRefresh, scope }: {
   prompt: Prompt; versions: PromptVersion[]; labels: PromptLabel[];
   isOwn: boolean; accentColor: string; onRefresh: () => void;
+  scope: PromptManagerScope;
 }) {
   const latest = versions[0];
   const [content, setContent] = useState(latest?.content || '');
@@ -385,13 +564,35 @@ function EditTab({ prompt, versions, labels, isOwn, accentColor, onRefresh }: {
   const [maxTokens, setMaxTokens] = useState(String(latest?.config?.max_tokens ?? ''));
   const [saving, setSaving] = useState(false);
   const [promoteOnSave, setPromoteOnSave] = useState(true);
+  const [mutationError, setMutationError] = useState<MutationError | null>(null);
 
   const vars = extractVariables(content);
-  const hasChanges = content !== (latest?.content || '');
+  const hasChanges = content !== (latest?.content || '')
+    || model !== (latest?.config?.model || '')
+    || temperature !== String(latest?.config?.temperature ?? '0.7')
+    || maxTokens !== String(latest?.config?.max_tokens ?? '');
+
+  const promoteVersion = async (versionId: string) => {
+    setSaving(true);
+    setMutationError(null);
+    try {
+      const label = await setLabel(prompt.id, 'production', versionId, scope);
+      if (!label) throw new Error('The version was saved, but production could not be updated.');
+      onRefresh();
+    } catch (promotionError) {
+      setMutationError({
+        message: errorMessage(promotionError, 'The version was saved, but production could not be updated.'),
+        retry: () => { void promoteVersion(versionId); },
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const handleSave = async () => {
     if (!content.trim()) return;
     setSaving(true);
+    setMutationError(null);
     const config: PromptConfig = {};
     if (model) config.model = model;
     const tempNum = parseFloat(temperature);
@@ -399,17 +600,37 @@ function EditTab({ prompt, versions, labels, isOwn, accentColor, onRefresh }: {
     const tokNum = parseInt(maxTokens);
     if (!isNaN(tokNum) && tokNum > 0) config.max_tokens = tokNum;
 
-    const ver = await createVersion(prompt.id, content, config);
-    if (ver && promoteOnSave) {
-      await setLabel(prompt.id, 'production', ver.id);
+    try {
+      const ver = await createVersion(prompt.id, content, config, scope);
+      if (!ver) throw new Error('The new version could not be saved. Your draft is still here.');
+      if (promoteOnSave) {
+        const label = await setLabel(prompt.id, 'production', ver.id, scope);
+        if (!label) {
+          onRefresh();
+          setMutationError({
+            message: 'Version saved, but it could not be promoted to production.',
+            retry: () => { void promoteVersion(ver.id); },
+          });
+          return;
+        }
+      }
+      onRefresh();
+    } catch (saveError) {
+      setMutationError({
+        message: errorMessage(saveError, 'The new version could not be saved. Your draft is still here.'),
+        retry: () => { void handleSave(); },
+      });
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
-    onRefresh();
   };
 
   return (
     <View style={s.tabContent}>
       <Text style={s.sectionTitle}>CONTENT</Text>
+      {mutationError ? (
+        <MutationNotice error={mutationError} onDismiss={() => setMutationError(null)} />
+      ) : null}
       <Text style={s.hint}>
         Use {'{{variableName}}'} for dynamic values.
         {prompt.type === 'chat' && ' Content is a JSON array of {role, content} messages.'}
@@ -490,13 +711,13 @@ function EditTab({ prompt, versions, labels, isOwn, accentColor, onRefresh }: {
           </Pressable>
 
           <Pressable
-            onPress={handleSave}
+            onPress={() => { void handleSave(); }}
             disabled={saving || !content.trim()}
             style={[s.saveBtn, { backgroundColor: hasChanges ? accentColor : '#333', opacity: saving ? 0.5 : 1 },
               Platform.OS === 'web' && { cursor: 'pointer' } as any]}
           >
             <Text style={s.saveBtnText}>
-              {saving ? 'SAVING...' : hasChanges ? 'SAVE AS NEW VERSION' : 'SAVE AS NEW VERSION'}
+              {saving ? 'SAVING...' : 'SAVE AS NEW VERSION'}
             </Text>
           </Pressable>
 
@@ -567,45 +788,100 @@ function VersionsTab({ versions, labels, accentColor }: {
 
 // ─── Labels Tab ─────────────────────────────────────────────────────────────
 
-function LabelsTab({ prompt, versions, labels, isOwn, accentColor, onRefresh }: {
+function LabelsTab({ prompt, versions, labels, isOwn, accentColor, onRefresh, scope }: {
   prompt: Prompt; versions: PromptVersion[]; labels: PromptLabel[];
   isOwn: boolean; accentColor: string; onRefresh: () => void;
+  scope: PromptManagerScope;
 }) {
   const [newLabelName, setNewLabelName] = useState('');
   const [newLabelVersion, setNewLabelVersion] = useState('');
   const [adding, setAdding] = useState(false);
   const [showAddForm, setShowAddForm] = useState(false);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [mutationError, setMutationError] = useState<MutationError | null>(null);
 
   const handleAddLabel = async () => {
     if (!newLabelName.trim() || !newLabelVersion) return;
     setAdding(true);
-    await setLabel(prompt.id, newLabelName.trim(), newLabelVersion);
-    setAdding(false);
-    setNewLabelName('');
-    setNewLabelVersion('');
-    setShowAddForm(false);
-    onRefresh();
+    setMutationError(null);
+    try {
+      const label = await setLabel(prompt.id, newLabelName.trim(), newLabelVersion, scope);
+      if (!label) throw new Error('The label could not be added. Your entries are still here.');
+      setNewLabelName('');
+      setNewLabelVersion('');
+      setShowAddForm(false);
+      onRefresh();
+    } catch (labelError) {
+      setMutationError({
+        message: errorMessage(labelError, 'The label could not be added. Your entries are still here.'),
+        retry: () => { void handleAddLabel(); },
+      });
+    } finally {
+      setAdding(false);
+    }
   };
 
   const handleRemove = async (label: string) => {
-    await removeLabel(prompt.id, label);
-    onRefresh();
+    const action = `remove:${label}`;
+    setBusyAction(action);
+    setMutationError(null);
+    try {
+      const removed = await removeLabel(prompt.id, label, scope);
+      if (!removed) throw new Error(`The “${label}” label could not be removed.`);
+      onRefresh();
+    } catch (removeError) {
+      setMutationError({
+        message: errorMessage(removeError, `The “${label}” label could not be removed.`),
+        retry: () => { void handleRemove(label); },
+      });
+    } finally {
+      setBusyAction(null);
+    }
   };
 
   const handleChangeVersion = async (lbl: PromptLabel, vId: string) => {
-    await setLabel(prompt.id, lbl.label, vId);
-    onRefresh();
+    const action = `move:${lbl.label}:${vId}`;
+    setBusyAction(action);
+    setMutationError(null);
+    try {
+      const changed = await setLabel(prompt.id, lbl.label, vId, scope);
+      if (!changed) throw new Error(`The “${lbl.label}” label could not be moved.`);
+      onRefresh();
+    } catch (changeError) {
+      setMutationError({
+        message: errorMessage(changeError, `The “${lbl.label}” label could not be moved.`),
+        retry: () => { void handleChangeVersion(lbl, vId); },
+      });
+    } finally {
+      setBusyAction(null);
+    }
   };
 
   const handleRollback = async (vId: string) => {
-    await rollbackToVersion(prompt.id, vId);
-    onRefresh();
+    const action = `rollback:${vId}`;
+    setBusyAction(action);
+    setMutationError(null);
+    try {
+      const rolledBack = await rollbackToVersion(prompt.id, vId, scope);
+      if (!rolledBack) throw new Error('Production could not be rolled back.');
+      onRefresh();
+    } catch (rollbackError) {
+      setMutationError({
+        message: errorMessage(rollbackError, 'Production could not be rolled back.'),
+        retry: () => { void handleRollback(vId); },
+      });
+    } finally {
+      setBusyAction(null);
+    }
   };
 
   return (
     <View style={s.tabContent}>
       <Text style={s.sectionTitle}>LABELS</Text>
       <Text style={s.hint}>Labels are mutable pointers to versions. "production" is fetched by default at runtime.</Text>
+      {mutationError ? (
+        <MutationNotice error={mutationError} onDismiss={() => setMutationError(null)} />
+      ) : null}
 
       {labels.map(l => {
         const ver = versions.find(v => v.id === l.versionId);
@@ -619,8 +895,11 @@ function LabelsTab({ prompt, versions, labels, isOwn, accentColor, onRefresh }: 
               <Text style={s.labelVersionRef}>v{ver?.version ?? '?'}</Text>
               {isOwn && l.label !== 'latest' && (
                 <Pressable
-                  onPress={() => handleRemove(l.label)}
-                  style={[s.labelRemoveBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                  onPress={() => { void handleRemove(l.label); }}
+                  disabled={busyAction !== null}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Remove ${l.label} label`}
+                  style={[s.labelRemoveBtn, busyAction !== null && s.disabled, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                 >
                   <Text style={s.labelRemoveText}>✕</Text>
                 </Pressable>
@@ -633,7 +912,8 @@ function LabelsTab({ prompt, versions, labels, isOwn, accentColor, onRefresh }: 
                   {versions.map(v => (
                     <Pressable
                       key={v.id}
-                      onPress={() => handleChangeVersion(l, v.id)}
+                      onPress={() => { void handleChangeVersion(l, v.id); }}
+                      disabled={busyAction !== null}
                       style={[
                         s.versionPickerBtn,
                         v.id === l.versionId && { backgroundColor: accentColor },
@@ -670,8 +950,8 @@ function LabelsTab({ prompt, versions, labels, isOwn, accentColor, onRefresh }: 
               return (
                 <Pressable
                   key={v.id}
-                  onPress={() => !isProd && handleRollback(v.id)}
-                  disabled={isProd}
+                  onPress={() => { if (!isProd) void handleRollback(v.id); }}
+                  disabled={isProd || busyAction !== null}
                   style={[s.rollbackBtn, isProd && { opacity: 0.3 },
                     Platform.OS === 'web' && { cursor: isProd ? 'default' : 'pointer' } as any]}
                 >
@@ -721,7 +1001,7 @@ function LabelsTab({ prompt, versions, labels, isOwn, accentColor, onRefresh }: 
                   <Text style={s.modalCancelText}>CANCEL</Text>
                 </Pressable>
                 <Pressable
-                  onPress={handleAddLabel}
+                  onPress={() => { void handleAddLabel(); }}
                   disabled={adding || !newLabelName.trim() || !newLabelVersion}
                   style={[s.modalSaveBtn, { backgroundColor: accentColor, opacity: adding ? 0.5 : 1 },
                     Platform.OS === 'web' && { cursor: 'pointer' } as any]}
@@ -838,6 +1118,18 @@ function TestTab({ prompt, versions, labels, accentColor }: {
 
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0a0a14' },
+  disabled: { opacity: 0.45 },
+  mutationNotice: {
+    marginHorizontal: 12, marginVertical: 8, padding: 10, borderRadius: 8,
+    backgroundColor: '#2A1116', borderWidth: 1, borderColor: '#7F1D1D', gap: 8,
+  },
+  mutationNoticeText: { color: '#FCA5A5', fontSize: 12, lineHeight: 17 },
+  mutationNoticeActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8 },
+  mutationNoticeButton: {
+    minHeight: 36, justifyContent: 'center', paddingHorizontal: 10,
+    borderRadius: 6, borderWidth: 1, borderColor: '#991B1B',
+  },
+  mutationNoticeButtonText: { color: '#FCA5A5', fontSize: 10, fontWeight: '800', letterSpacing: 0.5 },
 
   // Header
   header: {

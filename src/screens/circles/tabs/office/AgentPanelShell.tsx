@@ -18,6 +18,7 @@ import {
   type AgentPanelTab,
   type AgentPanelTabKey,
 } from './AgentPanelTabs';
+import AgentPanelWebPortal from './AgentPanelWebPortal';
 
 // ── Per-tab error boundary ──────────────────────────────────────────────────
 // Wraps the active tab's rendered content so a single tab that throws (e.g.
@@ -519,6 +520,7 @@ export default function AgentPanelShell({
     <>
       {panelMode === 'center' && (
         <Pressable
+          testID="agent-panel-backdrop"
           onPress={onClose}
           accessible={false}
           accessibilityElementsHidden
@@ -530,7 +532,7 @@ export default function AgentPanelShell({
             Platform.OS === 'web' && ({
               position: 'fixed',
               zIndex: WEB_AGENT_MODAL_BACKDROP_Z_INDEX,
-              transition: 'opacity 280ms cubic-bezier(0.4, 0, 0.2, 1)',
+              transition: reduceMotion ? 'none' : 'opacity 280ms cubic-bezier(0.4, 0, 0.2, 1)',
               cursor: 'pointer',
             } as any),
           ]}
@@ -569,7 +571,9 @@ export default function AgentPanelShell({
           Platform.OS === 'web' && panelMode === 'center'
             ? ({ position: 'fixed', zIndex: WEB_AGENT_MODAL_PANEL_Z_INDEX } as any)
             : null,
-          isDesktop && Platform.OS === 'web' ? ({ transition: panelTransition } as any) : null,
+          isDesktop && Platform.OS === 'web'
+            ? ({ transition: reduceMotion ? 'none' : panelTransition } as any)
+            : null,
         ]}>
         {isDesktop && Platform.OS === 'web' && panelMode === 'side' && (
           <Pressable
@@ -688,6 +692,10 @@ export default function AgentPanelShell({
         <View style={styles.nativeModalRoot}>{panelLayer}</View>
       </Modal>
     );
+  }
+
+  if (Platform.OS === 'web' && panelMode === 'center') {
+    return <AgentPanelWebPortal>{panelLayer}</AgentPanelWebPortal>;
   }
 
   return panelLayer;

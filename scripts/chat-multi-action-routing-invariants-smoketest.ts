@@ -268,7 +268,7 @@ async function main(): Promise<void> {
     );
     assert.match(
       variableInitializer('recoveryFollowup'),
-      /^!hasAuthoritativeMultiActionContract\b/,
+      /^!preservesIntactMultiIntentTurn\b/,
     );
   });
 
@@ -302,7 +302,7 @@ async function main(): Promise<void> {
       '// Build one image description per turn',
       'web-search route',
     );
-    assert.match(web, /if\s*\(webDecision\.attach\s*&&\s*!hasAuthoritativeMultiActionContract\)/);
+    assert.match(web, /if\s*\(webDecision\.attach\s*&&\s*!preservesIntactMultiIntentTurn\)/);
     assert.match(web, /runOptionalWebSearchLane/);
 
     const capability = sourceSection(
@@ -310,7 +310,7 @@ async function main(): Promise<void> {
       '// Trigger Agent AI',
       'model-capability route',
     );
-    assert.match(capability, /&&\s*!hasAuthoritativeMultiActionContract/);
+    assert.match(capability, /&&\s*!preservesIntactMultiIntentTurn/);
     assert.match(capability, /routeByCapability/);
   });
 
@@ -324,18 +324,18 @@ async function main(): Promise<void> {
     assert.match(indesign, /:\s*buildInDesignBannerClarification/);
   });
 
-  await check('model-readiness yields to A# runtime while image failures stay explicit', () => {
+  await check('A# runtime keeps its ledger while Chat seals an exact connected tool model and image failures stay explicit', () => {
     const readiness = sourceSection(
-      '// A curated shelf is discovery, not credential authority.',
+      'const catalogRequestedTurnModel =',
       '// ── Resume a pending clarification',
       'model-readiness gate',
     );
-    assert.match(
-      readiness,
-      /if\s*\([\s\S]{0,120}shouldBlockForReadiness[\s\S]{0,160}&& !preflightHasAuthoritativeMultiActionContract/,
-    );
-    assert.match(readiness, /Nothing ran\./);
-    assert.match(readiness, /return;/);
+    assert.doesNotMatch(readiness, /catalogOwnsThisTurn[\s\S]{0,500}!preflightHasAuthoritativeMultiActionContract/);
+    assert.match(readiness, /resolveReadyChatModelForTurn/);
+    assert.match(readiness, /requireToolUse: requiresToolUse/);
+    assert.match(readiness, /No approved connected Chat model could safely run this turn, so nothing ran\./);
+    assert.match(readiness, /exactTurnCatalog = await refreshTurnModelCatalogIfNeeded\(\)/);
+    assert.match(readiness, /if \(!resolveTurnModelFromCatalog\(exactTurnCatalog\)\) return;/);
 
     const visualBrief = sourceSection(
       'const requireTurnVisualBriefs = async',

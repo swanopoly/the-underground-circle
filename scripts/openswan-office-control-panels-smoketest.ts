@@ -8,6 +8,7 @@
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { computeAgentPanelGeometry } from '../src/screens/circles/tabs/office/agentPanelLayoutCore';
 
 let passes = 0;
 let failures = 0;
@@ -90,6 +91,9 @@ check(
     && agentPanel.includes("ev.key === 'Tab' && effectivePanelMode === 'center'")
     && agentPanel.includes('returnFocusRef.current')
     && agentPanel.includes('findMatchingTriggers()')
+    && agentPanel.includes('if (!agent) {\n      restoreAgentPanelFocus();')
+    && agentPanel.includes('Replacing one\n  // docked agent with another is not a close')
+    && agentPanel.includes('returnFocusGenerationRef.current !== restoreGeneration')
     && agentPanel.includes('liveTarget?.focus({ preventScroll: true })')
     && officeTab.includes('accessibilityLabel={`Open ${agent.name} agent panel`}')
     && officeTab.includes("Platform.OS === 'web' ? ({ tabIndex: 0 } as any)"),
@@ -97,9 +101,10 @@ check(
 );
 check(
   panelShell.includes('zIndex: 100,')
-    && panelLayout.includes('const CENTER_H_RATIO = 0.68;')
-    && panelLayout.includes('const CENTER_MAX_H = 720;')
-    && panelLayout.includes('Math.min(CENTER_MAX_H, maxCenteredHeight'),
+    && panelLayout.includes('computeAgentPanelGeometry(effectivePanelMode, sideWidth, viewport)')
+    && agentPanel.includes('useAgentPanelLayout(supportsDockedPanel)')
+    && computeAgentPanelGeometry('center', 480, { w: 1180, h: 820 }).height === 558
+    && computeAgentPanelGeometry('center', 480, { w: 3840, h: 2160 }).height === 720,
   'the centered panel stays compact and the mobile sheet owns its controls above sticky Office chrome',
 );
 check(
@@ -194,22 +199,27 @@ check(
     && frontend.includes('readOfficeAgentSessionBindingsBatch(')
     && frontend.includes('capturedAuthority,')
     && frontend.includes('const actionInFlight = useRef(false);')
-    && frontend.includes('if (actionInFlight.current) return;'),
+    && frontend.includes('if (actionInFlight.current) return false;'),
   'private binding reads and provider mutations use captured exact authority and stay single-flight',
 );
 check(
   frontend.includes('const bindingRefreshGeneration = sessionRefreshGeneration.current;')
     && frontend.includes('const bindingFingerprint = loadedConnectionFingerprint;')
-    && frontend.indexOf('const verifiedSessions = await listSessions(verifiedConfig);') < frontend.indexOf('const savedBinding = await setOfficeAgentSessionBinding(')
+    && frontend.indexOf('const verifiedSessions = await listSessions(verifiedConfig);') < frontend.indexOf('const bindingResult = await setOfficeAgentSessionBinding(')
     && frontend.includes('bindingRefreshGeneration !== sessionRefreshGeneration.current')
-    && frontend.includes('matchesOpenSwanConnectionFingerprint(bindingFingerprint, latestConfig.connection)'),
-  'binding revalidates the exact runtime and session after confirmation before saving a route',
+    && frontend.includes('matchesOpenSwanConnectionFingerprint(bindingFingerprint, latestConfig.connection)')
+    && frontend.includes('const currentBinding = sessionBindings[officeAgent.id] ?? null;')
+    && frontend.includes('isAuthorityCurrent: isIdentityAuthorityCurrent')
+    && frontend.includes('bindingResult.receipt.resultBinding'),
+  'binding revalidates the runtime/session and commits only through the expected-row CAS receipt',
 );
 check(
   frontend.includes('const expectedBinding = sessionBindings[officeAgent.id];')
-    && frontend.indexOf('readOfficeAgentSessionBindingsBatch([officeAgent.id], capturedAuthority)') < frontend.indexOf('clearOfficeAgentSessionBinding(officeAgent.id, capturedAuthority)')
-    && frontend.includes('The session route changed while confirmation was open.'),
-  'unbinding rechecks the exact displayed route after confirmation before clearing it',
+    && frontend.includes('const clearResult = await clearOfficeAgentSessionBinding(')
+    && frontend.includes('expectedBinding,')
+    && frontend.includes('clearResult.receipt.resultBinding !== null')
+    && !frontend.includes('readOfficeAgentSessionBindingsBatch([officeAgent.id], capturedAuthority)'),
+  'unbinding submits its exact displayed row to the database CAS and requires a missing postcondition receipt',
 );
 check(
   gatewayPanels.includes("type AdvancedLaneStatus = 'idle' | 'loading' | 'ready' | 'unsupported' | 'error'")
@@ -227,6 +237,73 @@ check(
   'runtime search failures cannot be painted as green successful results',
 );
 check(
+  frontend.includes('accessibilityLabel="Task draft for Chat"')
+    && frontend.includes('accessibilityLabel="Subagent task draft for Chat"')
+    && frontend.includes('accessibilityLabel="Runtime memory search query"')
+    && frontend.includes('accessibilityLabel="Runtime web search query"')
+    && !frontend.includes('Connected-agent message draft for Chat')
+    && !frontend.includes('DRAFT FOR CHAT'),
+  'every distinct OpenSwan draft and search field is named, with no duplicate generic Chat composer',
+);
+check(
+  frontend.includes('accessibilityLabel="Loading published Office agent bindings"')
+    && frontend.includes('accessibilityLabel="Loading exact OpenSwan session"')
+    && gatewayPanels.includes('accessibilityLabel="Loading connection cron jobs"')
+    && frontend.includes('accessibilityRole="alert" accessibilityLiveRegion="assertive"')
+    && gatewayPanels.includes('{error && <Text accessibilityRole="alert" accessibilityLiveRegion="assertive"')
+    && frontend.includes('{bindingNotice}</Text>'),
+  'runtime loading, error, action, and binding receipts are announced beside their exact controls',
+);
+check(
+  frontend.includes('const bindingReadGeneration = useRef(0);')
+    && frontend.includes('const readGeneration = ++bindingReadGeneration.current;')
+    && frontend.includes('sessionGeneration === sessionRefreshGeneration.current')
+    && frontend.includes('advancedOpenRef.current')
+    && frontend.includes('if (!readIsCurrent()) return;'),
+  'late published-agent and private-binding reads cannot repopulate a closed or refreshed Advanced disclosure',
+);
+check(
+  frontend.includes('disabled={!memoryQuery.trim()}')
+    && frontend.includes('disabled={!webQuery.trim()}')
+    && frontend.includes('accessibilityState={{ disabled: actionDisabled, busy: actionState === loadingKey }}'),
+  'runtime search actions expose disabled and busy state and cannot submit an empty query',
+);
+check(
+  (frontend.match(/setMemoryResult\(''\);/g) || []).length >= 2
+    && (frontend.match(/setMemoryResultQuery\(''\);/g) || []).length >= 3
+    && (frontend.match(/setMemorySearchState\('idle'\);/g) || []).length >= 2
+    && (frontend.match(/setWebResults\(\[\]\);/g) || []).length >= 2
+    && (frontend.match(/setWebResultQuery\(''\);/g) || []).length >= 3
+    && (frontend.match(/setWebSearchState\('idle'\);/g) || []).length >= 2
+    && (frontend.match(/setActionNotice\(null\);/g) || []).length >= 2
+    && (frontend.match(/setBindingNotice\(null\);/g) || []).length >= 2,
+  'refreshing or closing Advanced retires private search evidence and prior action receipts before a new exact runtime snapshot',
+);
+check(
+  frontend.includes('const capturedConnectionFingerprint = loadedConnectionFingerprint;')
+    && frontend.includes('const actionId = ++actionSequence.current;')
+    && frontend.includes('activeActionId.current === actionId')
+    && frontend.includes('const latestConfig = await resolveConfig();')
+    && frontend.includes('matchesOpenSwanConnectionFingerprint(capturedConnectionFingerprint, latestConfig.connection)')
+    && frontend.includes("if (invocationIsCurrent()) {\n        setActionNotice(null);")
+    && frontend.includes('hasCurrentPanelAuthority(searchAuthority, isIdentityAuthorityCurrent)'),
+  'late runtime search success and failure are fenced by action ownership, authority, refresh generation, disclosure state, and exact connection fingerprint',
+);
+check(
+  frontend.includes("setMemorySearchState('loading')")
+    && frontend.includes("setMemorySearchState(ok ? 'ready' : 'error')")
+    && frontend.includes('setMemoryResultQuery(query);')
+    && frontend.includes('Runtime memory search failed. Check the connection and retry.')
+    && frontend.includes("setWebSearchState('loading')")
+    && frontend.includes("setWebSearchState(ok ? 'ready' : 'error')")
+    && frontend.includes('setWebResultQuery(query);')
+    && frontend.includes('RESULTS FOR “{memoryResultQuery}”')
+    && frontend.includes('RESULTS FOR “{webResultQuery}”')
+    && frontend.includes('No verified web results were returned.')
+    && !frontend.includes('await refresh();'),
+  'each runtime search renders local loading, error, and verified-empty evidence without erasing its read result in a mutation refresh',
+);
+check(
   frontend.includes('MANAGE IN CRON JOBS')
     && !frontend.includes('runAction(`Run ${job.id}`'),
   'the runtime summary does not duplicate the Cron panel mutation control',
@@ -242,7 +319,11 @@ check(
 );
 check(
   cron.includes('Run cron job "${niceName}" now?')
-    && cron.includes('Create scheduled job "${newJob.name}" with schedule'),
+    && cron.includes('Create scheduled job "${createPayload.name}" with schedule')
+    && cron.includes('name: newJob.name.trim()')
+    && cron.includes('schedule: newJob.schedule.trim()')
+    && cron.includes('task: newJob.task.trim()')
+    && cron.includes('const result = await createCronJob(config, createPayload);'),
   'both immediate execution and schedule creation require an explicit confirmation',
 );
 

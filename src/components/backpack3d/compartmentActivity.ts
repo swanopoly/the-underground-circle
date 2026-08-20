@@ -3,6 +3,10 @@
  * Used by both the 3D backpack meshes and the 2D compartment cards.
  */
 import type { BackpackData } from '../../hooks/useBackpackData';
+import {
+  BACKPACK_COMPARTMENT_KEYS,
+  type BackpackCompartmentKey,
+} from '../../lib/backpackCompartments';
 
 export interface CompartmentStats {
   miniStat: string;
@@ -15,20 +19,22 @@ const fmtTokens = (n: number) =>
     : String(n);
 
 export function getCompartmentStats(
-  key: string,
+  key: BackpackCompartmentKey,
   data: BackpackData,
 ): CompartmentStats {
   const activeAgents = data.enrichedAgents.filter(a => a.status === 'active').length;
-  const healthyAgents = data.enrichedAgents.filter(a => a.status !== 'error').length;
-  const healthPct = data.enrichedAgents.length > 0
-    ? Math.round((healthyAgents / data.enrichedAgents.length) * 100)
-    : 100;
+  const availableAgents = data.enrichedAgents.filter(
+    a => a.status === 'active' || a.status === 'idle',
+  ).length;
+  const availablePct = data.enrichedAgents.length > 0
+    ? Math.round((availableAgents / data.enrichedAgents.length) * 100)
+    : null;
   const tagCount = data.sessionTags.size;
 
   switch (key) {
     case 'cost':
       return {
-        miniStat: `$${data.periodCosts.today.toFixed(2)} today`,
+        miniStat: `~$${data.periodCosts.today.toFixed(2)} today`,
         hasActivity: data.periodCosts.today > 0,
       };
     case 'terminal':
@@ -43,7 +49,9 @@ export function getCompartmentStats(
       };
     case 'farm':
       return {
-        miniStat: `${healthPct}% healthy · ${activeAgents} active`,
+        miniStat: availablePct == null
+          ? 'No agent data'
+          : `${availablePct}% available · ${activeAgents} active`,
         hasActivity: activeAgents > 0,
       };
     case 'performance': {
@@ -52,7 +60,7 @@ export function getCompartmentStats(
         data.enrichedAgents[0],
       );
       return {
-        miniStat: top ? `Top: ${top.name}` : 'No data',
+        miniStat: top ? `Most turns: ${top.name}` : 'No data',
         hasActivity: (top?.turns || 0) > 0,
       };
     }
@@ -73,25 +81,30 @@ export function getCompartmentStats(
       };
     case 'prompts':
       return { miniStat: 'Prompt library', hasActivity: false };
+    case 'knowledge':
+      return { miniStat: 'Graph · capture · review', hasActivity: false };
     case 'llm-bench':
-      return { miniStat: '29 models', hasActivity: false };
+      return { miniStat: 'Curated benchmark reference', hasActivity: false };
+    case 'model-lab':
+      return { miniStat: 'Training workspace preview', hasActivity: false };
     case 'trading':
       return {
         miniStat: data.featuredTradeCount > 0
           ? `${data.featuredTradeCount} active trades`
           : 'Solana trading',
         hasActivity: data.featuredTradeCount > 0,
-      };
-    default:
-      return { miniStat: '', hasActivity: false };
+        };
+    case 'devices':
+      return { miniStat: 'Local bridge tools', hasActivity: false };
   }
 }
 
 /** Build the stats map for all compartments at once */
-export function getAllCompartmentStats(data: BackpackData): Record<string, CompartmentStats> {
-  const keys = ['cost', 'terminal', 'traces', 'farm', 'performance', 'projects', 'analytics', 'canvas', 'prompts', 'llm-bench', 'trading'];
-  const result: Record<string, CompartmentStats> = {};
-  for (const key of keys) {
+export function getAllCompartmentStats(
+  data: BackpackData,
+): Record<BackpackCompartmentKey, CompartmentStats> {
+  const result = {} as Record<BackpackCompartmentKey, CompartmentStats>;
+  for (const key of BACKPACK_COMPARTMENT_KEYS) {
     result[key] = getCompartmentStats(key, data);
   }
   return result;

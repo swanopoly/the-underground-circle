@@ -1,4 +1,4 @@
-// Agent Performance Metrics - Leaderboard & ROI Analysis
+// Agent Performance Metrics - directional leaderboard and telemetry analysis
 import React, { useMemo, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, Pressable, Platform } from 'react-native';
 import { OfficeAgent } from '../lib/officeAgents';
@@ -14,21 +14,45 @@ interface AgentMetrics {
   agentId: string;
   name: string;
   color: string;
-  sessionCount: number;
+  responseCount: number;
   totalCost: number;
-  avgCostPerSession: number;
+  avgCostPerResponse: number;
   totalTokens: number;
-  avgTokensPerSession: number;
-  messagesProcessed: number;
-  uptimePercent: number;
+  avgTokensPerResponse: number;
+  recordedTurns: number;
+  statusScore: number;
   efficiency: number; // tokens per dollar
-  errorCount: number;
+  hasErrorSignal: boolean;
   model: string;
   lastActive: string;
   status: 'active' | 'idle' | 'error' | 'offline' | 'building';
 }
 
-type SortBy = 'sessions' | 'cost' | 'efficiency' | 'uptime' | 'messages';
+type SortBy = 'responses' | 'cost' | 'efficiency' | 'status' | 'turns';
+
+const SORT_LABELS: Record<SortBy, string> = {
+  responses: 'responses',
+  cost: 'cost',
+  efficiency: 'efficiency',
+  status: 'current status',
+  turns: 'recorded turns',
+};
+
+function PerformanceProvenanceNotice() {
+  return (
+    <View
+      testID="agent-performance-estimate-notice"
+      accessible
+      accessibilityLabel="Directional estimates. Rankings, status availability, efficiency, and insights are derived from current agent status, response receipts, and aggregate turn telemetry. They are not measured service level agreement results or evaluation receipts."
+      style={styles.provenanceNotice}
+    >
+      <Text accessibilityRole="header" style={styles.provenanceTitle}>DIRECTIONAL ESTIMATES</Text>
+      <Text style={styles.provenanceText}>
+        Rankings, status availability, efficiency, and insights use current status, response receipts, and aggregate turn telemetry—not measured SLA results or eval receipts.
+      </Text>
+    </View>
+  );
+}
 
 export default function AgentPerformanceMetrics({ agents, sessions, accentColor = '#6366f1' }: Props) {
   const [sortBy, setSortBy] = useState<SortBy>('cost');
@@ -45,9 +69,9 @@ export default function AgentPerformanceMetrics({ agents, sessions, accentColor 
       let bVal: number;
 
       switch (sortBy) {
-        case 'sessions':
-          aVal = a.sessionCount;
-          bVal = b.sessionCount;
+        case 'responses':
+          aVal = a.responseCount;
+          bVal = b.responseCount;
           break;
         case 'cost':
           aVal = a.totalCost;
@@ -57,13 +81,13 @@ export default function AgentPerformanceMetrics({ agents, sessions, accentColor 
           aVal = a.efficiency;
           bVal = b.efficiency;
           break;
-        case 'uptime':
-          aVal = a.uptimePercent;
-          bVal = b.uptimePercent;
+        case 'status':
+          aVal = a.statusScore;
+          bVal = b.statusScore;
           break;
-        case 'messages':
-          aVal = a.messagesProcessed;
-          bVal = b.messagesProcessed;
+        case 'turns':
+          aVal = a.recordedTurns;
+          bVal = b.recordedTurns;
           break;
         default:
           return 0;
@@ -91,19 +115,26 @@ export default function AgentPerformanceMetrics({ agents, sessions, accentColor 
   if (agents.length === 0) {
     return (
       <View style={styles.emptyContainer}>
+        <PerformanceProvenanceNotice />
         <Text style={styles.emptyIcon}>📊</Text>
         <Text style={styles.emptyTitle}>No Agents Connected</Text>
         <Text style={styles.emptyText}>
-          Connect agents to see performance metrics, leaderboards, and ROI analysis.
+          Connect agents to see directional performance metrics and telemetry comparisons.
         </Text>
       </View>
     );
   }
 
   return (
-    <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
-      {/* Summary Cards */}
-      <View style={styles.summaryRow}>
+    <View style={styles.root}>
+      <PerformanceProvenanceNotice />
+      <ScrollView
+        style={styles.scrollContainer}
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Summary Cards */}
+        <View style={styles.summaryRow}>
         <View style={styles.summaryCard}>
           <Text style={styles.summaryLabel}>TOTAL AGENTS</Text>
           <Text style={[styles.summaryValue, { color: accentColor }]}>{agents.length}</Text>
@@ -134,12 +165,12 @@ export default function AgentPerformanceMetrics({ agents, sessions, accentColor 
         <View style={[styles.topPerformerBanner, { borderColor: accentColor }]}>
           <Text style={styles.trophyIcon}>🏆</Text>
           <View style={styles.topPerformerInfo}>
-            <Text style={styles.topPerformerLabel}>TOP PERFORMER</Text>
+            <Text style={styles.topPerformerLabel}>LEADING {SORT_LABELS[sortBy].toUpperCase()}</Text>
             <Text style={[styles.topPerformerName, { color: topPerformer.color }]}>
               {topPerformer.name}
             </Text>
             <Text style={styles.topPerformerStats}>
-              {topPerformer.sessionCount} sessions · ${topPerformer.totalCost.toFixed(2)} · 
+              {topPerformer.responseCount} responses · ${topPerformer.totalCost.toFixed(2)} ·{' '}
               {topPerformer.efficiency.toFixed(0)}K tokens/$
             </Text>
           </View>
@@ -151,9 +182,9 @@ export default function AgentPerformanceMetrics({ agents, sessions, accentColor 
         <Text style={styles.sortLabel}>SORT BY:</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.sortButtons}>
           <SortButton
-            label="Sessions"
-            active={sortBy === 'sessions'}
-            onPress={() => handleSort('sessions')}
+            label="Responses"
+            active={sortBy === 'responses'}
+            onPress={() => handleSort('responses')}
             accentColor={accentColor}
           />
           <SortButton
@@ -169,15 +200,15 @@ export default function AgentPerformanceMetrics({ agents, sessions, accentColor 
             accentColor={accentColor}
           />
           <SortButton
-            label="Uptime"
-            active={sortBy === 'uptime'}
-            onPress={() => handleSort('uptime')}
+            label="Current status"
+            active={sortBy === 'status'}
+            onPress={() => handleSort('status')}
             accentColor={accentColor}
           />
           <SortButton
-            label="Messages"
-            active={sortBy === 'messages'}
-            onPress={() => handleSort('messages')}
+            label="Recorded turns"
+            active={sortBy === 'turns'}
+            onPress={() => handleSort('turns')}
             accentColor={accentColor}
           />
         </ScrollView>
@@ -195,8 +226,9 @@ export default function AgentPerformanceMetrics({ agents, sessions, accentColor 
             accentColor={accentColor}
           />
         ))}
-      </View>
-    </ScrollView>
+        </View>
+      </ScrollView>
+    </View>
   );
 }
 
@@ -216,6 +248,10 @@ function AgentMetricRow({ metric, rank, isExpanded, onPress, accentColor }: {
     <View style={styles.metricRow}>
       <Pressable
         onPress={onPress}
+        accessibilityRole="button"
+        accessibilityLabel={`${metric.name}, list position ${rank}`}
+        accessibilityHint={isExpanded ? 'Collapses telemetry details' : 'Expands telemetry details'}
+        accessibilityState={{ expanded: isExpanded }}
         style={[
           styles.metricHeader,
           isExpanded && styles.metricHeaderExpanded,
@@ -233,8 +269,8 @@ function AgentMetricRow({ metric, rank, isExpanded, onPress, accentColor }: {
 
         <View style={styles.metricStats}>
           <View style={styles.statItem}>
-            <Text style={styles.statLabel}>Sessions</Text>
-            <Text style={[styles.statValue, { color: accentColor }]}>{metric.sessionCount}</Text>
+            <Text style={styles.statLabel}>Responses</Text>
+            <Text style={[styles.statValue, { color: accentColor }]}>{metric.responseCount}</Text>
           </View>
           <View style={styles.statItem}>
             <Text style={styles.statLabel}>Cost</Text>
@@ -245,8 +281,8 @@ function AgentMetricRow({ metric, rank, isExpanded, onPress, accentColor }: {
             <Text style={[styles.statValue, { color: accentColor }]}>{metric.efficiency.toFixed(0)}K</Text>
           </View>
           <View style={styles.statItem}>
-            <Text style={styles.statLabel}>Uptime</Text>
-            <Text style={[styles.statValue, { color: accentColor }]}>{metric.uptimePercent}%</Text>
+            <Text style={styles.statLabel}>Status</Text>
+            <Text style={[styles.statValue, { color: statusColor }]}>{metric.status.toUpperCase()}</Text>
           </View>
         </View>
 
@@ -257,25 +293,29 @@ function AgentMetricRow({ metric, rank, isExpanded, onPress, accentColor }: {
       {isExpanded && (
         <View style={styles.metricDetails}>
           <View style={styles.detailRow}>
-            <Text style={styles.detailLabel}>Avg Cost/Session:</Text>
-            <Text style={styles.detailValue}>${metric.avgCostPerSession.toFixed(4)}</Text>
+            <Text style={styles.detailLabel}>Avg Cost/Response:</Text>
+            <Text style={styles.detailValue}>
+              {metric.responseCount > 0 ? `$${metric.avgCostPerResponse.toFixed(4)}` : '—'}
+            </Text>
           </View>
           <View style={styles.detailRow}>
             <Text style={styles.detailLabel}>Total Tokens:</Text>
             <Text style={styles.detailValue}>{(metric.totalTokens / 1000).toFixed(1)}K</Text>
           </View>
           <View style={styles.detailRow}>
-            <Text style={styles.detailLabel}>Avg Tokens/Session:</Text>
-            <Text style={styles.detailValue}>{metric.avgTokensPerSession.toFixed(0)}</Text>
+            <Text style={styles.detailLabel}>Avg Tokens/Response:</Text>
+            <Text style={styles.detailValue}>
+              {metric.responseCount > 0 ? metric.avgTokensPerResponse.toFixed(0) : '—'}
+            </Text>
           </View>
           <View style={styles.detailRow}>
-            <Text style={styles.detailLabel}>Messages Processed:</Text>
-            <Text style={styles.detailValue}>{metric.messagesProcessed}</Text>
+            <Text style={styles.detailLabel}>Recorded Turns:</Text>
+            <Text style={styles.detailValue}>{metric.recordedTurns}</Text>
           </View>
           <View style={styles.detailRow}>
-            <Text style={styles.detailLabel}>Errors:</Text>
-            <Text style={[styles.detailValue, { color: metric.errorCount > 0 ? '#ef4444' : '#22c55e' }]}>
-              {metric.errorCount}
+            <Text style={styles.detailLabel}>Current Error Signal:</Text>
+            <Text style={[styles.detailValue, { color: metric.hasErrorSignal ? '#ef4444' : '#22c55e' }]}>
+              {metric.hasErrorSignal ? 'Detected' : 'None'}
             </Text>
           </View>
           <View style={styles.detailRow}>
@@ -285,22 +325,20 @@ function AgentMetricRow({ metric, rank, isExpanded, onPress, accentColor }: {
 
           {/* Performance Insights */}
           <View style={styles.insights}>
-            <Text style={styles.insightsTitle}>💡 INSIGHTS</Text>
-            {metric.efficiency > 50000 && (
-              <Text style={styles.insightText}>✨ Excellent efficiency - keeping costs low!</Text>
+            <Text style={styles.insightsTitle}>💡 DIRECTIONAL INSIGHTS</Text>
+            {metric.efficiency > 50 && (
+              <Text style={styles.insightText}>High token volume per estimated dollar in current receipts</Text>
             )}
-            {metric.avgCostPerSession > 0.50 && (
+            {metric.avgCostPerResponse > 0.50 && (
               <Text style={[styles.insightText, { color: '#f59e0b' }]}>
-                ⚠️ High cost per session - consider switching model
+                ⚠️ High cost per response - review model and workload fit
               </Text>
             )}
-            {metric.errorCount > 5 && (
-              <Text style={[styles.insightText, { color: '#ef4444' }]}>
-                🔴 Multiple errors detected - needs attention
-              </Text>
+            {metric.hasErrorSignal && (
+              <Text style={[styles.insightText, { color: '#ef4444' }]}>Current agent status reports an error</Text>
             )}
-            {metric.messagesProcessed > 100 && (
-              <Text style={styles.insightText}>🏆 High activity - productive agent!</Text>
+            {metric.recordedTurns > 100 && (
+              <Text style={styles.insightText}>🏆 High recorded turn volume</Text>
             )}
           </View>
         </View>
@@ -320,6 +358,9 @@ function SortButton({ label, active, onPress, accentColor }: {
   return (
     <Pressable
       onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`Sort by ${label}`}
+      accessibilityState={{ selected: active }}
       style={[
         styles.sortBtn,
         active && [styles.sortBtnActive, { borderColor: accentColor, backgroundColor: accentColor + '15' }],
@@ -335,31 +376,32 @@ function SortButton({ label, active, onPress, accentColor }: {
 
 function calculateAgentMetrics(agents: OfficeAgent[], sessions: OpenSwanSession[]): AgentMetrics[] {
   return agents.map(agent => {
-    // Find all sessions for this agent (sessions are per-response, keyed by agentId)
-    const agentSessions = sessions.filter(s => s.agentId === agent.id || s.agentId === agent.name);
+    // Backpack supplies one OpenSwanSession-shaped row per recorded response.
+    const agentResponses = sessions.filter(s => s.agentId === agent.id || s.agentId === agent.name);
 
-    const sessionCount = agentSessions.length || 1;
-    const totalCost = agentSessions.reduce((sum, s) => sum + (s.totalCost || 0), 0) || agent.costToday || 0;
-    const totalTokens = agentSessions.reduce((sum, s) => sum + (s.totalInputTokens || 0) + (s.totalOutputTokens || 0), 0) || agent.tokensUsed || 0;
-    const avgCostPerSession = sessionCount > 0 ? totalCost / sessionCount : totalCost;
-    const avgTokensPerSession = sessionCount > 0 ? totalTokens / sessionCount : totalTokens;
+    const responseCount = agentResponses.length;
+    const responseCost = agentResponses.reduce((sum, s) => sum + (s.totalCost || 0), 0);
+    const responseTokens = agentResponses.reduce((sum, s) => sum + (s.totalInputTokens || 0) + (s.totalOutputTokens || 0), 0);
+    const totalCost = responseCount > 0 ? responseCost : agent.costToday || 0;
+    const totalTokens = responseCount > 0 ? responseTokens : agent.tokensUsed || 0;
+    const avgCostPerResponse = responseCount > 0 ? totalCost / responseCount : 0;
+    const avgTokensPerResponse = responseCount > 0 ? totalTokens / responseCount : 0;
     const efficiency = totalCost > 0 ? totalTokens / totalCost / 1000 : 0; // tokens per dollar (in thousands)
-    const uptimePercent = agent.status === 'active' ? 99 : agent.status === 'idle' ? 95 : agent.status === 'error' ? 70 : 0;
-    const errorCount = agent.status === 'error' ? 1 : 0;
+    const statusScore = agent.status === 'active' ? 4 : agent.status === 'building' ? 3 : agent.status === 'idle' ? 2 : agent.status === 'error' ? 1 : 0;
 
     return {
       agentId: agent.id,
       name: agent.name,
       color: agent.color,
-      sessionCount,
+      responseCount,
       totalCost,
-      avgCostPerSession,
+      avgCostPerResponse,
       totalTokens,
-      avgTokensPerSession,
-      messagesProcessed: agent.messagesProcessed,
-      uptimePercent,
+      avgTokensPerResponse,
+      recordedTurns: agent.messagesProcessed,
+      statusScore,
       efficiency,
-      errorCount,
+      hasErrorSignal: agent.status === 'error',
       model: agent.model,
       lastActive: agent.lastActive,
       status: agent.status,
@@ -370,10 +412,38 @@ function calculateAgentMetrics(agents: OfficeAgent[], sessions: OpenSwanSession[
 // ─── Styles ────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  container: {
+  root: {
     flex: 1,
     backgroundColor: '#000000',
+  },
+  scrollContainer: {
+    flex: 1,
+  },
+  scrollContent: {
     padding: 16,
+  },
+  provenanceNotice: {
+    alignSelf: 'stretch',
+    backgroundColor: '#0d0d14',
+    borderWidth: 1,
+    borderColor: '#f59e0b55',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 16,
+  },
+  provenanceTitle: {
+    color: '#f59e0b',
+    fontSize: 9,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+    letterSpacing: 1,
+  },
+  provenanceText: {
+    color: '#b0b0b0',
+    fontSize: 10,
+    fontFamily: 'monospace',
+    lineHeight: 15,
+    marginTop: 3,
   },
   emptyContainer: {
     flex: 1,

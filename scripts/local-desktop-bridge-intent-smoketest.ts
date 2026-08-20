@@ -1,8 +1,9 @@
 /**
  * local-desktop-bridge-intent-smoketest - pins chat routing for local
- * desktop bridge awareness/actions. Read-only requests should stay on
- * the lightweight OpenSwan bridge path; file/app execution should use
- * the shared computer-task runtime instead of falling back to plain chat.
+ * desktop bridge awareness/actions. Requests recognized by the canonical
+ * computer router should use the shared computer-task runtime with explicit
+ * surface/tool/proof metadata; narrower awareness fallbacks may still use the
+ * lightweight OpenSwan bridge path instead of falling back to plain chat.
  *
  * Run: npm run smoke:local-desktop-bridge-intent
  */
@@ -37,6 +38,54 @@ function pass(message: string) {
 function assert(condition: unknown, message: string, detail?: string) {
   if (condition) pass(message);
   else fail(`${message}${detail ? ` - ${detail}` : ''}`);
+}
+
+type ExpectedComputerTaskRoute = Partial<{
+  kind: 'browser' | 'desktop_app' | 'local_file' | 'hybrid' | 'agent_buildout';
+  routeId: string | null;
+  pipelineId: string;
+  risk: 'safe' | 'review' | 'external_side_effect' | 'destructive';
+  approvalRequired: boolean;
+  requiredTools: string[];
+  requiredActionTools: string[];
+}>;
+
+function assertComputerTaskRoute(message: string, expected: ExpectedComputerTaskRoute) {
+  const plan = buildChatAutomationPlan({ message });
+  const route = plan.computerRequestRoute;
+  assert(plan.execution.kind === 'run_computer_task', `"${message}" enters the shared computer-task runtime`, `saw ${plan.execution.kind}`);
+  assert(Boolean(route), `"${message}" carries canonical computer-route metadata`);
+  if (!route) return;
+
+  assert(route.executionKind === 'run_computer_task', `"${message}" route execution metadata stays canonical`, `saw ${route.executionKind}`);
+  assert(plan.execution.routeId === route.routeId, `"${message}" planner and computer route agree on routeId`, `saw ${String(plan.execution.routeId)} / ${String(route.routeId)}`);
+  if (expected.kind !== undefined) {
+    assert(route.kind === expected.kind, `"${message}" computer surface = ${expected.kind}`, `saw ${route.kind}`);
+  }
+  if (expected.routeId !== undefined) {
+    assert(route.routeId === expected.routeId, `"${message}" computer routeId = ${String(expected.routeId)}`, `saw ${String(route.routeId)}`);
+  }
+  if (expected.pipelineId !== undefined) {
+    assert(route.selectedPipeline.id === expected.pipelineId, `"${message}" pipeline = ${expected.pipelineId}`, `saw ${route.selectedPipeline.id}`);
+  }
+  if (expected.risk !== undefined) {
+    assert(route.risk === expected.risk && plan.risk === expected.risk, `"${message}" keeps ${expected.risk} risk`, `saw ${route.risk} / ${plan.risk}`);
+  }
+  if (expected.approvalRequired !== undefined) {
+    assert(
+      route.approvalRequired === expected.approvalRequired && plan.approval.required === expected.approvalRequired,
+      `"${message}" approval metadata = ${expected.approvalRequired}`,
+      `saw ${route.approvalRequired} / ${plan.approval.required}`,
+    );
+  }
+  for (const tool of expected.requiredTools || []) {
+    assert(route.recommendedTools.includes(tool), `"${message}" recommends ${tool}`, route.recommendedTools.join(', '));
+  }
+  const actionTools = route.actionItems.map((item) => item.tool);
+  for (const tool of expected.requiredActionTools || []) {
+    assert(actionTools.includes(tool), `"${message}" exposes ${tool} as an executable route action`, actionTools.join(', '));
+  }
+  assert(route.completionProof.length > 0, `"${message}" carries completion-proof requirements`);
 }
 
 function assertIntent(
@@ -204,6 +253,19 @@ function main() {
   assertIntent(
     'need you to tell me all my tabs open in chrome right now',
     'browser_tabs',
+    undefined,
+    'run_computer_task',
+  );
+  assertComputerTaskRoute(
+    'need you to tell me all my tabs open in chrome right now',
+    {
+      kind: 'desktop_app',
+      routeId: null,
+      pipelineId: 'desktop_app_control',
+      risk: 'safe',
+      approvalRequired: false,
+      requiredTools: ['desktop.list_browser_tabs'],
+    },
   );
   assertIntent(
     'what apps are open on my computer?',
@@ -298,6 +360,19 @@ function main() {
     'inspect Photoshop document status',
     'photoshop_document_status',
     (intent) => assert(intent.appQuery === 'Photoshop', 'Photoshop status targets app', `saw ${intent.appQuery}`),
+    'run_computer_task',
+  );
+  assertComputerTaskRoute(
+    'inspect Photoshop document status',
+    {
+      kind: 'desktop_app',
+      routeId: null,
+      pipelineId: 'desktop_app_control',
+      risk: 'safe',
+      approvalRequired: false,
+      requiredTools: ['desktop.photoshop_document_status'],
+      requiredActionTools: ['desktop.photoshop_document_status'],
+    },
   );
   assertExtraIntent(
     'show Photoshop layers matching headline',
@@ -306,6 +381,18 @@ function main() {
       assert(intent.appQuery === 'Photoshop', 'Photoshop layer inventory targets app', `saw ${intent.appQuery}`);
       assert(intent.query === 'headline', 'Photoshop layer inventory query parsed', `saw ${intent.query}`);
     },
+    'run_computer_task',
+  );
+  assertComputerTaskRoute(
+    'show Photoshop layers matching headline',
+    {
+      kind: 'desktop_app',
+      routeId: null,
+      pipelineId: 'desktop_app_control',
+      risk: 'safe',
+      approvalRequired: false,
+      requiredTools: ['desktop.read_a11y_tree', 'desktop.photoshop_document_status'],
+    },
   );
   assertExtraIntent(
     'update Photoshop headline text to Spring Sale',
@@ -313,6 +400,19 @@ function main() {
     (intent) => {
       assert(intent.targetLabel === 'headline', 'Photoshop text layer parsed', `saw ${intent.targetLabel}`);
       assert(intent.text === 'Spring Sale', 'Photoshop replacement text parsed', `saw ${intent.text}`);
+    },
+    'run_computer_task',
+  );
+  assertComputerTaskRoute(
+    'update Photoshop headline text to Spring Sale',
+    {
+      kind: 'desktop_app',
+      routeId: null,
+      pipelineId: 'desktop_app_control',
+      risk: 'review',
+      approvalRequired: true,
+      requiredTools: ['desktop.photoshop_update_text_layer', 'desktop.photoshop_layer_inventory', 'approvals.request'],
+      requiredActionTools: ['desktop.photoshop_update_text_layer', 'desktop.photoshop_layer_inventory', 'approvals.request'],
     },
   );
   assertExtraIntent(
@@ -364,6 +464,18 @@ function main() {
     'open https://example.com/dashboard',
     'open_url',
     { url: 'https://example.com/dashboard' },
+    'run_computer_task',
+  );
+  assertComputerTaskRoute(
+    'open https://example.com/dashboard',
+    {
+      kind: 'browser',
+      routeId: 'browser',
+      risk: 'review',
+      approvalRequired: false,
+      requiredTools: ['browser.dom_snapshot'],
+      requiredActionTools: ['browser.dom_snapshot'],
+    },
   );
   assertIntent(
     'open example.com/docs',
@@ -527,21 +639,67 @@ function main() {
     'list my Apple Shortcuts',
     'shortcuts_list',
     () => undefined,
+    'run_computer_task',
+  );
+  assertComputerTaskRoute(
+    'list my Apple Shortcuts',
+    {
+      kind: 'desktop_app',
+      routeId: null,
+      pipelineId: 'desktop_app_control',
+      risk: 'safe',
+      approvalRequired: false,
+      requiredTools: ['desktop.observe_app', 'desktop.read_a11y_tree'],
+      requiredActionTools: ['desktop.observe_app'],
+    },
   );
   assertExtraIntent(
     'run shortcut Resize Images',
     'shortcut_run',
     (intent) => assert(intent.shortcutName === 'Resize Images', 'shortcut name parsed', `saw ${intent.shortcutName}`),
+    'run_computer_task',
+  );
+  assertComputerTaskRoute(
+    'run shortcut Resize Images',
+    {
+      pipelineId: 'desktop_app_control',
+      risk: 'review',
+      approvalRequired: false,
+      requiredTools: ['desktop.read_a11y_tree'],
+    },
   );
   assertExtraIntent(
     'confirm run shortcut Resize Images',
     'shortcut_run',
     (intent) => assert(intent.shortcutName === 'Resize Images', 'confirmed shortcut name parsed', `saw ${intent.shortcutName}`),
+    'run_computer_task',
+  );
+  assertComputerTaskRoute(
+    'confirm run shortcut Resize Images',
+    {
+      pipelineId: 'desktop_app_control',
+      risk: 'review',
+      approvalRequired: false,
+      requiredTools: ['desktop.read_a11y_tree'],
+    },
   );
   assertExtraIntent(
     'show clickable elements in Safari',
     'a11y_tree',
     (intent) => assert(intent.appQuery === 'Safari', 'a11y app parsed', `saw ${intent.appQuery}`),
+    'run_computer_task',
+  );
+  assertComputerTaskRoute(
+    'show clickable elements in Safari',
+    {
+      kind: 'browser',
+      routeId: 'browser',
+      pipelineId: 'browser_navigation',
+      risk: 'safe',
+      approvalRequired: false,
+      requiredTools: ['browser.dom_snapshot'],
+      requiredActionTools: ['browser.dom_snapshot'],
+    },
   );
   assertExtraIntent(
     'minimize active window',

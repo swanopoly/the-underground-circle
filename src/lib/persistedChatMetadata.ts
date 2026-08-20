@@ -184,6 +184,7 @@ export type PersistedChatBotMetadata = {
     selectedModel?: string | null;
     effectiveModel?: string | null;
     provider?: string | null;
+    showRouteChips?: boolean;
   };
   agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
   /** Durable nonterminal bridge/session lineage; never contains response copy. */

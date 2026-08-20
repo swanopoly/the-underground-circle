@@ -86,25 +86,36 @@ assert(
   'semantic click and value tools stay off the acknowledgement-only generic mutation path',
 );
 
-const prepareIndex = runtimeSource.indexOf(
+const runtimeExecutionSource = runtimeSource.slice(runtimeSource.indexOf(
+  'export async function executeOpenSwanRuntimeTool',
+));
+const prepareIndex = runtimeExecutionSource.indexOf(
   'prepareGuardedGenericNativeUiMutation(',
-  runtimeSource.indexOf('export async function executeOpenSwanRuntimeTool'),
 );
-const approvalIndex = runtimeSource.indexOf(
-  'maybeRequestToolApproval(tool, approvalArgs, context)',
+const approvalIndex = runtimeExecutionSource.indexOf(
+  'maybeAuthorizeToolWithWorkflowReview(',
   prepareIndex,
 );
-const recheckIndex = runtimeSource.indexOf(
+const guardedExecutionIndex = runtimeExecutionSource.indexOf(
+  'executeGuardedGenericNativeUiMutation(',
+  approvalIndex,
+);
+const guardedRuntimeSource = runtimeSource.slice(
+  runtimeSource.indexOf('async function executeGuardedGenericNativeUiMutation('),
+  runtimeSource.indexOf('export async function executeOpenSwanRuntimeTool'),
+);
+const recheckIndex = guardedRuntimeSource.indexOf(
   'recheckGenericNativeUiMutationGuardAtHandlerEntry({',
 );
-const durableIndex = runtimeSource.indexOf(
+const durableIndex = guardedRuntimeSource.indexOf(
   'dispatchDurableComputerAppMutation({',
   recheckIndex,
 );
 assert(
   prepareIndex >= 0
     && approvalIndex > prepareIndex
-    && recheckIndex > 0
+    && guardedExecutionIndex > approvalIndex
+    && recheckIndex >= 0
     && durableIndex > recheckIndex,
   'fresh observation precedes approval and one-shot recheck precedes durable dispatch',
 );

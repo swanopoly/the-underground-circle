@@ -144,13 +144,13 @@ assertInOrder(
   compactPrecedence,
   [
     'const explicitlyTargetsConnectedCodingAgent = Boolean(',
-    'selectedChatAgentTarget && !isOpenSwanChatAgentTarget(selectedChatAgentTarget)',
+    'selectedChatAgentTarget && (!isOpenSwanChatAgentTarget(selectedChatAgentTarget) || !selectedChatAgentTarget.isDefault)',
     'isTerminalAgentSendRequest(content)',
     'Boolean(parseTerminalAgentLaunchRequest(content))',
     'assign|agent|terminal|term|multi|roundtable',
     'claude(?:\\s+code)?|codex',
     'const codingAgentOwnsAttachmentTurn = explicitlyTargetsConnectedCodingAgent || isCodingGenerationRequest(content, sessionProfile);',
-    'const shouldRunDesktopAttachmentTask = !codingAgentOwnsAttachmentTurn && shouldRouteAttachedFilesToDesktop(content, desktopAttachmentCandidates);',
+    'const shouldRunDesktopAttachmentTask = !preflightHasAuthoritativeMultiActionContract && legacyDesktopAttachmentRouteEnabled && !addressedElsewhereForPreflight && !codingAgentOwnsAttachmentTurn && shouldRouteAttachedFilesToDesktop(content, desktopAttachmentCandidates);',
     'if (shouldRunDesktopAttachmentTask) {',
   ],
   'coding-agent ownership is decided before desktop routing',
@@ -310,7 +310,7 @@ const selectedAgentSection = section(
 assertInOrder(
   compact(selectedAgentSection),
   [
-    'selectedChatAgentTarget && !isOpenSwanChatAgentTarget(selectedChatAgentTarget)',
+    'selectedChatAgentTarget && (!isOpenSwanChatAgentTarget(selectedChatAgentTarget) || !selectedChatAgentTarget.isDefault)',
     'const selectedAgentVisualBriefs = await requireTurnVisualBriefs(selectedDispatchAgent.name);',
     'if (selectedAgentVisualBriefs === null) return;',
     'dispatchAssignedAgentTask(selectedDispatchAgent, content, selectedAgentVisualBriefs)',
@@ -347,8 +347,8 @@ assertInOrder(
   compact(ordinaryChatVisualSection),
   [
     "let turnVisualBriefContext = '';",
-    'if (turnHasImageAttachments) {',
-    "const briefs = await requireTurnVisualBriefs('the selected chat model');",
+    'if (turnHasImageAttachments && !opensDesktopAttachment) {',
+    "const briefs = await requireTurnVisualBriefs('the selected chat model', plannedAutomationForTurn);",
     'if (briefs === null) return;',
     'turnVisualBriefContext = formatVisualBriefsForConnectedAgent(briefs);',
   ],
@@ -361,7 +361,7 @@ assert.match(
 );
 assert.match(
   compact(chat),
-  /const attachmentContext = \[ buildAttachmentPromptContext\(currentAttachments\), figmaPromptContext, turnVisualBriefContext, \]/,
+  /const attachmentContext = requiresAuthoritativeAttachmentSources \? '' : \[ buildAttachmentPromptContext\(currentAttachments\), figmaPromptContext, turnVisualBriefContext, \]/,
   'plain Chat and workbench prompt context receive the formatted visual brief',
 );
 assert.match(

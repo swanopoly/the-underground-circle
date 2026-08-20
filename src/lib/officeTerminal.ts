@@ -1194,7 +1194,10 @@ export async function loadResponsesForMessages(
         .select('*')
         .in('message_id', messageIds);
 
-      if (error || !data) return [];
+      if (error) {
+        throw new Error(error.message || 'Terminal responses could not be loaded.');
+      }
+      if (!data) return [];
 
       const responses = (data as Record<string, unknown>[]).map(row => ({
         id:           row.id as string,
@@ -1723,14 +1726,23 @@ export async function updateAgentPosition(
   x: number,
   y: number
 ): Promise<void> {
-  await supabase
+  if (!agentId || !Number.isFinite(x) || !Number.isFinite(y)) {
+    throw new Error('A valid agent and position are required.');
+  }
+
+  const { data, error } = await supabase
     .from('circle_office_agents')
     .update({
       position_x: Math.max(0, Math.min(1, x)),
       position_y: Math.max(0, Math.min(1, y)),
       updated_at: new Date().toISOString(),
     })
-    .eq('id', agentId);
+    .eq('id', agentId)
+    .select('id')
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) throw new Error('The agent position was not updated. Check your circle access and try again.');
 }
 
 // ─── Update last command on agent row ────────────────────────────────────────

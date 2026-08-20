@@ -27,6 +27,11 @@ import {
   createSecondBrainNoteFromMemory,
   getSecondBrainUnavailableMessage,
   getSecondBrainReviewState,
+  isCircleShareableSecondBrainMemory,
+  isCircleShareableSecondBrainNote,
+  isPersonalSecondBrainMemory,
+  loadSecondBrainAgentBriefInputs,
+  loadSecondBrainMemoriesForScope,
   promoteSecondBrainNoteToMemory,
   reviewSecondBrainNote,
   searchSecondBrain,
@@ -101,6 +106,30 @@ interface CanvasState {
 interface OtherCircle { id: string; name: string; }
 
 type ReviewQueueItem = { note: SecondBrainNote; state: SecondBrainReviewState };
+
+type KnowledgeReadKind =
+  | 'main'
+  | 'other-circles'
+  | 'other-graph'
+  | 'db-stats'
+  | 'search'
+  | 'mutation'
+  | 'site-map'
+  | 'knowledge-intake';
+
+const SITE_MAP_PREVIEW_LABELS = [
+  'Chat',
+  'Office',
+  'Feed',
+  'Rooms',
+  'Marketplace',
+  'Backpack',
+  'Computer Use',
+  'OpenSwan',
+  'BlackSwan',
+  'Memory Bank',
+  'Provider Routing',
+] as const;
 
 const DB_STAT_FAILURE_COOLDOWN_MS = 60_000;
 const dbStatUnavailableUntil = new Map<string, number>();
@@ -1509,8 +1538,11 @@ export default function SecondBrainDashboard({
   const [graph, setGraph] = useState<SecondBrainGraph | null>(null);
   const [filter, setFilter] = useState<BrainFilter>('active');
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+  const [loadIsStale, setLoadIsStale] = useState(false);
   const [status, setStatus] = useState('');
   const [saving, setSaving] = useState(false);
+  const [searching, setSearching] = useState(false);
   const [title, setTitle] = useState('');
   const [url, setUrl] = useState('');
   const [content, setContent] = useState('');
@@ -1523,70 +1555,221 @@ export default function SecondBrainDashboard({
   const [otherCircleId, setOtherCircleId] = useState<string | null>(null);
   const [otherGraph, setOtherGraph] = useState<SecondBrainGraph | null>(null);
   const [otherLoading, setOtherLoading] = useState(false);
+  const [otherCirclesError, setOtherCirclesError] = useState('');
+  const [otherGraphError, setOtherGraphError] = useState('');
   const [uploadStatus, setUploadStatus] = useState('');
   const [dbStats, setDbStats] = useState<Record<string, DigitalBrainDbStat>>({});
+  const [dbStatsError, setDbStatsError] = useState('');
   const [systemNodeId, setSystemNodeId] = useState<string | null>(null);
   const [knowledgeSeeding, setKnowledgeSeeding] = useState(false);
   const [showSystemDetails, setShowSystemDetails] = useState(false);
-  const memorySyncRef = useRef('');
-  const autoMapFiredRef = useRef(false);
+  const [dismissedSiteMapDraftScope, setDismissedSiteMapDraftScope] = useState('');
+  const readGenerationRef = useRef<Record<KnowledgeReadKind, number>>({
+    main: 0,
+    'other-circles': 0,
+    'other-graph': 0,
+    'db-stats': 0,
+    search: 0,
+    mutation: 0,
+    'site-map': 0,
+    'knowledge-intake': 0,
+  });
+  const snapshotScopeRef = useRef({ graph: '', memories: '' });
   const { width } = useWindowDimensions();
   const compactLayout = width < 720;
+  const scopeKey = `${circleId}:${userId || 'anonymous'}:${brainMode}`;
+  const currentScopeRef = useRef(scopeKey);
+  currentScopeRef.current = scopeKey;
+
+  const beginRead = useCallback((kind: KnowledgeReadKind) => {
+    readGenerationRef.current[kind] += 1;
+    return readGenerationRef.current[kind];
+  }, []);
+
+  const isCurrentRead = useCallback((kind: KnowledgeReadKind, generation: number) => (
+    readGenerationRef.current[kind] === generation
+  ), []);
+
+  const isCurrentScopeOperation = useCallback((
+    kind: KnowledgeReadKind,
+    generation: number,
+    targetScope: string,
+  ) => (
+    readGenerationRef.current[kind] === generation
+    && currentScopeRef.current === targetScope
+  ), []);
 
   const load = useCallback(async () => {
+    const generation = beginRead('main');
+    const targetScope = scopeKey;
+    const hadGraphSnapshot = snapshotScopeRef.current.graph === targetScope;
+    const hadMemorySnapshot = snapshotScopeRef.current.memories === targetScope;
     setLoading(true);
+    setLoadError('');
+    setLoadIsStale(false);
+    if (brainMode === 'mine' && !userId) {
+      if (isCurrentScopeOperation('main', generation, targetScope)) {
+        setGraph(null);
+        setNotes([]);
+        setMemories([]);
+        setLoadError('Sign in to load personal Knowledge. No circle data was substituted.');
+        setLoading(false);
+      }
+      return;
+    }
     const graphOpts = brainMode === 'mine' ? { userId, mode: 'mine' as const } : { mode: 'circle' as const };
-    const [graphResult, memoryResult] = await Promise.all([
-      buildSecondBrainGraph(circleId, graphOpts),
-      import('../lib/agentMemory')
-        .then(mod => mod.getUserMemories(circleId, userId))
-        .catch(() => ({ circle: [], user: [], session: [], agent: [], total: 0 })),
-    ]);
-    setGraph(graphResult.graph);
-    setNotes(graphResult.graph.notes);
-    const loaded = [
-      ...(memoryResult.circle || []),
-      ...(memoryResult.user || []),
-      ...(memoryResult.session || []),
-      ...((memoryResult as any).agent || []),
-    ];
-    setMemories(loaded);
-    setStatus(graphResult.missing
-      ? 'Second brain migration is not deployed yet. Run the SQL migration and refresh.'
-      : graphResult.unavailable
-        ? 'Second brain storage is temporarily unavailable. Check the Supabase table/RLS health and refresh.'
-      : graphResult.error || '');
-    setLoading(false);
-  }, [circleId, userId, brainMode]);
+    try {
+      const [graphResult, memoryResult] = await Promise.all([
+        buildSecondBrainGraph(circleId, graphOpts),
+        loadSecondBrainMemoriesForScope({ circleId, userId, mode: brainMode, limit: 200 }),
+      ]);
+      if (!isCurrentScopeOperation('main', generation, targetScope)) return;
 
-  useEffect(() => { load(); }, [load]);
+      const graphFailed = Boolean(graphResult.missing || graphResult.unavailable || graphResult.error);
+      if (!graphFailed) {
+        setGraph(graphResult.graph);
+        setNotes(graphResult.graph.notes);
+        snapshotScopeRef.current.graph = targetScope;
+      } else if (!hadGraphSnapshot) {
+        setGraph(null);
+        setNotes([]);
+      }
+      if (!memoryResult.error) {
+        setMemories(memoryResult.memories);
+        snapshotScopeRef.current.memories = targetScope;
+      } else if (!hadMemorySnapshot) {
+        setMemories([]);
+      }
+
+      const retainedParts = [
+        graphFailed && hadGraphSnapshot ? 'notes' : '',
+        memoryResult.error && hadMemorySnapshot ? 'agent memory' : '',
+      ].filter(Boolean);
+      if (retainedParts.length) {
+        setLoadIsStale(true);
+        setLoadError(`Refresh failed for ${retainedParts.join(' and ')}. Previously loaded data is still shown and may be stale.`);
+      } else if (graphResult.missing) {
+        setLoadError('Knowledge storage is not set up for this workspace yet. Unavailable sections were cleared.');
+      } else if (graphResult.unavailable || graphResult.error) {
+        setLoadError('Knowledge notes could not be loaded. The unavailable section was cleared; check the connection and retry.');
+      } else if (memoryResult.error) {
+        setLoadError('Knowledge notes are current, but agent memory could not be loaded. The unavailable memory section was cleared; retry.');
+      }
+    } catch {
+      if (isCurrentScopeOperation('main', generation, targetScope)) {
+        if (hadGraphSnapshot || hadMemorySnapshot) {
+          setLoadIsStale(true);
+          setLoadError('Refresh failed. Previously loaded Knowledge is still shown and may be stale.');
+        } else {
+          setGraph(null);
+          setNotes([]);
+          setMemories([]);
+          setLoadError('Knowledge could not load. Unavailable sections were cleared; check the connection and retry.');
+        }
+      }
+    } finally {
+      if (isCurrentScopeOperation('main', generation, targetScope)) setLoading(false);
+    }
+  }, [beginRead, brainMode, circleId, isCurrentScopeOperation, scopeKey, userId]);
+
+  useEffect(() => {
+    setGraph(null);
+    setNotes([]);
+    setMemories([]);
+    setSelectedNoteId(null);
+    setSearchResults(null);
+    setSearching(false);
+    setMapping(false);
+    setMapStatus('');
+    setDbStats({});
+    setDbStatsError('');
+    setLoadError('');
+    setLoadIsStale(false);
+    setStatus('');
+    setSaving(false);
+    setUploadStatus('');
+    setKnowledgeSeeding(false);
+    void load();
+    return () => {
+      readGenerationRef.current.main += 1;
+      readGenerationRef.current.search += 1;
+      readGenerationRef.current.mutation += 1;
+      readGenerationRef.current['site-map'] += 1;
+      readGenerationRef.current['knowledge-intake'] += 1;
+    };
+  }, [load, scopeKey]);
 
   const loadOtherCircles = useCallback(async () => {
-    if (!userId) return;
-    const { data } = await supabase
-      .from('circle_members')
-      .select('circle_id, circles(id, name)')
-      .eq('user_id', userId)
-      .neq('circle_id', circleId);
-    setOtherCircles((data || []).map((m: any) => ({
-      id: m.circle_id,
-      name: m.circles?.name || m.circle_id.slice(0, 10),
-    })));
-  }, [userId, circleId]);
+    if (!userId) {
+      setOtherCircles([]);
+      setOtherCirclesError('Sign in to view other circle knowledge.');
+      return;
+    }
+    const generation = beginRead('other-circles');
+    setOtherCirclesError('');
+    try {
+      const { data, error } = await supabase
+        .from('circle_members')
+        .select('circle_id, circles(id, name)')
+        .eq('user_id', userId)
+        .neq('circle_id', circleId);
+      if (!isCurrentRead('other-circles', generation)) return;
+      if (error) {
+        setOtherCirclesError('Other circles could not be loaded. Check the connection and retry.');
+        return;
+      }
+      setOtherCircles((data || []).map((m: any) => ({
+        id: m.circle_id,
+        name: m.circles?.name || m.circle_id.slice(0, 10),
+      })));
+    } catch {
+      if (isCurrentRead('other-circles', generation)) {
+        setOtherCirclesError('Other circles could not be loaded. Check the connection and retry.');
+      }
+    }
+  }, [beginRead, circleId, isCurrentRead, userId]);
+
+  useEffect(() => {
+    readGenerationRef.current['other-circles'] += 1;
+    readGenerationRef.current['other-graph'] += 1;
+    setOtherCircles([]);
+    setOtherCirclesError('');
+    setOtherCircleId(null);
+    setOtherGraph(null);
+    setOtherGraphError('');
+    setOtherLoading(false);
+  }, [circleId, userId]);
 
   useEffect(() => {
     if (viewMode === 'other' && !otherCircles.length) loadOtherCircles();
   }, [viewMode, otherCircles.length, loadOtherCircles]);
 
   const loadOtherCircleGraph = async (id: string) => {
+    const generation = beginRead('other-graph');
     setOtherCircleId(id);
+    setOtherGraph(null);
+    setOtherGraphError('');
     setOtherLoading(true);
-    const result = await buildSecondBrainGraph(id, { mode: 'circle' });
-    setOtherGraph(result.graph);
-    setOtherLoading(false);
+    try {
+      const result = await buildSecondBrainGraph(id, { mode: 'circle' });
+      if (!isCurrentRead('other-graph', generation)) return;
+      if (result.missing || result.unavailable || result.error) {
+        setOtherGraphError('That circle\'s knowledge graph could not be loaded. Check access and retry.');
+      } else {
+        setOtherGraph(result.graph);
+      }
+    } catch {
+      if (isCurrentRead('other-graph', generation)) {
+        setOtherGraphError('That circle\'s knowledge graph could not be loaded. Check access and retry.');
+      }
+    } finally {
+      if (isCurrentRead('other-graph', generation)) setOtherLoading(false);
+    }
   };
 
   const loadDbStats = useCallback(async () => {
+    const generation = beginRead('db-stats');
+    setDbStatsError('');
     const entries = await Promise.all(DIGITAL_BRAIN_DB_TABLES.map(async (cfg) => {
       if (cfg.probe === 'skip') {
         return [cfg.table, {
@@ -1651,32 +1834,35 @@ export default function SecondBrainDashboard({
         }] as const;
       }
     }));
+    if (!isCurrentRead('db-stats', generation)) return;
     setDbStats(Object.fromEntries(entries));
-  }, [circleId, userId]);
+    const failedCount = entries.filter(([, stat]) => !stat.ok && !('skipped' in stat && stat.skipped)).length;
+    if (failedCount > 0) {
+      setDbStatsError(`${failedCount} data ${failedCount === 1 ? 'source' : 'sources'} could not be verified. Counts marked unavailable are not zero.`);
+    }
+  }, [beginRead, circleId, isCurrentRead, userId]);
 
   useEffect(() => {
     if (viewMode === 'system') void loadDbStats();
+    return () => {
+      readGenerationRef.current['db-stats'] += 1;
+    };
   }, [viewMode, loadDbStats]);
-
-  useEffect(() => {
-    if (loading || autoMapFiredRef.current || brainMode !== 'mine' || !userId || Platform.OS !== 'web') return;
-    if (status || getSecondBrainUnavailableMessage()) return;
-    const siteMapCount = notes.filter(n => (n.metadata as any)?.siteMapKey).length;
-    if (siteMapCount < 5) {
-      autoMapFiredRef.current = true;
-      autoMapSiteToSecondBrain(circleId, userId, () => {}).then(result => {
-        if (!result.error && result.created > 0) load();
-      });
-    }
-  }, [loading, brainMode, userId, notes, circleId, load, status]);
 
   const processBrainFiles = useCallback(async (files: File[]) => {
     if (Platform.OS !== 'web') return;
     if (!userId) { setStatus('Sign in to upload files.'); return; }
     if (!files.length) return;
+    const targetScope = scopeKey;
+    if (currentScopeRef.current !== targetScope) return;
+    const generation = beginRead('mutation');
+    const targetCircleId = circleId;
+    const targetUserId = userId;
+    const targetMode = brainMode;
 
     setUploadStatus(`Processing ${files.length} file(s)...`);
     for (const file of files) {
+      if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
       const ext = (file.name.split('.').pop() || '').toLowerCase();
       let noteTitle = file.name.replace(/\.[^.]+$/, '');
       let noteContent = '';
@@ -1690,12 +1876,13 @@ export default function SecondBrainDashboard({
         } else {
           noteContent = `File: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
         }
+        if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
         const result = await createSecondBrainNote({
-          circleId, userId, title: noteTitle,
+          circleId: targetCircleId, userId: targetUserId, title: noteTitle,
           content: noteContent.slice(0, 8000),
           noteKind: 'note',
           status: 'inbox',
-          visibility: brainMode === 'circle' ? 'circle_shared' : 'private',
+          visibility: targetMode === 'circle' ? 'circle_shared' : 'private',
           metadata: {
             source: 'file_upload',
             filename: file.name,
@@ -1704,6 +1891,7 @@ export default function SecondBrainDashboard({
             reviewIntervalDays: 1,
           },
         });
+        if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
         if (result.note) {
           setSelectedNoteId(result.note.id);
           setUploadStatus(`Saved: ${noteTitle}`);
@@ -1711,12 +1899,18 @@ export default function SecondBrainDashboard({
           setUploadStatus(result.error || 'Failed to save');
         }
       } catch (err: any) {
-        setUploadStatus(`Error with ${file.name}`);
+        if (isCurrentScopeOperation('mutation', generation, targetScope)) {
+          setUploadStatus(`Error with ${file.name}`);
+        }
       }
     }
+    if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
     await load();
-    setTimeout(() => setUploadStatus(''), 2500);
-  }, [brainMode, userId, circleId, load]);
+    if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
+    setTimeout(() => {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) setUploadStatus('');
+    }, 2500);
+  }, [beginRead, brainMode, circleId, isCurrentScopeOperation, load, scopeKey, userId]);
 
   const handleFileUpload = useCallback(async () => {
     if (Platform.OS !== 'web') return;
@@ -1757,9 +1951,21 @@ export default function SecondBrainDashboard({
     .filter(item => item.state.urgency === 'due' || item.state.urgency === 'soon')
     .sort((a, b) => b.state.priorityScore - a.state.priorityScore)
     .slice(0, 14), [notes]);
+  const agentBriefNotes = useMemo(
+    () => brainMode === 'circle' ? notes.filter(isCircleShareableSecondBrainNote) : notes,
+    [brainMode, notes],
+  );
+  const agentBriefMemories = useMemo(
+    () => brainMode === 'circle'
+      ? memories.filter(isCircleShareableSecondBrainMemory)
+      : userId
+        ? memories.filter(memory => isPersonalSecondBrainMemory(memory, userId))
+        : [],
+    [brainMode, memories, userId],
+  );
   const agentBrief = useMemo(
-    () => buildSecondBrainAgentBrief(notes, memories),
-    [notes, memories],
+    () => buildSecondBrainAgentBrief(agentBriefNotes, agentBriefMemories),
+    [agentBriefMemories, agentBriefNotes],
   );
   const systemMap = useMemo<DigitalBrainSystemMap>(
     () => buildDigitalBrainSystemMap({ notes, memories, dbStats }),
@@ -1825,148 +2031,263 @@ export default function SecondBrainDashboard({
   const linkedMemoryCount = notes.filter(n => Boolean(n.source_memory_id)).length;
   const reviewDueCount = reviewQueue.length;
   const allGraphLinkCount = graph?.links.length || graphLinks.length;
+  const siteMapCount = notes.filter(note => Boolean((note.metadata as any)?.siteMapKey)).length;
+  const siteMapDraftReady = Platform.OS === 'web'
+    && !loading
+    && brainMode === 'mine'
+    && Boolean(userId)
+    && siteMapCount < 5
+    && dismissedSiteMapDraftScope !== scopeKey
+    && !getSecondBrainUnavailableMessage();
 
   const handleCapture = async (kind: 'note' | 'web_clip') => {
     if (!userId) { setStatus('Sign in before saving to the circle digital brain.'); return; }
     const body = content.trim(), sourceUrl = url.trim();
     if (!body && !sourceUrl) { setStatus('Add note content or a URL first.'); return; }
+    const generation = beginRead('mutation');
+    const targetScope = scopeKey;
+    const targetCircleId = circleId;
+    const targetUserId = userId;
+    const targetMode = brainMode;
     setSaving(true);
-    const result = await createSecondBrainNote({
-      circleId, userId, title,
-      url: sourceUrl || undefined,
-      content: body || sourceUrl,
-      noteKind: kind,
-      status: kind === 'web_clip' ? 'inbox' : 'processed',
-      visibility: brainMode === 'circle' ? 'circle_shared' : 'private',
-      metadata: { surface: 'backpack', captureMode: kind },
-    });
-    setSaving(false);
-    if (result.note) {
-      setTitle(''); setUrl(''); setContent('');
-      setSelectedNoteId(result.note.id);
-      setStatus('Saved to the .web digital brain.');
-      await load();
-    } else {
-      setStatus(result.missing
-        ? 'Second brain database migration is not deployed yet.'
-        : result.error || 'Could not save note.');
+    try {
+      const result = await createSecondBrainNote({
+        circleId: targetCircleId, userId: targetUserId, title,
+        url: sourceUrl || undefined,
+        content: body || sourceUrl,
+        noteKind: kind,
+        status: kind === 'web_clip' ? 'inbox' : 'processed',
+        visibility: targetMode === 'circle' ? 'circle_shared' : 'private',
+        metadata: { surface: 'backpack', captureMode: kind },
+      });
+      if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
+      if (result.note) {
+        setTitle(''); setUrl(''); setContent('');
+        setSelectedNoteId(result.note.id);
+        setStatus('Saved to the .web digital brain.');
+        await load();
+      } else {
+        setStatus(result.missing
+          ? 'Second brain database migration is not deployed yet.'
+          : result.error || 'Could not save note.');
+      }
+    } catch {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) {
+        setStatus('Knowledge could not save the note. Check the connection and retry.');
+      }
+    } finally {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) setSaving(false);
     }
   };
 
   const handleSearch = async () => {
-    if (!searchQuery.trim()) { setSearchResults(null); return; }
-    setSaving(true);
-    const result = await searchSecondBrain(circleId, searchQuery, { includeMemories: true, limit: 14 });
-    setSearchResults(result.results);
-    setSaving(false);
-    if (result.error) setStatus(result.error);
+    const query = searchQuery.trim();
+    if (!query) {
+      beginRead('search');
+      setSearchResults(null);
+      setSearching(false);
+      return;
+    }
+    const generation = beginRead('search');
+    const targetScope = scopeKey;
+    const targetCircleId = circleId;
+    const targetMode = brainMode;
+    const targetUserId = userId;
+    setSearching(true);
+    try {
+      if (targetMode === 'mine' && !targetUserId) {
+        setSearchResults(null);
+        setStatus('Sign in to search personal Knowledge.');
+        return;
+      }
+      const result = await searchSecondBrain(targetCircleId, query, targetMode === 'circle'
+        ? { mode: 'circle', includeMemories: true, limit: 14 }
+        : { mode: 'mine', userId: targetUserId!, includeMemories: true, limit: 14 });
+      if (!isCurrentScopeOperation('search', generation, targetScope)) return;
+      if (result.error) {
+        setSearchResults(null);
+        setStatus('Knowledge search could not finish. Check the connection and retry.');
+      } else {
+        setSearchResults(result.results);
+      }
+    } catch {
+      if (isCurrentScopeOperation('search', generation, targetScope)) {
+        setSearchResults(null);
+        setStatus('Knowledge search could not finish. Check the connection and retry.');
+      }
+    } finally {
+      if (isCurrentScopeOperation('search', generation, targetScope)) setSearching(false);
+    }
   };
 
   const handlePromoteNote = async (note: SecondBrainNote, scope: 'circle' | 'user') => {
     if (!userId) { setStatus('Sign in before promoting notes into memory.'); return; }
+    if (scope === 'circle' && !isCircleShareableSecondBrainNote(note)) {
+      setStatus('Share this note with the circle first. Promoting it is a separate action.');
+      return;
+    }
+    const generation = beginRead('mutation');
+    const targetScope = scopeKey;
+    const targetUserId = userId;
     setSaving(true);
-    const result = await promoteSecondBrainNoteToMemory(note, { userId, scope });
-    setSaving(false);
-    if (result.memory) {
-      setStatus(`Promoted "${note.title}" into ${scope} agent memory.`);
-      await load();
-    } else {
-      setStatus(result.error || 'Could not promote note.');
+    try {
+      const result = await promoteSecondBrainNoteToMemory(note, { userId: targetUserId, scope });
+      if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
+      if (result.memory) {
+        setStatus(`Promoted "${note.title}" into ${scope} agent memory.`);
+        await load();
+      } else {
+        setStatus(result.error || 'Could not promote note.');
+      }
+    } catch {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) {
+        setStatus('Knowledge could not promote the note. Check the connection and retry.');
+      }
+    } finally {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) setSaving(false);
     }
   };
 
   const handleMark = async (note: SecondBrainNote, nextStatus: SecondBrainNote['status']) => {
+    const generation = beginRead('mutation');
+    const targetScope = scopeKey;
     setSaving(true);
-    const result = await updateSecondBrainNote(note.id, { status: nextStatus });
-    setSaving(false);
-    if (result.note) {
-      setStatus(`Marked "${note.title}" as ${nextStatus}.`);
-      await load();
-    } else {
-      setStatus(result.error || 'Could not update note.');
+    try {
+      const result = await updateSecondBrainNote(note.id, { status: nextStatus });
+      if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
+      if (result.note) {
+        setStatus(`Marked "${note.title}" as ${nextStatus}.`);
+        await load();
+      } else {
+        setStatus(result.error || 'Could not update note.');
+      }
+    } catch {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) {
+        setStatus('Knowledge could not update the note. Check the connection and retry.');
+      }
+    } finally {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) setSaving(false);
     }
   };
 
   const handleImportMemory = async (mem: MemoryEntry) => {
     if (!userId) { setStatus('Sign in before importing agent memory.'); return; }
+    const generation = beginRead('mutation');
+    const targetScope = scopeKey;
+    const targetCircleId = circleId;
+    const targetUserId = userId;
+    const targetMode = brainMode;
     setSaving(true);
-    const result = await createSecondBrainNoteFromMemory(
-      mem,
-      userId,
-      circleId,
-      brainMode === 'circle' ? undefined : 'private',
-    );
-    setSaving(false);
-    if (result.note) {
-      setSelectedNoteId(result.note.id);
-      setStatus('Agent memory linked into the .web digital brain.');
-      await load();
-    } else {
-      setStatus(result.missing
-        ? 'Second brain database migration is not deployed yet.'
-        : result.error || 'Could not import memory.');
+    try {
+      const result = await createSecondBrainNoteFromMemory(
+        mem,
+        targetUserId,
+        targetCircleId,
+        targetMode === 'circle' ? undefined : 'private',
+      );
+      if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
+      if (result.note) {
+        setSelectedNoteId(result.note.id);
+        setStatus('Agent memory linked into the .web digital brain.');
+        await load();
+      } else {
+        setStatus(result.missing
+          ? 'Second brain database migration is not deployed yet.'
+          : result.error || 'Could not import memory.');
+      }
+    } catch {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) {
+        setStatus('Knowledge could not link that memory. Check the connection and retry.');
+      }
+    } finally {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) setSaving(false);
     }
   };
 
-  const handleSyncAllMemories = useCallback(async (silent = false) => {
+  const handleSyncAllMemories = useCallback(async () => {
     if (!userId) {
-      if (!silent) setStatus('Sign in before syncing memories.');
+      setStatus('Sign in before syncing memories.');
       return;
     }
     const toSync = memories.filter(mem => !linkedMemoryIds.has(mem.id));
     if (!toSync.length) {
-      if (!silent) setStatus('All loaded memories are already present in your Digital Brain.');
+      setStatus('All loaded memories are already present in your Digital Brain.');
       return;
     }
+    const generation = beginRead('mutation');
+    const targetScope = scopeKey;
+    const targetCircleId = circleId;
+    const targetUserId = userId;
     setSaving(true);
-    if (!silent) setStatus(`Syncing ${toSync.length} memories into your Digital Brain...`);
+    setStatus(`Syncing ${toSync.length} memories into your Digital Brain...`);
     let synced = 0;
     let skipped = 0;
-    for (const mem of toSync) {
-      const result = await createSecondBrainNoteFromMemory(mem, userId, circleId, 'private');
-      if (result.note) synced++;
-      else skipped++;
+    try {
+      for (const mem of toSync) {
+        if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
+        const result = await createSecondBrainNoteFromMemory(mem, targetUserId, targetCircleId, 'private');
+        if (result.note) synced++;
+        else skipped++;
+      }
+      if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
+      setStatus(skipped
+        ? `Synced ${synced} memories into your Digital Brain. ${skipped} could not be attached to this circle.`
+        : `Synced ${synced} memories into your Digital Brain.`);
+      await load();
+    } catch {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) {
+        setStatus('Knowledge memory sync did not finish. Check the connection and retry.');
+      }
+    } finally {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) setSaving(false);
     }
-    setSaving(false);
-    setStatus(skipped
-      ? `Synced ${synced} memories into your Digital Brain. ${skipped} could not be attached to this circle.`
-      : `Synced ${synced} memories into your Digital Brain.`);
-    await load();
-  }, [circleId, linkedMemoryIds, load, memories, userId]);
-
-  useEffect(() => {
-    if (viewMode !== 'system' || !userId || missingMemories.length === 0) return;
-    const key = `${circleId}:${userId}:${missingMemories.map(mem => mem.id).sort().join('|')}`;
-    if (memorySyncRef.current === key) return;
-    memorySyncRef.current = key;
-    void handleSyncAllMemories(true);
-  }, [circleId, handleSyncAllMemories, missingMemories, userId, viewMode]);
+  }, [beginRead, circleId, isCurrentScopeOperation, linkedMemoryIds, load, memories, scopeKey, userId]);
 
   const handleShare = async (note: SecondBrainNote, visibility: SecondBrainVisibility) => {
+    const generation = beginRead('mutation');
+    const targetScope = scopeKey;
     setSaving(true);
-    const result = await shareSecondBrainNote(note.id, visibility);
-    setSaving(false);
-    if (result.note) {
-      setStatus(visibility === 'private'
-        ? `"${note.title}" is now private.`
-        : `"${note.title}" shared with the circle.`);
-      await load();
-    } else {
-      setStatus(result.error || 'Could not update visibility.');
+    try {
+      const result = await shareSecondBrainNote(note.id, visibility);
+      if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
+      if (result.note) {
+        setStatus(visibility === 'private'
+          ? `"${note.title}" is now private.`
+          : `"${note.title}" shared with the circle. Promote it separately if agents should retain it.`);
+        await load();
+      } else {
+        setStatus(result.error || 'Could not update visibility.');
+      }
+    } catch {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) {
+        setStatus('Knowledge could not update visibility. Check the connection and retry.');
+      }
+    } finally {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) setSaving(false);
     }
   };
 
   const handleReviewAction = async (note: SecondBrainNote, action: 'reviewed' | 'snoozed' | 'evergreen') => {
+    const generation = beginRead('mutation');
+    const targetScope = scopeKey;
     setSaving(true);
-    const result = await reviewSecondBrainNote(note, action);
-    setSaving(false);
-    if (result.note) {
-      setStatus(action === 'snoozed'
-        ? `Snoozed "${note.title}" for review.`
-        : `Reviewed "${note.title}" and scheduled the next resurfacing.`);
-      await load();
-    } else {
-      setStatus(result.error || 'Could not update review schedule.');
+    try {
+      const result = await reviewSecondBrainNote(note, action);
+      if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
+      if (result.note) {
+        setStatus(action === 'snoozed'
+          ? `Snoozed "${note.title}" for review.`
+          : `Reviewed "${note.title}" and scheduled the next resurfacing.`);
+        await load();
+      } else {
+        setStatus(result.error || 'Could not update review schedule.');
+      }
+    } catch {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) {
+        setStatus('Knowledge could not update the review schedule. Check the connection and retry.');
+      }
+    } finally {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) setSaving(false);
     }
   };
 
@@ -1985,80 +2306,157 @@ export default function SecondBrainDashboard({
 
   const handleSaveAgentBrief = async () => {
     if (!userId) { setStatus('Sign in before saving the agent brief.'); return; }
+    const generation = beginRead('mutation');
+    const targetScope = scopeKey;
+    const targetCircleId = circleId;
+    const targetUserId = userId;
+    const targetMode = brainMode;
     setSaving(true);
-    const result = await createSecondBrainNote({
-      circleId,
-      userId,
-      title: `.web Digital Brain brief - ${new Date().toLocaleDateString()}`,
-      content: agentBrief,
-      noteKind: 'agent_summary',
-      status: 'processed',
-      visibility: brainMode === 'circle' ? 'circle_shared' : 'private',
-      tags: ['agent-brief', 'digital-brain', 'openswan'],
-      importance: 0.82,
-      metadata: {
-        source: 'digital_brain_agent_brief',
-        generatedAt: new Date().toISOString(),
-        reviewDueAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-        reviewIntervalDays: 7,
-      },
-    });
-    setSaving(false);
-    if (result.note) {
-      setSelectedNoteId(result.note.id);
-      setStatus('Saved an agent-ready brief back into the Digital Brain.');
-      await load();
-    } else {
-      setStatus(result.error || 'Could not save the agent brief.');
+    setStatus('Revalidating the brief inputs before saving…');
+    try {
+      const inputs = await loadSecondBrainAgentBriefInputs({
+        circleId: targetCircleId,
+        userId: targetUserId,
+        mode: targetMode,
+      });
+      if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
+      if (inputs.error) {
+        setStatus('The agent brief was not saved because its source visibility could not be revalidated. Retry after refreshing Knowledge.');
+        return;
+      }
+      if (targetMode === 'circle' && (
+        inputs.notes.some(note => !isCircleShareableSecondBrainNote(note))
+        || inputs.memories.some(memory => !isCircleShareableSecondBrainMemory(memory))
+      )) {
+        setStatus('The circle brief was not saved because a source is not circle-shared.');
+        return;
+      }
+      const revalidatedBrief = buildSecondBrainAgentBrief(inputs.notes, inputs.memories);
+      const result = await createSecondBrainNote({
+        circleId: targetCircleId,
+        userId: targetUserId,
+        title: `.web Digital Brain brief - ${new Date().toLocaleDateString()}`,
+        content: revalidatedBrief,
+        noteKind: 'agent_summary',
+        status: 'processed',
+        visibility: targetMode === 'circle' ? 'circle_shared' : 'private',
+        tags: ['agent-brief', 'digital-brain', 'openswan'],
+        importance: 0.82,
+        metadata: {
+          source: 'digital_brain_agent_brief',
+          sourceMode: targetMode,
+          sourceNoteIds: inputs.notes.map(note => note.id),
+          sourceMemoryIds: inputs.memories.map(memory => memory.id),
+          visibilityRevalidatedAt: new Date().toISOString(),
+          generatedAt: new Date().toISOString(),
+          reviewDueAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          reviewIntervalDays: 7,
+        },
+      });
+      if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
+      if (result.note) {
+        setSelectedNoteId(result.note.id);
+        setStatus(targetMode === 'circle'
+          ? 'Saved a circle brief from revalidated circle-shared sources.'
+          : 'Saved a private agent brief from revalidated personal sources.');
+        await load();
+      } else {
+        setStatus(result.error || 'Could not save the agent brief.');
+      }
+    } catch {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) {
+        setStatus('The agent brief was not saved because source revalidation failed.');
+      }
+    } finally {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) setSaving(false);
     }
   };
 
   const handleMapSite = async () => {
     if (!userId) { setStatus('Sign in before mapping the site.'); return; }
     if (mapping) return;
+    const generation = beginRead('site-map');
+    const targetScope = scopeKey;
+    const targetCircleId = circleId;
+    const targetUserId = userId;
     const unavailable = getSecondBrainUnavailableMessage();
     if (unavailable) {
       setMapStatus(`Map paused: ${unavailable}`);
-      setTimeout(() => setMapStatus(''), 4000);
+      setTimeout(() => {
+        if (isCurrentScopeOperation('site-map', generation, targetScope)) setMapStatus('');
+      }, 4000);
       return;
     }
     setMapping(true);
-    setMapStatus('Starting site map…');
-    const result = await autoMapSiteToSecondBrain(
-      circleId,
-      userId,
-      (msg, _pct) => setMapStatus(msg),
-    );
-    setMapping(false);
-    if (result.error) {
-      setMapStatus(`Map error: ${result.error}`);
-    } else {
-      setMapStatus(`Mapped: +${result.created} new, ${result.updated} refreshed, ${result.linked} links`);
-      await load();
+    setMapStatus('Saving the reviewed site map…');
+    try {
+      const result = await autoMapSiteToSecondBrain(
+        targetCircleId,
+        targetUserId,
+        (msg, _pct) => {
+          if (isCurrentScopeOperation('site-map', generation, targetScope)) setMapStatus(msg);
+        },
+      );
+      if (!isCurrentScopeOperation('site-map', generation, targetScope)) return;
+      if (result.error) {
+        setMapStatus('Site map could not be saved. No completion was recorded; check Knowledge storage and retry.');
+      } else {
+        setDismissedSiteMapDraftScope(targetScope);
+        setMapStatus(`Site map saved: ${result.created} new, ${result.updated} refreshed, ${result.linked} links.`);
+        await load();
+      }
+    } catch {
+      if (isCurrentScopeOperation('site-map', generation, targetScope)) {
+        setMapStatus('Site map could not be saved. No completion was recorded; check the connection and retry.');
+      }
+    } finally {
+      if (isCurrentScopeOperation('site-map', generation, targetScope)) {
+        setMapping(false);
+        setTimeout(() => {
+          if (isCurrentScopeOperation('site-map', generation, targetScope)) setMapStatus('');
+        }, 5000);
+      }
     }
-    setTimeout(() => setMapStatus(''), 4000);
   };
 
   const handleSeedKnowledge = async () => {
     if (!userId) { setStatus('Sign in before running Digital Brain knowledge intake.'); return; }
     if (knowledgeSeeding) return;
+    const generation = beginRead('knowledge-intake');
+    const targetScope = scopeKey;
+    const targetCircleId = circleId;
+    const targetUserId = userId;
+    const targetMode = brainMode;
     setKnowledgeSeeding(true);
     setMapStatus('Running Wiki + .web knowledge intake...');
-    const result = await runSecondBrainKnowledgeProfile({
-      profileKeys: SECOND_BRAIN_KNOWLEDGE_PROFILE_OPTIONS.map(profile => profile.key),
-      circleId,
-      userId,
-      visibility: brainMode === 'circle' ? 'circle_shared' : 'private',
-    });
-    setKnowledgeSeeding(false);
-    if (!result.ok) {
-      setMapStatus(`Knowledge intake failed: ${result.error || 'unknown error'}`);
-      setTimeout(() => setMapStatus(''), 5000);
-      return;
+    try {
+      const result = await runSecondBrainKnowledgeProfile({
+        profileKeys: SECOND_BRAIN_KNOWLEDGE_PROFILE_OPTIONS.map(profile => profile.key),
+        circleId: targetCircleId,
+        userId: targetUserId,
+        visibility: targetMode === 'circle' ? 'circle_shared' : 'private',
+      });
+      if (!isCurrentScopeOperation('knowledge-intake', generation, targetScope)) return;
+      if (!result.ok) {
+        setMapStatus(`Knowledge intake failed: ${result.error || 'unknown error'}`);
+        setTimeout(() => {
+          if (isCurrentScopeOperation('knowledge-intake', generation, targetScope)) setMapStatus('');
+        }, 5000);
+        return;
+      }
+      setMapStatus('Knowledge intake complete. Wiki and Digital Brain were refreshed.');
+      await load();
+      if (!isCurrentScopeOperation('knowledge-intake', generation, targetScope)) return;
+      setTimeout(() => {
+        if (isCurrentScopeOperation('knowledge-intake', generation, targetScope)) setMapStatus('');
+      }, 4500);
+    } catch {
+      if (isCurrentScopeOperation('knowledge-intake', generation, targetScope)) {
+        setMapStatus('Knowledge intake did not finish. Check the connection and retry.');
+      }
+    } finally {
+      if (isCurrentScopeOperation('knowledge-intake', generation, targetScope)) setKnowledgeSeeding(false);
     }
-    setMapStatus('Knowledge intake complete. Wiki and Digital Brain were refreshed.');
-    await load();
-    setTimeout(() => setMapStatus(''), 4500);
   };
 
   const resultNotes = (searchResults || []).filter(i => i.kind === 'note');
@@ -2111,9 +2509,18 @@ export default function SecondBrainDashboard({
         <View style={styles.heroActions}>
           <Pressable
             onPress={load}
-            style={({ hovered, pressed }: any) => [styles.ghostBtn, hovered && webLift, pressed && webPressed]}
+            disabled={loading}
+            accessibilityRole="button"
+            accessibilityLabel="Refresh knowledge"
+            accessibilityState={{ busy: loading, disabled: loading }}
+            style={({ hovered, pressed }: any) => [
+              styles.ghostBtn,
+              loading && styles.actionDisabled,
+              hovered && !loading && webLift,
+              pressed && !loading && webPressed,
+            ]}
           >
-            <Text style={styles.ghostBtnText}>Refresh</Text>
+            <Text style={styles.ghostBtnText}>{loading ? 'Refreshing…' : 'Refresh'}</Text>
           </Pressable>
           {Platform.OS === 'web' && (
             <Pressable
@@ -2167,8 +2574,39 @@ export default function SecondBrainDashboard({
       </View>
 
       {/* ── Status ─────────────────────────────────────────────────────── */}
+      {loadError ? (
+        <View
+          style={[styles.statusBar, styles.errorBar]}
+          accessibilityRole="alert"
+          accessibilityLiveRegion="polite"
+        >
+          <View style={styles.statusCopy}>
+            <Text style={styles.errorTitle}>{loadIsStale ? 'Showing stale Knowledge' : 'Knowledge is incomplete'}</Text>
+            <Text style={styles.statusText}>{loadError}</Text>
+          </View>
+          <Pressable
+            onPress={load}
+            disabled={loading}
+            accessibilityRole="button"
+            accessibilityLabel="Retry loading knowledge"
+            accessibilityState={{ busy: loading, disabled: loading }}
+            style={({ hovered, pressed }: any) => [
+              styles.retryBtn,
+              loading && styles.actionDisabled,
+              hovered && !loading && styles.mapActionBtnHover,
+              pressed && !loading && webPressed,
+            ]}
+          >
+            <Text style={styles.retryBtnText}>{loading ? 'Retrying…' : 'Retry'}</Text>
+          </Pressable>
+        </View>
+      ) : null}
       {(mapStatus || status || uploadStatus) ? (
-        <View style={[styles.statusBar, mapStatus ? { borderColor: '#6366f133', backgroundColor: '#6366f10a' } : null]}>
+        <View
+          style={[styles.statusBar, mapStatus ? { borderColor: '#6366f133', backgroundColor: '#6366f10a' } : null]}
+          accessible
+          accessibilityLiveRegion="polite"
+        >
           <Text style={[styles.statusText, mapStatus ? { color: '#6366f1' } : null]}>
             {mapStatus || uploadStatus || status}
           </Text>
@@ -2189,12 +2627,21 @@ export default function SecondBrainDashboard({
               <Pressable
                 onPress={handleMapSite}
                 disabled={mapping}
-                style={({ hovered, pressed }: any) => [styles.mapActionBtn, hovered && !mapping && styles.mapActionBtnHover, pressed && webPressed]}
+                accessibilityRole="button"
+                accessibilityLabel="Save site map to Knowledge"
+                accessibilityHint="Creates or refreshes private Knowledge notes and links"
+                accessibilityState={{ busy: mapping, disabled: mapping }}
+                style={({ hovered, pressed }: any) => [
+                  styles.mapActionBtn,
+                  mapping && styles.actionDisabled,
+                  hovered && !mapping && styles.mapActionBtnHover,
+                  pressed && !mapping && webPressed,
+                ]}
               >
-                <Text style={[styles.mapActionText, { color: '#8b8df8' }]}>{mapping ? 'Mapping…' : 'Map site'}</Text>
+                <Text style={[styles.mapActionText, { color: '#8b8df8' }]}>{mapping ? 'Saving…' : 'Save map'}</Text>
               </Pressable>
               <Pressable
-                onPress={() => handleSyncAllMemories(false)}
+                onPress={handleSyncAllMemories}
                 disabled={saving || !missingMemories.length}
                 style={({ hovered, pressed }: any) => [styles.mapActionBtn, hovered && !saving && styles.mapActionBtnHover, pressed && webPressed]}
               >
@@ -2230,6 +2677,50 @@ export default function SecondBrainDashboard({
               </Pressable>
             </View>
           </View>
+
+          {siteMapDraftReady ? (
+            <View style={styles.siteMapDraft} accessibilityRole="summary">
+              <View style={styles.siteMapDraftCopy}>
+                <Text style={styles.siteMapDraftTitle}>SITE MAP DRAFT · NOT SAVED</Text>
+                <Text style={styles.panelHint}>
+                  {SITE_MAP_PREVIEW_LABELS.join(' · ')} plus eligible live missions, rooms, and agents are ready to map. Nothing has been written. Saving will create or refresh private Knowledge notes and their links.
+                </Text>
+              </View>
+              <View style={styles.heroActions}>
+                <Pressable
+                  onPress={handleMapSite}
+                  disabled={mapping}
+                  accessibilityRole="button"
+                  accessibilityLabel="Save site map to Knowledge"
+                  accessibilityHint="Creates or refreshes private Knowledge notes and links"
+                  accessibilityState={{ busy: mapping, disabled: mapping }}
+                  style={({ hovered, pressed }: any) => [
+                    styles.mapActionBtn,
+                    styles.siteMapSaveBtn,
+                    mapping && styles.actionDisabled,
+                    hovered && !mapping && styles.mapActionBtnHover,
+                    pressed && !mapping && webPressed,
+                  ]}
+                >
+                  <Text style={[styles.mapActionText, { color: '#c7d2fe' }]}>{mapping ? 'Saving…' : 'Save map'}</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => setDismissedSiteMapDraftScope(scopeKey)}
+                  disabled={mapping}
+                  accessibilityRole="button"
+                  accessibilityLabel="Dismiss site map draft"
+                  style={({ hovered, pressed }: any) => [
+                    styles.mapActionBtn,
+                    mapping && styles.actionDisabled,
+                    hovered && !mapping && styles.mapActionBtnHover,
+                    pressed && !mapping && webPressed,
+                  ]}
+                >
+                  <Text style={styles.mapActionText}>Not now</Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
 
           <View style={styles.systemStatStrip}>
             <BrainStat label="Surfaces" value={String(systemMap.stats.appSurfaces)} color="#6366f1" />
@@ -2315,6 +2806,19 @@ export default function SecondBrainDashboard({
 
             <View style={styles.systemDetailCard}>
               <Text style={styles.columnTitle}>Database coverage</Text>
+              {dbStatsError ? (
+                <View style={styles.inlineError} accessibilityRole="alert">
+                  <Text style={styles.inlineErrorText}>{dbStatsError}</Text>
+                  <Pressable
+                    onPress={loadDbStats}
+                    accessibilityRole="button"
+                    accessibilityLabel="Retry database coverage"
+                    style={({ hovered, pressed }: any) => [styles.inlineRetryBtn, hovered && styles.mapActionBtnHover, pressed && webPressed]}
+                  >
+                    <Text style={styles.retryBtnText}>Retry</Text>
+                  </Pressable>
+                </View>
+              ) : null}
               <ScrollView style={styles.systemList} nestedScrollEnabled>
                 {DIGITAL_BRAIN_DB_TABLES.map(cfg => {
                   const stat = dbStats[cfg.table];
@@ -2323,7 +2827,7 @@ export default function SecondBrainDashboard({
                       <View style={styles.dbRowHeader}>
                         <Text style={styles.cardTitle}>{cfg.label}</Text>
                         <Text style={[styles.cardMeta, { color: stat?.skipped ? '#94a3b8' : stat?.ok ? '#22c55e' : '#f59e0b' }]}>
-                          {stat?.skipped ? 'skipped' : stat?.ok ? `${stat.count ?? 0}` : 'pending'}
+                          {stat?.skipped ? 'skipped' : stat?.ok ? `${stat.count ?? 0}` : stat ? 'unavailable' : 'loading'}
                         </Text>
                       </View>
                       <Text style={styles.sourceUrl}>{cfg.table}</Text>
@@ -2601,7 +3105,12 @@ export default function SecondBrainDashboard({
               <View style={styles.searchRow}>
                 <TextInput
                   value={searchQuery}
-                  onChangeText={setSearchQuery}
+                  onChangeText={(value) => {
+                    beginRead('search');
+                    setSearching(false);
+                    setSearchQuery(value);
+                    setSearchResults(null);
+                  }}
                   onSubmitEditing={handleSearch}
                   placeholder="Ask the brain anything…"
                   placeholderTextColor={PIXEL_COLORS.text3}
@@ -2609,12 +3118,18 @@ export default function SecondBrainDashboard({
                 />
                 <Pressable
                   onPress={handleSearch}
+                  disabled={searching}
+                  accessibilityRole="button"
+                  accessibilityLabel="Search knowledge"
+                  accessibilityState={{ busy: searching, disabled: searching }}
                   style={({ hovered, pressed }: any) => [
                     styles.primaryBtn, { borderColor: accentColor, backgroundColor: accentColor },
-                    hovered && webLift, pressed && webPressed,
+                    searching && styles.actionDisabled,
+                    hovered && !searching && webLift,
+                    pressed && !searching && webPressed,
                   ]}
                 >
-                  <Text style={styles.primaryBtnText}>{saving ? '…' : 'SEARCH'}</Text>
+                  <Text style={styles.primaryBtnText}>{searching ? '…' : 'SEARCH'}</Text>
                 </Pressable>
                 {searchResults && (
                   <Pressable
@@ -2755,7 +3270,11 @@ export default function SecondBrainDashboard({
               <View style={styles.panelHeader}>
                 <View>
                   <Text style={styles.panelLabel}>AGENT BRIEF</Text>
-                  <Text style={styles.panelHint}>Compressed context for chat, OpenSwan, terminal agents, and browser tasks.</Text>
+                  <Text style={styles.panelHint}>
+                    {brainMode === 'circle'
+                      ? 'Compressed only from circle-shared notes and memories; visibility is checked again before save.'
+                      : 'Compressed personal context for chat, OpenSwan, terminal agents, and browser tasks.'}
+                  </Text>
                 </View>
                 <View style={styles.heroActions}>
                   <Pressable onPress={handleCopyAgentBrief} style={({ hovered, pressed }: any) => [styles.ghostBtn, hovered && webLift, pressed && webPressed]}>
@@ -2846,7 +3365,20 @@ export default function SecondBrainDashboard({
             View the knowledge graph of any circle you are a member of.
           </Text>
 
-          {!otherCircles.length ? (
+          {otherCirclesError ? (
+            <View style={[styles.emptyCard, styles.errorCard]} accessibilityRole="alert">
+              <Text style={styles.emptyTitle}>CIRCLES UNAVAILABLE</Text>
+              <Text style={styles.emptyText}>{otherCirclesError}</Text>
+              <Pressable
+                onPress={loadOtherCircles}
+                accessibilityRole="button"
+                accessibilityLabel="Retry loading other circles"
+                style={({ hovered, pressed }: any) => [styles.retryBtn, hovered && styles.mapActionBtnHover, pressed && webPressed]}
+              >
+                <Text style={styles.retryBtnText}>Retry</Text>
+              </Pressable>
+            </View>
+          ) : !otherCircles.length ? (
             <View style={styles.emptyCard}>
               <Text style={styles.emptyTitle}>NO OTHER CIRCLES</Text>
               <Text style={styles.emptyText}>Join additional circles to see their brain graphs here.</Text>
@@ -2879,11 +3411,28 @@ export default function SecondBrainDashboard({
                   {otherCircles.find(c => c.id === otherCircleId)?.name || otherCircleId} — Brain Graph
                 </Text>
                 <Text style={styles.graphCanvasMeta}>
-                  {otherGraph ? `${otherGraph.notes.length} nodes · ${otherGraph.clusters.length} clusters` : 'Loading…'}
+                  {otherGraphError
+                    ? 'Unavailable'
+                    : otherGraph
+                      ? `${otherGraph.notes.length} nodes · ${otherGraph.clusters.length} clusters`
+                      : 'Loading…'}
                 </Text>
               </View>
               {otherLoading ? (
                 <ActivityIndicator color={accentColor} style={{ padding: 40 }} />
+              ) : otherGraphError ? (
+                <View style={[styles.graphArea, styles.graphEmptyState, { minHeight: 180 }]} accessibilityRole="alert">
+                  <Text style={styles.emptyTitle}>GRAPH UNAVAILABLE</Text>
+                  <Text style={styles.emptyText}>{otherGraphError}</Text>
+                  <Pressable
+                    onPress={() => loadOtherCircleGraph(otherCircleId)}
+                    accessibilityRole="button"
+                    accessibilityLabel="Retry loading circle knowledge graph"
+                    style={({ hovered, pressed }: any) => [styles.retryBtn, hovered && styles.mapActionBtnHover, pressed && webPressed]}
+                  >
+                    <Text style={styles.retryBtnText}>Retry</Text>
+                  </Pressable>
+                </View>
               ) : otherGraph && Platform.OS === 'web' ? (
                 <BrainGraph3DCanvas
                   notes={otherGraph.notes.filter(n => n.status !== 'archived').slice(0, 24)}
@@ -2987,8 +3536,8 @@ function NoteCard({
             <Text style={[styles.miniBtnText, { color: '#f59e0b' }]}>MAKE PRIVATE</Text>
           </Pressable>
         )}
-        <Pressable onPress={() => onPromote(note, 'circle')} style={styles.miniBtn}>
-          <Text style={styles.miniBtnText}>MEMORY</Text>
+        <Pressable onPress={() => onPromote(note, isPrivate ? 'user' : 'circle')} style={styles.miniBtn}>
+          <Text style={styles.miniBtnText}>{isPrivate ? 'PRIVATE MEMORY' : 'CIRCLE MEMORY'}</Text>
         </Pressable>
         <Pressable onPress={() => onMark(note, 'archived')} style={styles.miniBtnDanger}>
           <Text style={styles.miniBtnDangerText}>ARCHIVE</Text>
@@ -3277,6 +3826,25 @@ const styles = StyleSheet.create({
   mapActionBtnHover: { backgroundColor: '#171d28', borderColor: '#343e50' },
   mapActionBtnActive: { backgroundColor: '#1a2030', borderColor: '#3d475a' },
   mapActionText: { color: '#98a3b5', fontSize: 10, fontWeight: '600' },
+  actionDisabled: {
+    opacity: 0.5,
+    ...(Platform.OS === 'web' ? { cursor: 'default' } as any : {}),
+  },
+  siteMapDraft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 12,
+    borderWidth: 1,
+    borderColor: '#6366f144',
+    borderRadius: 12,
+    backgroundColor: '#6366f10d',
+    padding: 12,
+  },
+  siteMapDraftCopy: { flex: 1, minWidth: 250, gap: 4 },
+  siteMapDraftTitle: { color: '#c7d2fe', fontSize: 10, fontWeight: '800', letterSpacing: 0.7 },
+  siteMapSaveBtn: { borderColor: '#6366f166', backgroundColor: '#6366f118' },
   systemStatStrip: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -3351,6 +3919,27 @@ const styles = StyleSheet.create({
     padding: GRID.sm,
     marginBottom: GRID.sm,
     gap: 4,
+  },
+  inlineError: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    borderWidth: 1,
+    borderColor: '#f59e0b33',
+    borderRadius: 8,
+    backgroundColor: '#f59e0b0d',
+    padding: 8,
+  },
+  inlineErrorText: { flex: 1, color: '#d4a650', fontSize: 9, lineHeight: 14 },
+  inlineRetryBtn: {
+    minHeight: 32,
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#f59e0b44',
+    borderRadius: 7,
+    paddingHorizontal: 9,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   dbRowHeader: {
     flexDirection: 'row',
@@ -3704,12 +4293,36 @@ const styles = StyleSheet.create({
     padding: 11,
   },
   statusText: { color: '#b8c1ce', fontSize: 11 },
+  errorBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 10,
+    borderColor: '#ef444455',
+    backgroundColor: '#ef44440d',
+  },
+  statusCopy: { flex: 1, minWidth: 240, gap: 3 },
+  errorTitle: { color: '#fca5a5', fontSize: 10, fontWeight: '800' },
+  retryBtn: {
+    minHeight: 36,
+    alignSelf: 'flex-start',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#ef444455',
+    borderRadius: 8,
+    backgroundColor: '#161116',
+    paddingHorizontal: 12,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  retryBtnText: { color: '#f1f4f8', fontSize: 10, fontWeight: '700' },
 
   // Common
   panelLabel: { color: '#e7ebf1', fontSize: 15, fontWeight: '600', letterSpacing: -0.2 },
   panelHint: { color: '#7d899d', fontSize: 11, lineHeight: 17 },
   columnTitle: { color: '#aab4c3', fontSize: 10, fontWeight: '700', letterSpacing: 0.35 },
   emptyCard: { borderWidth: 1, borderColor: PIXEL_COLORS.border0, borderRadius: 3, backgroundColor: PIXEL_COLORS.bg2, padding: GRID.lg, gap: GRID.sm },
+  errorCard: { borderColor: '#ef444444', backgroundColor: '#ef44440a' },
   emptyTitle: { color: PIXEL_COLORS.text1, fontSize: 11, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1.2, textTransform: 'uppercase' },
   emptyText: { color: PIXEL_COLORS.text3, fontSize: 11, fontFamily: 'monospace', lineHeight: 16 },
 

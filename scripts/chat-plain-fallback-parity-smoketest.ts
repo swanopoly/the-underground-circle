@@ -113,7 +113,8 @@ const openSwanStart = chatTabSource.indexOf('const structured = await runOpenSwa
 const batchFallbackSource = chatTabSource.slice(batchFallbackStart, openSwanStart);
 assert(
   batchFallbackStart >= 0
-    && batchFallbackSource.includes('await getPlainChatRequestContext()')
+    && batchFallbackSource.includes('const plainChatRequestContext = prepared.requestContext')
+    && batchFallbackSource.includes('commitTurnModelDispatch(prepared.seal)')
     && batchFallbackSource.includes('messages: plainChatRequestContext.messages')
     && batchFallbackSource.includes('maxTokens: 2048')
     && !batchFallbackSource.includes('social conversation')

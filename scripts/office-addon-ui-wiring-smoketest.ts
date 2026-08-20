@@ -264,6 +264,11 @@ assert(
   'floor rename rejects empty or unsafe names',
 );
 const officeTabStyles = read('src/screens/circles/tabs/office/officeTabStyles.ts');
+const floorControlRail = section(
+  officeSections,
+  '<View testID="office-workspace-ready"',
+  '</ScrollView>',
+);
 assert(
   officeSections.includes('accessibilityLiveRegion="polite"')
     && officeSections.includes('testID="office-workspace-status"'),
@@ -283,9 +288,22 @@ assert(
     && officeSections.includes("['←', -OFFICE_FLOOR_GRID_SIZE"),
   'room-kit errors are typed and every editor surface shares the canonical 16px grid',
 );
+for (const [label, start, end] of [
+  ['floor switch', 'floorChip: {', 'floorChipActive:'],
+  ['floor add and presets', 'floorAddBtn: {', 'floorAddBtnText:'],
+  ['floor rename save and cancel', 'floorInlineActionBtn: {', 'floorRenameBtn:'],
+  ['floor rename', 'floorRenameBtn: {', 'floorDeleteBtn:'],
+  ['floor delete', 'floorDeleteBtn: {', 'floorDeleteBtnText:'],
+] as const) {
+  const controlStyle = section(officeTabStyles, start, end);
+  assert.match(controlStyle, /height:\s*32/, `${label} uses the shared compact 32px rail height`);
+}
 assert(
-  officeTabStyles.includes('width: 24,') && officeTabStyles.includes('height: 24,'),
-  'floor delete meets the WCAG 2.2 nominal 24px minimum target size',
+  floorControlRail.includes('style={styles.floorInlineActionBtn}')
+    && floorControlRail.includes('styles.floorRenameBtn')
+    && !floorControlRail.includes('styles.floorChipWithDelete')
+    && !floorControlRail.includes('minHeight: 36'),
+  'floor actions share compact aligned styles without stale padding or legacy sizing',
 );
 assert(
   (officeTab.match(/constrainOfficeFurnitureGeometry\(\{/g) || []).length >= 7

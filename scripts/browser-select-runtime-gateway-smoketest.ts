@@ -38,8 +38,8 @@ assert(
 const edgeSelectSource = edgeSource.slice(edgeSelectStart, edgeSelectEnd);
 
 assert(
-  executeSource.indexOf('prepareGuardedBrowserSelect(args, context)')
-    < executeSource.indexOf('maybeRequestToolApproval(tool, approvalArgs, context)'),
+  executeSource.indexOf('prepareGuardedBrowserSelect(runtimeArgs, context)')
+    < executeSource.indexOf('maybeAuthorizeToolWithWorkflowReview('),
   'native select is freshly observed before approval lookup/request',
 );
 assert(
@@ -80,7 +80,7 @@ assert(
 );
 assert(
   dispatchSource.includes('handler: async (sealedArgs)')
-    && dispatchSource.includes('setGuardedBrowserSelectOption({ ...sealedArgs })'),
+    && dispatchSource.includes('setGuardedBrowserSelectOption({\n        ...sealedArgs,'),
   'the bridge receives only cryptographically sealed handler arguments',
 );
 assert(

@@ -176,7 +176,7 @@ async function main(): Promise<void> {
 
   await check('slash plus attachment stops before message persistence, provider, or bridge dispatch', () => {
     const slashStart = sourceIndex("if (hasPendingAttachments && content.startsWith('/'))", 0, 'slash attachment stop');
-    const slashEnd = sourceIndex('// A curated shelf is discovery', slashStart, 'post-slash readiness marker');
+    const slashEnd = sourceIndex('const catalogRequestedTurnModel =', slashStart, 'post-slash readiness marker');
     const slash = chat.slice(slashStart, slashEnd);
     assert.match(slash, /cannot run through a slash shortcut yet/i);
     assert.match(slash, /Your files are still attached/i);
@@ -216,11 +216,11 @@ async function main(): Promise<void> {
     // Any early stateful shortcut that could precede this guard yields to the
     // bound A1, exact-human, or selected-executor classification first.
     const readiness = sourceSection(
-      '// A curated shelf is discovery',
+      'const catalogRequestedTurnModel =',
       '// ── Resume a pending clarification',
       'pre-picker model readiness',
     );
-    assert.match(readiness, /!preflightHasAuthoritativeMultiActionContract/);
+    assert.match(readiness, /const requiresToolUse = preflightHasAuthoritativeMultiActionContract/);
     assert.match(readiness, /!addressedElsewhereForPreflight/);
     assert.match(readiness, /!preservesConnectedAgentExecutorForPreflight/);
     const clarificationAndBooking = sourceSection(

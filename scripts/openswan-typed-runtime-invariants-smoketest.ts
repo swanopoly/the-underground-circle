@@ -25,6 +25,8 @@
  *            50-agent ceiling, $10 per-deploy cost cap).
  *   OST-G6 — exact per-call tool identity and hidden runtime receipts survive
  *            the typed bridge without generated IDs or model-visible metadata.
+ *   OST-G7 — HTTP-200 relay routing fallbacks fail closed in both the parent
+ *            session provider and delegated-child provider boundaries.
  *
  * Run: npm run smoke:openswan-typed-runtime-invariants
  */
@@ -156,6 +158,17 @@ assert(
 assert(
   hasLiveMention(sessionSrc, 'toolParallelPolicyProvider: createOpenSwanToolParallelPolicyProvider('),
   'toolParallelPolicyProvider is passed LIVE into the typed-core run (replay safety + partitioning, 2026-07-20)',
+);
+
+// ── OST-G7: relay routing failures fail closed in parent + child ──
+const routingFallbackFailureGuard = /if\s*\(\s*hasSwanbotRoutingFallback\(parsed\.routing\)\s*\)\s*\{\s*edgeFailed\s*=\s*true;\s*\}/m;
+assert(
+  routingFallbackFailureGuard.test(sessionSrc),
+  'session provider marks HTTP-200 routing_fallback as an edge failure',
+);
+assert(
+  routingFallbackFailureGuard.test(subagentSrc),
+  'delegated-child provider marks HTTP-200 routing_fallback as an edge failure',
 );
 
 // ── OST-G6: exact call identity + hidden receipt side channel ──────────────

@@ -117,7 +117,7 @@ check(runtime.includes("finishDurableAgentAction(\n        completedDispatch.lea
 const approvalSlice = between(
   runtime,
   'approvalArgs = {\n          approvalSchemaVersion: proposal.schemaVersion,',
-  "const gate = await maybeRequestToolApproval(\n          'desktop.set_element_value'",
+  "const gate = await maybeAuthorizeToolWithWorkflowReview(\n          'desktop.set_element_value'",
 );
 check(approvalSlice.includes('requestedValueHash: proposal.requestedValueHash'), 'approval binds the requested value hash');
 check(approvalSlice.includes('requestedValueLength: proposal.requestedValueLength'), 'approval binds the requested value length');

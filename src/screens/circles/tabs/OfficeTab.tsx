@@ -118,10 +118,9 @@ import {
   getAgentIdentityKey,
   loadAgentIdentitiesExact,
   recordAgentActivityExact,
+  refreshAgentIdentitiesFromServerExact,
   renameAgentExact,
   restoreAllAgentsExact,
-  saveAgentIdentitiesExact,
-  syncAgentIdentitiesFromServerExact,
   updateAgentIdentityExact,
   type AgentIdentity,
   type AgentIdentityExactAuthority,
@@ -447,6 +446,19 @@ type OfficeExactAuthority = AgentIdentityExactAuthority & {
   circleId: string;
   generation: number;
 };
+
+function resolveAgentIdentityRefreshSnapshot(
+  localIdentities: Map<string, AgentIdentity>,
+  serverResult: Readonly<{
+    serverVerified: boolean;
+    identities: Map<string, AgentIdentity>;
+  }>,
+): Map<string, AgentIdentity> {
+  // A successful exact server read is count-complete, so absence is durable
+  // truth (including an empty snapshot). Local state is fallback-only when
+  // that read fails and must never resurrect a server-deleted identity.
+  return new Map(serverResult.serverVerified ? serverResult.identities : localIdentities);
+}
 
 function idleConfigAuthorityKey(authority: Readonly<{
   userId: string;
@@ -1170,6 +1182,7 @@ export default function OfficeTab({
   const [statusHistory, setStatusHistory] = useState<Array<OfficeAgent[]>>([]);
   const [enrichedAgents, setEnrichedAgents] = useState<OfficeAgent[]>([]);
   const [agentIdentities, setAgentIdentities] = useState<Map<string, AgentIdentity>>(new Map());
+  const agentIdentityRefreshGenerationRef = useRef(0);
   const enrichedAgentsRef = useRef<OfficeAgent[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [agentNames, setAgentNames] = useState<Record<string, string>>({});
@@ -4008,27 +4021,27 @@ export default function OfficeTab({
   }, [terminalSize, officeTerminalModule]);
 
   const refreshAgentIdentities = useCallback(async () => {
+    const refreshGeneration = agentIdentityRefreshGenerationRef.current + 1;
+    agentIdentityRefreshGenerationRef.current = refreshGeneration;
     const requestedAuthority = captureOfficeAuthority();
     if (!requestedAuthority) return false;
+    const refreshIsCurrent = () => (
+      refreshGeneration === agentIdentityRefreshGenerationRef.current
+      && isOfficeAuthorityCurrent(requestedAuthority)
+    );
     try {
       const localIdentities = await loadAgentIdentitiesExact(requestedAuthority);
-      if (!isOfficeAuthorityCurrent(requestedAuthority)) return false;
-      const serverResult = await syncAgentIdentitiesFromServerExact(requestedAuthority);
-      if (!isOfficeAuthorityCurrent(requestedAuthority)) return false;
+      if (!refreshIsCurrent()) return false;
+      const serverResult = await refreshAgentIdentitiesFromServerExact(
+        requestedAuthority,
+        isOfficeAuthorityCurrent,
+      );
+      if (!refreshIsCurrent()) return false;
 
-      const identities = new Map(localIdentities);
-      if (serverResult.ok) {
-        for (const [key, serverIdentity] of serverResult.identities) {
-          // This is an explicit exact-server refresh. Existing durable rows
-          // win unconditionally; client clocks are never ordering authority.
-          identities.set(key, serverIdentity);
-        }
-        if (identities.size > 0 && isOfficeAuthorityCurrent(requestedAuthority)) {
-          void saveAgentIdentitiesExact(identities, requestedAuthority, isOfficeAuthorityCurrent);
-        }
-      }
+      const identities = resolveAgentIdentityRefreshSnapshot(localIdentities, serverResult);
+      if (!refreshIsCurrent()) return false;
       setAgentIdentities(identities);
-      return serverResult.ok;
+      return serverResult.serverVerified;
     } catch {
       return false;
     }

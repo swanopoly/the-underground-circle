@@ -3,16 +3,15 @@ import { Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-na
 import AgentControlCard from '../../../../components/AgentControlCard';
 import {
   getAgentIdentityKey,
-  loadAgentIdentitiesExact,
+  refreshAgentIdentitiesFromServerExact,
   setMainAgentForProviderExact,
-  syncAgentIdentitiesFromServerExact,
   type AgentIdentityExactAuthority,
 } from '../../../../lib/agentIdentity';
 import {
   PROVIDER_META,
   type OfficeConnectionAuthorityFence,
 } from '../../../../lib/connectionManager';
-import { OfficeAgent } from '../../../../lib/officeAgents';
+import { OfficeAgent, resolveOfficeAgentExecutionTruth } from '../../../../lib/officeAgents';
 import {
   getAgentControlExact,
   upsertAgentControlExact,
@@ -61,8 +60,10 @@ function QuickActionsStrip({
   });
   const [toast, setToast] = useState<string | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const diagnosticInFlightRef = useRef(false);
   const controlReadGenerationRef = useRef(0);
   const controlMutationGenerationRef = useRef(0);
+  const controlMutationInFlightRef = useRef(false);
 
   const canRunDiagnostics = agent.providerType === 'claude-code' && !!onRunCommand;
   const isPaused = controlState.control?.is_paused === true;
@@ -85,6 +86,7 @@ function QuickActionsStrip({
     const generation = controlReadGenerationRef.current + 1;
     controlReadGenerationRef.current = generation;
     controlMutationGenerationRef.current += 1;
+    controlMutationInFlightRef.current = false;
     setControlBusy(false);
     setControlState({ status: 'loading', control: null, message: null });
     const authority = identityAuthority;
@@ -138,7 +140,8 @@ function QuickActionsStrip({
 
   const handleSend = async () => {
     const text = draft.trim();
-    if (!text || sending) return;
+    if (!text || diagnosticInFlightRef.current) return;
+    diagnosticInFlightRef.current = true;
     setSending(true);
     try {
       if (canRunDiagnostics && onRunCommand) {
@@ -156,14 +159,16 @@ function QuickActionsStrip({
     } catch {
       showToast('Diagnostic failed. Review bridge status and retry.');
     } finally {
+      diagnosticInFlightRef.current = false;
       setSending(false);
     }
   };
 
   const handleTogglePause = async () => {
-    if (controlBusy || !controlReady) return;
+    if (controlMutationInFlightRef.current || controlBusy || !controlReady) return;
     const mutationGeneration = controlMutationGenerationRef.current + 1;
     controlMutationGenerationRef.current = mutationGeneration;
+    controlMutationInFlightRef.current = true;
     setControlBusy(true);
     const authority = identityAuthority;
     try {
@@ -213,15 +218,16 @@ function QuickActionsStrip({
       }
     } finally {
       if (controlMutationGenerationRef.current === mutationGeneration) {
+        controlMutationInFlightRef.current = false;
         setControlBusy(false);
       }
     }
   };
 
-  const handleCopySession = () => {
+  const handleCopySession = async () => {
     try {
-      if (Platform.OS === 'web' && navigator?.clipboard) {
-        navigator.clipboard.writeText(sessionKey);
+      if (Platform.OS === 'web' && typeof navigator !== 'undefined' && navigator.clipboard) {
+        await navigator.clipboard.writeText(sessionKey);
         showToast('Session key copied');
       } else {
         showToast(sessionKey);
@@ -377,6 +383,7 @@ function QuickActionsStrip({
 function NowDoingPanel({ agent, currentObjective }: { agent: OfficeAgent; currentObjective: string }) {
   const [burnSamples, setBurnSamples] = useState<Array<{ t: number; tokens: number }>>(() => [{ t: Date.now(), tokens: agent.tokensUsed || 0 }]);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const executionTruth = resolveOfficeAgentExecutionTruth(agent);
 
   // Record a sample when the bridge counter advances so we can draw a
   // 30-minute rolling sparkline without introducing another timer or DB read.
@@ -388,34 +395,62 @@ function NowDoingPanel({ agent, currentObjective }: { agent: OfficeAgent; curren
     });
   }, [agent.tokensUsed]);
 
-  const recentCalls = (agent.recentToolCalls || []).slice(-5).reverse();
-  const activeFiles = agent.activeFiles || [];
-  const isWorking = agent.status === 'active' || agent.status === 'building' || !!agent.currentToolName;
-  const dotColor = isWorking ? '#3fb950' : '#484f58';
+  // A connection/session transition retires the prior evidence window. The
+  // bridge may retain counters and tool fields for diagnostics, but a newly
+  // verified runtime must establish its own burn-rate baseline.
+  useEffect(() => {
+    setBurnSamples([{ t: Date.now(), tokens: agent.tokensUsed || 0 }]);
+    setDetailsOpen(false);
+  }, [agent.connectionId, agent.id, agent.sessionKey, executionTruth.state]);
+
+  const recentCalls = executionTruth.state === 'active'
+    ? (agent.recentToolCalls || []).slice(-5).reverse()
+    : [];
+  const activeFiles = executionTruth.state === 'active' ? (agent.activeFiles || []) : [];
+  const isWorking = executionTruth.state === 'active';
+  const dotColor = executionTruth.state === 'warning'
+    ? '#f59e0b'
+    : isWorking
+      ? '#3fb950'
+      : '#484f58';
   const burnRate = computeBurnRate(burnSamples);
-  const hasEvidence = recentCalls.length > 0 || activeFiles.length > 0 || burnRate > 0;
+  const hasEvidence = isWorking && (recentCalls.length > 0 || activeFiles.length > 0 || burnRate > 0);
+  const stateLabel = executionTruth.state === 'warning'
+    ? 'Needs refresh'
+    : executionTruth.state === 'active'
+      ? 'Working'
+      : executionTruth.state === 'connected'
+        ? 'Ready'
+        : 'Offline';
+  const statusCopy = executionTruth.state === 'warning'
+    ? `Runtime status warning: ${executionTruth.statusWarning}. Refresh the connection before assigning new work.`
+    : executionTruth.state === 'connected'
+      ? 'Connected and standing by. No current execution is verified.'
+      : executionTruth.state === 'unavailable'
+        ? 'Runtime is offline or unavailable. Reconnect it before assigning new work.'
+        : currentObjective;
 
   return (
     <View style={[overviewStyles.currentWork, isWorking && overviewStyles.currentWorkActive]}>
       <View style={overviewStyles.currentWorkHeader}>
         <View style={[overviewStyles.currentWorkDot, { backgroundColor: dotColor }]} />
         <Text style={overviewStyles.currentWorkTitle}>Current work</Text>
-        <Text style={overviewStyles.currentWorkState}>{isWorking ? 'Working' : 'Standing by'}</Text>
+        <Text accessibilityLiveRegion="polite" style={overviewStyles.currentWorkState}>{stateLabel}</Text>
       </View>
 
-      {agent.currentToolName || agent.currentToolFile ? (
+      {executionTruth.currentToolName || executionTruth.currentToolFile ? (
         <View style={overviewStyles.currentTool}>
           <Text style={overviewStyles.currentToolName}>
-            {agent.currentToolName || 'Running'}
+            {executionTruth.currentToolName || 'Running'}
           </Text>
-          {agent.currentToolFile && (
+          {executionTruth.currentToolFile && (
             <Text style={overviewStyles.currentToolFile} numberOfLines={1}>
-              {shortPath(agent.currentToolFile)}
+              {shortPath(executionTruth.currentToolFile)}
             </Text>
           )}
         </View>
       ) : (
-        <Text style={overviewStyles.currentObjective}>{currentObjective}</Text>
+        <Text style={overviewStyles.currentObjective}>{statusCopy}</Text>
       )}
 
       {hasEvidence ? (
@@ -621,6 +656,7 @@ export default function AgentOverviewPanel({
   >('idle');
   const [mainAgentBusy, setMainAgentBusy] = useState(false);
   const [mainAgentReloadGeneration, setMainAgentReloadGeneration] = useState(0);
+  const mainAgentMutationInFlightRef = useRef(false);
 
   const sessionKey = useMemo(
     () => getAgentIdentityKey(agent),
@@ -654,6 +690,7 @@ export default function AgentOverviewPanel({
     setIsMainAgent(false);
     setMainAgentStatus('idle');
     setMainAgentBusy(false);
+    mainAgentMutationInFlightRef.current = false;
   }, [agent.id, identityRequestKey]);
 
   useEffect(() => () => {
@@ -676,24 +713,22 @@ export default function AgentOverviewPanel({
     const capturedRequestKey = identityRequestKey;
     const capturedAuthority = exactIdentityAuthority;
     setMainAgentStatus('loading');
-    Promise.all([
-      loadAgentIdentitiesExact(exactIdentityAuthority),
-      syncAgentIdentitiesFromServerExact(exactIdentityAuthority),
-    ])
-      .then(([localIdentities, serverResult]) => {
+    refreshAgentIdentitiesFromServerExact(
+      exactIdentityAuthority,
+      isIdentityAuthorityCurrent,
+    )
+      .then(serverResult => {
         if (
           cancelled
           || !isIdentityAuthorityCurrent(capturedAuthority)
           || latestIdentityRequestKeyRef.current !== capturedRequestKey
           || latestIdentityAccessTokenRef.current !== capturedAuthority.accessToken
         ) return;
-        if (!serverResult.ok) {
+        if (!serverResult.serverVerified) {
           setMainAgentStatus('error');
           return;
         }
-        const ids = new Map(localIdentities);
-        for (const [key, identity] of serverResult.identities) ids.set(key, identity);
-        const identity = ids.get(sessionKey);
+        const identity = serverResult.identities.get(sessionKey);
         setIsMainAgent(identity?.isPrimary === true);
         setMainAgentStatus('ready');
       })
@@ -732,10 +767,12 @@ export default function AgentOverviewPanel({
     const capturedRequestKey = identityRequestKey;
     if (
       mainAgentDisabled
+      || mainAgentMutationInFlightRef.current
       || !capturedAuthority
       || !capturedRequestKey
       || !isIdentityAuthorityCurrent(capturedAuthority)
     ) return;
+    mainAgentMutationInFlightRef.current = true;
     setMainAgentBusy(true);
     try {
       const receipt = await setMainAgentForProviderExact(
@@ -776,7 +813,10 @@ export default function AgentOverviewPanel({
         isIdentityAuthorityCurrent(capturedAuthority)
         && latestIdentityRequestKeyRef.current === capturedRequestKey
         && latestIdentityAccessTokenRef.current === capturedAuthority.accessToken
-      ) setMainAgentBusy(false);
+      ) {
+        mainAgentMutationInFlightRef.current = false;
+        setMainAgentBusy(false);
+      }
     }
   };
 
@@ -805,10 +845,15 @@ export default function AgentOverviewPanel({
 
       <Pressable
         onPress={() => setDetailsOpen(value => !value)}
+        disabled={mainAgentBusy}
         accessibilityRole="button"
         accessibilityLabel={detailsOpen ? 'Hide agent details' : 'Show agent details'}
-        accessibilityState={{ expanded: detailsOpen }}
-        style={overviewStyles.detailsDisclosure}
+        accessibilityState={{ disabled: mainAgentBusy, expanded: detailsOpen }}
+        style={[
+          overviewStyles.detailsDisclosure,
+          mainAgentBusy && overviewStyles.actionButtonDisabled,
+          Platform.OS === 'web' && mainAgentBusy ? ({ cursor: 'wait' } as any) : null,
+        ]}
       >
         <View style={overviewStyles.detailsDisclosureCopy}>
           <Text style={overviewStyles.detailsDisclosureTitle}>Agent details</Text>

@@ -1,7 +1,7 @@
 # The Underground Circle - App Stack Reference
 
 > Current app map for agents before writing code.
-> Last reviewed: 2026-08-14
+> Last reviewed: 2026-08-20
 
 `AGENTS.md` and `docs/AGENTS_ROADMAP.md` own agent workflow and runtime
 ownership. This file maps the app.
@@ -62,8 +62,9 @@ Current live backend baseline after remediation:
 
 Do not overstate this baseline. Email auto-confirm is still enabled, custom
 SMTP and CAPTCHA are absent, task-image objects remain publicly readable by
-URL, safe claimant-bound Office invocation is not installed, and bridge pairing
-is not yet device-bound. The migration ledger is drifted, so apply only one
+URL, the newly installed Office authority still lacks authenticated
+contention/account-switch/provider-dispatch canaries, and bridge pairing is not
+yet device-bound. The migration ledger is drifted, so apply only one
 reviewed idempotent migration at a time rather than using a broad database push.
 At the review cutoff, login/OAuth/logout and strict-header frontend changes were
 source/build evidence pending a production frontend deployment and live flow
@@ -88,7 +89,7 @@ cross-surface focus requests continue to override the default.
 | Concern | File(s) |
 |---|---|
 | Office exact runtime authority and account-switch lifecycle | `src/lib/officeDashboardPersistence.ts`, `src/lib/connectionManager.ts`, `src/lib/computerTaskState.ts`, `src/lib/agentPlanPersistence.ts`, `src/lib/computerUseHistory.ts`, `src/lib/llmProviders.ts`, `src/lib/workspaceAdaptation.ts`, `src/lib/oauthConnect.ts`, `src/lib/idleBehaviors.ts`, `src/lib/officeTerminal.ts`, `src/lib/agentInvocation.ts`, `src/lib/circleOffice.ts`, `src/services/customThemes.ts`, `src/services/sharedMemory.ts`, `src/services/hitlService.ts`, `src/services/runApprovalsService.ts`, `src/components/OfficeTerminal.tsx`, `src/components/ComputerUseHistoryPanel.tsx`, `src/components/HitlApprovalBanner.tsx`, `src/components/RunApprovalBanner.tsx`, `src/screens/circles/tabs/OfficeTab.tsx`, `src/screens/circles/tabs/ProfileTab.tsx`, `src/screens/circles/tabs/office/OfficeSections.tsx`, `src/screens/circles/tabs/office/CustomizePanel.tsx`, `supabase/migrations/20260817120000_circle_idle_behavior_claims.sql`, `docs/RUN_THIS_SQL.sql` §46, `scripts/{computer-task-private-authority,office-customize-private-authority,workspace-adaptation-exact-authority,oauth-disconnect-authority-lifecycle,office-terminal-mutation-authority,office-invocation-exact-authority,idle-behavior-scheduler-lifecycle,circle-idle-behavior-claims-sql,circle-office-exact-auth-scope,office-dashboard-persistence-authority}-smoketest.ts`, `scripts/circle-idle-behavior-claims-sql-behavior-smoketest.sh` |
-| Office Agent panel router and canonical Chat handoff | `src/lib/{agentRunSystem,agentRuntimeSubject,chatAgentTargets,circleIntegrations,circleOffice,officeAgentSessionBinding,openswanService,progression,siteAutomation}.ts`, `src/services/hitlService.ts`, `src/components/AgentControlCard.tsx`, `src/components/rpg/{AgentEvolutionCard,StreakFlame,XPEventFeed}.tsx`, `src/screens/circles/CircleDetailScreen.tsx`, `src/screens/circles/tabs/{ChatTab,OfficeTab}.tsx`, `src/screens/circles/tabs/office/{AgentPanel,AgentPanelShell,AgentOverviewPanel,AgentActivityPanel,AgentGatewayPanels,AgentTerminalPanels,AgentMemoryPanel,AgentRunsPanel,AgentSpiritPanel,AgentEvolutionPanel,Whiteboard}.tsx`, `src/screens/circles/tabs/office/{AgentPanelTabs,useAgentPanelLayout}.ts`, and the `office-agent-*` plus OpenSwan panel/lifecycle smokes |
+| Office Agent panel router and canonical Chat handoff | `src/lib/{agentRunSystem,agentRuntimeSubject,chatAgentTargets,circleIntegrations,circleOffice,officeAgentSessionBinding,openswanService,progression,siteAutomation}.ts`, `src/services/hitlService.ts`, `src/components/AgentControlCard.tsx`, `src/components/rpg/{AgentEvolutionCard,StreakFlame,XPEventFeed}.tsx`, `src/screens/circles/CircleDetailScreen.tsx`, `src/screens/circles/tabs/{ChatTab,OfficeTab}.tsx`, `src/screens/circles/tabs/office/{AgentPanel,AgentPanelShell,AgentOverviewPanel,AgentActivityPanel,AgentGatewayPanels,AgentTerminalPanels,AgentMemoryPanel,AgentRunsPanel,AgentSpiritPanel,AgentEvolutionPanel,Whiteboard}.tsx`, `src/screens/circles/tabs/office/{AgentPanelTabs,agentMemoryMutationCore,agentCronControlCore,agentPanelLayoutCore,useAgentPanelLayout}.ts`, and the `office-agent-*` plus OpenSwan panel/lifecycle smokes |
 | Chat plan approval capability identity | `src/lib/chatPlanApprovalAuthorityCore.ts`, `src/lib/runChatAutomationPlan.ts`, `src/lib/openswanToolApprovals.ts`, `scripts/chat-plan-tool-manifest-smoketest.ts`, `scripts/openswan-runtime-approval-smoketest.ts` |
 | Dependency compatibility and Expo image build boundary | `package.json`, `package-lock.json`, `scripts/dependency-override-compat-smoketest.mjs`, `scripts/expo-image-asset-guard.mjs`, `scripts/expo-image-asset-guard-smoketest.mjs`, `scripts/security-release-check.mjs` |
 | Agent standards and worktree quality | `src/lib/agentDevelopmentStandards.ts`, `src/lib/openswanWorktreeConfig.ts`, `scripts/openswan-lane-report.ts`, `.github/workflows/openswan-release.yml`, `docs/AGENT_DEVELOPMENT_STANDARDS_INDEX.md`, `docs/SWANBOT_OPENSWAN_AGENT_LANES_2026-06-29.md` |
@@ -113,7 +114,7 @@ cross-surface focus requests continue to override the default.
 | Typed agent loop | `src/lib/agentExecutionCore.ts` |
 | OpenSwan session runtime, exact resume, multi-action completion, and terminal truth | `src/lib/openswanSessionRuntime.ts`, `src/lib/openswanSessionRuntimeAdapters.ts`, `src/lib/openSwanMultiActionCompletionCore.ts`, `src/lib/toolLoopResume.ts`, `src/lib/openswanTaskPlanner.ts`, `src/lib/openswanToolRuntime.ts`, `src/lib/agentRunSystem.ts`, `src/lib/chatLaneOutcome.ts`, `src/lib/chatOutcomeSignals.ts`, `src/lib/persistedChatMetadata.ts`, `src/lib/roomMessageMetadata.ts`, `src/lib/roomChatService.ts`, `src/screens/circles/tabs/ChatTab.tsx`, `scripts/openswan-{terminal-outcome-contract,multi-action-completion-core,multi-action-report-tool,multi-action-artifact-evidence,multi-action-provider-causality,multi-action-read-evidence,multi-action-terminal-wiring,multi-action-semantic-evidence,resume-locator}-smoketest.ts`, `scripts/{agent-run-metadata-merge-cas,chat-multi-action-routing-invariants,room-chat-multi-action-persistence,room-message-reload-pagination}-smoketest.ts` |
 | Room document context, reviewed edits, and GitHub submission | `src/screens/circles/tabs/RoomsTab.tsx`, `src/lib/roomChatFileContext.ts`, `src/lib/roomChatService.ts`, `src/lib/openswanToolRuntime.ts`, `src/lib/builderGithubSave.ts`, `src/lib/github.ts`, `src/lib/githubChatCommands.ts`, `src/screens/circles/tabs/chat/BuilderGithubSaveModal.tsx`, `scripts/{room-chat-file-context,room-chat-minimal-ui,room-github-submit}-smoketest.ts` |
-| Owner-private Office agent → OpenSwan session binding | `src/lib/officeAgentSessionBindingCore.ts`, `src/lib/officeAgentSessionBinding.ts`, `src/lib/agentAutoConnect.ts`, `src/lib/agentAutoConnectState.ts`, `src/lib/agentInvocation.ts`, `src/screens/circles/tabs/OfficeTab.tsx`, `src/screens/circles/tabs/office/AgentGatewayPanels.tsx`, `supabase/migrations/20260807170000_office_agent_session_bindings.sql`, `docs/RUN_THIS_SQL.sql` §36 |
+| Owner-private Office agent → OpenSwan session binding | `src/lib/officeAgentSessionBindingCore.ts`, `src/lib/officeAgentSessionBinding.ts`, `src/lib/agentAutoConnect.ts`, `src/lib/agentAutoConnectState.ts`, `src/lib/agentInvocation.ts`, `src/screens/circles/tabs/OfficeTab.tsx`, `src/screens/circles/tabs/office/AgentGatewayPanels.tsx`, `supabase/migrations/{20260807170000_office_agent_session_bindings,20260818120000_office_agent_session_binding_cas}.sql`, `docs/RUN_THIS_SQL.sql` §§36/49, `scripts/office-agent-session-binding-{core,wiring,sql}-smoketest.ts`, `scripts/office-agent-session-binding-cas-sql-behavior-smoketest.sh` |
 | Office dashboard truth, stable cost semantics, exact private-state lifecycle, per-circle layout, and complete floor presets | `src/lib/officeDashboardPersistence.ts`, `src/lib/officeLayoutLocalCache.ts`, `src/lib/officeLayoutSaveReceiptCore.ts`, `src/lib/officePreferenceWriteQueueCore.ts`, `src/lib/officeFloorPresetCore.ts`, `src/lib/chatAttentionQueue.ts`, `src/lib/runHistoryFilterCore.ts`, `src/lib/officeAgents.ts`, `src/lib/agentIdentity.ts`, `src/lib/agentPresence.ts`, `src/lib/agentHeartbeat.ts`, `src/lib/sessionCache.ts`, `src/lib/sessionTags.ts`, `src/lib/claudeUsage.ts`, `src/components/chat/RunHistoryDrawer.tsx`, `src/components/office/OfficeOpsBoardCards.tsx`, `src/screens/circles/tabs/OfficeTab.tsx`, `src/screens/circles/tabs/office/OfficeSections.tsx`, `src/screens/circles/tabs/office/AgentRunsPanel.tsx`, `src/screens/circles/tabs/office/AgentActivityPanel.tsx`, `src/screens/circles/tabs/office/Whiteboard.tsx`, `supabase/migrations/20260811120000_office_dashboard_state_and_floor_presets.sql`, `supabase/migrations/20260813140000_office_layout_exact_save_receipt.sql`, `supabase/migrations/20260813220000_office_user_preferences.sql`, `supabase/migrations/20260817130000_agent_identity_primary_rpc.sql`, `docs/RUN_THIS_SQL.sql` §§37/45/47, `scripts/office-layout-local-cache-smoketest.ts`, `scripts/office-layout-save-receipt-core-smoketest.ts`, `scripts/office-user-preferences-sql-parity-smoketest.ts`, `scripts/office-private-runtime-wiring-smoketest.ts`, `scripts/agent-identity-exact-authority-smoketest.ts`, `scripts/agent-identity-cross-realm-cache-ordering-smoketest.ts`, `scripts/agent-identity-primary-rpc-sql-smoketest.ts`, `scripts/agent-identity-primary-rpc-sql-behavior-smoketest.sh` |
 | Office addon catalog, data truth, reversible floor editor, and OAuth credential control | `src/lib/officeConfig.ts`, `src/lib/officeAddonExperienceCore.ts`, `src/lib/officeValidation.ts`, `src/lib/animationHelpers.ts`, `src/lib/oauthConnect.ts`, `src/lib/officeTerminal.ts`, `src/screens/circles/tabs/OfficeTab.tsx`, `src/screens/circles/tabs/office/OfficeSections.tsx`, `src/screens/circles/tabs/office/OfficeFloor.tsx`, `src/screens/circles/tabs/office/InteractiveFurniture.tsx`, `src/screens/circles/tabs/office/AgentPanelShell.tsx`, `src/screens/circles/tabs/office/officeFloorLayout.ts`, `src/components/OfficeTerminal.tsx`, `src/components/PhoneMessenger.tsx`, `src/components/office/ConnectAllBridgesPanel.tsx`, `src/components/office/OfficeBridgeDiagPanel.tsx`, `src/components/office/OfficeBridgeReadinessStrip.tsx`, `src/components/office/StatusPicker.tsx`, `src/components/office/WorldClockBar.tsx`, `supabase/functions/email-calendar-oauth/index.ts`, `supabase/migrations/20260813190000_atomic_oauth_credential_store.sql`, `docs/RUN_THIS_SQL.sql` §42, `scripts/office-addon-registry-smoketest.ts`, `scripts/office-addon-experience-core-smoketest.ts`, `scripts/office-addon-ui-wiring-smoketest.ts`, `scripts/office-validation-smoketest.ts`, `scripts/oauth-popup-boundary-smoketest.ts`, `scripts/oauth-credential-control-sql-smoketest.ts`, `scripts/oauth-credential-control-sql-behavior-smoketest.sh`, `scripts/office-terminal-broadcast-authority-smoketest.ts`, `scripts/office-authenticated-local-e2e.mjs` |
 | Personal Figma OAuth and server-only file projection | `src/lib/oauthConnect.ts`, `src/lib/oauthCallbackRelay.ts`, `src/lib/figmaBuilder.ts`, `src/screens/circles/tabs/office/CustomizePanel.tsx`, `supabase/functions/figma-oauth/index.ts`, `supabase/migrations/20260813200000_figma_oauth_credential_control.sql`, `docs/RUN_THIS_SQL.sql` §43, `scripts/figma-oauth-boundary-smoketest.ts`, `scripts/figma-oauth-credential-control-sql-smoketest.ts`, `scripts/figma-oauth-credential-control-sql-behavior-smoketest.sh` |
@@ -121,6 +122,7 @@ cross-surface focus requests continue to override the default.
 | Agent subject display surfaces | `src/components/AutomationsPanel.tsx`, `src/components/OfficeTerminal.tsx`, `src/screens/circles/tabs/office/AgentMemoryPanel.tsx`, `src/screens/circles/tabs/office/AgentRunsPanel.tsx` |
 | Tool catalog, bounded action reporter, and derived-artifact publisher | `src/lib/openswanToolRuntime.ts`, `src/lib/openswanTaskPlanner.ts`, `src/lib/openswanTools/index.ts` |
 | Feed active-run truth | `src/lib/agentRunSystem.ts`, `src/lib/runHistoryFilterCore.ts`, `src/lib/officeOpsBoard.ts`, `src/screens/circles/tabs/FeedTab.tsx`, `scripts/feed-active-runs-truth-smoketest.ts` |
+| Chat pre-dispatch hosted-model fallback | `src/lib/chatModelFallbackCore.ts`, `src/lib/modelCatalogReadinessCore.ts`, `src/lib/serviceProfileSouls.ts`, `src/screens/circles/tabs/ChatTab.tsx`, `scripts/{model-catalog-readiness,chat-model-dispatch-seal}-smoketest.ts` |
 | Provider model resolution | `src/lib/serviceProfileSouls.ts` |
 | Cross-provider routing | `src/lib/crossProviderRouter.ts`, `src/lib/universalInvoke.ts` |
 | Billing preference | `src/lib/billingPriority.ts` |
@@ -626,10 +628,19 @@ explicit owner action, not inferred identity. The displayed OpenSwan session's
 Agent Gateway UI lets the current owner bind, move, or clear one of their
 published OpenSwan Office agents against the exact owner-owned `agents_bots`
 UUID and case-sensitive session key. §36 adds the no-backfill, owner-private
-`office_agent_session_bindings` table, owner-only reads, server-authorized
-set/clear RPCs, and `invoke_agent_v2`. That versioned RPC composes the canonical
-Office claim exactly once and returns its bound-or-missing binding snapshot;
-public `circle_office_agents` rows never receive session identity or secrets.
+`office_agent_session_bindings` table, owner-only reads, and `invoke_agent_v2`.
+§49 retires execute authority from the original unconditional set/clear RPCs.
+Every Gateway bind, move, or clear now submits the exact observed binding and
+`updated_at` instant—or an explicit expected-null first bind—plus captured
+Circle and bearer authority to one locking compare-and-set RPC. Monotonic row
+versions reject an A→B→A ABA from a stale confirmation. Its structured applied/unchanged/conflict/
+target-conflict receipt is the only mutation success authority; a conflict is
+refreshed and never replayed. That versioned invocation RPC still composes the
+canonical Office claim exactly once and returns its bound-or-missing binding
+snapshot; public `circle_office_agents` rows never receive session identity or
+secrets. The exact runtime resolver accepts a blank client token only for the
+canonical loopback browser proxy on port 18790; direct 18789, remote, path,
+query, HTTPS, and other tokenless endpoints remain non-dispatchable.
 
 The Office Agent popup follows the same progressive-disclosure rule as Chat's
 Control Panel and has four primary destinations: Overview, Work, Runtime, and
@@ -668,7 +679,10 @@ enforces at most one primary per exact provider with a partial unique index,
 and returns a bounded owner/session/provider receipt before the current
 generation may replace that provider's exact local cache lane. Its narrow
 server guard also rejects direct deletion of a primary row while preserving
-ordinary non-primary deletion and provider metadata writes. The
+ordinary non-primary deletion and provider metadata writes. §47 was applied
+individually and its RPC, partial unique index, and update/delete guard catalog
+were verified on 2026-08-20; authenticated remote two-tab contention and
+account-switch canaries remain pending. The
 bridge card owns only a bounded read-only health probe. Runs is a presentation
 surface and cannot reap canonical rows on mount. Its exact-subject scan exposes
 a partial result when the bounded candidate window is exhausted, supports
@@ -688,10 +702,16 @@ the open panel. `scripts/office-agent-popup-live-canary-contract-smoketest.ts`
 pins an offline safety contract for the opt-in disposable fixture in
 `scripts/office-authenticated-local-e2e.mjs`. That live lane opens the built-in
 OpenSwan popup in two same-origin tabs, checks centered focus cycling and backdrop blocking,
-web tablet portrait/landscape containment, reduced motion, and concurrent exact-user
-auth refresh followed by exact authority rereads. Its backdrop proof is scoped
-to tested header and visible floating-Chat points, and its fixture requires
-explicit live, disposable-fixture, exact-project, and remote-target (when
+web tablet portrait/landscape containment, reduced motion, a keyboard-clamped
+non-modal dock through compact modal fallback and restoration, and concurrent
+exact-user auth refresh followed by exact authority rereads. Before creating
+the disposable fixture, it hashes the fetched same-origin Expo entry content
+and requires an exact operator-supplied artifact SHA-256; every authenticated
+page must retain that digest. Popup-scoped console errors fail outside the
+single exact missing-favicon exception, and visible section alerts/render
+fallbacks also fail completion. Its backdrop proof is scoped to tested header
+and visible floating-Chat points, and its fixture requires explicit live,
+disposable-fixture, exact-project, exact-artifact, and remote-target (when
 applicable) acknowledgements. It is source-ready but has not
 been run for this revision, and it does not claim native Modal, VoiceOver,
 TalkBack, provider-mutation, account-switch, or deployed-site proof.
@@ -705,7 +725,8 @@ inventories, authenticated privileges, and reviewed Edge digests. A match is
 `catalog_contract_matches_unattested`, never deployment or release proof;
 `--require-deployed` intentionally remains nonzero until a reviewed
 target-bound capture plus authenticated contention/account-switch canaries are
-available.
+available. The separate 2026-08-20 operator application/catalog checks for
+§§47-48 do not convert caller-supplied preflight JSON into attested evidence.
 
 Published Office Spirit assignment uses
 `supabase/migrations/20260817140000_agent_spirit_assignment_rpc.sql`, mirrored
@@ -739,7 +760,8 @@ captured authority, and adopt the validated full snapshot without writing it
 again, avoiding both stale open panels and storage-event loops.
 Memory Soul projection requires an exact published-agent UUID and never falls
 back to mutable display-name matching.
-§48 is pending/not applied.
+§48 was applied and its RPC/trigger/grant catalog was verified on 2026-08-20;
+authenticated remote contention and account-switch canaries remain pending.
 Run
 `npm run check:openswan-control-panels` when changing these boundaries.
 
@@ -1005,7 +1027,11 @@ or serialized plan metadata is not authority. The build uses narrow
 bounded magic-signature scan that rejects symlinks and ICNS/JXL/HEIF/HEIC files
 under repository-controlled Expo assets. The upstream `image-size` denial-of-
 service advisories have no patched release and remain build-time audit debt;
-the guard is defense in depth, not a dependency fix.
+the guard is defense in depth, not a dependency fix. The production audit
+permits only those two exact advisory identities while the lock remains
+`image-size@1.2.1` under the exact Expo/Metro build-tool closure; any package,
+version, graph, advisory, direct-dependency, or critical-severity drift fails
+closed.
 
 Source review, focused smokes, `check:office-addons`, both typecheck suites, a
 clean production export, public-bundle scan, and an authenticated frozen-export
@@ -1189,8 +1215,13 @@ this same path instead of a second browser fetch.
 Before those provider requests, the client now checks the public `llm-proxy`
 GET capability list once. A healthy older deployment without advertised
 `list_models` support stays on the curated fallback and does not emit one
-expected HTTP 400 per connected provider during Chat startup. The source Edge
-health response advertises the action; deployment remains separately gated.
+expected HTTP 400 per connected provider during Chat startup. Production
+metadata/router probes on 2026-08-20 confirmed hosted `llm-proxy` v22 is
+`ACTIVE`, uses `verify_jwt = false`, returns 200 to browser-style `OPTIONS`, and
+returns 401 from function-owned authorization for an unauthenticated `POST`.
+That proves the hosted router/CORS/auth boundary only: no source fingerprint or
+authenticated `list_models`/provider request was attested, so provider canaries
+remain gated.
 Background memory embedding separately preflights OpenAI key metadata. Once
 the proxy reports an unreadable credential, the client persists that exact key
 id/version as blocked for a bounded daily recheck; re-saving or rotating the
@@ -1207,24 +1238,63 @@ arbitrary OpenAI-compatible endpoints on
 their guarded OpenSwan/local-tool paths. Known retired and non-chat IDs cannot
 re-enter through live or database catalogs. Curated Chat category/popular
 shelves remain browsable previews but disable hosted models without an exact
-ready provider/model identity; Auto ignores providers with zero ready models
-and stops an unavailable resolution before provider I/O. Separate image/tool
-capability models remain on their existing owners. Office removes bare hosted
-provider shortcuts that could execute a different fallback than their label;
+ready provider/model identity; Auto ignores providers with zero ready models.
+For an ordinary hosted Chat turn whose requested or Auto-resolved model is not
+ready, the pre-dispatch fallback core selects at most one exact ready row from
+the active account catalog. Account-verified and exact circle-integration
+candidates outrank curated fallback rows; within the same confidence, the
+deterministic policy tries an equivalent logical route, then the task-aware
+preference, then an explicit reviewed non-premium baseline. Catalog response
+order is never authority; a verified safe account row may be the final stable
+fallback, while manual-only and unreviewed premium tiers are never promoted
+implicitly. Verified account-catalog absence can trigger substitution, but an
+unverified curated omission cannot prove the saved choice unavailable. The
+complete send-time catalog read has one bounded deadline. Chat
+generation-revalidates the decision after awaited prompt/context preparation,
+then seals one immutable model/provider decision at the exact first dispatch.
+The prompt is rebuilt when the generation changes before that boundary; later
+same-model transport recovery reuses the seal and cannot reselect. Chat
+displays which fallback model and provider API it will try and leaves the saved
+picker/thread choice intact. Deterministic local recovery/data commands (including `/integrations`)
+remain usable without a model connection through a token-bound fail-closed
+classifier; provider, agent, bridge, and tool commands do not inherit that
+exception.
+An unavailable/stale catalog scope or the absence of an eligible connected row
+fails closed before provider I/O. Once any provider request starts, there is no
+mid-request or post-I/O model/provider retry. A stable credential rejection is
+quarantined only for the exact account/circle until a key change; ambiguous
+transport failures receive a bounded cooldown. Either failure forces a fresh
+catalog read for the next turn, allowing a different connected API without
+leaking a failed account's state into another account. Image-only and stale
+saved choices cannot probe an unconnected generator before fallback: Chat
+selects an exact connected text API first, or blocks without provider I/O when
+none is ready. Unknown saved model IDs cannot fall through to an unverified provider, while a verified local Ollama row stays on
+its local executor. The current image-brief route starts only when the exact
+account catalog proves its supported Anthropic image-block model is connected.
+Office removes bare hosted provider
+shortcuts that could execute a different fallback than their label;
 current GPT, Gemini, GLM, MiniMax, and DeepSeek choices enter through
 provider-qualified account rows. Key writes/deletes invalidate the shared
 cache and refresh mounted key consumers. Rooms forwards only ready catalog
 providers to its OpenSwan Auto resolver, preserving account-backed routing
 across the Room boundary. OpenRouter Popular is labeled live only after a live
 ranking response; its current fallback and live rows both exclude retired IDs
-and project-banned vendor families. Chat resolves Auto once before capability routing and
-reuses that same model for transport; continuation context retains the newest
-assistant answer's tail. Existing exact saved selections remain visible and
-routable, while the Sonnet 4.6 default remains unchanged. This is source
-compatibility, not live provider entitlement or deployed Edge proof.
+and project-banned vendor families. Chat resolves one effective turn model
+before capability routing, preserves selected-versus-effective provenance, and
+reuses that effective model for prompt construction and transport; continuation
+context retains the newest assistant answer's tail. Existing exact saved
+selections remain visible and routable, while the Sonnet 4.6 default remains
+unchanged. This is source-contract plus hosted-router evidence, not live
+provider entitlement, an authenticated provider-call canary, or attested Edge
+source parity.
 
 - `src/lib/modelCatalogReadinessCore.ts` owns the pure exact-inventory
   projection and user-facing account-catalog readiness state.
+- `src/lib/chatModelFallbackCore.ts` owns the pure deterministic ordinary-Chat
+  pre-dispatch choice, whole-catalog deadline, transient-cooldown projection,
+  provider-free classifier, and generation-stable dispatch preparation. It can
+  select only an exact ready catalog route, cannot mutate the saved selection,
+  and has no provider retry or dispatch authority.
 - `src/lib/llmProviders.ts` defines provider types, curated fallback lists,
   authenticated live-catalog loading/cache invalidation, key CRUD, and
   `invokeLLMProxy`; `src/lib/integrations/modelProviderRegistry.ts` merges
@@ -1245,7 +1315,10 @@ compatibility, not live provider entitlement or deployed Edge proof.
   `user_required` policy, so they never inspect or spend a platform environment
   key. Missing rows remain `key_missing`; failed stored-key lookup/decryption
   is `credential_unreadable`. Other shared-helper callers retain their explicit
-  policy until migrated.
+  policy until migrated. Hosted v22 was `ACTIVE` with `verify_jwt = false` on
+  2026-08-20; `OPTIONS` 200 and unauthenticated `POST` 401 confirm routing into
+  function-owned authorization, not source-fingerprint parity or a successful
+  authenticated provider call.
 - `supabase/functions/swanbot-ai/index.ts` can relay marketplace-prefixed
   models with tools.
 - `src/lib/billingPriority.ts` controls provider preference modes:
@@ -1269,9 +1342,11 @@ wallet row without an independently verified private-key backup.
 The 2026-08-07 Chat/Marketplace source contract makes
 `claude-sonnet-4-6` the default for future or unconfigured threads without
 backfilling existing rows; an explicit `auto` preference still invokes model
-resolution. A `key_missing` or `credential_unreadable` response stops
-same-turn stream/proxy retries and gives the user a focused Marketplace model
-connect/reconnect action. Anthropic setup first probes the submitted key, then
+resolution. Before provider I/O, an unavailable selection may use the bounded
+catalog-authorized fallback above. After provider I/O begins, a `key_missing`
+or `credential_unreadable` response stops same-turn stream/proxy/model retries
+and gives the user a focused Marketplace model connect/reconnect action.
+Anthropic setup first probes the submitted key, then
 stores it only in the signed-in user's encrypted model-key vault, and finally
 probes the stored credential through `llm-proxy`; the UI reports Connected only
 after both checks pass.
@@ -2484,15 +2559,33 @@ This is disposable validation, not production application.
   paths passed for root-first combined root/§26 claim/start/settle. This is not
   behavioral crash-cut, live contention/recovery, production migration, or
   Photoshop canary proof.
-- `20260807170000_office_agent_session_bindings.sql` (§36) is **pending and not
-  applied**. Disposable PostgreSQL 14 applied the migration twice and focused
+- `20260807170000_office_agent_session_bindings.sql` (§36) is **applied**.
+  Production catalog checks reconfirmed the table and legacy RPCs on
+  2026-08-20; disposable PostgreSQL 14 applied the migration twice and focused
   smokes cover the no-backfill owner-private table, single-policy reapply, RLS
   read, denied direct writes, authenticated set/clear including stale cleanup
   after provider drift, versioned bound/missing `invoke_agent_v2` claim, pure
   exact resolver, and Office/Feed source wiring. No live authenticated binding UI, provider
-  dispatch, cross-device local-token availability, production migration, or
-  deployment has been proven. Typed provider final-result reconciliation also
+  dispatch, or cross-device local-token availability has been proven. Typed provider final-result reconciliation also
   remains pending, so acceptance stays nonterminal.
+- `20260817130000_agent_identity_primary_rpc.sql` (§47) was **applied
+  individually and catalog-verified 2026-08-20**. Target checks confirmed the
+  authenticated RPC, partial unique provider-primary index, and update/delete
+  guards. Authenticated remote two-tab contention and account-switch canaries
+  remain pending.
+- `20260817140000_agent_spirit_assignment_rpc.sql` (§48) was **applied
+  individually and catalog-verified 2026-08-20**. Target checks confirmed both
+  authenticated RPCs, both projection guards, and denied direct authenticated
+  custom-profile DELETE. Authenticated remote two-account, assignment/delete
+  contention, and account-switch canaries remain pending.
+- `20260818120000_office_agent_session_binding_cas.sql` (§49) was **applied and
+  catalog-verified 2026-08-20**. It was applied individually after the
+  already-present §36 objects. Source/parity, pure receipt validation, exact Gateway
+  authority/fence wiring, and disposable PostgreSQL expected-null, stale-row,
+  move, clear, target-conflict, grant, and two-session contention behavior pass.
+  The old §36 set/clear functions no longer have authenticated or service-role
+  execute authority. Remote authenticated two-tab contention, account/circle
+  switching, and exact provider dispatch remain pending.
 - Use `NOTIFY pgrst, 'reload schema';` after schema changes when relevant.
 
 ## Validation

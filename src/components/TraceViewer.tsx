@@ -34,14 +34,24 @@ export default function TraceViewer({ circleId, accentColor = '#6366f1' }: Props
   const [traces, setTraces] = useState<Trace[]>([]);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [retryFocused, setRetryFocused] = useState(false);
+  const loadGenerationRef = useRef(0);
 
   const loadTraces = useCallback(async () => {
-    if (!circleId) return;
+    const generation = ++loadGenerationRef.current;
+    if (!circleId) {
+      setTraces([]);
+      setLoadError(null);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
+    setLoadError(null);
 
     try {
       // Join responses with messages to get the command text and sender
-      const { data: responses } = await supabase
+      const { data: responses, error: responsesError } = await supabase
         .from('office_terminal_responses')
         .select(`
           id, message_id, agent_name, response_text, status, model,
@@ -51,27 +61,32 @@ export default function TraceViewer({ circleId, accentColor = '#6366f1' }: Props
         .eq('circle_id', circleId)
         .order('created_at', { ascending: false })
         .limit(50);
+      if (responsesError) throw responsesError;
+      if (generation !== loadGenerationRef.current) return;
 
       if (!responses || responses.length === 0) {
         setTraces([]);
-        setLoading(false);
         return;
       }
 
       // Get the message details for these responses
       const messageIds = [...new Set(responses.map(r => r.message_id).filter(Boolean))];
-      const { data: messages } = messageIds.length > 0
+      const { data: messages, error: messagesError } = messageIds.length > 0
         ? await supabase
             .from('office_terminal_messages')
             .select('id, command_text, sender_id, model')
             .in('id', messageIds)
-        : { data: [] as any[] };
+        : { data: [] as any[], error: null };
+      if (messagesError) throw messagesError;
+      if (generation !== loadGenerationRef.current) return;
 
       // Get sender profiles
       const senderIds = [...new Set((messages || []).map(m => m.sender_id).filter(Boolean))];
-      const { data: profiles } = senderIds.length > 0
+      const { data: profiles, error: profilesError } = senderIds.length > 0
         ? await supabase.from('profiles').select('id, display_name, username').in('id', senderIds)
-        : { data: [] as any[] };
+        : { data: [] as any[], error: null };
+      if (profilesError) throw profilesError;
+      if (generation !== loadGenerationRef.current) return;
 
       const messageMap = new Map((messages || []).map(m => [m.id, m]));
       const profileMap = new Map((profiles || []).map(p => [p.id, p]));
@@ -85,7 +100,7 @@ export default function TraceViewer({ circleId, accentColor = '#6366f1' }: Props
           agentName: r.agent_name || 'Unknown',
           command: msg?.command_text || '(unknown command)',
           responseText: r.response_text || '',
-          status: r.status,
+          status: normalizeTraceStatus(r.status),
           model: r.model || msg?.model || null,
           tokenCount: r.token_count || 0,
           inputTokens: r.input_tokens || 0,
@@ -100,12 +115,20 @@ export default function TraceViewer({ circleId, accentColor = '#6366f1' }: Props
       setTraces(mapped);
     } catch (err) {
       console.error('[TraceViewer] Failed to load traces:', err);
-      setTraces([]);
+      if (generation === loadGenerationRef.current) {
+        setLoadError('Request traces could not be loaded. Check your connection and try again.');
+      }
+    } finally {
+      if (generation === loadGenerationRef.current) setLoading(false);
     }
-    setLoading(false);
   }, [circleId]);
 
-  useEffect(() => { loadTraces(); }, [loadTraces]);
+  useEffect(() => {
+    void loadTraces();
+    return () => {
+      loadGenerationRef.current += 1;
+    };
+  }, [loadTraces]);
 
   // Realtime: refresh traces when new responses arrive (debounced)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -120,7 +143,7 @@ export default function TraceViewer({ circleId, accentColor = '#6366f1' }: Props
         filter: `circle_id=eq.${circleId}`,
       }, () => {
         if (debounceRef.current) clearTimeout(debounceRef.current);
-        debounceRef.current = setTimeout(() => loadTraces(), 2000);
+        debounceRef.current = setTimeout(() => { void loadTraces(); }, 2000);
       })
       .subscribe();
     return () => {
@@ -133,6 +156,33 @@ export default function TraceViewer({ circleId, accentColor = '#6366f1' }: Props
     return (
       <View style={styles.emptyContainer}>
         <Text style={styles.emptyText}>Loading traces...</Text>
+      </View>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <View
+        style={styles.emptyContainer}
+        accessibilityRole="alert"
+        accessibilityLiveRegion="assertive"
+      >
+        <Text style={styles.emptyTitle}>Traces unavailable</Text>
+        <Text style={styles.emptyText}>{loadError}</Text>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Retry loading request traces"
+          onPress={() => { void loadTraces(); }}
+          onFocus={() => setRetryFocused(true)}
+          onBlur={() => setRetryFocused(false)}
+          style={({ pressed }) => [
+            styles.retryButton,
+            retryFocused && styles.retryButtonFocused,
+            pressed && styles.retryButtonPressed,
+          ]}
+        >
+          <Text style={styles.retryButtonText}>RETRY</Text>
+        </Pressable>
       </View>
     );
   }
@@ -151,12 +201,15 @@ export default function TraceViewer({ circleId, accentColor = '#6366f1' }: Props
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
       <View style={styles.header}>
         <Text style={styles.headerTitle}>REQUEST TRACES</Text>
-        <Text style={styles.headerSub}>{traces.length} traces (last 50)</Text>
+        <Text style={styles.headerSub}>
+          {traces.length} traces (last 50) • token-based cost estimates
+        </Text>
       </View>
 
       {traces.map(trace => {
         const isExpanded = expandedId === trace.id;
         const isError = trace.status === 'error';
+        const statusMeta = getTraceStatusMeta(trace.status);
         const cost = trace.tokenCount * 0.0000005;
         const timeAgo = formatTimeAgo(trace.createdAt);
 
@@ -164,6 +217,10 @@ export default function TraceViewer({ circleId, accentColor = '#6366f1' }: Props
           <Pressable
             key={trace.id}
             onPress={() => setExpandedId(isExpanded ? null : trace.id)}
+            accessibilityRole="button"
+            accessibilityLabel={`${trace.senderName} to ${trace.agentName}, ${statusMeta.label.toLowerCase()}: ${trace.command}`}
+            accessibilityHint={isExpanded ? 'Collapses trace details' : 'Expands trace details'}
+            accessibilityState={{ expanded: isExpanded }}
             style={[
               styles.traceCard,
               isError && styles.traceCardError,
@@ -173,7 +230,7 @@ export default function TraceViewer({ circleId, accentColor = '#6366f1' }: Props
             {/* Trace header row */}
             <View style={styles.traceHeader}>
               <View style={[styles.statusDot, {
-                backgroundColor: isError ? '#ef4444' : trace.status === 'pending' ? '#f59e0b' : '#22c55e',
+                backgroundColor: statusMeta.color,
               }]} />
               <Text style={styles.traceSender}>{trace.senderName}</Text>
               <Text style={styles.traceArrow}>→</Text>
@@ -208,13 +265,11 @@ export default function TraceViewer({ circleId, accentColor = '#6366f1' }: Props
                 </View>
               )}
               <View style={styles.pill}>
-                <Text style={styles.pillText}>${cost.toFixed(4)}</Text>
+                <Text style={styles.pillText}>~${cost.toFixed(4)}</Text>
               </View>
-              {isError && (
-                <View style={[styles.pill, { backgroundColor: '#ef444420' }]}>
-                  <Text style={[styles.pillText, { color: '#ef4444' }]}>ERROR</Text>
-                </View>
-              )}
+              <View style={[styles.pill, { backgroundColor: `${statusMeta.color}20` }]}>
+                <Text style={[styles.pillText, { color: statusMeta.color }]}>{statusMeta.label}</Text>
+              </View>
             </View>
 
             {/* Expanded details */}
@@ -259,6 +314,25 @@ export default function TraceViewer({ circleId, accentColor = '#6366f1' }: Props
   );
 }
 
+function normalizeTraceStatus(value: unknown): Trace['status'] {
+  return value === 'done' || value === 'error' || value === 'pending' || value === 'streaming'
+    ? value
+    : 'pending';
+}
+
+function getTraceStatusMeta(status: Trace['status']): { color: string; label: string } {
+  switch (status) {
+    case 'done':
+      return { color: '#22c55e', label: 'DONE' };
+    case 'error':
+      return { color: '#ef4444', label: 'ERROR' };
+    case 'streaming':
+      return { color: '#3b82f6', label: 'STREAMING' };
+    case 'pending':
+      return { color: '#f59e0b', label: 'PENDING' };
+  }
+}
+
 function formatTimeAgo(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
   const mins = Math.floor(ms / 60000);
@@ -293,6 +367,29 @@ const styles = StyleSheet.create({
   emptyIcon: { fontSize: 48, marginBottom: 12 },
   emptyTitle: { fontSize: 18, fontWeight: '700', color: '#e8e8e8', marginBottom: 8 },
   emptyText: { fontSize: 13, color: '#9e9e9e', textAlign: 'center' },
+  retryButton: {
+    minWidth: 96,
+    minHeight: 44,
+    marginTop: 18,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#3e3e3e',
+    backgroundColor: '#161616',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 18,
+  },
+  retryButtonFocused: {
+    borderColor: '#6366f1',
+    backgroundColor: '#202020',
+  },
+  retryButtonPressed: { opacity: 0.72 },
+  retryButtonText: {
+    color: '#e8e8e8',
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 1,
+  },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',

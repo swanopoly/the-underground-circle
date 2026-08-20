@@ -60,6 +60,7 @@ import {
   createLegacyRoundNudgeHook,
   createLoopUsageAccumulator,
   finalizeLoopUsage,
+  hasSwanbotRoutingFallback,
   mapAgentEventToOpenSwanStage,
   needsCapExhaustionFinalization,
   parseSwanbotToolTurnData,
@@ -2984,6 +2985,9 @@ async function runTypedCoreToolLoop(args: {
       const parsed = parseSwanbotToolTurnData(data);
       // Routing is fixed for the turn — capture the first round's report.
       if (!routing && parsed.routing) routing = parsed.routing;
+      if (hasSwanbotRoutingFallback(parsed.routing)) {
+        edgeFailed = true;
+      }
       return parsed.turn;
     },
   };

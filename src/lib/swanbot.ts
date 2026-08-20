@@ -214,6 +214,12 @@ export type SwanBotContext = {
   agentSubjectMetadata?: AgentRuntimeSubjectMetadata;
   discordContext?: string;
   model?: string | null;
+  /**
+   * The outer Chat dispatcher already selected and generation-sealed this
+   * exact provider/model. A failed attempt must not fall through to a second
+   * provider whose readiness was never authorized for the turn.
+   */
+  modelDispatchSealed?: boolean;
   thinkingLevel?: 'fast' | 'balanced' | 'deep';
   maxTokens?: number;
   chatHistory?: string;
@@ -5543,7 +5549,7 @@ const localCommands: CmdHandler[] = [
     },
   },
   {
-    match: /^(who.*check|checked in)\s*[?]?$/i,
+    match: /^(who(?: has|'s)? checked in|checked in)\s*[?]?$/i,
     handler: async (ctx) => {
       if (!ctx.circleId) return "Need a circle for that.";
       const ci = await getTodayCheckIns(ctx.circleId);
@@ -5586,6 +5592,20 @@ const localCommands: CmdHandler[] = [
     },
   },
 ];
+
+/**
+ * Pure ownership check shared with Chat's hosted-model readiness gate. It uses
+ * the exact same model-status, capability-question, and local-command matchers
+ * as the downstream handler so a local reply cannot be blocked by a missing
+ * model API—or bypass model readiness after falling through a copied regex.
+ */
+export function isLocalSwanBotCommandMessage(message: string): boolean {
+  const cleaned = String(message || '').replace(/@(agent|blackswan|swanbot|swan)\b/gi, '').trim();
+  if (!cleaned) return false;
+  return isModelStatusQuestion(cleaned)
+    || isCreativeAppCapabilityQuestion(cleaned)
+    || localCommands.some((command) => command.match.test(cleaned));
+}
 
 export async function tryHandleLocalSwanBotCommand(
   message: string,
@@ -5663,6 +5683,22 @@ export type SwanBotTurnResult = {
   text: string;
   executionSummary?: ComputerTaskTurnEvidenceSummary;
 };
+
+/**
+ * A generation-sealed Chat model was the only authorized model for this
+ * provider boundary and did not return a response. Callers may cool down that
+ * exact provider for the next turn, but must never replay this turn elsewhere.
+ */
+export class SealedModelDispatchError extends Error {
+  readonly code = 'sealed_model_dispatch_failed';
+
+  constructor(modelId: string | null | undefined) {
+    super(
+      `The selected connected model (${String(modelId || 'provider')}) did not complete the request. Its API was not replayed through another provider.`,
+    );
+    this.name = 'SealedModelDispatchError';
+  }
+}
 
 /**
  * Detailed turn result for orchestration callers. The duplicate guard owns the
@@ -5902,6 +5938,7 @@ async function getSwanBotResponseImpl(
   // a MiniMax model, or another non-Anthropic model, route through llm-proxy
   // instead of going to swanbot-ai (which only knows Claude).
   const customModelProvider = pickProviderForModel(enrichedContext.model);
+  let sealedCustomModelAttemptFailed = false;
   if (customModelProvider && !shouldBlockExternalAiProvider(customModelProvider)) {
     try {
       const circleData = await getCircleContextData(enrichedContext);
@@ -5922,6 +5959,9 @@ async function getSwanBotResponseImpl(
         modelId: enrichedContext.model || '',
         message: cleaned,
       });
+      if (enrichedContext.modelDispatchSealed && marketplaceToolTier.tier === 'delegate_executor') {
+        throw new SealedModelDispatchError(enrichedContext.model);
+      }
       if (marketplaceToolTier.tier !== 'plain_text' && enrichedContext.circleId && enrichedContext.userId) {
         try {
           const loopModel = marketplaceToolTier.tier === 'delegate_executor'
@@ -5942,6 +5982,9 @@ async function getSwanBotResponseImpl(
             executionSurfaceGuard: enrichedContext.executionSurfaceGuard,
             agentSubject: agentSubjectPayload,
           });
+          if (enrichedContext.modelDispatchSealed && loop.routing?.routing_fallback) {
+            throw new SealedModelDispatchError(enrichedContext.model);
+          }
           // An incomplete loop with ZERO tool events means the edge call itself
           // failed (e.g. relay 400 marketplace_provider_unavailable) — fall
           // through to today's plain-text proxy tier instead of surfacing the
@@ -5956,6 +5999,7 @@ async function getSwanBotResponseImpl(
           }
           console.warn('[SwanBot] Tier 1.5: marketplace tool loop unusable — falling back to plain-text proxy tier.');
         } catch (loopErr) {
+          if (loopErr instanceof SealedModelDispatchError) throw loopErr;
           console.warn('[SwanBot] Tier 1.5: marketplace tool loop error — falling back to plain-text proxy tier:', loopErr);
         }
       }
@@ -6024,13 +6068,22 @@ async function getSwanBotResponseImpl(
       }
       console.warn(`[SwanBot] Tier 1.5: ${customModelProvider} returned empty — falling through to Claude.`);
       lastFailureReason = `your selected model (${enrichedContext.model}) via ${customModelProvider} returned nothing — its key may be missing or it's rate-limited`;
+      sealedCustomModelAttemptFailed = true;
     } catch (err) {
       console.warn(`[SwanBot] Tier 1.5: ${customModelProvider} error — falling through:`, err);
       lastFailureReason = `your selected model (${customModelProvider}) errored: ${err instanceof Error ? err.message : String(err)}`;
+      sealedCustomModelAttemptFailed = true;
     }
   }
 
+  if (sealedCustomModelAttemptFailed && enrichedContext.modelDispatchSealed) {
+    throw new SealedModelDispatchError(enrichedContext.model || customModelProvider);
+  }
+
   // Tier 2: Try AI Edge Function (Claude Haiku — primary for web)
+  const sealedDirectAnthropicModel = enrichedContext.modelDispatchSealed
+    && !customModelProvider
+    && /^claude-/i.test(String(enrichedContext.model || '').trim());
   if (enrichedContext.circleId && !shouldBlockExternalAiProvider('anthropic')) {
     console.log('[SwanBot] Tier 2: Calling swanbot-ai edge function...');
     // Before the swanbot-v2 hop (inside callSwanBotAI), collapse any bare
@@ -6167,6 +6220,9 @@ async function getSwanBotResponseImpl(
     } else {
       console.warn('[SwanBot] Tier 2: Edge function returned null');
       lastFailureReason = 'the Claude edge function returned nothing — the Anthropic key may be missing or the service is rate-limited';
+    }
+    if (sealedDirectAnthropicModel) {
+      throw new SealedModelDispatchError(enrichedContext.model);
     }
   } else if (!enrichedContext.circleId) {
     lastFailureReason = 'no circle context was available to route this request';

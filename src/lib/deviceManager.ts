@@ -60,6 +60,7 @@ export interface DeviceInventory {
 }
 
 export type DeviceCategory = 'printers' | 'serial' | '3dprinter' | 'network' | 'all';
+export type DeviceReadResult<T> = Readonly<{ ok: boolean; data: T | null; error?: string }>;
 
 // ─── Bridge Communication ───────────────────────────────────────────────────────
 
@@ -110,8 +111,12 @@ export async function checkBridgeHealth(): Promise<boolean> {
 
 /** Discover all connected devices (cached 10s on bridge side) */
 export async function discoverAllDevices(): Promise<DeviceInventory | null> {
-  const result = await bridgeGet<DeviceInventory>('/devices');
+  const result = await discoverAllDevicesResult();
   return result.data;
+}
+
+export async function discoverAllDevicesResult(): Promise<DeviceReadResult<DeviceInventory>> {
+  return bridgeGet<DeviceInventory>('/devices');
 }
 
 /** List printers with status and default */
@@ -128,14 +133,22 @@ export async function listSerialPorts(): Promise<SerialPort[]> {
 
 /** Detect 3D printer services */
 export async function detect3DPrinters(): Promise<PrinterService3D[]> {
-  const result = await bridgeGet<{ services: PrinterService3D[] }>('/devices/3dprinter');
+  const result = await detect3DPrintersResult();
   return result.data?.services || [];
+}
+
+export async function detect3DPrintersResult(): Promise<DeviceReadResult<{ services: PrinterService3D[] }>> {
+  return bridgeGet<{ services: PrinterService3D[] }>('/devices/3dprinter');
 }
 
 /** Scan network for devices */
 export async function scanNetwork(): Promise<NetworkDevice[]> {
-  const result = await bridgeGet<{ devices: NetworkDevice[] }>('/devices/network');
+  const result = await scanNetworkResult();
   return result.data?.devices || [];
+}
+
+export async function scanNetworkResult(): Promise<DeviceReadResult<{ devices: NetworkDevice[] }>> {
+  return bridgeGet<{ devices: NetworkDevice[] }>('/devices/network');
 }
 
 // ─── Device Actions ─────────────────────────────────────────────────────────────
@@ -182,13 +195,14 @@ export async function sendToSerial(port: string, data: string, baudRate?: number
 export async function sendGCode(
   target: 'octoprint' | 'klipper' | 'serial',
   command: string,
-  options?: { apiKey?: string; port?: string }
+  options?: { apiKey?: string; port?: string; serviceUrl?: string }
 ): Promise<{ ok: boolean; response?: string; error?: string }> {
   const result = await bridgePost<{ ok: boolean; response?: string }>('/devices/3dprinter/command', {
     target,
     command,
     apiKey: options?.apiKey,
     port: options?.port,
+    serviceUrl: options?.serviceUrl,
   });
   return { ok: result.ok, response: result.data?.response, error: result.error };
 }
@@ -296,11 +310,7 @@ export async function executeDeviceCommand(commandText: string): Promise<string>
     }
 
     case 'gcode': {
-      const target = (parts[1] || 'serial') as 'octoprint' | 'klipper' | 'serial';
-      const gcode = parts.slice(2).join(' ').replace(/^["']|["']$/g, '');
-      if (!gcode) return 'Usage: devices gcode [octoprint|klipper|serial] "G28 X Y"';
-      const result = await sendGCode(target, gcode);
-      return result.ok ? `✓ G-code sent${result.response ? `: ${result.response}` : ''}` : `✗ Failed: ${result.error}`;
+      return 'G-code requires an exact detected target and a separate hardware confirmation. Open Backpack → Devices to review and run the command.';
     }
 
     case 'network':
@@ -319,7 +329,7 @@ export async function executeDeviceCommand(commandText: string): Promise<string>
         '│ devices print "txt" — Print text to default      │',
         '│ devices serial      — List serial/COM ports      │',
         '│ devices 3d          — Detect 3D printer services │',
-        '│ devices gcode <target> "G28" — Send G-code       │',
+        '│ devices gcode       — Open Devices for safe review│',
         '│ devices network     — Scan local network         │',
         '└──────────────────────────────────────────────────┘',
       ].join('\n');

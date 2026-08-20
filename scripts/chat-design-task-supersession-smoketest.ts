@@ -663,7 +663,7 @@ assert.match(
 );
 assert.match(
   chatTabSource,
-  /!isInactiveDesignTask && !mutationReplayBlocked && item\.recoveryOptions/,
+  /const hasRecoveryOptions = !isInactiveDesignTask\s*&& !mutationReplayBlocked\s*&& !!\(item\.recoveryOptions/,
   'historical, superseded, and non-replayable transcript rows do not render recovery buttons',
 );
 assert.match(

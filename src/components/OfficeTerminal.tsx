@@ -179,6 +179,10 @@ interface Props {
   // ── Layout ──
   compact?: boolean;  // true = hide header bar (used in the bottom drawer)
   initialTab?: 'commands' | 'automations';
+  // Compatibility surfaces may show immutable command history without exposing
+  // dispatch, automations, local shell, training, or agent-creation controls.
+  readOnly?: boolean;
+  readOnlyReason?: string;
 
   // Exact auth snapshot owned by the mounting Office surface. Agent commands
   // fail closed without it; compatibility/read-only mounts may omit it.
@@ -1351,6 +1355,8 @@ export default function OfficeTerminal({
   byoProviderKeys,
   compact = false,
   initialTab,
+  readOnly = false,
+  readOnlyReason = 'Command history only.',
   terminalAuthority,
   isTerminalAuthorityCurrent,
   onCommandSent,
@@ -1399,6 +1405,10 @@ export default function OfficeTerminal({
   useEffect(() => {
     let cancelled = false;
     setAccountModelChoices([]);
+    if (readOnly) {
+      setModelCatalogNotice(null);
+      return () => { cancelled = true; };
+    }
     setModelCatalogNotice('Checking account model catalogs…');
     void loadModelGroups(circleId, { includeDisconnected: false })
       .then((groups) => {
@@ -1445,7 +1455,7 @@ export default function OfficeTerminal({
         setModelCatalogNotice('Account model catalogs could not be checked; exact access is checked when the command starts.');
       });
     return () => { cancelled = true; };
-  }, [circleId, byoProviderKeys]);
+  }, [circleId, byoProviderKeys, readOnly]);
 
   // Dynamic model list: base models + exact account rows. Preserve the
   // previous curated BYO builder only as the explicit load-failure fallback.
@@ -1469,6 +1479,7 @@ export default function OfficeTerminal({
   const [sending, setSending]                 = useState(false);
   const [sendError, setSendError]             = useState<string | null>(null);
   const [loading, setLoading]                 = useState(true);
+  const [transcriptError, setTranscriptError] = useState<string | null>(null);
   // Command history — local per instance (UI preference)
   const [cmdHistory, setCmdHistory]           = useState<string[]>([]);
   const [historyIdx, setHistoryIdx]           = useState(-1);
@@ -1479,6 +1490,9 @@ export default function OfficeTerminal({
   const deletedIdsRef = useRef<Set<string>>(new Set());
   const messagesRef = useRef<TerminalMessage[]>(messages);
   messagesRef.current = messages;
+  const transcriptGenerationRef = useRef(0);
+  const transcriptCircleRef = useRef(circleId);
+  transcriptCircleRef.current = circleId;
   const exactTerminalAuthorityRequired = (
     terminalAuthority !== undefined || isTerminalAuthorityCurrent !== undefined
   );
@@ -1595,15 +1609,22 @@ export default function OfficeTerminal({
   // never arrive as events, so a reconnect that does not replay this leaves the
   // terminal permanently missing whatever the agent said during the gap.
   const reloadTranscript = useCallback(async () => {
-    // Never throws: this runs as a realtime catch-up, and a rejected catch-up
-    // would escape the subscription wrapper's synchronous try/catch.
+    const requestedCircleId = circleId;
+    const generation = ++transcriptGenerationRef.current;
+    const requestIsCurrent = () => (
+      transcriptGenerationRef.current === generation
+      && transcriptCircleRef.current === requestedCircleId
+    );
+    setTranscriptError(null);
     try {
-      const { messages: hist } = await loadTerminalHistory(circleId, 50);
+      const { messages: hist, error: historyError } = await loadTerminalHistory(requestedCircleId, 50);
+      if (historyError) throw new Error(historyError);
+      if (!requestIsCurrent()) return;
       setMessages(hist.filter(message => !deletedIdsRef.current.has(message.id)));
-      setLoading(false);
       // Phase 3: load existing responses for history messages
       if (hist.length > 0) {
         const resps = await loadResponsesForMessages(hist.map(m => m.id));
+        if (!requestIsCurrent()) return;
         const map = new Map<string, TerminalResponse[]>();
         for (const r of resps) {
           if (deletedIdsRef.current.has(r.messageId)) continue;
@@ -1612,19 +1633,30 @@ export default function OfficeTerminal({
           map.set(r.messageId, arr);
         }
         setResponses(map);
+      } else {
+        setResponses(new Map());
       }
     } catch (err) {
       console.error('[OfficeTerminal] transcript load failed:', err);
-      setLoading(false);
+      if (requestIsCurrent()) {
+        setTranscriptError('Recorded command history could not be loaded. Check your connection and retry.');
+      }
+    } finally {
+      if (requestIsCurrent()) setLoading(false);
     }
   }, [circleId]);
 
   useEffect(() => {
     deletedIdsRef.current.clear();
+    setLoading(true);
+    setMessages([]);
+    setResponses(new Map());
 
     void reloadTranscript();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [circleId]);
+    return () => {
+      transcriptGenerationRef.current += 1;
+    };
+  }, [circleId, reloadTranscript]);
 
   useEffect(() => {
     const unsub = subscribeToTerminalMessages(
@@ -2276,6 +2308,32 @@ export default function OfficeTerminal({
   const modeInfo = TERMINAL_MODES.find(m => m.key === terminalMode);
   const modelInfo = TERMINAL_MODELS.find(m => m.key === selectedModel);
 
+  const transcriptFailure = transcriptError ? (
+    <View style={styles.transcriptError} accessibilityRole="alert">
+      <View style={styles.transcriptErrorCopy}>
+        <Text style={styles.transcriptErrorTitle}>History unavailable</Text>
+        <Text style={styles.transcriptErrorText}>
+          {transcriptError}{messages.length > 0 ? ' Existing history may be stale.' : ''}
+        </Text>
+      </View>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Retry loading recorded command history"
+        onPress={() => {
+          if (messages.length === 0) setLoading(true);
+          void reloadTranscript();
+        }}
+        style={({ pressed, focused }: any) => [
+          styles.transcriptRetry,
+          focused ? styles.transcriptRetryFocused : null,
+          pressed ? styles.transcriptRetryPressed : null,
+        ]}
+      >
+        <Text style={styles.transcriptRetryText}>Retry</Text>
+      </Pressable>
+    </View>
+  ) : null;
+
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <KeyboardAvoidingView
@@ -2322,6 +2380,16 @@ export default function OfficeTerminal({
       )}
 
       {/* ── Tab bar ── */}
+      {readOnly ? (
+        <View
+          style={styles.readOnlyBar}
+          accessibilityRole="summary"
+          accessibilityLabel={readOnlyReason}
+        >
+          <Text style={styles.readOnlyTitle}>RECORDED HISTORY</Text>
+          <Text style={styles.readOnlyText}>{readOnlyReason}</Text>
+        </View>
+      ) : (
       <View style={styles.termTabBar}>
         {(['commands', 'automations', 'shell'] as TerminalTab[]).map(tab => (
           <Pressable
@@ -2362,9 +2430,10 @@ export default function OfficeTerminal({
           <Text style={styles.connText}>{onlineCount > 0 ? 'connected' : 'offline'}</Text>
         </View>
       </View>
+      )}
 
       {/* ── Content area ── */}
-      {terminalTab === 'spawn' ? (
+      {!readOnly && terminalTab === 'spawn' ? (
         <SpawnAgentPanel
           circleId={circleId}
           onCreated={(agentId, agentName) => {
@@ -2398,13 +2467,13 @@ export default function OfficeTerminal({
           }}
           onCancel={() => setTerminalTab('commands')}
         />
-      ) : terminalTab === 'shell' ? (
+      ) : !readOnly && terminalTab === 'shell' ? (
         <LocalShellPanel />
-      ) : terminalTab === 'train' ? (
+      ) : !readOnly && terminalTab === 'train' ? (
         <TrainingDashboard circleId={circleId} />
-      ) : terminalTab === 'key' ? (
+      ) : !readOnly && terminalTab === 'key' ? (
         <CommandKeyPanel onRunCommand={(cmd) => { setInput(cmd); setTerminalTab('commands'); }} />
-      ) : terminalTab === 'automations' ? (
+      ) : !readOnly && terminalTab === 'automations' ? (
         <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
           <AutomationsPanel circleId={circleId} />
         </ScrollView>
@@ -2412,10 +2481,13 @@ export default function OfficeTerminal({
       <>
 
       {/* Message list */}
+      {transcriptError && messages.length > 0 ? transcriptFailure : null}
       {loading ? (
         <View style={styles.loadingState}>
           <PendingDots />
         </View>
+      ) : transcriptError && messages.length === 0 ? (
+        <View style={styles.transcriptErrorEmpty}>{transcriptFailure}</View>
       ) : messages.length === 0 ? (
         <View style={styles.emptyState}>
           <View style={styles.emptyBrand}>
@@ -2423,9 +2495,11 @@ export default function OfficeTerminal({
           </View>
           <Text style={styles.emptyTitle}>BlackSwan Terminal</Text>
           <Text style={styles.emptyText}>
-            Your agentic command center.{'\n'}
-            Type a message, use /commands, or @target an agent.
+            {readOnly
+              ? 'No recorded command history is available for this circle yet.'
+              : <>Your agentic command center.{'\n'}Type a message, use /commands, or @target an agent.</>}
           </Text>
+          {!readOnly && (
           <View style={styles.emptyHints}>
             {['/help', '/status', '/models', '/agents'].map(cmd => (
               <Pressable key={cmd} style={styles.emptyHintChip} onPress={() => setInput(cmd)}>
@@ -2436,6 +2510,7 @@ export default function OfficeTerminal({
               <Text style={styles.emptyHintText}>+ Spawn Agent</Text>
             </Pressable>
           </View>
+          )}
         </View>
       ) : (
         <FlatList
@@ -2446,7 +2521,9 @@ export default function OfficeTerminal({
             <TerminalRow
               msg={item}
               responses={responses.get(item.id)}
-              onDelete={item.id.startsWith('local-') || item.senderId === userId ? handleDelete : undefined}
+              onDelete={!readOnly && (item.id.startsWith('local-') || item.senderId === userId)
+                ? handleDelete
+                : undefined}
             />
           )}
           style={styles.list}
@@ -2456,6 +2533,8 @@ export default function OfficeTerminal({
         />
       )}
 
+      {!readOnly && (
+      <>
       {/* Autocomplete */}
       {showAutocomplete && (
         <AutocompleteSuggestions
@@ -2588,17 +2667,19 @@ export default function OfficeTerminal({
           <Text style={{ color: '#fca5a5', fontSize: 10, fontFamily: 'monospace' }}>{sendError}</Text>
         </Pressable>
       ) : null}
+      </>
+      )}
 
       {/* ── Footer status line (OpenSwan-style) ── */}
       <View style={styles.footer}>
         <View style={[styles.footerDot, onlineCount > 0 && { backgroundColor: BS.accent }]} />
         <Text style={styles.footerText}>
-          {thinkingLevel !== 'balanced' ? `${thinkingLevel} ` : ''}
-          {terminalMode !== 'execute' ? `${terminalMode} ` : ''}
-          {modelInfo?.label || 'auto'}
+          {readOnly
+            ? 'history only'
+            : `${thinkingLevel !== 'balanced' ? `${thinkingLevel} ` : ''}${terminalMode !== 'execute' ? `${terminalMode} ` : ''}${modelInfo?.label || 'auto'}`}
         </Text>
         <View style={{ flex: 1 }} />
-        {cmdHistory.length > 0 && (
+        {!readOnly && cmdHistory.length > 0 && (
           <Text style={styles.footerText}>{cmdHistory.length} history</Text>
         )}
         <Text style={styles.footerMuted}>|</Text>
@@ -2642,6 +2723,27 @@ const styles = StyleSheet.create({
   metricBadgeText: { fontFamily: MONO, fontSize: 8, fontWeight: '700', letterSpacing: 0.5 },
 
   // ── Tabs ──
+  readOnlyBar: {
+    minHeight: 48,
+    justifyContent: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: BS.border,
+    backgroundColor: BS.bgPanel,
+  },
+  readOnlyTitle: {
+    color: BS.textPrimary,
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+  },
+  readOnlyText: {
+    color: BS.textMuted,
+    fontSize: 9,
+    lineHeight: 13,
+    marginTop: 2,
+  },
   termTabBar: {
     flexDirection: 'row', alignItems: 'center',
     borderBottomWidth: 1, borderBottomColor: BS.border,
@@ -2670,6 +2772,37 @@ const styles = StyleSheet.create({
   list: { flex: 1 },
   listContent: { paddingTop: 8, paddingBottom: 8 },
   loadingState: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  transcriptErrorEmpty: { flex: 1, justifyContent: 'center', padding: 16 },
+  transcriptError: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    margin: 10,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#f59e0b55',
+    borderRadius: 10,
+    backgroundColor: '#f59e0b12',
+  },
+  transcriptErrorCopy: { flex: 1, minWidth: 0 },
+  transcriptErrorTitle: { color: '#f4dfb5', fontSize: 11, fontWeight: '700', marginBottom: 2 },
+  transcriptErrorText: { color: '#a8946d', fontSize: 10, lineHeight: 15 },
+  transcriptRetry: {
+    minHeight: 44,
+    minWidth: 72,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: '#f59e0b66',
+    borderRadius: 9,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  transcriptRetryFocused: {
+    ...Platform.select({ web: { outlineStyle: 'none', boxShadow: '0 0 0 3px rgba(245,158,11,0.28)' } as any, default: {} }),
+  },
+  transcriptRetryPressed: { opacity: 0.75, backgroundColor: '#f59e0b18' },
+  transcriptRetryText: { color: '#f4dfb5', fontSize: 10, fontWeight: '700' },
 
   // ── Empty state ──
   emptyState: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32 },

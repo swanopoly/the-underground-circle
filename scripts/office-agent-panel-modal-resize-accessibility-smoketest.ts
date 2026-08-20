@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs';
 const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 const panel = read('src/screens/circles/tabs/office/AgentPanel.tsx');
 const shell = read('src/screens/circles/tabs/office/AgentPanelShell.tsx');
+const webPortal = read('src/screens/circles/tabs/office/AgentPanelWebPortal.web.tsx');
+const nativePortal = read('src/screens/circles/tabs/office/AgentPanelWebPortal.tsx');
 const layout = read('src/screens/circles/tabs/office/useAgentPanelLayout.ts');
 
 let assertions = 0;
@@ -31,8 +33,17 @@ check(
 check(
   shell.includes("role: 'dialog'")
     && shell.includes("'aria-modal': panelMode === 'center' ? true : undefined")
+    && shell.includes('testID="agent-panel-backdrop"')
     && shell.includes('return panelLayer;'),
-  'web centered and docked presentation keeps its existing dialog/DOM path',
+  'web centered and docked presentation keeps its dialog path with a stable, testable backdrop',
+);
+check(
+  shell.includes("if (Platform.OS === 'web' && panelMode === 'center')")
+    && shell.includes('<AgentPanelWebPortal>{panelLayer}</AgentPanelWebPortal>')
+    && webPortal.includes("require('react-dom')")
+    && webPortal.includes('return createPortal(children, document.body);')
+    && nativePortal.includes('return <>{children}</>;'),
+  'the centered web dialog escapes Office stacking contexts while native keeps its Modal-owned tree',
 );
 check(
   shell.includes('<Text nativeID="uc-agent-panel-title" style={styles.visuallyHiddenTitle}>{agent.name}</Text>')
@@ -95,7 +106,7 @@ check(
   'resize teardown restores pre-existing body styles instead of blanking them',
 );
 check(
-  layout.includes("if (panelMode !== 'side') stopSideResize();")
+  layout.includes("if (effectivePanelMode !== 'side') stopSideResize();")
     && layout.includes('stopSideResize(false);'),
   'mode changes and unmount both tear down an in-flight resize',
 );

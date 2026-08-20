@@ -5,6 +5,7 @@ import ts from 'typescript';
 
 const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 const memory = read('src/screens/circles/tabs/office/AgentMemoryPanel.tsx');
+const memoryMutationCore = read('src/screens/circles/tabs/office/agentMemoryMutationCore.ts');
 const spirit = read('src/screens/circles/tabs/office/AgentSpiritPanel.tsx');
 
 let assertions = 0;
@@ -36,18 +37,27 @@ for (const marker of [
   'REFRESHING THE LAST VERIFIED MEMORY SNAPSHOT',
   'Showing the newest 200 verified entries.',
   'Older server entries are not represented.',
-  'The memory change did not return exactly one receipt.',
-  'The memory change returned a mismatched receipt.',
   ".eq('circle_id', authority.circleId)",
   ".eq('user_id', authority.userId)",
-  ".select('id, circle_id, user_id, scope, content, is_active, pinned, retrieval_mode, importance')",
-  "row.is_active === false",
-  "row.pinned === nextPinned",
-  "row.retrieval_mode === 'startup'",
-  'row.content === editContent',
+  ".eq('updated_at', exactRequest.expectedUpdatedAt)",
+  ".eq('visibility', exactRequest.visibility)",
+  ".select('*')",
+  'editingMemorySnapshotRef.current = { ...mem }',
+  "setMemoryActionStatus(`CONFLICT: ${conflictMessage}`)",
+  "setMemoryActionStatus('OUTCOME UNKNOWN:",
   'INSPECT IDENTITY DETAILS',
 ]) {
   check(memory.includes(marker), `Memory exact architecture includes ${marker}`);
+}
+for (const marker of [
+  'createAgentMemoryCasRequest(',
+  'executeAgentMemoryCasMutation(',
+  "if (result.data.length === 0) return { kind: 'conflict'",
+  "if (result.data.length !== 1) return { kind: 'outcome_unknown'",
+  'Object.entries(request.patch).every',
+  "visibility: 'private'",
+]) {
+  check(memoryMutationCore.includes(marker), `Memory CAS core includes ${marker}`);
 }
 check(!memory.includes("import('../../../../lib/agentMemory')"), 'Memory does not use ambient management helpers');
 check(!memory.includes("import('../../../../lib/memoryActions')"), 'Memory pin and promote do not use ambient helpers');
@@ -161,9 +171,13 @@ for (const marker of [
   'ERROR: Soul was not saved. Check the connection and try again.',
   'ERROR: Custom profile was not saved. Check the connection and try again.',
   'const expectedProfileReceipt = {',
+  '.insert(expectedProfileReceipt)',
+  'if (!Array.isArray(insertedProfiles) || insertedProfiles.length !== 1)',
+  'if (savingProfileTokenRef.current === savingToken)',
   'Object.entries(expectedProfileReceipt).every(([field, requestedValue])',
   'returnedProfile[field] === requestedValue',
-  'Custom profile outcome could not be verified. Refresh profiles before retrying.',
+  'Custom profile outcome could not be verified. No profile was adopted; refresh profiles before retrying.',
+  'Choose a new name; the existing profile was not changed.',
   "String(data.user_id || '') !== authority.userId",
   "String(data.name || '') !== requestedProfileName",
   'returnedProfileId !== returnedProfileId.toLowerCase()',
@@ -176,6 +190,7 @@ check(!spirit.includes("import('../../../../lib/memoryService')"), 'Spirit artif
 check(!spirit.includes('.ilike('), 'Spirit never aliases a live session to a public row by mutable display name');
 check(!spirit.includes('updateAgentSpirit('), 'Spirit never accepts a zero-row public assignment helper as success');
 check(!spirit.includes(".from('custom_agent_profiles')\n        .delete()"), 'Spirit profile deletion cannot bypass the guarded RPC');
+check(!spirit.includes(".from('custom_agent_profiles').upsert("), 'Spirit Save As cannot overwrite an existing custom profile');
 check(!spirit.includes('window.alert(`Failed to save profile: ${error.message}`)'), 'Spirit never exposes raw profile persistence errors to the user');
 check(
   spirit.indexOf('deleteUnreferencedCustomAgentProfileExact(') < spirit.indexOf('setCustomProfiles(prev => prev.filter'),

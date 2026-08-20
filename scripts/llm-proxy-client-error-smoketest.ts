@@ -56,6 +56,14 @@ async function main(): Promise<void> {
   check(unreadableRecovery?.providerId === 'anthropic' && unreadableRecovery.itemId === 'anthropic', 'unreadable recovery targets the Anthropic Marketplace item');
   check(!shouldRetryLLMProxyFailure(details), 'missing credentials are not retried');
   check(!shouldRetryLLMProxyFailure(unreadable), 'unreadable credentials are not retried');
+  const rejected = normalizeLLMProxyErrorPayload({
+    code: 'provider_credential_rejected',
+    error: 'The provider rejected this credential.',
+  }, 'fallback', 502, 'openai');
+  const rejectedRecovery = getLLMProxyCredentialRecoveryPresentation(rejected);
+  check(rejectedRecovery?.message.includes('saved OpenAI credential was rejected'), 'provider 401/403 maps to bounded reconnect guidance');
+  check(rejectedRecovery?.actionLabel === 'Reconnect OpenAI', 'rejected credentials expose the exact safe Marketplace repair');
+  check(!shouldRetryLLMProxyFailure(rejected), 'provider-rejected credentials are not retried in the same turn');
   check(!shouldRetryLLMProxyFailure({ code: 'validation', status: 400 }), 'validation failures are not retried');
   check(shouldRetryLLMProxyFailure({ status: 429 }), 'rate limits permit one bounded retry');
   check(shouldRetryLLMProxyFailure({ code: 'upstream_error', status: 502 }), 'upstream failures permit one bounded retry');

@@ -51,9 +51,17 @@ const files = [join(repoRoot, 'App.tsx'), ...sourceFiles(join(repoRoot, 'src'))]
 const sources = files.map((path) => ({ path, source: readFileSync(path, 'utf8') }));
 const modalFiles = sources.filter(({ source }) => modalPrimitiveOccurrences(source) > 0);
 const modalCount = modalFiles.reduce((total, { source }) => total + modalPrimitiveOccurrences(source), 0);
-const fadeCount = modalFiles.reduce((total, { source }) => total + occurrences(source, 'animationType="fade"'), 0);
+const reducedMotionSafeFadePattern = /animationType=\{\s*\w+\s*\?\s*['"]none['"]\s*:\s*['"]fade['"]\s*\}/g;
+const compliantMotionOccurrences = (source: string): number => (
+  occurrences(source, 'animationType="fade"')
+  + (source.match(reducedMotionSafeFadePattern)?.length || 0)
+);
+const compliantMotionCount = modalFiles.reduce(
+  (total, { source }) => total + compliantMotionOccurrences(source),
+  0,
+);
 const nonFadeFiles = modalFiles
-  .filter(({ source }) => modalPrimitiveOccurrences(source) !== occurrences(source, 'animationType="fade"'))
+  .filter(({ source }) => modalPrimitiveOccurrences(source) !== compliantMotionOccurrences(source))
   .map(({ path }) => path.replace(`${repoRoot}/`, ''));
 const directionalMotionFiles = modalFiles
   .filter(({ source }) => /animationType\s*=\s*["'](?:slide|none)["']/.test(source))
@@ -61,8 +69,8 @@ const directionalMotionFiles = modalFiles
 
 assert(modalCount > 0, 'the source inventory finds product Modal primitives');
 assert(
-  fadeCount === modalCount,
-  `all ${modalCount} product Modal primitives explicitly use fade${nonFadeFiles.length ? `; mismatches: ${nonFadeFiles.join(', ')}` : ''}`,
+  compliantMotionCount === modalCount,
+  `all ${modalCount} product Modal primitives use fade, with an optional reduced-motion static state${nonFadeFiles.length ? `; mismatches: ${nonFadeFiles.join(', ')}` : ''}`,
 );
 assert(
   directionalMotionFiles.length === 0,

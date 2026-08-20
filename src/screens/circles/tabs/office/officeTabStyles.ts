@@ -500,7 +500,7 @@ export const styles = StyleSheet.create({
     zIndex: 40,
     overflow: 'visible',
   },
-  floorList: { gap: 4, flexDirection: 'row', alignItems: 'center' },
+  floorList: { gap: 4, flexDirection: 'row', alignItems: 'center', minHeight: 32 },
   barActions: { flexDirection: 'row', alignItems: 'center', gap: 5, flexShrink: 0, zIndex: 50, overflow: 'visible' },
   officeDashboardPanels: {
     flexDirection: 'row',
@@ -525,14 +525,14 @@ export const styles = StyleSheet.create({
   },
   floorChip: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
-    paddingHorizontal: 8, paddingVertical: 4,
+    height: 32, paddingHorizontal: 9, paddingVertical: 0, justifyContent: 'center',
     borderRadius: 5, borderWidth: 1, borderColor: '#2a2a2a', backgroundColor: '#000000',
   },
   floorChipActive: {
     borderColor: '#ffffff30', backgroundColor: '#ffffff10',
   },
   floorChipText: {
-    fontSize: 11, color: '#888', fontFamily: 'monospace', fontWeight: '600',
+    maxWidth: 180, fontSize: 11, lineHeight: 16, color: '#888', fontFamily: 'monospace', fontWeight: '600',
   },
   floorChipTextActive: {
     color: '#fff', fontWeight: '700',
@@ -556,8 +556,9 @@ export const styles = StyleSheet.create({
     fontFamily: 'monospace',
   },
   floorAddBtn: {
-    paddingHorizontal: 12, paddingVertical: 5,
-    borderRadius: 6, borderWidth: 1, borderColor: '#6366f130', backgroundColor: '#6366f115',
+    height: 32, paddingHorizontal: 10, paddingVertical: 0,
+    alignItems: 'center', justifyContent: 'center',
+    borderRadius: 5, borderWidth: 1, borderColor: '#6366f130', backgroundColor: '#6366f115',
   },
   floorAddBtnText: {
     fontSize: 11, color: '#6366f1', fontFamily: 'monospace', fontWeight: '700', letterSpacing: 1,
@@ -644,12 +645,37 @@ export const styles = StyleSheet.create({
   editScrollArrowText: {
     fontSize: 22, fontWeight: '700' as const,
   },
-  floorChipWrap: { position: 'relative', flexDirection: 'row', alignItems: 'center', gap: 2, marginRight: 6 },
-  floorChipWithDelete: { paddingRight: 28 },
+  floorChipWrap: { position: 'relative', flexDirection: 'row', alignItems: 'stretch', height: 32, gap: 2, marginRight: 6 },
+  floorRenameInput: {
+    minWidth: 130,
+    height: 30,
+    color: '#f8fafc',
+    fontFamily: 'monospace',
+    fontSize: 11,
+    paddingHorizontal: 6,
+    paddingVertical: 0,
+  },
+  floorInlineActionBtn: {
+    width: 32,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  floorRenameBtn: {
+    width: 32,
+    height: 32,
+    marginLeft: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: '#334155',
+    backgroundColor: '#050505',
+  },
   floorDeleteBtn: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
+    width: 32,
+    height: 32,
+    borderRadius: 5,
     backgroundColor: '#160b0b',
     borderWidth: 1,
     borderColor: '#ef444455',
@@ -658,7 +684,7 @@ export const styles = StyleSheet.create({
     zIndex: 5,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
-  floorDeleteBtnText: { fontSize: 10, color: '#ef4444', fontWeight: '800', lineHeight: 20 },
+  floorDeleteBtnText: { fontSize: 10, color: '#ef4444', fontWeight: '800', lineHeight: 16 },
   clearBtn: {
     marginTop: 6, paddingVertical: 4, paddingHorizontal: 10, borderRadius: 4,
     backgroundColor: '#ffffff10', alignSelf: 'flex-start',

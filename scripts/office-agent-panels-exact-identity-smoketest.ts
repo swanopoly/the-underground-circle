@@ -7,6 +7,7 @@ const overview = read('src/screens/circles/tabs/office/AgentOverviewPanel.tsx');
 const terminal = read('src/screens/circles/tabs/office/AgentTerminalPanels.tsx');
 const memory = read('src/screens/circles/tabs/office/AgentMemoryPanel.tsx');
 const spirit = read('src/screens/circles/tabs/office/AgentSpiritPanel.tsx');
+const customProfileMigration = read('supabase/migrations/20260327_custom_agent_profiles.sql');
 
 let assertions = 0;
 function check(condition: unknown, message: string): void {
@@ -31,7 +32,17 @@ check(
   'panel-shell rename fails closed without live exact authority or a complete durable receipt',
 );
 
-check(overview.includes('loadAgentIdentitiesExact(exactIdentityAuthority)'), 'Overview reads the exact identity cache');
+check(
+  overview.includes('refreshAgentIdentitiesFromServerExact(\n      exactIdentityAuthority,\n      isIdentityAuthorityCurrent,')
+    && overview.includes('const identity = serverResult.identities.get(sessionKey);'),
+  'Overview adopts the read-only count-complete server snapshot directly',
+);
+check(
+  overview.includes('if (!serverResult.serverVerified)')
+    && !overview.includes('new Map(localIdentities)')
+    && !overview.includes('syncAgentIdentitiesFromServerExact('),
+  'Overview treats durable absence as verified false instead of merging a stale local primary flag',
+);
 check(
   !overview.includes('renameAgentExact')
     && !overview.includes('onRenameAgent')
@@ -60,7 +71,17 @@ check(
 );
 check(overview.includes('isParentIdentityAuthorityCurrent(authority)'), 'Overview composes its local request fence with the parent authority lifecycle');
 
-check(terminal.includes('loadAgentIdentitiesExact(exactIdentityAuthority)'), 'Terminal profile reads exact-scoped identity data');
+check(
+  terminal.includes('refreshAgentIdentitiesFromServerExact(\n      exactIdentityAuthority,\n      isIdentityAuthorityCurrent,')
+    && terminal.includes('const identity = serverResult.identities.get(identityKey);'),
+  'Terminal profile adopts the read-only count-complete server snapshot directly',
+);
+check(
+  terminal.includes('if (!serverResult.serverVerified)')
+    && !terminal.includes('new Map(localIdentities)')
+    && !terminal.includes('syncAgentIdentitiesFromServerExact('),
+  'Terminal treats durable absence as an empty default profile instead of merging stale local configuration',
+);
 check(terminal.includes('updateAgentIdentityExact(identityKey'), 'Terminal profile writes with captured exact authority');
 check(!/\bloadAgentIdentities\(/.test(terminal), 'Terminal profile has no ownerless identity read');
 check(!/\bupdateAgentIdentity\(/.test(terminal), 'Terminal profile has no ownerless identity write');
@@ -92,8 +113,13 @@ check(memory.includes('identityAuthority: AgentMemoryPanelAuthority | null'), 'M
 check(memory.includes('isIdentityAuthorityCurrent: AgentMemoryPanelAuthorityFence'), 'Memory requires a lifecycle fence');
 check(memory.includes(".setHeader('Authorization', bearer)"), 'Memory reads bind the captured bearer');
 check(memory.includes('if (result.error) throw result.error'), 'Memory propagates read failures instead of converting them to empty state');
-check(memory.includes('The memory change did not return exactly one receipt.'), 'Memory mutations require exactly one row receipt');
-check(memory.includes(".eq('circle_id', authority.circleId)") && memory.includes(".eq('user_id', authority.userId)"), 'Memory writes bind exact circle and owner filters');
+check(
+  memory.includes('executeAgentMemoryCasMutation(')
+    && memory.includes(".eq('updated_at', exactRequest.expectedUpdatedAt)")
+    && memory.includes(".select('*')"),
+  'Memory mutations require an exact-version one-row postcondition receipt',
+);
+check(memory.includes(".eq('circle_id', exactRequest.circleId)") && memory.includes(".eq('user_id', exactRequest.userId)"), 'Memory writes bind exact circle and owner filters');
 check(!memory.includes("import('../../../../lib/agentMemory')") && !memory.includes("import('../../../../lib/memoryActions')"), 'Memory has no ambient mutation helper path');
 check(memory.includes('onOpenInChat(request.slice(0, 3_500))'), 'new Memory and instruction drafts continue through canonical Chat');
 check(!memory.includes('<ScrollView'), 'Memory leaves vertical scrolling to the panel shell');
@@ -113,6 +139,40 @@ check(spirit.includes('spiritAssignmentBusyRef.current') && spirit.includes('dis
 check(spirit.includes('receipt.serverSaved === true && !receipt.localSaved') && spirit.includes('Spirit was saved on the server, but this view could not refresh'), 'Spirit preserves a durable-server/local-refresh partial outcome without false failure copy');
 check(spirit.includes("receipt.error === 'outcome_unknown'") && spirit.includes('Refresh this Spirit before retrying.') && spirit.includes('Refresh profiles before retrying.'), 'Spirit and profile deletion preserve an unverifiable 2xx outcome without blind replay copy');
 check(spirit.includes("String(data.user_id || '') !== authority.userId") && spirit.includes("String(data.name || '') !== requestedProfileName"), 'Spirit adopts a saved profile only from an exact owner/name receipt');
+const saveAsNameStart = spirit.indexOf('const requestedProfileName = saveProfileName.trim();');
+const saveAsStart = spirit.lastIndexOf('onPress={async () => {', saveAsNameStart);
+const saveAsEnd = spirit.indexOf('disabled={savingProfile}', saveAsStart);
+const saveAsFlow = spirit.slice(saveAsStart, saveAsEnd);
+check(saveAsStart >= 0 && saveAsEnd > saveAsStart, 'Spirit Save As flow is present in the panel');
+check(
+  saveAsFlow.includes("supabase.from('custom_agent_profiles')\n                                  .insert(expectedProfileReceipt)")
+    && saveAsFlow.includes(".setHeader('Authorization', `Bearer ${authority.accessToken}`)")
+    && saveAsFlow.includes(".select('id, user_id, name, emoji, color, tagline, system_prompt, skill_bundle, risk_tier, action_posture, evidence_posture, communication_density, skepticism, escalation_trigger')"),
+  'Spirit Save As is an exact-authority create that requests a complete receipt',
+);
+check(!saveAsFlow.includes('.upsert(') && !saveAsFlow.includes('onConflict'), 'Spirit Save As cannot overwrite an existing same-name profile');
+check(
+  saveAsFlow.includes('if (!Array.isArray(insertedProfiles) || insertedProfiles.length !== 1)')
+    && saveAsFlow.includes('Object.entries(expectedProfileReceipt).every')
+    && saveAsFlow.indexOf('if (!isIdentityRequestCurrent(capturedRequestKey)) return;') < saveAsFlow.indexOf('const returnedProfileId'),
+  'Spirit Save As requires one exact requested-field receipt behind the current authority fence',
+);
+check(
+  saveAsFlow.includes('if (savingProfileRef.current) return;')
+    && saveAsFlow.includes('savingProfileRef.current = true;')
+    && saveAsFlow.includes('const savingToken = savingProfileTokenRef.current + 1;')
+    && saveAsFlow.includes('if (savingProfileTokenRef.current === savingToken)')
+    && spirit.includes('savingProfileTokenRef.current += 1;\n    savingProfileRef.current = false;'),
+  'Spirit Save As is single-flight and retires busy ownership across identity scopes',
+);
+check(
+  saveAsFlow.includes("errorCode === '23505'")
+    && saveAsFlow.includes('Choose a new name; the existing profile was not changed.')
+    && !saveAsFlow.includes('setProfileActionStatus(error')
+    && !saveAsFlow.includes('setProfileActionStatus(error.'),
+  'Spirit Save As turns duplicate-name conflicts into non-destructive guidance without raw backend copy',
+);
+check(/UNIQUE\s*\(\s*user_id\s*,\s*name\s*\)/i.test(customProfileMigration), 'concurrent same-owner/name inserts are database-enforced create-only conflicts');
 check(spirit.includes('isIdentityAuthorityCurrent(current)'), 'Spirit fences late results against the current authority generation');
 check(spirit.includes('setCustomProfiles([])') && spirit.includes("setSoulText('')"), 'Spirit clears private state when its exact scope changes');
 check(spirit.includes("useState<'loading' | 'ready' | 'error'>('loading')") && spirit.includes('Retry loading verified Spirit identity'), 'Spirit distinguishes verified empty identity from retryable load failure');

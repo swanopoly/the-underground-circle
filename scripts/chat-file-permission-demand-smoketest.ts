@@ -10,14 +10,14 @@ const chatTabSource = readFileSync(
 );
 
 const componentStart = chatTabSource.indexOf('export default function ChatTab');
-const marketplaceState = chatTabSource.indexOf(
-  'const [marketplaceModelGroups, setMarketplaceModelGroups]',
+const modelCatalogStateBoundary = chatTabSource.indexOf(
+  'const modelCatalogGenerationRef = useRef(0);',
   componentStart,
 );
 assert(componentStart >= 0, 'ChatTab component is present');
-assert(marketplaceState > componentStart, 'ChatTab mount-state boundary is present');
+assert(modelCatalogStateBoundary > componentStart, 'ChatTab mount-state boundary is present');
 
-const mountStateSection = chatTabSource.slice(componentStart, marketplaceState);
+const mountStateSection = chatTabSource.slice(componentStart, modelCatalogStateBoundary);
 assert.doesNotMatch(
   mountStateSection,
   /requestLocalFileSessionGrant|getActiveLocalFileSessionGrant|inferLocalFileGrantRootsForTask/,

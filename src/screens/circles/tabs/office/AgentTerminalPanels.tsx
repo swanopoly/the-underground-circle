@@ -4,8 +4,7 @@ import { MONO } from './AgentPanelShared';
 import { OfficeAgent } from '../../../../lib/officeAgents';
 import {
   getAgentIdentityKey,
-  loadAgentIdentitiesExact,
-  syncAgentIdentitiesFromServerExact,
+  refreshAgentIdentitiesFromServerExact,
   updateAgentIdentityExact,
   type TerminalAgentOfficeConfig,
   type TerminalLaunchMode,
@@ -341,24 +340,22 @@ export function AgentTerminalProfilePanel({
     const capturedRequestKey = identityRequestKey;
     const capturedAuthority = exactIdentityAuthority;
     setProfileLoadState('loading');
-    Promise.all([
-      loadAgentIdentitiesExact(exactIdentityAuthority),
-      syncAgentIdentitiesFromServerExact(exactIdentityAuthority),
-    ])
-      .then(([localIdentities, serverResult]) => {
+    refreshAgentIdentitiesFromServerExact(
+      exactIdentityAuthority,
+      isIdentityAuthorityCurrent,
+    )
+      .then(serverResult => {
         if (
           cancelled
           || !isIdentityAuthorityCurrent(capturedAuthority)
           || latestIdentityRequestKeyRef.current !== capturedRequestKey
           || latestIdentityAccessTokenRef.current !== capturedAuthority.accessToken
         ) return;
-        if (!serverResult.ok) {
+        if (!serverResult.serverVerified) {
           setProfileLoadState('error');
           return;
         }
-        const identities = new Map(localIdentities);
-        for (const [key, identity] of serverResult.identities) identities.set(key, identity);
-        const identity = identities.get(identityKey);
+        const identity = serverResult.identities.get(identityKey);
         setConfig({
           defaultCwd: identity?.terminalConfig?.defaultCwd ?? agent.projectDir ?? '',
           defaultModel: identity?.terminalConfig?.defaultModel ?? identity?.boundModel ?? (agent.model && agent.model !== 'unknown' ? agent.model : ''),

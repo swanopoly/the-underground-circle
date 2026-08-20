@@ -12,6 +12,7 @@ export default function AgentActivityPanel({ agent, statusColor, statusLabel }: 
 }) {
   const [inspectOpen, setInspectOpen] = useState(false);
   const executionTruth = resolveOfficeAgentExecutionTruth(agent);
+  const liveExecutionEvidence = executionTruth.state === 'active';
   const sessionKey = getAgentIdentityKey(agent);
   const sessionInfo = [
     { label: 'Session ID', value: sessionKey || agent.id },
@@ -117,7 +118,7 @@ export default function AgentActivityPanel({ agent, statusColor, statusLabel }: 
         </View>
       </View>
 
-      {((agent.recentToolCalls?.length || 0) > 0 || agent.recentActions.length > 0) && (
+      {liveExecutionEvidence && ((agent.recentToolCalls?.length || 0) > 0 || agent.recentActions.length > 0) && (
         <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 12 }}>
           <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 10 }}>TOOL EXECUTION</Text>
           {(agent.recentToolCalls?.length || 0) > 0 ? (
@@ -147,7 +148,7 @@ export default function AgentActivityPanel({ agent, statusColor, statusLabel }: 
         </View>
       )}
 
-      {(agent.activeFiles?.length || 0) > 0 && (
+      {liveExecutionEvidence && (agent.activeFiles?.length || 0) > 0 && (
         <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 12 }}>
           <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 10 }}>ACTIVE FILES</Text>
           {agent.activeFiles!.map((file, index) => (
