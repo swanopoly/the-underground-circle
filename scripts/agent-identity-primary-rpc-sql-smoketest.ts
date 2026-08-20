@@ -181,13 +181,18 @@ for (const marker of [
   ".rpc('set_main_agent_for_provider_v1'",
   'p_session_key: normalizedSessionKey',
   'p_provider_type: normalizedProviderType',
-  ".setHeader('Authorization', `Bearer ${verifiedAuthority.accessToken}`)",
+  'const exactClient = getSupabaseClientForAccessToken(verifiedAuthority.accessToken);',
+  'const response = await exactClient',
   'parseAgentIdentityPrimaryRpcReceipt(',
   "error: 'mutation_superseded'",
   'publishCurrentAgentIdentityServerTruthExact(',
 ]) {
   check(exactPrimary.includes(marker), `exact runtime pins ${marker}`);
 }
+check(
+  !exactPrimary.includes('.setHeader(') && !/\bsupabase\s*\./u.test(exactPrimary),
+  'primary-agent RPC cannot dispatch through the shared client or mutate request headers',
+);
 check(
   (exactPrimary.match(/isAgentIdentityExactAuthorityCurrent\(/gu) || []).length >= 6,
   'generation fence surrounds verification, RPC, receipt, and publication handoff',
@@ -288,8 +293,9 @@ const roadmapSection47 = roadmap
   .split(/\r?\n/u)
   .find(line => line.startsWith('| 47 | Transactional primary-agent identity selection'));
 check(
-  roadmapSection47?.includes('**Pending / not applied.**'),
-  'roadmap separates source proof from live deployment proof',
+  roadmapSection47?.includes('**Applied / catalog-verified 2026-08-20.**')
+    && roadmapSection47.includes('Authenticated remote two-tab contention and account-switch canaries remain pending.'),
+  'roadmap records catalog-verified deployment while keeping authenticated canaries pending',
 );
 
 console.log(`Agent identity primary RPC SQL smoke passed (${assertions} assertions).`);

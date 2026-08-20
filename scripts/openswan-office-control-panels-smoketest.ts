@@ -194,7 +194,10 @@ check(
     && frontend.includes('!userId')
     && frontend.includes('isBlackSwanRuntime')
     && frontend.includes('hasCurrentPanelAuthority(identityAuthority, isIdentityAuthorityCurrent)')
-    && frontend.includes('loadOfficeConnectionsExact(identityAuthority, isIdentityAuthorityCurrent)')
+    && frontend.includes('loadPanelOpenSwanConfigExact(')
+    && gatewayPanels.includes('loadOfficeConnectionsExact(identityAuthority, isIdentityAuthorityCurrent)')
+    && gatewayPanels.includes('matchesOpenSwanConnectionFingerprint(runtimeConnectionSnapshot, storedConnection)')
+    && gatewayPanels.includes("const liveExactConnection: AgentConnection = { ...storedConnection, status: 'connected' };")
     && frontend.includes('getUserCircleAgentsExact(circleId, capturedAuthority)')
     && frontend.includes('readOfficeAgentSessionBindingsBatch(')
     && frontend.includes('capturedAuthority,')
@@ -342,9 +345,10 @@ check(
   spiritPanel.includes("if (publishedDbAgentId) {")
     && spiritPanel.includes(".eq('id', publishedDbAgentId)")
     && spiritPanel.includes(".eq('owner_id', authority.userId)")
-    && spiritPanel.includes(".setHeader('Authorization', `Bearer ${authority.accessToken}`)")
+    && spiritPanel.includes('getSupabaseClientForAccessToken(authority.accessToken)')
+    && !spiritPanel.includes('.setHeader(')
     && !spiritPanel.includes('useEffect(() => {\n    ensureDbAgent();'),
-  'Spirit resolves published agents by exact owner-scoped UUID and never auto-creates one on mount',
+  'Spirit resolves published agents by exact owner-scoped UUID through pinned authority and never auto-creates one on mount',
 );
 check(
   templatesPanel.includes('if (error) throw error;')

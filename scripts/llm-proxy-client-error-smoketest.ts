@@ -2,6 +2,8 @@
 
 import {
   getLLMProxyCredentialRecoveryPresentation,
+  getLLMProxyProviderAvailabilityPresentation,
+  getLLMProxyProviderQuarantineKind,
   LLMProxyInvocationError,
   normalizeLLMProxyErrorPayload,
   normalizeLLMProxyErrorResponseText,
@@ -56,6 +58,15 @@ async function main(): Promise<void> {
   check(unreadableRecovery?.providerId === 'anthropic' && unreadableRecovery.itemId === 'anthropic', 'unreadable recovery targets the Anthropic Marketplace item');
   check(!shouldRetryLLMProxyFailure(details), 'missing credentials are not retried');
   check(!shouldRetryLLMProxyFailure(unreadable), 'unreadable credentials are not retried');
+  const passiveCatalogUnreadable = normalizeLLMProxyErrorPayload({
+    status: 'unavailable',
+    provider: 'hostile-provider',
+    models: [],
+    code: 'credential_unreadable',
+    error: 'Reconnect the saved provider credential.',
+  }, 'fallback', undefined, 'openai');
+  check(passiveCatalogUnreadable.code === 'credential_unreadable' && passiveCatalogUnreadable.status === undefined, 'handled list_models HTTP 200 envelope preserves stable non-ready code without inventing an error status');
+  check(passiveCatalogUnreadable.provider === 'openai' && !shouldRetryLLMProxyFailure(passiveCatalogUnreadable), 'handled catalog failure stays exact-provider and non-retryable');
   const rejected = normalizeLLMProxyErrorPayload({
     code: 'provider_credential_rejected',
     error: 'The provider rejected this credential.',
@@ -64,6 +75,18 @@ async function main(): Promise<void> {
   check(rejectedRecovery?.message.includes('saved OpenAI credential was rejected'), 'provider 401/403 maps to bounded reconnect guidance');
   check(rejectedRecovery?.actionLabel === 'Reconnect OpenAI', 'rejected credentials expose the exact safe Marketplace repair');
   check(!shouldRetryLLMProxyFailure(rejected), 'provider-rejected credentials are not retried in the same turn');
+  const billingUnavailable = normalizeLLMProxyErrorPayload({
+    code: 'provider_billing_unavailable',
+    error: 'The selected provider account has no available billing capacity.',
+  }, 'fallback', 502, 'openrouter');
+  const billingPresentation = getLLMProxyProviderAvailabilityPresentation(billingUnavailable);
+  check(billingUnavailable.code === 'provider_billing_unavailable' && billingUnavailable.provider === 'openrouter', 'preserves the exact provider billing refusal');
+  check(billingPresentation?.message.includes('OpenRouter') && billingPresentation.message.includes('No other provider was tried in this turn'), 'billing refusal copy preserves no-same-turn-replay truth');
+  check(billingPresentation?.providerId === 'openrouter', 'billing refusal keeps the exact safe provider scope');
+  check(getLLMProxyCredentialRecoveryPresentation(billingUnavailable) === null, 'valid-but-unfunded provider is not mislabeled as a credential reconnect');
+  check(getLLMProxyProviderQuarantineKind(billingUnavailable) === 'billing', 'billing refusal receives a finite provider quarantine kind');
+  check(getLLMProxyProviderQuarantineKind(rejected) === 'credential', 'rejected keys retain key-change quarantine semantics');
+  check(!shouldRetryLLMProxyFailure(billingUnavailable), 'provider billing refusal is never retried in the same turn');
   check(!shouldRetryLLMProxyFailure({ code: 'validation', status: 400 }), 'validation failures are not retried');
   check(shouldRetryLLMProxyFailure({ status: 429 }), 'rate limits permit one bounded retry');
   check(shouldRetryLLMProxyFailure({ code: 'upstream_error', status: 502 }), 'upstream failures permit one bounded retry');

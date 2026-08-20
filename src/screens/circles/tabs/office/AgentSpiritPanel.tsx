@@ -37,7 +37,7 @@ import {
   loadCircleSiteCredentialsExact,
   loadSiteCredentialsExact,
 } from '../../../../lib/siteAutomation';
-import { supabase } from '../../../../lib/supabase';
+import { getSupabaseClientForAccessToken } from '../../../../lib/supabase';
 import { isUuidLike } from '../../../../lib/agentRuntimeSubject';
 
 export type AgentSpiritPanelAuthority = OfficeConnectionExactAuthority;
@@ -68,6 +68,11 @@ type WordPressReadiness = {
   username?: string | null;
   label?: string | null;
 };
+
+// One absolute budget owns auth verification plus every sequential Spirit
+// snapshot query. A stalled tab, auth request, or PostgREST socket must yield a
+// retryable error state instead of pinning the entire lazy route on a spinner.
+const SPIRIT_SNAPSHOT_TIMEOUT_MS = 8_000;
 
 function oneOf<T extends string>(value: unknown, options: readonly T[], fallback: T): T {
   return typeof value === 'string' && options.includes(value as T) ? value as T : fallback;
@@ -244,17 +249,17 @@ export default function AgentSpiritPanel({
     if (dbAgentId) return dbAgentId;
     const authority = exactIdentityAuthority;
     const capturedRequestKey = identityRequestKey;
-    if (!agent || !circleId || !authority || !capturedRequestKey || !publishedDbAgentId) return null;
+    if (!circleId || !authority || !capturedRequestKey || !publishedDbAgentId) return null;
     // Only an already-published row is eligible for a shared Office Spirit
     // projection. A live session keeps its Spirit in the exact identity store;
     // editing this panel never name-matches or creates a public agent row.
-    const { data, error } = await supabase
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+    const { data, error } = await exactClient
       .from('circle_office_agents')
       .select('id, spirit, spirit_emoji')
       .eq('id', publishedDbAgentId)
       .eq('circle_id', circleId)
       .eq('owner_id', authority.userId)
-      .setHeader('Authorization', `Bearer ${authority.accessToken}`)
       .maybeSingle();
     if (
       error
@@ -265,7 +270,7 @@ export default function AgentSpiritPanel({
     setDbAgentLink({ agentKey: stableSessionKey, dbAgentId: data.id });
     setCurrentSpirit(data.spirit || null);
     return data.id;
-  }, [agent, circleId, dbAgentId, exactIdentityAuthority, identityRequestKey, isIdentityRequestCurrent, publishedDbAgentId, stableSessionKey]);
+  }, [circleId, dbAgentId, exactIdentityAuthority, identityRequestKey, isIdentityRequestCurrent, publishedDbAgentId, stableSessionKey]);
 
   const persistIdentityPatch = useCallback(async (updates: Partial<AgentIdentity>): Promise<boolean> => {
     const authority = exactIdentityAuthority;
@@ -395,29 +400,38 @@ export default function AgentSpiritPanel({
   useEffect(() => {
     const authority = exactIdentityAuthority;
     const capturedRequestKey = identityRequestKey;
-    if (!agent || !circleId || !authority || !capturedRequestKey) {
+    if (!circleId || !authority || !capturedRequestKey) {
       setSpiritSnapshotState('error');
       return;
     }
     const agentKey = stableSessionKey;
     let cancelled = false;
+    const snapshotController = new AbortController();
+    const snapshotDeadline = setTimeout(
+      () => snapshotController.abort(),
+      SPIRIT_SNAPSHOT_TIMEOUT_MS,
+    );
     (async () => {
       setSpiritSnapshotState('loading');
       setSoulStatus('');
       try {
-        const identityResult = await syncAgentIdentitiesFromServerExact(authority);
+        const snapshotClient = getSupabaseClientForAccessToken(authority.accessToken);
+        const identityResult = await syncAgentIdentitiesFromServerExact(authority, {
+          fence: isIdentityAuthorityCurrent,
+          signal: snapshotController.signal,
+        });
         if (cancelled || !isIdentityRequestCurrent(capturedRequestKey)) return;
         if (!identityResult.ok) throw new Error('identity snapshot unavailable');
 
         let publishedRow: any = null;
         if (publishedDbAgentId) {
-          const { data, error } = await supabase
+          const { data, error } = await snapshotClient
             .from('circle_office_agents')
             .select('id, circle_id, owner_id, spirit, spirit_emoji')
             .eq('id', publishedDbAgentId)
             .eq('circle_id', circleId)
             .eq('owner_id', authority.userId)
-            .setHeader('Authorization', `Bearer ${authority.accessToken}`)
+            .abortSignal(snapshotController.signal)
             .maybeSingle();
           if (
             error
@@ -429,12 +443,12 @@ export default function AgentSpiritPanel({
           publishedRow = data;
         }
 
-        const { data: profiles, error: profilesError } = await supabase
+        const { data: profiles, error: profilesError } = await snapshotClient
           .from('custom_agent_profiles')
           .select('*')
           .eq('user_id', authority.userId)
           .order('name')
-          .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+          .abortSignal(snapshotController.signal);
         if (
           profilesError
           || !Array.isArray(profiles)
@@ -445,13 +459,13 @@ export default function AgentSpiritPanel({
         const identity = identityResult.identities.get(stableSessionKey);
         let verifiedSoul = identity?.soulPrompt?.trim() || '';
         if (!verifiedSoul) {
-          const { data: defaultData, error: defaultError } = await supabase
+          const { data: defaultData, error: defaultError } = await snapshotClient
             .from('agent_personalities')
             .select('personality')
             .eq('user_id', authority.userId)
             .eq('circle_id', circleId)
             .eq('agent_name', 'default')
-            .setHeader('Authorization', `Bearer ${authority.accessToken}`)
+            .abortSignal(snapshotController.signal)
             .maybeSingle();
           if (defaultError) {
             setSoulStatus('Default Soul fallback could not be verified. Agent-specific Spirit data is still current.');
@@ -468,10 +482,16 @@ export default function AgentSpiritPanel({
       } catch {
         if (cancelled || !isIdentityRequestCurrent(capturedRequestKey)) return;
         setSpiritSnapshotState('error');
+      } finally {
+        clearTimeout(snapshotDeadline);
       }
     })();
-    return () => { cancelled = true; };
-  }, [agent, circleId, exactIdentityAuthority, identityRequestKey, isIdentityRequestCurrent, publishedDbAgentId, spiritSnapshotReload, stableSessionKey]);
+    return () => {
+      cancelled = true;
+      clearTimeout(snapshotDeadline);
+      snapshotController.abort();
+    };
+  }, [circleId, exactIdentityAuthority, identityRequestKey, isIdentityAuthorityCurrent, isIdentityRequestCurrent, publishedDbAgentId, spiritSnapshotReload, stableSessionKey]);
 
   useEffect(() => {
     const capturedRequestKey = identityRequestKey;
@@ -1212,9 +1232,9 @@ export default function AgentSpiritPanel({
                                   emoji: selectedSpirit.emoji || '🤖', color: selectedSpirit.color || '#6366f1',
                                   tagline: `Custom ${s.name} profile`,
                                 };
-                                const { data: insertedProfiles, error } = await supabase.from('custom_agent_profiles')
+                                const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+                                const { data: insertedProfiles, error } = await exactClient.from('custom_agent_profiles')
                                   .insert(expectedProfileReceipt)
-                                  .setHeader('Authorization', `Bearer ${authority.accessToken}`)
                                   .select('id, user_id, name, emoji, color, tagline, system_prompt, skill_bundle, risk_tier, action_posture, evidence_posture, communication_density, skepticism, escalation_trigger');
                                 if (!isIdentityRequestCurrent(capturedRequestKey)) return;
                                 if (error) {
@@ -1299,7 +1319,7 @@ export default function AgentSpiritPanel({
             );
           })()}
 
-          {(customProfiles.length > 0 || profileActionStatus) && (
+          {(customProfiles.length > 0 || Boolean(profileActionStatus)) && (
             <View style={{ marginBottom: 10 }}>
               <Text style={[styles.spiritCatLabel, { color: '#22c55e' }]}>Your Custom Profiles</Text>
               {customProfiles.length > 0 ? (

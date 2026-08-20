@@ -146,6 +146,7 @@ import { resolveModelRouteIdentity, resolveModelSelectionReadiness } from '../..
 import { prettyProviderName } from '../../../lib/modelRouteExplainCore';
 import { getModelCapabilityFlags } from '../../../lib/modelCapabilities';
 import {
+  CHAT_BILLING_PROVIDER_COOLDOWN_MS,
   CHAT_TRANSIENT_PROVIDER_COOLDOWN_MS,
   classifyProviderFreeChatTurn,
   collectActiveChatProviderQuarantines,
@@ -471,6 +472,8 @@ import {
 import { autoModelDisplayName } from '../../../lib/chatModelDisplayCore';
 import {
   getLLMProxyCredentialRecoveryPresentation,
+  getLLMProxyProviderAvailabilityPresentation,
+  getLLMProxyProviderQuarantineKind,
   LLMProxyInvocationError,
 } from '../../../lib/llmProxyErrorCore';
 import { decayMemoryImportance, pinMemory, promoteMemory, recordMemoryFeedback, softDeleteMemory } from '../../../lib/memoryActions';
@@ -731,6 +734,17 @@ function buildPlainChatFailurePresentation(
       message: credentialRecovery.message,
       quickReplies: [credentialRecovery.actionLabel],
       quickRepliesLabel: 'Fix model connection',
+    };
+  }
+  const providerAvailability = error instanceof LLMProxyInvocationError
+    ? getLLMProxyProviderAvailabilityPresentation(error)
+    : null;
+  if (providerAvailability) {
+    return {
+      message: providerAvailability.message,
+      // Retrying the original request must remain an explicit new turn. A
+      // generic quick-reply string would send different text, not replay it.
+      quickReplies: [],
     };
   }
   return {
@@ -2449,7 +2463,7 @@ export default function ChatTab({
   const readyMarketplaceModelGroups = modelCatalogIsCurrentReady ? marketplaceModelGroups : [];
   const [modelProviderRefreshToken, setModelProviderRefreshToken] = useState(0);
   const forceNextModelCatalogRefreshRef = useRef(false);
-  const retireModelCatalogAfterCredentialFailure = useCallback(() => {
+  const retireModelCatalogAfterProviderFailure = useCallback(() => {
     // The provider just disproved this generation after I/O. Do not replay the
     // failed turn, but make the next turn re-read exact account readiness so a
     // different connected API can be selected pre-dispatch.
@@ -2459,19 +2473,30 @@ export default function ChatTab({
   }, []);
   const quarantineFailedTurnModel = useCallback((
     modelId: string | null | undefined,
-    failureKind: 'credential' | 'transient' = 'transient',
+    failureKind: 'credential' | 'billing' | 'transient' = 'transient',
   ) => {
     const identity = resolveModelRouteIdentity(resolvePlainChatModelRoute(modelId));
     if (identity?.provider) {
       const provider = normalizeConnectedProviderKey(identity.provider);
       const expiresAt = failureKind === 'credential'
         ? Number.POSITIVE_INFINITY
-        : Date.now() + CHAT_TRANSIENT_PROVIDER_COOLDOWN_MS;
+        : Date.now() + (failureKind === 'billing'
+          ? CHAT_BILLING_PROVIDER_COOLDOWN_MS
+          : CHAT_TRANSIENT_PROVIDER_COOLDOWN_MS);
       const previous = failedModelProviderQuarantineRef.current.get(provider) ?? 0;
       failedModelProviderQuarantineRef.current.set(provider, Math.max(previous, expiresAt));
     }
-    retireModelCatalogAfterCredentialFailure();
-  }, [retireModelCatalogAfterCredentialFailure]);
+    retireModelCatalogAfterProviderFailure();
+  }, [retireModelCatalogAfterProviderFailure]);
+  const quarantineTypedLLMProxyFailure = useCallback((
+    modelId: string | null | undefined,
+    error: unknown,
+  ): void => {
+    if (!(error instanceof LLMProxyInvocationError)) return;
+    const failureKind = getLLMProxyProviderQuarantineKind(error);
+    if (!failureKind) return;
+    quarantineFailedTurnModel(modelId, failureKind);
+  }, [quarantineFailedTurnModel]);
   const releaseFailedTurnModelQuarantine = useCallback((modelId: string | null | undefined) => {
     const identity = resolveModelRouteIdentity(resolvePlainChatModelRoute(modelId));
     if (identity?.provider) {
@@ -16188,26 +16213,28 @@ export default function ChatTab({
                   }
                   return;
                 }
-                // A missing or unreadable Marketplace credential is a stable
-                // user-action boundary, not a transient transport failure.
-                // Retrying the same request through llm-proxy/OpenSwan only
-                // repeats the failure and can start an unrelated recovery
-                // agent. Stop here, remove the empty stream bubble, and send
-                // the user directly to the provider connection.
-                const credentialRecovery = streamErr instanceof LLMProxyInvocationError
-                  ? getLLMProxyCredentialRecoveryPresentation(streamErr)
+                // Credential and billing refusals are typed provider
+                // boundaries, not generic transport failures. Never replay
+                // this turn through the batch lane; quarantine only the exact
+                // provider so a new turn may select another ready route.
+                const providerFailureKind = streamErr instanceof LLMProxyInvocationError
+                  ? getLLMProxyProviderQuarantineKind(streamErr)
                   : null;
-                if (credentialRecovery) {
-                  quarantineFailedTurnModel(streamCandidateModel, 'credential');
+                if (providerFailureKind) {
+                  quarantineFailedTurnModel(streamCandidateModel, providerFailureKind);
                   if (streamPendingMsgId) {
                     const orphanId = streamPendingMsgId;
                     setMessages(prev => prev.filter((message) => message.id !== orphanId));
                     if (activeThreadId) void removePendingBotMessage(activeThreadId, orphanId).catch(() => {});
                   }
-                  console.warn('[ChatTab] Model credential needs Marketplace reconnect; automatic fallback suppressed:', streamErr);
-                  addBotMessage(credentialRecovery.message, undefined, {
-                    quickReplies: [credentialRecovery.actionLabel],
-                    quickRepliesLabel: 'Fix model connection',
+                  const failure = buildPlainChatFailurePresentation(
+                    streamErr,
+                    streamCandidateModel || effectiveSelectedModel || 'the selected model',
+                  );
+                  console.warn('[ChatTab] Model provider rejected this turn; same-turn fallback suppressed:', streamErr);
+                  addBotMessage(failure.message, undefined, {
+                    quickReplies: failure.quickReplies,
+                    quickRepliesLabel: failure.quickRepliesLabel,
                     source: {
                       actor: agentName,
                       surface: 'main_chat_plain_model_error',
@@ -16318,16 +16345,15 @@ export default function ChatTab({
                 }
               } catch (plainModelError) {
                 const modelLabel = sendModel || effectiveSelectedModel || 'the selected model';
-                const credentialRecovery = plainModelError instanceof LLMProxyInvocationError
-                  ? getLLMProxyCredentialRecoveryPresentation(plainModelError)
+                const providerFailureKind = plainModelError instanceof LLMProxyInvocationError
+                  ? getLLMProxyProviderQuarantineKind(plainModelError)
                   : null;
                 // Confirmed credential failures remain excluded until the key
-                // changes. Ambiguous network/upstream failures receive only a
-                // short cooldown so a healthy provider cannot be poisoned for
-                // the rest of the mounted session.
+                // changes. Billing refusals receive a longer finite cooldown;
+                // ambiguous network/upstream failures keep the short cooldown.
                 quarantineFailedTurnModel(
                   sendModel || effectiveSelectedModel,
-                  credentialRecovery ? 'credential' : 'transient',
+                  providerFailureKind || 'transient',
                 );
                 const failure = buildPlainChatFailurePresentation(plainModelError, modelLabel);
                 console.warn('[ChatTab] Plain model batch failed:', plainModelError);
@@ -16643,6 +16669,8 @@ export default function ChatTab({
               message: augmentedPrompt,
               originalUserTaskText: content,
               context,
+              exactCircleAuthority: runHistoryExactAuthority,
+              isExactCircleAuthorityCurrent: isRunHistoryExactAuthorityCurrent,
               signal: openSwanController.signal,
               connectedProviders: openSwanDispatchSeal.connectedProviders,
               surface: 'main_chat',
@@ -17015,9 +17043,8 @@ export default function ChatTab({
               modelProviderDispatchStarted
               && sendModel
               && batchErr instanceof LLMProxyInvocationError
-              && getLLMProxyCredentialRecoveryPresentation(batchErr)
             ) {
-              quarantineFailedTurnModel(sendModel, 'credential');
+              quarantineTypedLLMProxyFailure(sendModel, batchErr);
             }
             const batchMessage = batchErr instanceof Error ? batchErr.message : String(batchErr || 'Unknown error');
             const batchStack = batchErr instanceof Error ? batchErr.stack || null : null;
@@ -17139,10 +17166,7 @@ export default function ChatTab({
         const chatErrorMessage = err instanceof Error ? err.message : String(err || 'Unknown error');
         const chatErrorStack = err instanceof Error ? err.stack || null : null;
         if (conversationOnlyTurn) {
-          if (
-            err instanceof LLMProxyInvocationError
-            && getLLMProxyCredentialRecoveryPresentation(err)
-          ) quarantineFailedTurnModel(resolvedTurnModel || effectiveSelectedModel, 'credential');
+          quarantineTypedLLMProxyFailure(resolvedTurnModel || effectiveSelectedModel, err);
           const failure = buildPlainChatFailurePresentation(
             err,
             effectiveSelectedModel || 'the selected model',
@@ -17255,14 +17279,14 @@ export default function ChatTab({
         && stagedFiles.length === 0
         && isConversationOnlyTurn(boundaryMessage);
       if (boundaryConversationOnly) {
-        if (
-          error instanceof LLMProxyInvocationError
-          && getLLMProxyCredentialRecoveryPresentation(error)
-        ) {
+        const providerFailureKind = error instanceof LLMProxyInvocationError
+          ? getLLMProxyProviderQuarantineKind(error)
+          : null;
+        if (providerFailureKind) {
           if (boundaryAttemptedModel) {
-            quarantineFailedTurnModel(boundaryAttemptedModel, 'credential');
+            quarantineFailedTurnModel(boundaryAttemptedModel, providerFailureKind);
           } else {
-            retireModelCatalogAfterCredentialFailure();
+            retireModelCatalogAfterProviderFailure();
           }
         }
         const failure = buildPlainChatFailurePresentation(

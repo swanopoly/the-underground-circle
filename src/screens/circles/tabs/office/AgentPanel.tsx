@@ -13,6 +13,8 @@ import {
   getAgentPanelTabs,
   getFallbackAgentPanelTab,
   type AgentPanelCapabilities,
+  type AgentPanelRuntimeConnectionFence,
+  type AgentPanelRuntimeConnectionSnapshot,
   type AgentPanelTabKey,
 } from './AgentPanelTabs';
 import { useAgentPanelLayout } from './useAgentPanelLayout';
@@ -48,6 +50,8 @@ interface Props {
   // identityAuthority?: AgentIdentityExactAuthority | null;
   identityAuthority?: AgentPanelIdentityAuthority | null;
   runtimeConnectionId?: string | null;
+  runtimeConnectionSnapshot?: AgentPanelRuntimeConnectionSnapshot | null;
+  isRuntimeConnectionSnapshotCurrent?: AgentPanelRuntimeConnectionFence;
   appearances?: Record<string, AgentAppearance>;
   onAppearanceChange?: (id: string, appearance: AgentAppearance) => Promise<AgentIdentityExactSaveResult>;
   environmentType?: EnvironmentType;
@@ -85,6 +89,11 @@ const loadRunsPanelModule = () => import('./AgentRunsPanel');
 const loadCustomizePanelModule = () => import('./AgentCustomizePanel');
 const loadEvolutionPanelModule = () => import('./AgentEvolutionPanel');
 const loadSpiritPanelModule = () => import('./AgentSpiritPanel');
+
+// This is a deployment-readiness assertion, not data authority. Keep the
+// optional progression route dark until its reviewed storage contract is
+// applied and verified; strict exact-authority reads still guard it when on.
+const HAS_AGENT_PROGRESSION_STORAGE_V1 = process.env.EXPO_PUBLIC_AGENT_PROGRESSION_STORAGE_V1 === 'true';
 
 function useLazyPanelModule<T>(
   active: boolean,
@@ -206,6 +215,8 @@ export default function AgentPanel({
   sessionTags, onAddSessionTag, onRemoveSessionTag, sessionStorageScope, circleId,
   identityAuthority,
   runtimeConnectionId,
+  runtimeConnectionSnapshot,
+  isRuntimeConnectionSnapshotCurrent,
   appearances, onAppearanceChange, environmentType, onRunCommand,
   onOpenAgentInChat,
 }: Props) {
@@ -331,6 +342,9 @@ export default function AgentPanel({
     [agent?.id, agent?.name, agent?.providerType, agent?.sessionKey, agent?.spirit, dbAgentId],
   );
 
+  const runtimeConnectionScopeKey = runtimeConnectionSnapshot
+    ? `${runtimeConnectionSnapshot.connectionId}:${runtimeConnectionSnapshot.agentBotId || 'local'}:${runtimeConnectionSnapshot.normalizedEndpoint}`
+    : 'none';
   const panelScopeKey = useMemo(() => {
     const subjectScope = agent
       ? `${agentSubject?.subjectKey || agent.id}:${agent.id}`
@@ -338,14 +352,14 @@ export default function AgentPanel({
     const authorityScope = exactIdentityAuthority
       ? `${exactIdentityAuthority.userId}:${exactIdentityAuthority.circleId}:generation:${authorityGeneration ?? `legacy-${tokenFingerprint(exactIdentityAuthority.accessToken)}`}`
       : `locked:generation:${authorityGeneration ?? `legacy-${tokenFingerprint(identityAuthority?.accessToken)}`}`;
-    return `${subjectScope}:${authorityScope}:runtime:${runtimeConnectionId || 'none'}`;
+    return `${subjectScope}:${authorityScope}:runtime:${runtimeConnectionScopeKey}`;
   }, [
     agent,
     agentSubject?.subjectKey,
     authorityGeneration,
     exactIdentityAuthority,
     identityAuthority?.accessToken,
-    runtimeConnectionId,
+    runtimeConnectionScopeKey,
   ]);
   const [renameDraft, setRenameDraft] = useState<{ scopeKey: string; name: string } | null>(null);
   const [renameBusyScopeKey, setRenameBusyScopeKey] = useState<string | null>(null);
@@ -409,12 +423,19 @@ export default function AgentPanel({
   const hasCircleContext = !!circleId;
   const hasIdentityAuthority = !!exactIdentityAuthority;
   const canCustomize = !!onAppearanceChange;
-  const hasRuntimeConnection = !!agent && !!runtimeConnectionId;
+  const hasRuntimeConnection = Boolean(
+    agent
+    && runtimeConnectionId
+    && runtimeConnectionSnapshot
+    && runtimeConnectionSnapshot.connectionId === runtimeConnectionId
+    && isRuntimeConnectionSnapshotCurrent?.(runtimeConnectionSnapshot),
+  );
   const panelCapabilities = useMemo<AgentPanelCapabilities>(() => ({
     hasCircleContext,
     hasIdentityAuthority,
+    hasProgressionStorage: HAS_AGENT_PROGRESSION_STORAGE_V1,
     canCustomize,
-    hasRuntimeConnection: !!agent && !!runtimeConnectionId,
+    hasRuntimeConnection,
   }), [canCustomize, hasCircleContext, hasIdentityAuthority, hasRuntimeConnection]);
   // Route availability depends on stable subject/provider capabilities, not
   // the live telemetry object Office replaces on every roster refresh.
@@ -936,15 +957,17 @@ export default function AgentPanel({
         />
       )}
 
-      {panelTab === 'openswan' && runtimeConnectionId && (agent.providerType === 'openswan' || agent.providerType === 'blackswan-local') && (
+      {panelTab === 'openswan' && runtimeConnectionId && runtimeConnectionSnapshot && isRuntimeConnectionSnapshotCurrent && (agent.providerType === 'openswan' || agent.providerType === 'blackswan-local') && (
         gatewayPanelsModule?.OpenSwanFrontendPanel ? (
           <gatewayPanelsModule.OpenSwanFrontendPanel
-            key={`${runtimeConnectionId}::${agent.sessionKey}`}
+            key={`${runtimeConnectionScopeKey}::${agent.sessionKey}`}
             agent={agent}
             accentColor={agent.color || '#6366f1'}
             circleId={circleId}
             userId={userId || undefined}
             runtimeConnectionId={runtimeConnectionId}
+            runtimeConnectionSnapshot={runtimeConnectionSnapshot}
+            isRuntimeConnectionSnapshotCurrent={isRuntimeConnectionSnapshotCurrent}
             identityAuthority={runtimeIdentityAuthority}
             isIdentityAuthorityCurrent={isExactIdentityAuthorityCurrent}
             onOpenInChat={openAgentInChat}
@@ -1101,7 +1124,7 @@ export default function AgentPanel({
       )}
 
       {/* ── CRON JOBS TAB ── */}
-      {panelTab === 'cron' && circleId && runtimeConnectionId && (
+      {panelTab === 'cron' && circleId && runtimeConnectionId && runtimeConnectionSnapshot && isRuntimeConnectionSnapshotCurrent && (
         <View nativeID="section-agent-cron" style={{ paddingHorizontal: 8, paddingBottom: 12 }}>
           {gatewayPanelsModule?.CronJobsPanel ? (
             <gatewayPanelsModule.CronJobsPanel
@@ -1109,6 +1132,8 @@ export default function AgentPanel({
               circleId={circleId}
               accentColor={agent.color || '#6366f1'}
               runtimeConnectionId={runtimeConnectionId}
+              runtimeConnectionSnapshot={runtimeConnectionSnapshot}
+              isRuntimeConnectionSnapshotCurrent={isRuntimeConnectionSnapshotCurrent}
               identityAuthority={runtimeIdentityAuthority}
               isIdentityAuthorityCurrent={isExactIdentityAuthorityCurrent}
             />

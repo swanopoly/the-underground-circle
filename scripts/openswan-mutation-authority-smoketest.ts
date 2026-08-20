@@ -117,10 +117,10 @@ async function main(): Promise<void> {
     counts,
     {
       read_only: 92,
-      action_ledger: 21,
+      action_ledger: 22,
       provider_idempotency: 0,
       proposal_only: 3,
-      unsupported: 103,
+      unsupported: 102,
     },
     'catalog authority totals are explicit and reviewable',
   );
@@ -141,6 +141,8 @@ async function main(): Promise<void> {
     'custom_api.request': 'action_ledger',
     'messaging.notify': 'action_ledger',
     'gmail.write': 'unsupported',
+    // Exact owner-private in-app mutation.
+    'agent.update_appearance': 'action_ledger',
     // Review-only paths
     'approvals.request': 'proposal_only',
     'code.generate': 'proposal_only',

@@ -57,6 +57,14 @@ let mutableGlobalUser = 'user-a';
 let releaseVerification: (() => void) | null = null;
 let verificationGate: Promise<void> | null = null;
 const sandbox: Record<string, unknown> = {
+  safeGetUserForAccessToken: async (token: string) => {
+    authCalls.push(token);
+    if (verificationGate) await verificationGate;
+    const tokenOwner = token === 'token-a' ? 'user-a' : token === 'token-b' ? 'user-b' : null;
+    return tokenOwner
+      ? { value: { id: tokenOwner }, error: null }
+      : { value: null, error: new Error('invalid token') };
+  },
   supabase: {
     auth: {
       getUser: async (token: string) => {
@@ -378,6 +386,11 @@ async function main(): Promise<void> {
   );
 
   console.log('Captured bearer verification');
+  assert(
+    verifySource.includes('safeGetUserForAccessToken(authority.accessToken)')
+      && !verifySource.includes('supabase.auth.getUser'),
+    'captured bearer verification uses the bounded explicit-token auth helper',
+  );
   authCalls.length = 0;
   const verifiedA = await exact.verifyAgentIdentityExactAuthority(scopeA);
   assert(verifiedA?.userId === 'user-a' && verifiedA.circleId === 'circle-a', 'matching bearer verifies the captured scope');
@@ -411,13 +424,23 @@ async function main(): Promise<void> {
   );
   assert(exactSync.includes(".eq('user_id', authority.userId)"), 'server read filters the captured owner');
   assert(
-    exactSync.includes(".setHeader('Authorization', `Bearer ${authority.accessToken}`)"),
-    'server read binds the captured bearer',
+    exactSync.includes('getSupabaseClientForAccessToken(authority.accessToken)')
+      && exactSync.includes('let query = exactClient')
+      && !exactSync.includes('.setHeader(')
+      && !exactSync.includes('supabase.from'),
+    'server read uses the pinned captured-bearer client without mutable-session header merging',
   );
   assert(exactSync.includes('row?.user_id !== authority.userId'), 'foreign-owner response rows fail the whole read');
   assert(exactSync.includes(".select('*', { count: 'exact' })"), 'server read proves full-snapshot completeness');
   assert(exactSync.includes('.abortSignal(signal)'), 'publication server read accepts a bounded abort signal');
   assert(!exactSync.includes('auth.getSession'), 'server read never obtains replacement global auth');
+  const exactSyncEntry = section(
+    'export async function syncAgentIdentitiesFromServerExact',
+    '/**\n * Seed-up:',
+  );
+  assert(exactSyncEntry.includes('signal?.aborted'), 'exact sync fails closed when its route deadline aborts');
+  assert(exactSyncEntry.includes('verifyAgentIdentityExactAuthority(syntacticAuthority, fence)'), 'exact sync carries the current lifecycle fence through bearer verification');
+  assert(exactSyncEntry.includes("error: 'authority_retired'"), 'an authority retired during a bounded sync cannot publish or reach the caller as current truth');
 
   const rowWriters = section(
     'function identityToRow',
@@ -456,14 +479,34 @@ async function main(): Promise<void> {
   const legacyPrimary = section('export async function setMainAgentForProvider(', 'export async function setMainAgentForProviderExact');
   assert(legacyPrimary.includes('setMainAgentForProviderExact requires captured Office authority'), 'ownerless primary selection is retired fail closed');
 
+  const exactMutationBase = section(
+    'async function loadAgentIdentityMutationBaseExact',
+    'type AgentIdentityRow = ReturnType<typeof identityToRow>;',
+  );
+  assert(
+    exactMutationBase.includes('const exactClient = getSupabaseClientForAccessToken(authority.accessToken);')
+      && exactMutationBase.includes('let query = exactClient')
+      && !exactMutationBase.includes('.setHeader(')
+      && !/\bsupabase\s*\./u.test(exactMutationBase),
+    'mutation-base reads use only a captured-token client after bounded authority verification',
+  );
+  assert(
+    exactMutationBase.indexOf('verifyAgentIdentityExactAuthority(syntacticAuthority, fence)')
+      < exactMutationBase.indexOf('getSupabaseClientForAccessToken(authority.accessToken)'),
+    'mutation-base bearer verification precedes creation of its exact database client',
+  );
+
   const exactPersist = section(
     'async function persistIdentitiesToServerExact',
     '/**\n * Persist an exact scope synchronously',
   );
   assert(exactPersist.includes('identityToRow(authority.userId, identity)'), 'server rows are stamped with the captured owner');
   assert(
-    (exactPersist.match(/\.setHeader\('Authorization', `Bearer \$\{authority\.accessToken\}`\)/g)?.length || 0) >= 3,
-    'CAS update, first-device insert, and batch compatibility paths all bind the captured bearer',
+    exactPersist.includes('const exactClient = getSupabaseClientForAccessToken(authority.accessToken);')
+      && (exactPersist.match(/await exactClient/g)?.length || 0) >= 3
+      && !exactPersist.includes('.setHeader(')
+      && !/\bsupabase\s*\./u.test(exactPersist),
+    'CAS update, first-device insert, and batch paths all use one captured-token client without header mutation',
   );
   assert(exactPersist.includes(".eq('updated_at', serverVersion)"), 'existing rows use the just-read server version as a CAS fence');
   assert(exactPersist.includes('.update(patch)') && exactPersist.includes('.insert(row)'), 'first-device server rows update narrowly while truly new rows insert exactly once');
@@ -508,8 +551,11 @@ async function main(): Promise<void> {
   );
   assert(exactPrimary.includes(".rpc('set_main_agent_for_provider_v1'"), 'primary-agent update uses the one transactional server writer');
   assert(
-    exactPrimary.includes(".setHeader('Authorization', `Bearer ${verifiedAuthority.accessToken}`)"),
-    'primary-agent RPC binds exactly the captured bearer',
+    exactPrimary.includes('const exactClient = getSupabaseClientForAccessToken(verifiedAuthority.accessToken);')
+      && exactPrimary.includes('const response = await exactClient')
+      && !exactPrimary.includes('.setHeader(')
+      && !/\bsupabase\s*\./u.test(exactPrimary),
+    'primary-agent RPC uses only the verified captured-token client',
   );
   assert(exactPrimary.includes('parseAgentIdentityPrimaryRpcReceipt('), 'primary-agent success requires the versioned exact RPC receipt');
   assert(exactPrimary.includes('publishCurrentAgentIdentityServerTruthExact('), 'validated primary receipt publishes only a fresh cross-realm server snapshot');
@@ -522,6 +568,27 @@ async function main(): Promise<void> {
       && !exactPrimary.includes('.upsert('),
     'primary-agent update has no residual multi-request client writer',
   );
+
+  const exactPublishedSpirit = section(
+    'export async function updatePublishedAgentSpiritExact',
+    '/** Delete one owner profile only after the server proves it is unreferenced. */',
+  );
+  const exactProfileDelete = section(
+    'export async function deleteUnreferencedCustomAgentProfileExact',
+    '// ─── Record Agent Activity',
+  );
+  for (const [label, exactRpc] of [
+    ['published-Spirit assignment', exactPublishedSpirit],
+    ['custom-profile deletion', exactProfileDelete],
+  ] as const) {
+    assert(
+      exactRpc.includes('const exactClient = getSupabaseClientForAccessToken(verifiedAuthority.accessToken);')
+        && exactRpc.includes('const response = await exactClient')
+        && !exactRpc.includes('.setHeader(')
+        && !/\bsupabase\s*\./u.test(exactRpc),
+      `${label} RPC uses only the verified captured-token client`,
+    );
+  }
 
   console.log('Transactional primary-agent receipt validation');
   const validPrimaryReceipt = makePrimaryReceipt();
@@ -661,6 +728,8 @@ async function main(): Promise<void> {
   let recoveryCalls = 0;
   let spiritPublicationCalls = 0;
   let publishedCacheSize = 0;
+  const spiritExactClientTokens: string[] = [];
+  let spiritSharedRpcCalls = 0;
   let spiritPublishResult: Record<string, unknown> = {
     ok: true,
     localSaved: true,
@@ -697,9 +766,10 @@ async function main(): Promise<void> {
       return spiritPublishResult;
     },
     storage: { getItem: async () => malformedCache ? '{broken' : null },
-    supabase: {
-      rpc: () => ({
-        setHeader: async () => {
+    getSupabaseClientForAccessToken: (token: string) => {
+      spiritExactClientTokens.push(token);
+      return {
+        rpc: async () => {
           if (concurrentSpiritRpcMode) {
             concurrentSpiritRpcCalls += 1;
             if (concurrentSpiritRpcCalls === 1) {
@@ -709,7 +779,13 @@ async function main(): Promise<void> {
           }
           return { data: makeSpiritReceipt(), error: null };
         },
-      }),
+      };
+    },
+    supabase: {
+      rpc: () => {
+        spiritSharedRpcCalls += 1;
+        throw new Error('exact Spirit writer touched the shared client');
+      },
     },
   };
   vm.runInNewContext(
@@ -737,6 +813,12 @@ async function main(): Promise<void> {
     () => true,
   );
   assert(recoveredSpirit.ok === true && recoveryCalls === 1, 'a valid Spirit receipt refreshes the exact cache from captured server truth');
+  assert(
+    spiritExactClientTokens.length === 1
+      && spiritExactClientTokens[0] === 'token-a'
+      && spiritSharedRpcCalls === 0,
+    'Spirit assignment dispatches through only the captured-token client',
+  );
   assert(publishedCacheSize === 2, 'Spirit cache publication uses the complete verified server snapshot');
   malformedCache = false;
   spiritPublishResult = { ok: false, localSaved: false, serverSaved: true, error: 'local_write_failed' };
@@ -813,6 +895,8 @@ async function main(): Promise<void> {
   let releaseFirstProfileDelete: (() => void) | null = null;
   let firstProfileDeleteStarted = Promise.resolve();
   let firstProfileDeleteGate = Promise.resolve();
+  const profileDeleteExactClientTokens: string[] = [];
+  let profileDeleteSharedRpcCalls = 0;
   const profileDeleteSandbox: Record<string, unknown> = {
     normalizeAgentIdentityExactWriteAuthority: (value: unknown) => value,
     isAgentIdentityUuidLike: (value: unknown) => typeof value === 'string'
@@ -821,9 +905,10 @@ async function main(): Promise<void> {
       authorityFence(_authority),
     verifyAgentIdentityExactAuthority: async (value: unknown) => value,
     parseCustomProfileDeleteRpcReceipt: () => profileDeleteReceiptValid,
-    supabase: {
-      rpc: () => ({
-        setHeader: async () => {
+    getSupabaseClientForAccessToken: (token: string) => {
+      profileDeleteExactClientTokens.push(token);
+      return {
+        rpc: async () => {
           if (concurrentProfileDeleteMode) {
             concurrentProfileDeleteCalls += 1;
             if (concurrentProfileDeleteCalls === 1) {
@@ -834,7 +919,13 @@ async function main(): Promise<void> {
           if (retireOnProfileDelete) profileDeleteFenceCurrent = false;
           return { data: validDeleteReceipt, error: null };
         },
-      }),
+      };
+    },
+    supabase: {
+      rpc: () => {
+        profileDeleteSharedRpcCalls += 1;
+        throw new Error('exact profile deletion touched the shared client');
+      },
     },
   };
   vm.runInNewContext(
@@ -859,6 +950,12 @@ async function main(): Promise<void> {
       && unknownDelete.serverDeleted === null
       && unknownDelete.error === 'outcome_unknown',
     'a 2xx profile-delete response with an unverifiable receipt reports outcome_unknown instead of false deletion',
+  );
+  assert(
+    profileDeleteExactClientTokens.length === 1
+      && profileDeleteExactClientTokens[0] === 'token-a'
+      && profileDeleteSharedRpcCalls === 0,
+    'profile deletion dispatches through only the captured-token client',
   );
   profileDeleteReceiptValid = true;
   concurrentProfileDeleteMode = true;
@@ -908,7 +1005,8 @@ async function main(): Promise<void> {
   let releaseFirstPrimaryRpc: (() => void) | null = null;
   let firstPrimaryRpcStarted = Promise.resolve();
   let firstPrimaryRpcGate = Promise.resolve();
-  let staleHeader = '';
+  const primaryExactClientTokens: string[] = [];
+  let primarySharedRpcCalls = 0;
   let staleLocalReads = 0;
   let stalePublications = 0;
   const stalePrimarySandbox: Record<string, unknown> = {
@@ -939,10 +1037,10 @@ async function main(): Promise<void> {
         return null;
       },
     },
-    supabase: {
-      rpc: () => ({
-        setHeader: async (_name: string, value: string) => {
-          staleHeader = value;
+    getSupabaseClientForAccessToken: (token: string) => {
+      primaryExactClientTokens.push(token);
+      return {
+        rpc: async () => {
           if (concurrentPrimaryRpcMode) {
             concurrentPrimaryRpcCalls += 1;
             if (concurrentPrimaryRpcCalls === 1) {
@@ -953,7 +1051,13 @@ async function main(): Promise<void> {
           if (retireOnPrimaryRpc) staleFenceCurrent = false;
           return { data: makePrimaryReceipt(), error: null };
         },
-      }),
+      };
+    },
+    supabase: {
+      rpc: () => {
+        primarySharedRpcCalls += 1;
+        throw new Error('exact primary mutation touched the shared client');
+      },
     },
   };
   vm.runInNewContext(
@@ -1021,7 +1125,12 @@ async function main(): Promise<void> {
     { userId: 'user-a', circleId: 'circle-a', accessToken: 'token-a', generation: 7 },
     () => staleFenceCurrent,
   );
-  assert(staleHeader === 'Bearer token-a', 'retiring RPC still dispatched only with the captured bearer');
+  assert(
+    primaryExactClientTokens.length === 4
+      && primaryExactClientTokens.every(token => token === 'token-a')
+      && primarySharedRpcCalls === 0,
+    'every primary RPC, including a retiring request, dispatches only through the captured-token client',
+  );
   assert(
     staleResult.ok === false
       && staleResult.error === 'authority_retired'

@@ -261,7 +261,8 @@ for (const marker of [
   ".rpc('set_published_agent_spirit_v1'",
   'p_circle_id: verifiedAuthority.circleId',
   'p_office_agent_id: officeAgentId',
-  ".setHeader('Authorization', `Bearer ${verifiedAuthority.accessToken}`)",
+  'const exactClient = getSupabaseClientForAccessToken(verifiedAuthority.accessToken);',
+  'const response = await exactClient',
   'parsePublishedAgentSpiritRpcReceipt(',
   "serverSaved: null, error: 'outcome_unknown'",
   "error: 'mutation_superseded'",
@@ -269,6 +270,10 @@ for (const marker of [
 ]) {
   check(exactWriter.includes(marker), `exact writer pins ${marker}`);
 }
+check(
+  !exactWriter.includes('.setHeader(') && !/\bsupabase\s*\./u.test(exactWriter),
+  'published-Spirit and profile-delete RPCs cannot dispatch through the shared client or mutate request headers',
+);
 check((exactWriter.match(/isAgentIdentityExactAuthorityCurrent\(/gu) || []).length >= 6, 'exact writer fences every remote and publication-handoff await boundary');
 check(!exactWriter.includes(".from('circle_office_agents')") && !exactWriter.includes(".from('agent_identities')"), 'runtime has one RPC and no split table writer');
 check(exactWriter.indexOf('parsePublishedAgentSpiritRpcReceipt(') < exactWriter.indexOf('publishCurrentAgentIdentityServerTruthExact('), 'validated receipt precedes cross-realm server-truth publication');
@@ -283,7 +288,8 @@ for (const marker of [
   'verifyAgentIdentityExactAuthority(authority, commandFence)',
   ".rpc('delete_unreferenced_custom_agent_profile_v1'",
   'p_profile_id: profileId',
-  ".setHeader('Authorization', `Bearer ${verifiedAuthority.accessToken}`)",
+  'const exactClient = getSupabaseClientForAccessToken(verifiedAuthority.accessToken);',
+  'const response = await exactClient',
   "errorMessage.includes('custom_agent_profile_still_referenced')",
   "error: 'profile_referenced'",
   'parseCustomProfileDeleteRpcReceipt(data, verifiedAuthority, profileId)',
@@ -291,6 +297,10 @@ for (const marker of [
 ]) {
   check(exactDelete.includes(marker), `exact profile delete pins ${marker}`);
 }
+check(
+  !exactDelete.includes('.setHeader(') && !/\bsupabase\s*\./u.test(exactDelete),
+  'exact profile deletion cannot dispatch through the shared client or mutate request headers',
+);
 check((exactDelete.match(/isAgentIdentityExactAuthorityCurrent\(/gu) || []).length >= 5, 'profile delete fences verification, RPC, receipt, and retirement');
 
 const persistPanel = sourceSection(
@@ -377,6 +387,10 @@ for (const [document, name] of [[roadmap, 'roadmap'], [stackReference, 'stack re
 }
 check(roadmap.includes('| 48 | Atomic published-agent Spirit projection'), 'roadmap SQL checklist records §48');
 const roadmapSection48 = roadmap.split(/\r?\n/u).find(line => line.startsWith('| 48 | Atomic published-agent Spirit projection'));
-check(roadmapSection48?.includes('**Pending / not applied.**'), 'roadmap separates source proof from deployment proof');
+check(
+  roadmapSection48?.includes('**Applied / catalog-verified 2026-08-20.**')
+    && roadmapSection48.includes('Authenticated remote two-account, multi-agent custom-profile, assignment/delete contention, and account-switch canaries remain pending.'),
+  'roadmap records catalog-verified deployment while keeping authenticated canaries pending',
+);
 
 console.log(`Agent Spirit assignment RPC SQL smoke passed (${assertions} assertions).`);

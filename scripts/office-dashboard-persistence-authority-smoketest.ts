@@ -12,6 +12,7 @@ import ts from 'typescript';
 
 const source = fs.readFileSync('src/lib/officeDashboardPersistence.ts', 'utf8');
 const officeSource = fs.readFileSync('src/screens/circles/tabs/OfficeTab.tsx', 'utf8');
+const envExample = fs.readFileSync('.env.example', 'utf8');
 let assertions = 0;
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -85,7 +86,36 @@ const authorityHelpers = sandbox.__authority as {
   ) => Promise<Authority | null>;
 };
 
+const capabilityHelperSource = section(
+  'function isExplicitOfficeBuildCapabilityEnabled',
+  'export const HAS_OFFICE_USER_PREFERENCES_STORAGE_V1',
+);
+const compiledCapabilityHelper = ts.transpileModule(
+  `${capabilityHelperSource}\n;(globalThis as any).__isEnabled = isExplicitOfficeBuildCapabilityEnabled;`,
+  {
+    compilerOptions: {
+      module: ts.ModuleKind.None,
+      target: ts.ScriptTarget.ES2022,
+    },
+  },
+).outputText;
+const capabilitySandbox: Record<string, unknown> = {};
+vm.runInNewContext(compiledCapabilityHelper, capabilitySandbox);
+const isCapabilityEnabled = capabilitySandbox.__isEnabled as (value: unknown) => boolean;
+
 async function main(): Promise<void> {
+  console.log('Default-off Office RPC readiness');
+  assert(!isCapabilityEnabled(undefined), 'an absent build capability is disabled');
+  assert(!isCapabilityEnabled(false), 'a boolean cannot accidentally enable a public build capability');
+  assert(!isCapabilityEnabled('false'), 'the documented false value is disabled');
+  assert(!isCapabilityEnabled('TRUE'), 'non-exact strings cannot enable a capability');
+  assert(isCapabilityEnabled('true'), 'only the exact reviewed true value enables a capability');
+  assert(
+    envExample.includes('EXPO_PUBLIC_OFFICE_USER_PREFERENCES_STORAGE_V1=false')
+      && envExample.includes('EXPO_PUBLIC_OFFICE_ATTENTION_SERVER_CLOCK_V1=false'),
+    'both optional Office RPC capabilities are documented default-off',
+  );
+
   console.log('Exact authority validation');
   const normalized = authorityHelpers.normalizeExactAuthority(' circle-a ', {
     userId: ' user-a ',
@@ -146,6 +176,29 @@ async function main(): Promise<void> {
   );
   assert(source.includes('export type OfficeDashboardExactAuthority'), 'module exports the exact authority contract');
   assert(source.includes('authorityGeneration: number'), 'authority contract carries lifecycle generation');
+
+  const preferenceRead = section(
+    'export async function loadOfficeUserPreferences',
+    'export async function patchOfficeUserPreferences',
+  );
+  const preferencePatch = section(
+    'export async function patchOfficeUserPreferences',
+    'function readLayoutDocument',
+  );
+  for (const [label, body] of [
+    ['preference read', preferenceRead],
+    ['preference mutation', preferencePatch],
+  ] as const) {
+    const readinessGate = body.indexOf('if (!HAS_OFFICE_USER_PREFERENCES_STORAGE_V1)');
+    const clientCreation = body.indexOf('getSupabaseClientForAccessToken(authority.accessToken)');
+    const rpcDispatch = body.indexOf(".rpc('");
+    assert(
+      readinessGate >= 0 && readinessGate < clientCreation && clientCreation < rpcDispatch,
+      `${label} returns device-only unavailable before creating a server client or probing an RPC`,
+    );
+    assert(body.includes('unavailable: true'), `${label} truthfully marks optional server storage unavailable`);
+  }
+  assert(preferencePatch.includes('retryable: false'), 'a disabled preference mutation is not queued for futile RPC retries');
 
   const membershipProof = section(
     'export async function verifyOfficeCircleMembership',
@@ -220,6 +273,17 @@ async function main(): Promise<void> {
   );
   assert(attentionFallback.includes(".eq('user_id', authority.userId)"), 'attention fallback filters the exact owner');
   assert(attentionFallback.includes(".eq('circle_id', authority.circleId)"), 'attention fallback filters the exact circle');
+  assert(
+    attentionFallback.includes('if (HAS_OFFICE_ATTENTION_SERVER_CLOCK_V1 && !attentionRpcMissingThisSession)')
+      && attentionFallback.indexOf('if (HAS_OFFICE_ATTENTION_SERVER_CLOCK_V1 && !attentionRpcMissingThisSession)')
+        < attentionFallback.indexOf(".rpc('list_active_office_attention_acknowledgements'"),
+    'the optional server-clock attention RPC is reached only behind its explicit readiness gate',
+  );
+  assert(
+    attentionFallback.indexOf(".from('office_attention_acknowledgements')")
+      > attentionFallback.indexOf('if (HAS_OFFICE_ATTENTION_SERVER_CLOCK_V1 && !attentionRpcMissingThisSession)'),
+    'the default-off attention path retains the exact-scope legacy-table fallback',
+  );
 
   for (const [label, start, end] of [
     ['attention mutation', 'export async function acknowledgeOfficeAttention', 'function mapFloorPresetRow'],

@@ -4,7 +4,7 @@ import type {
   OfficeConnectionAuthorityFence,
   OfficeConnectionExactAuthority,
 } from '../../../../lib/connectionManager';
-import { supabase } from '../../../../lib/supabase';
+import { getSupabaseClientForAccessToken } from '../../../../lib/supabase';
 import { subscribeWithReconnect } from '../../../../lib/subscribeWithReconnect';
 import { isUuidLike } from '../../../../lib/agentRuntimeSubject';
 import { getMemorySoulKey } from './agentSoulMemory';
@@ -308,7 +308,7 @@ export default function AgentMemoryPanel({
       return;
     }
     try {
-      const bearer = `Bearer ${authority.accessToken}`;
+      const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
       const laneRequests: Array<{ expected: ExactMemoryLaneExpectation; request: any }> = [
         {
           expected: {
@@ -316,16 +316,15 @@ export default function AgentMemoryPanel({
             scope: 'circle',
             visibility: 'circle_shared',
           },
-          request: supabase
-          .from('memory_entries')
-          .select('*')
-          .eq('circle_id', authority.circleId)
-          .eq('scope', 'circle')
-          .eq('visibility', 'circle_shared')
-          .eq('is_active', true)
-          .order('created_at', { ascending: false })
-          .limit(201)
-          .setHeader('Authorization', bearer),
+          request: exactClient
+            .from('memory_entries')
+            .select('*')
+            .eq('circle_id', authority.circleId)
+            .eq('scope', 'circle')
+            .eq('visibility', 'circle_shared')
+            .eq('is_active', true)
+            .order('created_at', { ascending: false })
+            .limit(201),
         },
         {
           expected: {
@@ -333,16 +332,15 @@ export default function AgentMemoryPanel({
             scope: 'session',
             visibility: 'circle_shared',
           },
-          request: supabase
-          .from('memory_entries')
-          .select('*')
-          .eq('circle_id', authority.circleId)
-          .eq('scope', 'session')
-          .eq('visibility', 'circle_shared')
-          .eq('is_active', true)
-          .order('updated_at', { ascending: false })
-          .limit(201)
-          .setHeader('Authorization', bearer),
+          request: exactClient
+            .from('memory_entries')
+            .select('*')
+            .eq('circle_id', authority.circleId)
+            .eq('scope', 'session')
+            .eq('visibility', 'circle_shared')
+            .eq('is_active', true)
+            .order('updated_at', { ascending: false })
+            .limit(201),
         },
         {
           expected: {
@@ -351,17 +349,16 @@ export default function AgentMemoryPanel({
             visibility: 'private',
             userId: authority.userId,
           },
-          request: supabase
-          .from('memory_entries')
-          .select('*')
-          .eq('circle_id', authority.circleId)
-          .eq('scope', 'session')
-          .eq('visibility', 'private')
-          .eq('user_id', authority.userId)
-          .eq('is_active', true)
-          .order('updated_at', { ascending: false })
-          .limit(201)
-          .setHeader('Authorization', bearer),
+          request: exactClient
+            .from('memory_entries')
+            .select('*')
+            .eq('circle_id', authority.circleId)
+            .eq('scope', 'session')
+            .eq('visibility', 'private')
+            .eq('user_id', authority.userId)
+            .eq('is_active', true)
+            .order('updated_at', { ascending: false })
+            .limit(201),
         },
         {
           expected: {
@@ -370,21 +367,20 @@ export default function AgentMemoryPanel({
             visibility: 'private',
             userId: authority.userId,
           },
-          request: supabase
-          .from('memory_entries')
-          .select('*')
-          .eq('circle_id', authority.circleId)
-          .eq('scope', 'user')
-          .eq('visibility', 'private')
-          .eq('user_id', authority.userId)
-          .eq('is_active', true)
-          .order('updated_at', { ascending: false })
-          .limit(201)
-          .setHeader('Authorization', bearer),
+          request: exactClient
+            .from('memory_entries')
+            .select('*')
+            .eq('circle_id', authority.circleId)
+            .eq('scope', 'user')
+            .eq('visibility', 'private')
+            .eq('user_id', authority.userId)
+            .eq('is_active', true)
+            .order('updated_at', { ascending: false })
+            .limit(201),
         },
       ];
       if (lookupIds.length > 0) {
-        let agentQuery = supabase
+        let agentQuery = exactClient
           .from('memory_entries')
           .select('*')
           .eq('circle_id', authority.circleId)
@@ -405,7 +401,7 @@ export default function AgentMemoryPanel({
             userId: authority.userId,
             agentIds: new Set(lookupIds),
           },
-          request: agentQuery.setHeader('Authorization', bearer),
+          request: agentQuery,
         });
       }
 
@@ -436,13 +432,12 @@ export default function AgentMemoryPanel({
       const publishedAgentIds = lookupIds.filter(isUuidLike);
       let soulRow: any = null;
       if (publishedAgentIds.length > 0) {
-        const { data, error } = await supabase
+        const { data, error } = await exactClient
           .from('circle_office_agents')
           .select('id, circle_id, owner_id, name, spirit')
           .in('id', publishedAgentIds)
           .eq('circle_id', authority.circleId)
           .eq('owner_id', authority.userId)
-          .setHeader('Authorization', bearer)
           .limit(2);
         if (!isExactRequestCurrent()) return;
         if (error) throw error;
@@ -635,10 +630,11 @@ export default function AgentMemoryPanel({
       && verifiedScopeKeyRef.current === capturedScopeKey
       && isIdentityAuthorityCurrent(authority)
     );
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
     return executeAgentMemoryCasMutation(
       request,
       async exactRequest => {
-        const result = await supabase
+        const result = await exactClient
           .from('memory_entries')
           .update(exactRequest.patch)
           .eq('id', exactRequest.id)
@@ -648,7 +644,6 @@ export default function AgentMemoryPanel({
           .eq('visibility', exactRequest.visibility)
           .eq('is_active', true)
           .eq('updated_at', exactRequest.expectedUpdatedAt)
-          .setHeader('Authorization', `Bearer ${authority.accessToken}`)
           .select('*');
         return { data: result.data, error: result.error, status: result.status };
       },

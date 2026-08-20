@@ -1,6 +1,11 @@
 import type { OfficeAgent } from '../../../../lib/officeAgents';
 import type { AgentConnection } from '../../../../lib/connectionManager';
-import { resolveOpenSwanConnectionTransport } from '../../../../lib/officeAgentSessionBindingCore';
+import {
+  buildOpenSwanConnectionFingerprint,
+  matchesOpenSwanConnectionFingerprint,
+  resolveOpenSwanConnectionTransport,
+  type OpenSwanConnectionFingerprint,
+} from '../../../../lib/officeAgentSessionBindingCore';
 
 export type AgentPanelTabKey =
   | 'overview'
@@ -25,6 +30,7 @@ export interface AgentPanelTab {
 export interface AgentPanelCapabilities {
   hasCircleContext: boolean;
   hasIdentityAuthority: boolean;
+  hasProgressionStorage: boolean;
   canCustomize: boolean;
   hasRuntimeConnection?: boolean;
 }
@@ -35,6 +41,20 @@ export interface AgentPanelGroup {
   description: string;
   tabs: AgentPanelTab[];
 }
+
+/**
+ * Non-secret proof of the exact connected runtime that Office is currently
+ * projecting. Durable connection metadata deliberately reloads as
+ * `disconnected`, so runtime panels must pair that exact-authority reload with
+ * this live verdict before using its locally hydrated secret.
+ */
+export type AgentPanelRuntimeConnectionSnapshot = Readonly<
+  OpenSwanConnectionFingerprint & { status: 'connected' }
+>;
+
+export type AgentPanelRuntimeConnectionFence = (
+  snapshot: AgentPanelRuntimeConnectionSnapshot,
+) => boolean;
 
 const TAB_CATALOG: Record<AgentPanelTabKey, AgentPanelTab> = {
   overview: { key: 'overview', label: 'Overview', description: 'Identity, readiness, controls, and high-signal agent context.' },
@@ -85,6 +105,43 @@ function isOpenSwanAgent(agent: OfficeAgent): boolean {
   return agent.providerType === 'openswan' || agent.providerType === 'blackswan-local';
 }
 
+function resolveAgentPanelRuntimeConnection(
+  agent: OfficeAgent | null | undefined,
+  connections: readonly AgentConnection[],
+): AgentConnection | null {
+  if (!agent || !isOpenSwanAgent(agent) || !Array.isArray(connections)) return null;
+  const eligible = connections.filter(connection => !!resolveOpenSwanConnectionTransport(connection));
+  const isBuiltIn = agent.id === 'default::blackswan'
+    || agent.id === 'blackswan-default'
+    || agent.id === 'openswan:main_chat';
+  if (isBuiltIn) return eligible.length === 1 ? eligible[0] : null;
+  const exact = eligible.filter(connection => connection.id === agent.connectionId);
+  return exact.length === 1 ? exact[0] : null;
+}
+
+export function resolveAgentPanelRuntimeConnectionSnapshot(
+  agent: OfficeAgent | null | undefined,
+  connections: readonly AgentConnection[],
+): AgentPanelRuntimeConnectionSnapshot | null {
+  const connection = resolveAgentPanelRuntimeConnection(agent, connections);
+  const fingerprint = buildOpenSwanConnectionFingerprint(connection);
+  return connection && fingerprint
+    ? Object.freeze({ ...fingerprint, status: 'connected' as const })
+    : null;
+}
+
+/** Re-check a captured runtime verdict against Office's current exact lane. */
+export function isAgentPanelRuntimeConnectionSnapshotCurrent(
+  snapshot: AgentPanelRuntimeConnectionSnapshot | null | undefined,
+  connections: readonly AgentConnection[],
+): snapshot is AgentPanelRuntimeConnectionSnapshot {
+  if (!snapshot || snapshot.status !== 'connected' || !Array.isArray(connections)) return false;
+  const matches = connections.filter(connection => connection.id === snapshot.connectionId);
+  return matches.length === 1
+    && !!resolveOpenSwanConnectionTransport(matches[0])
+    && matchesOpenSwanConnectionFingerprint(snapshot, matches[0]);
+}
+
 /**
  * Resolve the exact connection that may back runtime-only panel routes. The
  * built-in OpenSwan card is a product identity, not a connection id: it may use
@@ -96,14 +153,7 @@ export function resolveAgentPanelRuntimeConnectionId(
   agent: OfficeAgent | null | undefined,
   connections: readonly AgentConnection[],
 ): string | null {
-  if (!agent || !isOpenSwanAgent(agent) || !Array.isArray(connections)) return null;
-  const eligible = connections.filter(connection => !!resolveOpenSwanConnectionTransport(connection));
-  const isBuiltIn = agent.id === 'default::blackswan'
-    || agent.id === 'blackswan-default'
-    || agent.id === 'openswan:main_chat';
-  if (isBuiltIn) return eligible.length === 1 ? eligible[0].id : null;
-  const exact = eligible.filter(connection => connection.id === agent.connectionId);
-  return exact.length === 1 ? exact[0].id : null;
+  return resolveAgentPanelRuntimeConnectionSnapshot(agent, connections)?.connectionId || null;
 }
 
 /**
@@ -117,6 +167,12 @@ export function getAgentPanelTabs(
 ): AgentPanelTab[] {
   const hasCircleContext = capabilities?.hasCircleContext ?? true;
   const hasIdentityAuthority = capabilities?.hasIdentityAuthority ?? true;
+  // An omitted capability snapshot preserves the legacy source-level catalog.
+  // Any explicit live snapshot must positively declare progression storage;
+  // malformed or stale callers fail closed instead of probing optional tables.
+  const hasProgressionStorage = capabilities
+    ? capabilities.hasProgressionStorage === true
+    : true;
   const canCustomize = capabilities?.canCustomize ?? true;
   const hasRuntimeConnection = capabilities?.hasRuntimeConnection ?? true;
   const hasPrivateScope = hasCircleContext && hasIdentityAuthority;
@@ -134,7 +190,7 @@ export function getAgentPanelTabs(
     ...(hasPrivateScope ? [TAB_CATALOG.terminal] : []),
     ...(openSwanRuntimeAgent ? [TAB_CATALOG.cron] : []),
     ...(hasPrivateScope ? [TAB_CATALOG.spirit] : []),
-    ...(hasPrivateScope ? [TAB_CATALOG.evolution] : []),
+    ...(hasPrivateScope && hasProgressionStorage ? [TAB_CATALOG.evolution] : []),
     ...(hasPrivateScope && canCustomize ? [TAB_CATALOG.customize] : []),
   ];
 }

@@ -4,7 +4,16 @@ import { cronJobControlSnapshotMatches } from '../src/screens/circles/tabs/offic
 
 const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 const overview = read('src/screens/circles/tabs/office/AgentOverviewPanel.tsx');
+const hitl = read('src/services/hitlService.ts');
 const gateway = read('src/screens/circles/tabs/office/AgentGatewayPanels.tsx');
+const hitlSchema = read('supabase/migrations/20260226_hitl.sql');
+const hitlRls = read('supabase/migrations/20260325_security_warnings_fix.sql');
+const between = (source: string, start: string, end: string): string => {
+  const startIndex = source.indexOf(start);
+  const endIndex = source.indexOf(end, startIndex + start.length);
+  assert(startIndex >= 0 && endIndex > startIndex, `Expected source section ${start} -> ${end}`);
+  return source.slice(startIndex, endIndex);
+};
 const cronStart = gateway.indexOf('export function CronJobsPanel(');
 assert(cronStart >= 0, 'CronJobsPanel exists');
 const cron = gateway.slice(cronStart);
@@ -21,27 +30,81 @@ for (const marker of [
   assert(overview.includes(marker), `Overview wires ${marker}`);
 }
 assert(
-  overview.includes("showToast('Diagnostic failed. Review bridge status and retry.');")
+  overview.includes("showToast('Diagnostic failed. Review bridge status and retry.', 'error');")
     && overview.includes("showToast(output || 'Diagnostic completed');\n        setDraft('');")
     && !overview.includes('showToast(error instanceof Error ? error.message'),
   'Overview retains a failed diagnostic draft and never exposes raw transport errors',
+);
+assert(
+  overview.includes("accessibilityRole={toast.kind === 'error' ? 'alert' : undefined}")
+    && overview.includes("accessibilityLiveRegion={toast.kind === 'error' ? 'assertive' : 'polite'}")
+    && overview.includes('{toast.message}'),
+  'Overview announces successful receipts politely while reserving alert semantics for failures',
 );
 assert(
   overview.includes('Circle memory {memorySync.label.toLowerCase()}'),
   'Overview labels its user-and-circle memory probe without implying agent-specific freshness',
 );
 
+const exactControlRead = between(hitl, 'export async function getAgentControlExact(', '/** Exact pause/settings mutation');
+const exactControlWrite = between(hitl, 'export async function upsertAgentControlExact(', 'export async function requestApproval(');
+for (const [label, source] of [
+  ['read', exactControlRead],
+  ['write', exactControlWrite],
+] as const) {
+  assert(
+    source.includes('safeGetUserForAccessToken(authority.accessToken)')
+      && source.includes('const exactClient = getSupabaseClientForAccessToken(authority.accessToken);')
+      && source.includes("exactClient\n    .from('agent_controls')")
+      && !source.includes('supabase\n    .from(')
+      && !source.includes('.setHeader('),
+    `Exact agent-control ${label} uses only bounded subject verification and the captured-token client`,
+  );
+}
+for (const receiptCheck of [
+  'row.circle_id !== authority.circleId',
+  'row.session_key !== exactSessionKey',
+  'row.agent_name !== exactAgentName',
+  'row.is_paused !== updates.is_paused',
+  'Number(row.spending_limit_daily) !== Number(updates.spending_limit_daily)',
+  'row.require_approval_for.length !== updates.require_approval_for.length',
+]) {
+  assert(exactControlWrite.includes(receiptCheck), `Exact agent-control save receipt verifies ${receiptCheck}`);
+}
+
+const memorySyncHook = between(overview, 'function useMemorySyncStatus(', 'export default function AgentOverviewPanel(');
+assert(
+  memorySyncHook.includes('const exactClient = getSupabaseClientForAccessToken(accessToken);')
+    && memorySyncHook.includes("exactClient\n          .from('memory_entries')")
+    && !memorySyncHook.includes('supabase\n          .from(')
+    && !memorySyncHook.includes('.setHeader(')
+    && memorySyncHook.includes('const id = setInterval(tick, 120_000);')
+    && (memorySyncHook.match(/isIdentityAuthorityCurrent\(identityAuthority\)/g) || []).length >= 2,
+  'Overview memory sync uses the pinned client while retaining its two-minute cadence and pre/post-await authority fences',
+);
+
+assert(
+  hitlSchema.includes('unique(circle_id, session_key)')
+    && between(hitlRls, '-- ── agent_controls', '-- ── circle_memory').includes(
+      'SELECT circle_id FROM circle_members WHERE user_id = auth.uid()',
+    ),
+  'Agent controls retain one exact circle/session row and membership-bound source RLS policies',
+);
+
 for (const marker of [
   'CONNECTION CRON JOBS',
   'CONNECTION-LEVEL JOBS',
   'const [loadError, setLoadError]',
-  'const hasVerifiedSnapshot = verifiedScopeKey === cronScopeKey',
+  'const hasVerifiedConnection = verifiedScopeKey === cronScopeKey',
+  "const hasVerifiedSnapshot = hasVerifiedConnection && cronCapability === 'supported'",
   '&& !!verifiedConnectionFingerprint',
   'matchesOpenSwanConnectionFingerprint(verifiedConnectionFingerprint, connection)',
   'Showing the last verified connection snapshot',
   'Retry loading connection cron jobs',
   'if (!result.supported)',
-  'does not expose the cron tool',
+  'does not expose connection-level schedules',
+  'accessibilityLabel="Schedule capability status"',
+  "role: 'status'",
   "{['isolated', 'main'].map(target => (",
   'disabled={actionLoading !== null || mutationsUnavailable}',
 ]) {
@@ -51,15 +114,23 @@ assert(!cron.includes("['isolated', 'main', 'current']"), 'ambiguous current-ses
 const refreshStart = cron.indexOf('const refresh = useCallback(async () => {');
 const refreshEnd = cron.indexOf('\n  useEffect(() => {', refreshStart);
 const refresh = refreshStart >= 0 && refreshEnd > refreshStart ? cron.slice(refreshStart, refreshEnd) : '';
-assert(!refresh.includes('setJobs([])'), 'a transient same-scope Cron refresh failure never erases the last verified jobs');
+const unsupportedStart = refresh.indexOf('if (!result.supported) {');
+const unsupportedEnd = refresh.indexOf('\n      setJobs(result.jobs || []);', unsupportedStart);
+assert(
+  unsupportedStart > 0
+    && !refresh.slice(0, unsupportedStart).includes('setJobs([])')
+    && refresh.slice(unsupportedStart, unsupportedEnd).includes('setJobs([])')
+    && refresh.slice(unsupportedStart, unsupportedEnd).includes("setCronCapability('unsupported')"),
+  'transient refresh failures retain verified jobs while an exact unsupported receipt clears them without claiming an empty inventory',
+);
 assert(
   cron.indexOf('if (!result.ok) {') < cron.indexOf('setJobs(result.jobs || []);')
     && cron.indexOf('if (!result.supported) {') < cron.indexOf('setJobs(result.jobs || []);'),
   'Cron publishes a replacement job list only after a verified supported response',
 );
 assert(
-  cron.includes(') : !hasVerifiedSnapshot ? null : visibleJobs.length === 0 ? ('),
-  'Cron never paints an unavailable initial read as a verified empty schedule',
+  cron.includes("cronCapability === 'unsupported' || !hasVerifiedSnapshot ? null : visibleJobs.length === 0 ? ("),
+  'Cron never paints an unavailable or unsupported read as a verified empty schedule',
 );
 assert(
   cron.includes("typeof actionPatch.enabled === 'boolean'")

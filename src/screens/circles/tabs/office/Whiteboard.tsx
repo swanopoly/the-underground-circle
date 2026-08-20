@@ -118,7 +118,10 @@ function useRewardState(): RewardState {
     void safeGetUser().then(({ value: user }) => {
       if (!user || cancelled) return;
       const loadXp = () => {
-        void supabase.from('user_points').select('lifetime_points').eq('user_id', user.id).single()
+        // A new account has no reward row until its first server-owned award.
+        // Treat that as zero instead of requiring exactly one row, which makes
+        // PostgREST emit a noisy 406 during every Office load.
+        void supabase.from('user_points').select('lifetime_points').eq('user_id', user.id).maybeSingle()
           .then(({ data }) => { if (data && !cancelled) setLifetimeXP(data.lifetime_points ?? 0); });
       };
       loadXp();

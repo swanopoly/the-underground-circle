@@ -7,6 +7,7 @@ const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.ur
 const memory = read('src/screens/circles/tabs/office/AgentMemoryPanel.tsx');
 const memoryMutationCore = read('src/screens/circles/tabs/office/agentMemoryMutationCore.ts');
 const spirit = read('src/screens/circles/tabs/office/AgentSpiritPanel.tsx');
+const identity = read('src/lib/agentIdentity.ts');
 
 let assertions = 0;
 function check(condition: unknown, message: string): void {
@@ -27,7 +28,7 @@ for (const marker of [
   'Number.isSafeInteger(generation)',
   'generation <= 0',
   'isIdentityAuthorityCurrent(authority)',
-  ".setHeader('Authorization', bearer)",
+  'getSupabaseClientForAccessToken(authority.accessToken)',
   'if (result.error) throw result.error',
   'isExactMemoryLoadRequestCurrent(',
   'requireExactMemoryLaneRows(result.data, laneRequests[index].expected)',
@@ -70,6 +71,38 @@ check(memory.includes('visibleMemories.length'), 'Memory counts only the scope-m
 check(memory.includes('visibleSoulLabel || visibleSoulKey'), 'Memory exposes Soul copy only from the scope-matched verified snapshot');
 check(!memory.includes('.flatMap(result => result.data || [])'), 'Memory never converts null lane data into verified emptiness');
 check(!memory.includes(".eq('name', agentName.trim())"), 'Memory never attaches a published Soul projection by mutable display name');
+
+const memoryLoadSource = sourceSection(
+  memory,
+  'const load = useCallback(async () => {',
+  'useEffect(() => {\n    void load();',
+);
+const memoryMutationSource = sourceSection(
+  memory,
+  'const mutateMemoryExact = async (',
+  'const publishSuccessfulMemoryReceipt =',
+);
+check(
+  (memoryLoadSource.match(/const exactClient = getSupabaseClientForAccessToken\(authority\.accessToken\);/g) || []).length === 1
+    && (memoryLoadSource.match(/exactClient\s*\n\s*\.from\(/g) || []).length >= 6
+    && !memoryLoadSource.includes('.setHeader(')
+    && !memoryLoadSource.includes('supabase.from'),
+  'Memory snapshot lanes and published-agent read share one pinned captured-bearer client per exact load',
+);
+check(
+  (memoryMutationSource.match(/const exactClient = getSupabaseClientForAccessToken\(authority\.accessToken\);/g) || []).length === 1
+    && memoryMutationSource.includes("const result = await exactClient\n          .from('memory_entries')")
+    && !memoryMutationSource.includes('.setHeader(')
+    && !memoryMutationSource.includes('supabase.from'),
+  'Memory CAS mutation uses one pinned captured-bearer client without shared-auth header mutation',
+);
+check(
+  memory.includes("import { getSupabaseClientForAccessToken } from '../../../../lib/supabase';")
+    && !memory.includes("import { supabase } from '../../../../lib/supabase';")
+    && !memory.includes('.setHeader(')
+    && !memory.includes('supabase.from'),
+  'Memory has no shared Supabase exact query or per-query Authorization mutation path',
+);
 
 const memoryTruthSource = [
   sourceSection(memory, 'function getMemoryTimestamp', 'function getRelevantSouls'),
@@ -147,7 +180,11 @@ for (const marker of [
   'Number.isSafeInteger(generation)',
   'exactIdentityAuthority.generation',
   'isIdentityAuthorityCurrent(current)',
-  'syncAgentIdentitiesFromServerExact(authority)',
+  'syncAgentIdentitiesFromServerExact(authority, {',
+  'fence: isIdentityAuthorityCurrent,',
+  'signal: snapshotController.signal,',
+  'const SPIRIT_SNAPSHOT_TIMEOUT_MS = 8_000;',
+  'snapshotController.abort();',
   "useState<'loading' | 'ready' | 'error'>('loading')",
   'Retry loading verified Spirit identity',
   'No assignment or risk posture is being inferred from an empty response.',
@@ -187,7 +224,46 @@ for (const marker of [
   check(spirit.includes(marker), `Spirit exact architecture includes ${marker}`);
 }
 check(!spirit.includes("import('../../../../lib/memoryService')"), 'Spirit artifacts never use an ambient memory writer');
+const spiritSnapshotSource = sourceSection(
+  spirit,
+  'useEffect(() => {\n    const authority = exactIdentityAuthority;\n    const capturedRequestKey = identityRequestKey;',
+  'useEffect(() => {\n    const capturedRequestKey = identityRequestKey;',
+);
+const identitySnapshotSource = sourceSection(
+  identity,
+  'async function fetchAgentIdentitiesServerSnapshotExact',
+  'export async function syncAgentIdentitiesFromServerExact',
+);
+check(
+  (spirit.match(/\.abortSignal\(snapshotController\.signal\)/g) || []).length >= 3
+    && spirit.includes('clearTimeout(snapshotDeadline);'),
+  'Spirit gives its exact identity, published row, profile, and fallback reads one bounded abort lifecycle',
+);
+check(
+  spiritSnapshotSource.includes('const snapshotClient = getSupabaseClientForAccessToken(authority.accessToken);')
+    && (spiritSnapshotSource.match(/await snapshotClient/g) || []).length >= 3
+    && !spiritSnapshotSource.includes('.setHeader(')
+    && !spiritSnapshotSource.includes('await supabase'),
+  'Spirit snapshot uses one pinned-token client and never reacquires shared mutable auth',
+);
+check(
+  identity.includes("import { safeGetUserForAccessToken } from './authSession';")
+    && identity.includes('safeGetUserForAccessToken(authority.accessToken)')
+    && !identity.includes('supabase.auth.getUser(authority.accessToken)'),
+  'exact identity verification uses the bounded explicit-token auth path and never waits on mutable session auth',
+);
+check(
+  identitySnapshotSource.includes('getSupabaseClientForAccessToken(authority.accessToken)')
+    && identitySnapshotSource.includes('let query = exactClient')
+    && !identitySnapshotSource.includes('.setHeader(')
+    && !identitySnapshotSource.includes('supabase.from'),
+  'exact identity snapshot dispatches through the pinned-token PostgREST client',
+);
 check(!spirit.includes('.ilike('), 'Spirit never aliases a live session to a public row by mutable display name');
+check(
+  spirit.includes('(customProfiles.length > 0 || Boolean(profileActionStatus)) && ('),
+  'an empty custom-profile status cannot become a raw text child of a React Native View',
+);
 check(!spirit.includes('updateAgentSpirit('), 'Spirit never accepts a zero-row public assignment helper as success');
 check(!spirit.includes(".from('custom_agent_profiles')\n        .delete()"), 'Spirit profile deletion cannot bypass the guarded RPC');
 check(!spirit.includes(".from('custom_agent_profiles').upsert("), 'Spirit Save As cannot overwrite an existing custom profile');

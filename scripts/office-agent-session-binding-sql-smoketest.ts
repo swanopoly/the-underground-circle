@@ -94,12 +94,14 @@ check(consolidated.includes('-- §36. Owner-private Office agent → OpenSwan se
 check(consolidated.split(migration).length === 2, 'consolidated SQL contains one byte-aligned migration copy');
 check(roadmap.includes('| 36 | Owner-private Office-agent OpenSwan session bindings'), 'roadmap SQL checklist records §36');
 check(
-  /\| 36 \| Owner-private Office-agent OpenSwan session bindings[\s\S]*?\| \*\*Applied \/ catalog-ready/.test(roadmap),
-  'roadmap preserves the reported applied state of prerequisite §36',
+  /\| 36 \| Owner-private Office-agent OpenSwan session bindings[^\n]*?\| \*\*Applied \/ table and legacy RPC catalog reconfirmed 2026-08-20\.\*\*/.test(roadmap)
+    && roadmap.includes('Authenticated live binding UI, cross-device availability, and provider-dispatch proof remain pending.'),
+  'roadmap records the reconfirmed prerequisite catalog while keeping authenticated proof pending',
 );
 check(
-  /\| 49 \| Exact Office-agent OpenSwan session-binding compare-and-set[\s\S]*?\| \*\*Pending \/ not applied/.test(roadmap),
-  'roadmap keeps the new CAS boundary pending until target deployment',
+  /\| 49 \| Exact Office-agent OpenSwan session-binding compare-and-set[^\n]*?\| \*\*Applied \/ catalog-verified 2026-08-20\.\*\*/.test(roadmap)
+    && roadmap.includes('Authenticated remote two-tab first-bind/move/clear contention plus account/circle-switch and exact live-session dispatch canaries remain pending.'),
+  'roadmap records catalog-verified CAS deployment while keeping authenticated canaries pending',
 );
 
 check(/^--[\s\S]*\bBEGIN;[\s\S]*COMMIT;\s*NOTIFY pgrst, 'reload schema';\s*$/i.test(casMigration), 'CAS migration is one atomic transaction');

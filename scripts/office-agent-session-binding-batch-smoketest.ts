@@ -28,6 +28,10 @@ assert.match(batch, /new Set\(officeAgentIds\)/, 'batch ids are deduplicated');
 assert.match(batch, /uniqueIds\.some\(\(officeAgentId\) => !isUuid\(officeAgentId\)\)/, 'every requested id is an exact UUID');
 assert.match(batch, /\.from\('office_agent_session_bindings'\)/, 'batch uses the canonical owner-RLS table');
 assert.match(batch, /\.in\('office_agent_id', requestedOfficeAgentIds\)/, 'one IN query replaces per-agent fanout');
+assert.match(batch, /const accessToken = bindingAccessToken\(authority\)/, 'batch validates its optional captured bearer before dispatch');
+assert.match(batch, /getSupabaseClientForAccessToken\(accessToken\)/, 'captured-authority batch reads use a pinned-token client');
+assert.match(batch, /accessToken === undefined[\s\S]{0,80}\? supabase/, 'compatibility batch reads retain the shared client branch');
+assert.doesNotMatch(batch, /bindCapturedBearer|\.setHeader\(/, 'captured-authority batch reads never merge headers through shared auth');
 assert.match(failureClassifier, /'transient_transport'/, 'transport failure is structured');
 assert.match(batch, /reason: 'invalid_response'/, 'malformed or duplicate rows fail closed');
 
@@ -45,4 +49,4 @@ assert.match(effect, /setOfficeAgentSessionBindings\(new Map\(\)\)/, 'non-transi
 const exact = bindingSource.slice(exactStart);
 assert.match(exact, /\.eq\('office_agent_id', officeAgentId\)[\s\S]{0,80}\.maybeSingle\(\)/, 'execution authority keeps one exact fresh read');
 
-console.log('office agent session binding batch smoke passed (15 assertions)');
+console.log('office agent session binding batch smoke passed (19 assertions)');

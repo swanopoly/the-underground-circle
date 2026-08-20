@@ -28,6 +28,10 @@ import { getStrictLocalAiModeMessage, isStrictLocalAiModeEnabled, shouldBlockExt
 import type { OpenSwanMemoryStores } from './openswanMemoryStores';
 import type { OpenSwanChatMode } from './openswanModePolicy';
 import type { OpenSwanResolvedSkill } from './openswanSkillResolution';
+import type {
+  OpenSwanExactCircleAuthority,
+  OpenSwanExactCircleAuthorityFence,
+} from './openswanToolRuntime';
 import type { OpenSwanAttachmentTurnSources } from './openSwanAttachmentTurnSources';
 import type { AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
 import type { ConnectedProviderSet } from './serviceProfileSouls';
@@ -6491,6 +6495,10 @@ export async function executeToolUseLoop(opts: {
   model: string;
   circleId: string;
   userId: string;
+  /** Runtime-private exact authority for owner/circle Office preferences. */
+  exactCircleAuthority?: OpenSwanExactCircleAuthority | null;
+  /** Live UI fence; never enters provider input or persisted metadata. */
+  isExactCircleAuthorityCurrent?: OpenSwanExactCircleAuthorityFence;
   threadId?: string;
   runId?: string;
   /** Runtime-private exact approval authority for a single retry turn. */
@@ -6604,6 +6612,8 @@ export async function executeToolUseLoop(opts: {
   const toolCtx = {
     circleId: opts.circleId,
     userId: opts.userId,
+    exactCircleAuthority: opts.exactCircleAuthority,
+    isExactCircleAuthorityCurrent: opts.isExactCircleAuthorityCurrent,
     threadId: opts.threadId,
     runId: opts.runId,
     approvalResumeBinding: opts.approvalResumeBinding || null,

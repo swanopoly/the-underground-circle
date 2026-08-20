@@ -371,9 +371,10 @@ for (const sql of [migration, exactReceiptMigration, consolidatedSql]) {
   assert(sql.includes("NEW.expires_at := NEW.acknowledged_at + interval '30 days'"), 'attention expiry is server-stamped');
 }
 assert(
-  persistence.includes(".rpc('list_active_office_attention_acknowledgements'")
-    && persistence.includes('Compatibility for a target that has the historical §37 objects'),
-  'attention expiry prefers the database clock while retaining an explicit pre-migration compatibility path',
+  persistence.includes('if (HAS_OFFICE_ATTENTION_SERVER_CLOCK_V1 && !attentionRpcMissingThisSession)')
+    && persistence.includes(".rpc('list_active_office_attention_acknowledgements'")
+    && persistence.includes('Compatibility for a target that has the historical §37 table'),
+  'attention expiry uses the database clock only when declared ready and retains an explicit pre-migration compatibility path',
 );
 assert(
   persistence.includes('const acknowledgedAt = new Date()')

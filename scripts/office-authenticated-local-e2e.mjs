@@ -250,6 +250,64 @@ function isOfficeCanaryEssentialRequest(requestUrl) {
     || /\/rest\/v1\/office_layouts(?:\?|$)|\/rest\/v1\/rpc\/save_office_layout_v2(?:\?|$)/i.test(requestUrl);
 }
 
+function isAgentProgressionStorageRequest(requestUrl) {
+  return /\/rest\/v1\/(?:progression_events|agent_mastery|agent_evolution_unlocks)(?:\?|$)/i.test(requestUrl);
+}
+
+const HTTP_4XX_DIAGNOSTIC_SAMPLE_LIMIT = 24;
+const HTTP_4XX_TOOL_POST_DATA_MAX_BYTES = 16 * 1024;
+const HTTP_4XX_METHOD_ALLOWLIST = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
+const HTTP_4XX_TOOL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+
+function readSanitizedHttp4xxEvidence(response) {
+  const status = response.status();
+  if (status < 400 || status >= 500) return null;
+
+  let requestUrl;
+  try {
+    requestUrl = new URL(response.url());
+  } catch {
+    return null;
+  }
+  if (requestUrl.protocol !== 'http:' && requestUrl.protocol !== 'https:') return null;
+
+  const request = response.request();
+  const rawMethod = String(request.method() || '').toUpperCase();
+  const method = HTTP_4XX_METHOD_ALLOWLIST.has(rawMethod) ? rawMethod : 'OTHER';
+  let tool;
+  if (method === 'POST' && requestUrl.pathname === '/tools/invoke') {
+    const postData = request.postData();
+    if (
+      typeof postData === 'string'
+      && postData.length > 0
+      && postData.length <= HTTP_4XX_TOOL_POST_DATA_MAX_BYTES
+    ) {
+      try {
+        const parsed = JSON.parse(postData);
+        if (
+          parsed
+          && typeof parsed === 'object'
+          && !Array.isArray(parsed)
+          && typeof parsed.tool === 'string'
+          && HTTP_4XX_TOOL_NAME_PATTERN.test(parsed.tool)
+        ) tool = parsed.tool;
+      } catch {
+        // Invalid or non-JSON request bodies contribute no tool detail.
+      }
+    }
+  }
+
+  // Deliberately omit query, fragment, headers, and raw post data. They can
+  // contain bearer authority, fixture identifiers, or application payloads.
+  return {
+    status,
+    method,
+    origin: requestUrl.origin.slice(0, 200),
+    path: requestUrl.pathname.slice(0, 500),
+    ...(tool ? { tool } : {}),
+  };
+}
+
 const POPUP_CONSOLE_ERROR_ALLOWLIST = Object.freeze([
   {
     id: 'missing-favicon',
@@ -283,6 +341,9 @@ function attachDiagnostics(page, viewport) {
     popupConsoleErrors: [],
     popupAllowedConsoleErrors: [],
     popupSectionErrors: [],
+    progressionRequests: [],
+    http4xxResponseCount: 0,
+    http4xxResponseSamples: [],
   };
   diagnostics.push(record);
   page.on('pageerror', (error) => record.pageErrors.push(String(error?.message || error).slice(0, 500)));
@@ -320,13 +381,25 @@ function attachDiagnostics(page, viewport) {
   });
   page.on('request', (request) => {
     try {
-      const hostname = new URL(request.url()).hostname;
+      const requestUrl = new URL(request.url());
+      const hostname = requestUrl.hostname;
       if (hostname.endsWith('.supabase.co')) record.supabaseHosts.add(hostname);
+      if (isAgentProgressionStorageRequest(request.url())) {
+        record.progressionRequests.push(`${request.method()} ${requestUrl.pathname}`);
+      }
     } catch {
       // Non-URL browser resources are irrelevant to project identity.
     }
   });
   page.on('response', (response) => {
+    const http4xxEvidence = readSanitizedHttp4xxEvidence(response);
+    if (http4xxEvidence) {
+      record.http4xxResponseCount += 1;
+      record.http4xxResponseSamples.push(http4xxEvidence);
+      if (record.http4xxResponseSamples.length > HTTP_4XX_DIAGNOSTIC_SAMPLE_LIMIT) {
+        record.http4xxResponseSamples.shift();
+      }
+    }
     if (response.status() >= 500 && isOfficeCanaryEssentialRequest(response.url())) {
       record.serverErrors.push(`${response.status()} ${response.url()}`.slice(0, 700));
     }
@@ -466,7 +539,29 @@ async function openAuthenticatedOffice(context, session, viewportName, options =
   }
   await page.goto(`${appBaseUrl}/circle/${circleId}/office`, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await dismissTutorial(page);
-  await page.getByTestId('office-workspace-ready').waitFor({ state: 'visible', timeout: 45_000 });
+  try {
+    await page.getByTestId('office-workspace-ready').waitFor({ state: 'visible', timeout: 45_000 });
+  } catch (error) {
+    const entryState = await page.evaluate((key) => ({
+      url: location.href,
+      title: document.title,
+      authStoragePresent: localStorage.getItem(key) !== null,
+      officeReadyCount: document.querySelectorAll('[data-testid="office-workspace-ready"]').length,
+      alerts: Array.from(document.querySelectorAll('[role="alert"]'))
+        .map((alert) => alert.textContent?.replace(/\s+/g, ' ').trim() || '')
+        .filter(Boolean)
+        .slice(0, 5),
+      headings: Array.from(document.querySelectorAll('h1,h2,h3,[role="heading"]'))
+        .map((heading) => heading.textContent?.replace(/\s+/g, ' ').trim() || '')
+        .filter(Boolean)
+        .slice(0, 8),
+    }), storageKey).catch((diagnosticError) => ({
+      diagnosticError: diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError),
+    }));
+    throw new Error(
+      `Authenticated Office entry did not settle: ${JSON.stringify(entryState)}; cause=${error instanceof Error ? error.message : String(error)}.`,
+    );
+  }
   await dismissTutorial(page);
   const observedRoute = new URL(page.url());
   if (
@@ -1668,6 +1763,30 @@ async function waitForExactPopupAuthorityReady(page) {
   await page.getByLabel(/^(Pause|Resume) OpenSwan$/).waitFor({ state: 'visible', timeout: 30_000 });
 }
 
+async function verifyAgentPauseRoundTrip(page, record) {
+  const initialControl = page.getByLabel(/^(Pause|Resume) OpenSwan$/).first();
+  await initialControl.waitFor({ state: 'visible', timeout: 30_000 });
+  const initialLabel = await initialControl.getAttribute('aria-label');
+  if (initialLabel !== 'Pause OpenSwan' && initialLabel !== 'Resume OpenSwan') {
+    throw new Error(`The Agent pause control exposed an invalid initial label: ${String(initialLabel)}.`);
+  }
+  const toggledLabel = initialLabel === 'Pause OpenSwan' ? 'Resume OpenSwan' : 'Pause OpenSwan';
+
+  await initialControl.click();
+  await page.getByLabel(toggledLabel, { exact: true }).waitFor({ state: 'visible', timeout: 30_000 });
+  await assertPopupSectionHealthy(page, record, 'Agent pause toggle');
+
+  await page.getByLabel(toggledLabel, { exact: true }).click();
+  await page.getByLabel(initialLabel, { exact: true }).waitFor({ state: 'visible', timeout: 30_000 });
+  await assertPopupSectionHealthy(page, record, 'Agent pause restore');
+
+  return {
+    initialState: initialLabel.startsWith('Pause') ? 'running' : 'paused',
+    toggledState: toggledLabel.startsWith('Pause') ? 'running' : 'paused',
+    restored: true,
+  };
+}
+
 async function selectAgentCustomize(page) {
   await page.getByLabel('More destination', { exact: true }).click();
   await page.getByLabel('Customize tab', { exact: true }).click();
@@ -1718,42 +1837,92 @@ async function assertPopupSectionHealthy(page, record, label) {
   throw new Error(`${label} exposed ${errors.length} popup section error(s): ${JSON.stringify(errors)}.`);
 }
 
+async function readAgentPanelRouteDiagnostics(page) {
+  const root = page.locator('#uc-agent-panel-root');
+  if (await root.count() === 0) return { rootPresent: false };
+  return root.evaluate((element) => {
+    const leafText = Array.from(element.querySelectorAll('*'))
+      .filter((candidate) => candidate.children.length === 0)
+      .map((candidate) => candidate.textContent?.replace(/\s+/g, ' ').trim() || '')
+      .filter(Boolean);
+    const selected = (suffix) => Array.from(element.querySelectorAll(`[aria-label$="${suffix}"][aria-selected="true"]`))
+      .map((control) => control.getAttribute('aria-label'))
+      .filter(Boolean);
+    const tabpanel = element.querySelector('#uc-agent-panel-tabpanel');
+    return {
+      rootPresent: true,
+      destinations: selected(' destination'),
+      routes: selected(' tab'),
+      section: tabpanel?.getAttribute('aria-label') || null,
+      labelledBy: tabpanel?.getAttribute('aria-labelledby') || null,
+      loading: leafText.filter((text) => /^Loading\s+.+(?:…|\.\.\.)$/u.test(text)).slice(0, 8),
+      progressbars: Array.from(element.querySelectorAll('[role="progressbar"]'))
+        .map((progressbar) => progressbar.getAttribute('aria-label') || 'unnamed progress')
+        .slice(0, 8),
+      alerts: Array.from(element.querySelectorAll('[role="alert"]'))
+        .map((alert) => alert.textContent?.replace(/\s+/g, ' ').trim() || '')
+        .filter(Boolean)
+        .slice(0, 8),
+      sectionFallback: leafText.includes('This section could not load'),
+      activeElement: document.activeElement?.getAttribute('aria-label') || document.activeElement?.id || null,
+    };
+  });
+}
+
 async function waitForAgentPanelRouteSettled(page, destinationLabel, routeLabel, expectedSectionLabel) {
-  await page.waitForFunction(({ destination, route, section }) => {
-    const root = document.getElementById('uc-agent-panel-root');
-    if (!root) return false;
-    const controls = Array.from(root.querySelectorAll('[aria-label]'));
-    const destinationControl = controls.find(
-      (element) => element.getAttribute('aria-label') === destination,
+  try {
+    await page.waitForFunction(({ destination, route, section }) => {
+      const root = document.getElementById('uc-agent-panel-root');
+      if (!root) return false;
+      const controls = Array.from(root.querySelectorAll('[aria-label]'));
+      const destinationControl = controls.find(
+        (element) => element.getAttribute('aria-label') === destination,
+      );
+      const routeControl = route
+        ? controls.find((element) => element.getAttribute('aria-label') === route)
+        : null;
+      const tabpanel = root.querySelector('#uc-agent-panel-tabpanel');
+      const loadingLeaf = Array.from(root.querySelectorAll('*')).some((element) => (
+        element.children.length === 0
+        && /^Loading\s+.+(?:…|\.\.\.)$/u.test(element.textContent?.trim() || '')
+      ));
+      const loadingProgress = root.querySelector('[role="progressbar"]');
+      const labelledBy = tabpanel?.getAttribute('aria-labelledby');
+      const activeControl = routeControl || destinationControl;
+      return destinationControl?.getAttribute('aria-selected') === 'true'
+        && (!route || routeControl?.getAttribute('aria-selected') === 'true')
+        && destinationControl?.getAttribute('aria-controls') === 'uc-agent-panel-tabpanel'
+        && (!routeControl || routeControl.getAttribute('aria-controls') === 'uc-agent-panel-tabpanel')
+        && tabpanel?.getAttribute('role') === 'tabpanel'
+        && tabpanel?.getAttribute('aria-label') === section
+        && Boolean(activeControl?.id)
+        && labelledBy === activeControl?.id
+        && !loadingLeaf
+        && !loadingProgress;
+    }, {
+      destination: destinationLabel,
+      route: routeLabel,
+      section: expectedSectionLabel,
+    }, { timeout: 30_000 });
+  } catch (error) {
+    const diagnostics = await readAgentPanelRouteDiagnostics(page).catch((diagnosticError) => ({
+      diagnosticError: diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError),
+    }));
+    const expectedRoute = routeLabel || expectedSectionLabel || destinationLabel;
+    throw new Error(
+      `Agent popup route ${expectedRoute} did not settle: ${JSON.stringify(diagnostics)}; cause=${error instanceof Error ? error.message : String(error)}.`,
     );
-    const routeControl = route
-      ? controls.find((element) => element.getAttribute('aria-label') === route)
-      : null;
-    const tabpanel = root.querySelector('#uc-agent-panel-tabpanel');
-    const loadingLeaf = Array.from(root.querySelectorAll('*')).some((element) => (
-      element.children.length === 0
-      && /^Loading\s+.+(?:…|\.\.\.)$/u.test(element.textContent?.trim() || '')
-    ));
-    const labelledBy = tabpanel?.getAttribute('aria-labelledby');
-    const activeControl = routeControl || destinationControl;
-    return destinationControl?.getAttribute('aria-selected') === 'true'
-      && (!route || routeControl?.getAttribute('aria-selected') === 'true')
-      && destinationControl?.getAttribute('aria-controls') === 'uc-agent-panel-tabpanel'
-      && (!routeControl || routeControl.getAttribute('aria-controls') === 'uc-agent-panel-tabpanel')
-      && tabpanel?.getAttribute('role') === 'tabpanel'
-      && tabpanel?.getAttribute('aria-label') === section
-      && Boolean(activeControl?.id)
-      && labelledBy === activeControl?.id
-      && !loadingLeaf;
-  }, {
-    destination: destinationLabel,
-    route: routeLabel,
-    section: expectedSectionLabel,
-  }, { timeout: 30_000 });
+  }
 }
 
 async function assertVisitedAgentPanelRoute(page, record, destinationLabel, routeLabel, expectedSectionLabel) {
-  await waitForAgentPanelRouteSettled(page, destinationLabel, routeLabel, expectedSectionLabel);
+  try {
+    await waitForAgentPanelRouteSettled(page, destinationLabel, routeLabel, expectedSectionLabel);
+  } catch (error) {
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)} popupConsoleErrors=${JSON.stringify(record.popupConsoleErrors.slice(-5))}.`,
+    );
+  }
   const label = routeLabel || destinationLabel;
   await assertPopupSectionHealthy(page, record, `Agent popup route ${label}`);
   if (record.popupConsoleErrors.length > 0) {
@@ -1914,25 +2083,31 @@ async function readAgentPopupEvidence(page) {
 }
 
 async function waitForResponsiveAgentPopup(page, expectedDockControlVisible) {
-  await page.waitForFunction((expectDock) => {
-    const root = document.getElementById('uc-agent-panel-root');
-    if (!root) return false;
-    const rect = root.getBoundingClientRect();
-    const dockControl = Array.from(document.querySelectorAll('[aria-label]')).find(
-      (element) => element.getAttribute('aria-label') === 'Dock agent panel to the right',
-    );
-    const dockVisible = Boolean(dockControl && dockControl.getBoundingClientRect().width > 0);
-    const backdrop = document.querySelector('[data-testid="agent-panel-backdrop"]');
-    return dockVisible === expectDock
-      && root.getAttribute('aria-modal') === 'true'
-      && Boolean(backdrop)
-      && rect.width >= 280
-      && rect.height >= 280
-      && rect.left >= -1
-      && rect.top >= -1
-      && rect.right <= innerWidth + 1
-      && rect.bottom <= innerHeight + 1;
-  }, expectedDockControlVisible, { timeout: 15_000 });
+  try {
+    await page.waitForFunction((expectDock) => {
+      const root = document.getElementById('uc-agent-panel-root');
+      if (!root) return false;
+      const rect = root.getBoundingClientRect();
+      const dockControl = Array.from(document.querySelectorAll('[aria-label]')).find(
+        (element) => element.getAttribute('aria-label') === 'Dock agent panel to the right',
+      );
+      const dockVisible = Boolean(dockControl && dockControl.getBoundingClientRect().width > 0);
+      const backdrop = document.querySelector('[data-testid="agent-panel-backdrop"]');
+      return dockVisible === expectDock
+        && root.getAttribute('aria-modal') === 'true'
+        && Boolean(backdrop)
+        && Boolean(document.activeElement && root.contains(document.activeElement))
+        && rect.width >= 280
+        && rect.height >= 280
+        && rect.left >= -1
+        && rect.top >= -1
+        && rect.right <= innerWidth + 1
+        && rect.bottom <= innerHeight + 1;
+    }, expectedDockControlVisible, { timeout: 15_000 });
+  } catch (error) {
+    const evidence = await readAgentPopupEvidence(page).catch(() => null);
+    throw new Error(`Responsive Agent popup did not settle: ${JSON.stringify({ expectedDockControlVisible, evidence, cause: String(error) })}.`);
+  }
 }
 
 function assertAgentPopupEvidence(evidence, label, expectedDockControlVisible) {
@@ -2368,7 +2543,10 @@ async function runAgentPopupCanary(session) {
     console.error = function (...args) {
       const text = args.map((value) => String(value)).join(' ');
       if (/Maximum update depth exceeded|Too many re-renders/i.test(text) && captured.length < 5) {
-        captured.push({ text: text.slice(0, 500), stack: String(new Error().stack || '').slice(0, 4_000) });
+        captured.push({
+          text: text.slice(0, 500),
+          stack: String(new Error().stack || '').slice(0, 4_000),
+        });
       }
       return originalError.apply(this, args);
     };
@@ -2408,6 +2586,8 @@ async function runAgentPopupCanary(session) {
     }
     await waitForExactPopupAuthorityReady(firstPage);
     await assertPopupSectionHealthy(firstPage, firstRecord, 'First-tab Overview');
+    const pauseControlRoundTrip = await verifyAgentPauseRoundTrip(firstPage, firstRecord);
+    progress('agent-popup:pause-resume-round-trip-verified');
     const headerAreaBackdropIsolation = await verifyCenteredHeaderBackdropIsolation(firstPage);
     progress('agent-popup:centered-header-and-chat-backdrop-isolation-verified');
 
@@ -2481,6 +2661,12 @@ async function runAgentPopupCanary(session) {
     progress('agent-popup:docked-resize-breakpoint-restoration-verified');
 
     const availablePanelRoutes = await visitEveryAvailableAgentPanelRoute(firstPage, firstRecord);
+    const progressionAdvertised = availablePanelRoutes.some((destination) => (
+      destination.routes.includes('XP & Achievements section')
+    ));
+    if (progressionAdvertised) {
+      throw new Error('The default-off Agent progression capability unexpectedly advertised XP & Achievements.');
+    }
     await selectAgentCustomize(firstPage);
     await assertPopupSectionHealthy(firstPage, firstRecord, 'Customize restored after available-route sweep');
     progress('agent-popup:all-available-routes-verified');
@@ -2575,6 +2761,7 @@ async function runAgentPopupCanary(session) {
     const serverErrors = records.flatMap((record) => record.serverErrors);
     const popupConsoleErrors = records.flatMap((record) => record.popupConsoleErrors);
     const popupSectionErrors = records.flatMap((record) => record.popupSectionErrors);
+    const progressionRequests = records.flatMap((record) => record.progressionRequests);
     const essentialRequestFailures = records.flatMap((record) => record.failedRequests).filter((message) => {
       const requestUrl = message.match(/^\S+\s+(\S+)/)?.[1] || '';
       return isOfficeCanaryEssentialRequest(requestUrl);
@@ -2586,6 +2773,9 @@ async function runAgentPopupCanary(session) {
     }
     if (popupSectionErrors.length > 0) {
       throw new Error(`Agent popup tabs observed ${popupSectionErrors.length} visible section error(s): ${JSON.stringify(popupSectionErrors.slice(0, 5))}.`);
+    }
+    if (progressionRequests.length > 0) {
+      throw new Error(`Default-off Agent progression made ${progressionRequests.length} unexpected storage request(s): ${JSON.stringify(progressionRequests.slice(0, 5))}.`);
     }
     if (essentialRequestFailures.length > 0) {
       throw new Error(`Agent popup tabs observed ${essentialRequestFailures.length} essential request failure(s).`);
@@ -2610,6 +2800,7 @@ async function runAgentPopupCanary(session) {
         returnedToCenteredPopup: true,
       },
       reducedMotionPreviewAnimations: previewAnimationCount,
+      pauseControlRoundTrip,
       headerAreaBackdropIsolation,
       focusRestoredInBothTabs: true,
       pageErrors: 0,
@@ -2830,6 +3021,7 @@ try {
       consoleErrors: entry.consoleErrors.length,
       failedRequests: entry.failedRequests.length,
       serverErrors: entry.serverErrors.length,
+      http4xxResponses: entry.http4xxResponseCount,
       sampleConsoleErrors: entry.consoleErrors.slice(0, 3),
       updateLoopConsoleDetails: entry.consoleErrorDetails.filter((detail) => (
         /Maximum update depth exceeded|Too many re-renders/i.test(detail.text)
@@ -2839,6 +3031,7 @@ try {
       popupSectionErrors: entry.popupSectionErrors.slice(0, 5),
       sampleFailedRequests: entry.failedRequests.slice(0, 3),
       sampleServerErrors: entry.serverErrors.slice(0, 3),
+      sampleHttp4xxResponses: entry.http4xxResponseSamples.slice(-5),
       layoutResponses: entry.layoutResponses.slice(-12),
       supabaseHosts: [...entry.supabaseHosts].sort(),
       bundleIdentity: entry.bundleIdentity,
@@ -2880,6 +3073,8 @@ if (runFailure || cleanupFailure) {
       popupSectionErrors: entry.popupSectionErrors.slice(-8),
       failedRequests: entry.failedRequests.slice(-8),
       serverErrors: entry.serverErrors.slice(-5),
+      http4xxResponses: entry.http4xxResponseCount,
+      sampleHttp4xxResponses: entry.http4xxResponseSamples.slice(-8),
       layoutResponses: entry.layoutResponses.slice(-12),
       supabaseHosts: [...entry.supabaseHosts].sort(),
       bundleIdentity: entry.bundleIdentity,

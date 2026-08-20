@@ -173,6 +173,16 @@ assert.doesNotMatch(
   /sessions_send/,
   'sessions_send remains on the declared slow client boundary',
 );
+assert.match(
+  rawToolInvoker,
+  /const isFastRead = FAST_TOOLS\.has\(tool\) \|\| \(tool === 'cron' && args\.action === 'list'\);/,
+  'cron inventory uses the bounded fast-read deadline without shortening cron mutation budgets',
+);
+assert.match(
+  rawToolInvoker,
+  /const timer = setTimeout[\s\S]*const res = await fetch[\s\S]*const payload = await res\.json\(\);[\s\S]*finally \{\s*clearTimeout\(timer\);/,
+  'the raw tool deadline remains armed through response-body consumption',
+);
 assert.match(toolCapabilityState, /const unsupportedToolEndpointCache = new Map<string, number>\(\);/, 'endpoint capability failures expire instead of surviving until page reload');
 assert.match(rawToolInvoker, /if \(tool === 'sessions_list'\) markToolRpcEndpointUnsupported\(endpointKey\);/, 'only the baseline session inventory may classify the whole tool endpoint as unsupported');
 assert.match(rawToolInvoker, /markToolUnsupported\(endpointKey, tool\);[\s\S]{0,320}if \(tool === 'sessions_list'\)/, 'an optional-tool 404 is cached per tool without disabling other capabilities');

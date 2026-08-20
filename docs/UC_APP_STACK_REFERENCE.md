@@ -646,7 +646,11 @@ The Office Agent popup follows the same progressive-disclosure rule as Chat's
 Control Panel and has four primary destinations: Overview, Work, Runtime, and
 More. Their contextual sections remain capability-filtered, so a DB-only or
 unauthenticated OpenSwan row cannot expose unusable live Runtime or Schedule
-routes. Opening an agent performs no speculative section imports or name-based
+routes. `XP & Achievements` is also default-off unless the exact public
+`EXPO_PUBLIC_AGENT_PROGRESSION_STORAGE_V1=true` deployment-readiness assertion
+is present. With the optional progression tables unverified, that route is not
+advertised or mounted and performs no progression REST/Realtime request instead
+of presenting an invented zero. Opening an agent performs no speculative section imports or name-based
 database creation. Lazy failures show a retry, and subject/authority-generation
 changes synchronously reset the route and remount section resources so one
 agent's stale data cannot render beneath another agent.
@@ -929,7 +933,10 @@ authenticated layout mutation surface, rejects unsafe/far-future versions, and
 repairs any legacy future-version poison before revoking raw writes. It removes
 invalid legacy dismissals, enforces a durable run/circle foreign key, and uses
 server-owned acknowledgement/expiry timestamps plus a server-clock active-read
-RPC. Before that trigger lands, a bounded 30-day compatibility payload renews
+RPC. The client uses that RPC only when
+`EXPO_PUBLIC_OFFICE_ATTENTION_SERVER_CLOCK_V1=true`; otherwise it directly uses
+the exact owner/circle legacy-table fallback and makes no missing-RPC probe.
+Before that trigger lands, a bounded 30-day compatibility payload renews
 expired historical rows; the trigger overwrites those browser timestamps after
 migration. Authenticated localhost exact local/server
 convergence and save/reload passed on 2026-08-13; negative RLS, deployed, and
@@ -946,15 +953,48 @@ behind exact-scope hydration so an account/circle switch cannot briefly paint
 the previous user's names, appearance, notes, budget, sessions, or Telegram
 state. Telegram tokens remain only in verified local secret storage; the
 server receives bounded non-secret `chatId`/`botName` metadata. Legacy private
-profile keys and appearances are scrubbed without projecting their values, and
-narrow triggers keep older clients from restoring them. Session/tag/identity
+profile keys and appearances are first preserved only when one profile has
+exactly one Circle membership. The bounded live preference document cannot
+losslessly carry a production-shaped map with more than 128 appearances, so
+every normalized complete appearance is first stored in the owner-private,
+FORCE-RLS, no-authenticated-DML recovery archive
+`office_user_legacy_appearances (user_id,circle_id,agent_key)`. The migration
+requires exact key and JSON equality between the normalized source snapshot and
+that archive before it scrubs anything. The live `appearances` projection is
+deterministic rather than a whole-map truncation: exact current roster ids take
+priority, then matching `agentNames` keys, with a maximum of 128 entries; the
+archive preserves every remaining normalized entry. Partial appearance records
+are field-merged with dedicated `agent_appearance` values winning collisions,
+valid bounded fields are retained, and missing fields receive the current safe
+15-field defaults. Partial idle state likewise keeps bounded values while
+missing/malformed behavior fields become disabled, 1440 minutes, or `null`;
+malformed behavior entries drop. `telegramConfig` is never projected;
+ambiguous membership, recursive secret-bearing sources, invalid reviewed
+sources, archive mismatch, or a missing preference copy fail the transaction.
+Conflicts never overwrite newer state, and the complete normalized document
+must pass the canonical validator before the scrub. Transaction-local `SHARE`
+locks keep `profiles`, `circle_members`, and `circle_office_agents`
+write-stable while the archive has a mutually exclusive publication lock;
+five-second lock and 30-second statement timeouts roll the section back under
+contention, so application requires the value-free candidate-count preflight
+and a low-write window.
+Narrow triggers then keep older clients from restoring the legacy fields.
+The OpenSwan appearance tool uses the same exact captured authority and §45
+read/patch RPC with a revision receipt, never a raw profile write. Session/tag/identity
 caches are exact user/circle envelopes with no scoped fallback to ownerless
 legacy records. Local queue deadlines retire only the exact scope lane until an
 unabortable operation settles, while unrelated users/circles remain
 independent. Migration `20260813220000_office_user_preferences.sql` is mirrored
-byte-for-byte as §45 and is not applied to the target; source and disposable
-PostgreSQL behavior do not substitute for live two-user negative-RLS,
-account-switch, cross-device, native secret-store, or deployed UI proof.
+byte-for-byte as §45 and is not applied to the target. A value-free production
+rollback preflight proved 910 exact archive entries, the deterministic 122-entry
+active projection, zero invalid archive rows, and complete legacy-source scrub
+inside one rolled-back transaction, leaving the target unchanged. Source,
+disposable PostgreSQL, and that rollback proof do not substitute for live
+two-user negative-RLS, account-switch, cross-device, native secret-store, or
+deployed UI proof.
+Accordingly, `EXPO_PUBLIC_OFFICE_USER_PREFERENCES_STORAGE_V1` is default-off;
+disabled builds keep device-only preference state and do not call the §45 read
+or patch RPC.
 
 The 2026-08-13 exact-runtime continuation layer extends that private-state gate
 to the remaining Office action surfaces. Before private hydration, Office

@@ -7,12 +7,20 @@ const overview = read('src/screens/circles/tabs/office/AgentOverviewPanel.tsx');
 const terminal = read('src/screens/circles/tabs/office/AgentTerminalPanels.tsx');
 const memory = read('src/screens/circles/tabs/office/AgentMemoryPanel.tsx');
 const spirit = read('src/screens/circles/tabs/office/AgentSpiritPanel.tsx');
+const identityCore = read('src/lib/agentIdentity.ts');
 const customProfileMigration = read('supabase/migrations/20260327_custom_agent_profiles.sql');
 
 let assertions = 0;
 function check(condition: unknown, message: string): void {
   assertions += 1;
   assert(condition, message);
+}
+
+function sourceSection(source: string, start: string, end: string): string {
+  const startAt = source.indexOf(start);
+  const endAt = source.indexOf(end, startAt + start.length);
+  check(startAt >= 0 && endAt > startAt, `exact identity source section is bounded: ${start}`);
+  return source.slice(startAt, endAt);
 }
 
 check(panel.includes('identityAuthority?: AgentIdentityExactAuthority | null'), 'AgentPanel accepts one exact identity authority');
@@ -31,6 +39,46 @@ check(
     && panel.includes('if (!receipt.ok || !receipt.localSaved || receipt.serverSaved !== true)'),
   'panel-shell rename fails closed without live exact authority or a complete durable receipt',
 );
+
+const exactIdentityMutationBase = sourceSection(
+  identityCore,
+  'async function loadAgentIdentityMutationBaseExact',
+  'type AgentIdentityRow = ReturnType<typeof identityToRow>;',
+);
+const exactIdentityPersist = sourceSection(
+  identityCore,
+  'async function persistIdentitiesToServerExact',
+  '/**\n * Persist an exact scope synchronously',
+);
+const exactPublishedSpirit = sourceSection(
+  identityCore,
+  'export async function updatePublishedAgentSpiritExact',
+  '/** Delete one owner profile only after the server proves it is unreferenced. */',
+);
+const exactProfileDelete = sourceSection(
+  identityCore,
+  'export async function deleteUnreferencedCustomAgentProfileExact',
+  '// ─── Record Agent Activity',
+);
+const exactPrimaryMutation = sourceSection(
+  identityCore,
+  'export async function setMainAgentForProviderExact',
+  '// ─── Customize Agent Appearance',
+);
+for (const [label, body, tokenExpression] of [
+  ['mutation-base read', exactIdentityMutationBase, 'authority.accessToken'],
+  ['identity row mutation', exactIdentityPersist, 'authority.accessToken'],
+  ['published Spirit mutation', exactPublishedSpirit, 'verifiedAuthority.accessToken'],
+  ['custom profile deletion', exactProfileDelete, 'verifiedAuthority.accessToken'],
+  ['primary-agent mutation', exactPrimaryMutation, 'verifiedAuthority.accessToken'],
+] as const) {
+  check(
+    body.includes(`getSupabaseClientForAccessToken(${tokenExpression})`)
+      && !body.includes('.setHeader(')
+      && !/\bsupabase\s*\./u.test(body),
+    `popup ${label} uses a captured-token client and rejects shared-client/header dispatch`,
+  );
+}
 
 check(
   overview.includes('refreshAgentIdentitiesFromServerExact(\n      exactIdentityAuthority,\n      isIdentityAuthorityCurrent,')
@@ -54,7 +102,14 @@ check(!/\bloadAgentIdentities\(/.test(overview), 'Overview has no ownerless iden
 check(!/\brenameAgent\(/.test(overview), 'Overview has no ownerless rename fallback');
 check(!/\bsetMainAgentForProvider\(/.test(overview), 'Overview has no ownerless primary-agent mutation');
 check(overview.includes('latestIdentityRequestKeyRef.current !== capturedRequestKey'), 'Overview rejects late identity reads and mutations');
-check(overview.includes(".setHeader('Authorization', `Bearer ${accessToken}`)"), 'Overview memory status binds the captured bearer');
+check(
+  overview.includes("import { getSupabaseClientForAccessToken } from '../../../../lib/supabase';")
+    && overview.includes('const exactClient = getSupabaseClientForAccessToken(accessToken);')
+    && overview.includes("exactClient\n          .from('memory_entries')")
+    && !overview.includes('.setHeader(')
+    && !overview.includes('supabase.from'),
+  'Overview memory status uses the pinned captured-bearer client without shared-auth header merging',
+);
 check(
   overview.includes("receipt.error === 'outcome_unknown'")
     && overview.includes('receipt.serverSaved === true && !receipt.localSaved')
@@ -111,7 +166,13 @@ for (const retiredDirectPath of ['sendSwanBotMessage', 'loadConversationHistory'
 
 check(memory.includes('identityAuthority: AgentMemoryPanelAuthority | null'), 'Memory requires exact authority');
 check(memory.includes('isIdentityAuthorityCurrent: AgentMemoryPanelAuthorityFence'), 'Memory requires a lifecycle fence');
-check(memory.includes(".setHeader('Authorization', bearer)"), 'Memory reads bind the captured bearer');
+check(
+  memory.includes("import { getSupabaseClientForAccessToken } from '../../../../lib/supabase';")
+    && (memory.match(/const exactClient = getSupabaseClientForAccessToken\(authority\.accessToken\);/g) || []).length === 2
+    && !memory.includes('.setHeader(')
+    && !memory.includes('supabase.from'),
+  'Memory snapshot and mutation operations use pinned captured-bearer clients without shared-auth header merging',
+);
 check(memory.includes('if (result.error) throw result.error'), 'Memory propagates read failures instead of converting them to empty state');
 check(
   memory.includes('executeAgentMemoryCasMutation(')
@@ -125,7 +186,19 @@ check(memory.includes('onOpenInChat(request.slice(0, 3_500))'), 'new Memory and 
 check(!memory.includes('<ScrollView'), 'Memory leaves vertical scrolling to the panel shell');
 check(!memory.includes(".eq('name', agentName.trim())"), 'Memory Soul projection never aliases a live session to a published agent by display name');
 
-check(spirit.includes('syncAgentIdentitiesFromServerExact(authority)'), 'Spirit hydrates from a durable exact identity snapshot');
+check(
+  spirit.includes('syncAgentIdentitiesFromServerExact(authority, {')
+    && spirit.includes('fence: isIdentityAuthorityCurrent,')
+    && spirit.includes('signal: snapshotController.signal,'),
+  'Spirit hydrates from a durable exact identity snapshot under its current authority and route deadline',
+);
+check(
+  spirit.includes('const SPIRIT_SNAPSHOT_TIMEOUT_MS = 8_000;')
+    && (spirit.match(/\.abortSignal\(snapshotController\.signal\)/g) || []).length >= 3
+    && spirit.includes('snapshotController.abort();')
+    && !spirit.includes('}, [agent, circleId, exactIdentityAuthority, identityRequestKey'),
+  'Spirit bounds and retires every sequential snapshot request instead of leaving the route loading forever',
+);
 check(spirit.includes('updateAgentIdentityExact(') && spirit.includes('updates,\n      authority,\n      isIdentityAuthorityCurrent,'), 'Spirit identity patches bind captured authority and its live generation fence');
 check(!/\bloadAgentIdentities\(/.test(spirit), 'Spirit has no ownerless identity read');
 check(!/\bupdateAgentIdentity\(/.test(spirit), 'Spirit has no ownerless identity write');
@@ -145,10 +218,11 @@ const saveAsEnd = spirit.indexOf('disabled={savingProfile}', saveAsStart);
 const saveAsFlow = spirit.slice(saveAsStart, saveAsEnd);
 check(saveAsStart >= 0 && saveAsEnd > saveAsStart, 'Spirit Save As flow is present in the panel');
 check(
-  saveAsFlow.includes("supabase.from('custom_agent_profiles')\n                                  .insert(expectedProfileReceipt)")
-    && saveAsFlow.includes(".setHeader('Authorization', `Bearer ${authority.accessToken}`)")
+  saveAsFlow.includes('const exactClient = getSupabaseClientForAccessToken(authority.accessToken);')
+    && saveAsFlow.includes("exactClient.from('custom_agent_profiles')\n                                  .insert(expectedProfileReceipt)")
+    && !saveAsFlow.includes('.setHeader(')
     && saveAsFlow.includes(".select('id, user_id, name, emoji, color, tagline, system_prompt, skill_bundle, risk_tier, action_posture, evidence_posture, communication_density, skepticism, escalation_trigger')"),
-  'Spirit Save As is an exact-authority create that requests a complete receipt',
+  'Spirit Save As uses the pinned exact-authority client and requests a complete receipt',
 );
 check(!saveAsFlow.includes('.upsert(') && !saveAsFlow.includes('onConflict'), 'Spirit Save As cannot overwrite an existing same-name profile');
 check(
@@ -177,7 +251,12 @@ check(spirit.includes('isIdentityAuthorityCurrent(current)'), 'Spirit fences lat
 check(spirit.includes('setCustomProfiles([])') && spirit.includes("setSoulText('')"), 'Spirit clears private state when its exact scope changes');
 check(spirit.includes("useState<'loading' | 'ready' | 'error'>('loading')") && spirit.includes('Retry loading verified Spirit identity'), 'Spirit distinguishes verified empty identity from retryable load failure');
 check(spirit.includes(".eq('user_id', authority.userId)"), 'Spirit server operations filter the captured owner');
-check(spirit.includes(".setHeader('Authorization', `Bearer ${authority.accessToken}`)"), 'Spirit server operations bind the captured bearer');
+check(
+  spirit.includes('getSupabaseClientForAccessToken(authority.accessToken)')
+    && !spirit.includes('.setHeader(')
+    && !spirit.includes('supabase.from'),
+  'Spirit server operations use pinned captured-bearer clients without shared-auth header merging',
+);
 check(!spirit.includes("import('../../../../lib/memoryService')"), 'Spirit artifacts use Chat instead of an ambient memory writer');
 
 for (const source of [overview, terminal, memory, spirit]) {

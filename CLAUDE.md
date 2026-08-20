@@ -1042,14 +1042,41 @@ late callbacks fail closed, another scope is not blocked by a stalled lane, and
 the private Office subtree does not render until the exact scope hydrates.
 Telegram tokens stay only in verified exact-scope local secret storage; the
 server receives bounded non-secret `chatId`/`botName` metadata. Ownerless
-legacy records are not imported. Migration
+legacy records are not imported. Before scrubbing legacy fields, §45 copies an
+allowlisted document only for an exactly-one-membership profile. Partial
+appearance records preserve bounded fields, fill the current safe 15-field
+defaults, and merge dedicated `agent_appearance` values at field level with the
+dedicated value winning. A production-shaped map can have more than the 128
+live-document appearance entries, so §45 archives every normalized complete
+appearance in the owner-private, FORCE-RLS, no-authenticated-DML
+`office_user_legacy_appearances (user_id,circle_id,agent_key)` recovery table.
+Before a source is scrubbed, exact keys and JSON values must match the archive.
+The bounded live projection prefers exact current roster ids, then matching
+`agentNames` keys, with a deterministic 128-entry cap; the archive retains all
+other normalized entries. Partial idle state preserves bounded
+booleans/cooldowns/timestamps while missing or malformed fields become
+disabled, 1440 minutes, or `null`, and malformed behavior entries drop.
+`telegramConfig` never enters the projection; ambiguous membership, recursive
+secret-bearing sources, invalid reviewed inputs, archive mismatch, or a missing
+preference-copy receipt abort the transaction. Conflicts do not overwrite newer
+state, and the complete normalized document must pass canonical validation.
+Existence-guarded transaction-local `SHARE` locks keep `profiles`,
+`circle_members`, and `circle_office_agents` write-stable while the archive has
+an exclusive publication lock; five-second lock and 30-second statement
+timeouts fail closed under contention, so operators first run the value-free
+candidate-count preflight and choose a low-write window. The OpenSwan
+appearance tool now uses the same exact captured authority and canonical §45
+read/patch receipt path instead of writing a profile blob. Migration
 `20260813220000_office_user_preferences.sql` is mirrored byte-for-byte as §45;
 it also scrubs the deprecated private profile keys and appearance column and
 prevents older clients from restoring them. Static/parity, exact-scope runtime,
-and disposable PostgreSQL behavior are current 2026-08-13, but §45 is not
-applied. Negative RLS, two-account/two-tab, deployed, native secret-store,
-cross-device layout, preset, preference, and acknowledgement behavior remain
-pending.
+and disposable PostgreSQL behavior are current 2026-08-20, but §45 is not
+applied. A value-free production rollback preflight proved 910 exact archive
+entries, the deterministic 122-entry active projection, zero invalid archive
+rows, and complete legacy-source scrub inside one rolled-back transaction, so
+the target remained unchanged. Authenticated negative RLS, two-account/two-tab,
+deployed, native secret-store, cross-device layout, preset, preference, and
+acknowledgement behavior remain pending.
 
 The 2026-08-13 continuation hardening applies the same exact authority to
 Office connections, terminal dispatch, approvals, OAuth/Figma, and idle work.

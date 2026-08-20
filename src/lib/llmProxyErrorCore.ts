@@ -14,6 +14,7 @@ export type LLMProxyErrorCode =
   | 'key_missing'
   | 'credential_unreadable'
   | 'provider_credential_rejected'
+  | 'provider_billing_unavailable'
   | 'unsupported_provider'
   | 'upstream_error'
   | 'internal';
@@ -70,6 +71,7 @@ export function shouldRetryLLMProxyFailure(
     || details.code === 'key_missing'
     || details.code === 'credential_unreadable'
     || details.code === 'provider_credential_rejected'
+    || details.code === 'provider_billing_unavailable'
     || details.code === 'unsupported_provider'
   ) {
     return false;
@@ -92,6 +94,14 @@ export interface LLMProxyCredentialRecoveryPresentation {
   itemId: LLMProxyProviderId | null;
 }
 
+export interface LLMProxyProviderAvailabilityPresentation {
+  message: string;
+  /** Safe, allowlisted provider whose finite cooldown should be applied. */
+  providerId: LLMProxyProviderId | null;
+}
+
+export type LLMProxyProviderQuarantineKind = 'credential' | 'billing';
+
 const KNOWN_CODES = new Set<LLMProxyErrorCode>([
   'validation',
   'unauthenticated',
@@ -99,6 +109,7 @@ const KNOWN_CODES = new Set<LLMProxyErrorCode>([
   'key_missing',
   'credential_unreadable',
   'provider_credential_rejected',
+  'provider_billing_unavailable',
   'unsupported_provider',
   'upstream_error',
   'internal',
@@ -252,6 +263,37 @@ export function getLLMProxyCredentialRecoveryPresentation(
     providerId,
     itemId: providerId,
   };
+}
+
+/**
+ * Present a provider-account billing refusal without mislabeling a valid key
+ * as disconnected. The failed turn remains terminal; Chat may exclude this
+ * exact provider for a finite period before selecting a different ready route
+ * on a new turn.
+ */
+export function getLLMProxyProviderAvailabilityPresentation(
+  details: Pick<LLMProxyErrorDetails, 'code' | 'provider'>,
+): LLMProxyProviderAvailabilityPresentation | null {
+  if (details.code !== 'provider_billing_unavailable') return null;
+  const providerId = safeProvider(details.provider) ?? null;
+  const providerLabel = providerId ? PROVIDER_LABELS[providerId] : 'The selected model provider';
+  return {
+    message: `${providerLabel} could not accept this request because the connected account has no available billing capacity. No other provider was tried in this turn. Send the request again and Chat will prefer another ready connected model when one is available.`,
+    providerId,
+  };
+}
+
+/** Stable credentials stay excluded until the key changes; billing refusals
+ * receive a finite cooldown so a newly funded account can recover naturally. */
+export function getLLMProxyProviderQuarantineKind(
+  details: Pick<LLMProxyErrorDetails, 'code'>,
+): LLMProxyProviderQuarantineKind | null {
+  if (
+    details.code === 'key_missing'
+    || details.code === 'credential_unreadable'
+    || details.code === 'provider_credential_rejected'
+  ) return 'credential';
+  return details.code === 'provider_billing_unavailable' ? 'billing' : null;
 }
 
 export async function readLLMProxyInvokeError(

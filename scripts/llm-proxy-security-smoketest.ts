@@ -98,6 +98,10 @@ check(
   "upstream provider 401/403 is preserved as a bounded stable credential failure",
 );
 check(
+  /error\.kind === "http" && error\.status === 402[\s\S]*?errResponse\(\s*502,\s*"provider_billing_unavailable"/s.test(source),
+  "upstream provider HTTP 402 becomes a typed non-retryable billing refusal",
+);
+check(
   sharedEdgeSource.includes("if (error) throw new StoredApiKeyLookupError(provider);"),
   "stored-key RPC failures never collapse to an absent key",
 );
@@ -190,6 +194,19 @@ check(
   /return errResponse\(\s*503,\s*"internal",\s*"Circle access could not be verified\."\s*,?\s*\)/s
     .test(handler),
   "an indeterminate membership lookup cannot fall through",
+);
+
+const modelCatalogHandler = section(
+  "if (isModelCatalog) {",
+  "// ── Embedding fast-path",
+);
+check(
+  /catch \(error\) \{[\s\S]*?error instanceof StoredApiKeyLookupError[\s\S]*?return jsonResponse\(\{[\s\S]*?status: "unavailable"[\s\S]*?models: \[\][\s\S]*?fetchedAt: null[\s\S]*?code: "credential_unreadable"/s.test(modelCatalogHandler),
+  "passive list_models turns unreadable ciphertext into a handled typed non-ready envelope",
+);
+check(
+  !/errResponse\(\s*409/.test(modelCatalogHandler),
+  "passive list_models emits no noisy HTTP 409 while interactive requests retain the outer 409",
 );
 
 // ── Hosted SSRF boundary ───────────────────────────────────────────────────

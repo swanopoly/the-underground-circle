@@ -4,7 +4,7 @@
  * provider session identities or local connection secrets.
  */
 
-import { supabase } from './supabase';
+import { getSupabaseClientForAccessToken, supabase } from './supabase';
 import type {
   AgentConnection,
   OfficeConnectionAuthorityFence,
@@ -293,17 +293,21 @@ export async function readOfficeAgentSessionBindingsBatch(
   }
 
   try {
-    const query = bindCapturedBearer(supabase
-      .from('office_agent_session_bindings')
-      .select('id, office_agent_id, agent_bot_id, session_key, created_at, updated_at')
-      .in('office_agent_id', requestedOfficeAgentIds), authority);
-    if (!query) {
+    const accessToken = bindingAccessToken(authority);
+    if (accessToken === null) {
       return Object.freeze({
         ok: false,
         reason: 'invalid_input',
         error: 'The captured Office session authority is invalid.',
       });
     }
+    const client = accessToken === undefined
+      ? supabase
+      : getSupabaseClientForAccessToken(accessToken);
+    const query = client
+      .from('office_agent_session_bindings')
+      .select('id, office_agent_id, agent_bot_id, session_key, created_at, updated_at')
+      .in('office_agent_id', requestedOfficeAgentIds);
     const { data, error } = await query;
     if (error) return bindingReadFailure(error);
     if (!Array.isArray(data) || data.length > requestedOfficeAgentIds.length) {
@@ -456,7 +460,7 @@ async function compareAndSetOfficeAgentSessionBinding(
     });
   }
 
-  const query = bindCapturedBearer(supabase.rpc('compare_and_set_office_agent_session_binding_v1', {
+  const rpcArgs = {
     p_office_agent_id: request.officeAgentId,
     p_circle_id: authority.circleId,
     p_expected_binding_id: request.expectedBinding?.id ?? null,
@@ -465,17 +469,14 @@ async function compareAndSetOfficeAgentSessionBinding(
     p_expected_updated_at: request.expectedBinding?.updatedAt ?? null,
     p_next_agent_bot_id: request.nextBinding?.agentBotId ?? null,
     p_next_session_key: request.nextBinding?.sessionKey ?? null,
-  }), authority);
-  if (!query) {
-    return Object.freeze({
-      ok: false,
-      reason: 'invalid_request',
-      error: 'The exact Office session authority is invalid.',
-    });
-  }
+  };
 
   try {
-    const { data, error } = await query;
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+    const { data, error } = await exactClient.rpc(
+      'compare_and_set_office_agent_session_binding_v1',
+      rpcArgs,
+    );
     if (!mutationAuthorityIsCurrent(authority, options.isAuthorityCurrent)) {
       return Object.freeze({
         ok: false,

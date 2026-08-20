@@ -146,9 +146,11 @@ check(
   'Office preserves bounded multi-line panel drafts instead of applying the one-line quick-seed ceiling',
 );
 check(
-  officeHandoff.indexOf('setSelectedAgent(null);') >= 0
-    && officeHandoff.indexOf('setSelectedAgent(null);') < officeHandoff.indexOf('onOpenAgentInChat?.('),
-  'Office retires the mounted modal before switching to Chat',
+  officeHandoff.indexOf('clearSelectedAgentPanel();') >= 0
+    && officeHandoff.indexOf('clearSelectedAgentPanel();') < officeHandoff.indexOf('onOpenAgentInChat?.(')
+    && officeSource.includes('selectedAgentRefreshRetentionRef.current = null;')
+    && officeSource.includes('const clearSelectedAgentPanel = useCallback(() => {'),
+  'Office retires the mounted modal and its refresh-retention handle before switching to Chat',
 );
 check(
   officeSource.includes('onOpenAgentInChat={onOpenAgentInChat ? handleOpenAgentInChat : undefined}'),

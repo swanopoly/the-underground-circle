@@ -93,7 +93,7 @@ check(
   'Opening per-agent run history remains read-only and cannot reap canonical runs',
 );
 
-const customProfilesStart = spirit.indexOf('{(customProfiles.length > 0 || profileActionStatus)');
+const customProfilesStart = spirit.indexOf('{(customProfiles.length > 0 || Boolean(profileActionStatus))');
 const customProfilesEnd = spirit.indexOf('{SPIRIT_CATEGORIES.map', customProfilesStart);
 assert.ok(customProfilesStart >= 0 && customProfilesEnd > customProfilesStart, 'custom profile section is discoverable');
 const customProfilesSection = spirit.slice(customProfilesStart, customProfilesEnd);
@@ -132,8 +132,9 @@ check(
 check(
   spirit.includes('const requestedProfileName = saveProfileName.trim()')
     && spirit.includes('const expectedProfileReceipt = {')
-    && spirit.includes("supabase.from('custom_agent_profiles')\n                                  .insert(expectedProfileReceipt)")
-    && !spirit.includes("supabase.from('custom_agent_profiles').upsert(")
+    && spirit.includes('const exactClient = getSupabaseClientForAccessToken(authority.accessToken);')
+    && spirit.includes("exactClient.from('custom_agent_profiles')\n                                  .insert(expectedProfileReceipt)")
+    && !spirit.includes("exactClient.from('custom_agent_profiles').upsert(")
     && spirit.includes('if (!Array.isArray(insertedProfiles) || insertedProfiles.length !== 1)')
     && spirit.includes('Object.entries(expectedProfileReceipt).every(([field, requestedValue])')
     && spirit.includes('returnedProfile[field] === requestedValue')

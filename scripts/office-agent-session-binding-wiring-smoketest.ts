@@ -138,8 +138,18 @@ async function main(): Promise<void> {
     'binding mutations cross the dedicated receipt-bearing server CAS',
   );
   check(
-    count(bindingSource, /supabase\.rpc\('compare_and_set_office_agent_session_binding_v1'/g) === 1,
+    count(bindingSource, /exactClient\.rpc\(\s*'compare_and_set_office_agent_session_binding_v1'/g) === 1,
     'set and clear share one canonical CAS dispatch site',
+  );
+  const bindingCasStart = bindingSource.indexOf('async function compareAndSetOfficeAgentSessionBinding(');
+  const bindingCasEnd = bindingSource.indexOf('/** Bind or move only if', bindingCasStart);
+  check(bindingCasStart >= 0 && bindingCasEnd > bindingCasStart, 'binding CAS implementation is present');
+  const bindingCasSource = bindingSource.slice(bindingCasStart, bindingCasEnd);
+  check(
+    bindingCasSource.includes('const exactClient = getSupabaseClientForAccessToken(authority.accessToken);')
+      && !bindingCasSource.includes('bindCapturedBearer')
+      && !bindingCasSource.includes('.setHeader('),
+    'binding CAS dispatch uses the pinned exact-authority client without shared header merging',
   );
   expectNoMatch(
     bindingSource,
@@ -282,7 +292,7 @@ async function main(): Promise<void> {
   expectMatch(gatewaySource, /clearOfficeAgentSessionBinding/, 'AgentGatewayPanels exposes owner unbinding');
   expectMatch(
     gatewaySource,
-    /\.filter\(\s*\(?\s*conn\s*\)?\s*=>\s*conn\.id\s*===\s*runtimeConnectionId\s*\)/,
+    /\.filter\(\s*\(?\s*connection\s*\)?\s*=>\s*connection\.id\s*===\s*runtimeConnectionId\s*\)/,
     'AgentGatewayPanels resolves the displayed connection by the exact runtime route',
   );
   expectNoMatch(

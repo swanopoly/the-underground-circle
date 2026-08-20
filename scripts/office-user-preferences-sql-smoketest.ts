@@ -60,6 +60,60 @@ for (const marker of [
   'REVOKE ALL ON FUNCTION public.patch_my_office_preferences_v1(uuid, jsonb)',
   'GRANT EXECUTE ON FUNCTION public.read_my_office_preferences_v1(uuid)',
   'GRANT EXECUTE ON FUNCTION public.patch_my_office_preferences_v1(uuid, jsonb)',
+  "SET LOCAL lock_timeout = '5s'",
+  "SET LOCAL statement_timeout = '30s'",
+  'DO $legacy_private_office_lock$',
+  "LOCK TABLE public.profiles, public.circle_members, public.circle_office_agents IN SHARE MODE",
+  'LOCK TABLE public.office_user_legacy_appearances IN SHARE ROW EXCLUSIVE MODE',
+  'CREATE TABLE IF NOT EXISTS public.office_user_legacy_appearances',
+  'PRIMARY KEY (user_id, circle_id, agent_key)',
+  'ALTER TABLE public.office_user_legacy_appearances ENABLE ROW LEVEL SECURITY',
+  'ALTER TABLE public.office_user_legacy_appearances FORCE ROW LEVEL SECURITY',
+  'DO $legacy_appearance_archive_policy_reset$',
+  'CREATE POLICY office_user_legacy_appearances_select_own',
+  'REVOKE ALL ON TABLE public.office_user_legacy_appearances',
+  'GRANT SELECT ON TABLE public.office_user_legacy_appearances TO authenticated',
+  'office_legacy_appearance_archive_schema_mismatch',
+  'office_legacy_appearance_archive_primary_key_mismatch',
+  'office_legacy_appearance_archive_receipt_mismatch',
+  'office_legacy_active_roster_appearance_capacity_exceeded',
+  'office_legacy_preference_membership_ambiguous',
+  'office_legacy_preference_reviewed_source_unsafe',
+  'office_legacy_preference_source_invalid',
+  'office_legacy_appearance_entry_invalid',
+  'office_legacy_preference_reviewed_field_invalid',
+  'office_legacy_preference_copy_receipt_missing',
+  'CREATE TEMP TABLE office_legacy_appearance_expected_v1',
+  'INSERT INTO public.office_user_legacy_appearances(',
+  'DO $legacy_appearance_archive_receipt$',
+  'DO $legacy_active_appearance_capacity$',
+  'DO $legacy_private_office_copy$',
+  'WITH eligible_profiles AS (',
+  'CROSS JOIN LATERAL (',
+  'FROM public.circle_members AS exact_membership',
+  'appearance_entries AS (',
+  'active_appearance_candidates AS (',
+  'deduplicated_active_appearances AS (',
+  'ranked_active_appearances AS (',
+  'normalized_appearance_entries AS (',
+  "ELSE '#f5d0a9'",
+  "ELSE '#6366f1'",
+  "ELSE 'neutral'",
+  'idle_behavior_entries AS (',
+  "'enabled', CASE",
+  "'cooldownMinutes', CASE",
+  "'lastRanAt', CASE",
+  'normalized_idle_configs AS (',
+  "'sharedChatOptIn', source.shared_chat_opt_in",
+  "'agentNames', source.agent_names",
+  "'appearances', normalized_appearance.appearances",
+  "'whiteboardNotes', source.whiteboard_notes",
+  "'budgetConfig', source.budget_config",
+  "'idleConfig', normalized_idle.idle_config",
+  "'agentFilterMode', source.agent_filter_mode",
+  'AND NOT source_contains_secret',
+  'AND public.validate_office_user_preferences_v1(preferences)',
+  'ON CONFLICT (user_id, circle_id) DO NOTHING',
   "- 'telegramConfig'",
   "- 'agentNames'",
   "- 'whiteboardNotes'",
@@ -176,6 +230,164 @@ const scrubEnd = migration.indexOf('$legacy_telegram_scrub$;', scrubStart + 4);
 const scrubBody = migration.slice(scrubStart, scrubEnd);
 check(scrubStart >= 0 && scrubEnd > scrubStart, 'legacy scrub has a bounded idempotent block');
 check(!scrubBody.includes('RETURNING') && !scrubBody.includes('SELECT office_preferences'), 'legacy scrub never projects credential values');
+
+const lockStart = migration.indexOf('DO $legacy_private_office_lock$');
+const lockEnd = migration.indexOf('$legacy_private_office_lock$;', lockStart + 4);
+const lockBody = migration.slice(lockStart, lockEnd);
+const copyStart = migration.indexOf('DO $legacy_private_office_copy$');
+const copyEnd = migration.indexOf('$legacy_private_office_copy$;', copyStart + 4);
+const copyBody = migration.slice(copyStart, copyEnd);
+check(copyStart >= 0 && copyEnd > copyStart, 'legacy preservation has a bounded idempotent block');
+check(
+  lockStart >= 0
+    && lockEnd > lockStart
+    && lockEnd < copyStart
+    && copyEnd < scrubStart,
+  'write-stable legacy lock precedes preservation and the separate scrub block',
+);
+check(
+  migration.indexOf("SET LOCAL lock_timeout = '5s'") < lockStart
+    && migration.indexOf("SET LOCAL statement_timeout = '30s'") < lockStart
+    && lockBody.includes("pg_catalog.to_regclass('public.profiles')")
+    && lockBody.includes("pg_catalog.to_regclass('public.circle_members')")
+    && lockBody.includes("pg_catalog.to_regclass('public.circle_office_agents')")
+    && lockBody.includes(
+      "EXECUTE 'LOCK TABLE public.profiles, public.circle_members, public.circle_office_agents IN SHARE MODE'",
+    )
+    && lockBody.includes('LOCK TABLE public.office_user_legacy_appearances IN SHARE ROW EXCLUSIVE MODE'),
+  'legacy source, roster, and archive locks are existence-guarded and fail on bounded local timeouts',
+);
+check(
+  copyBody.includes('FROM public.circle_members AS exact_membership')
+    && copyBody.includes(') = 1'),
+  'legacy preservation requires exactly one current circle membership',
+);
+check(
+  copyBody.includes("'agentNames', source.agent_names")
+    && copyBody.includes("'appearances', normalized_appearance.appearances")
+    && copyBody.includes("'whiteboardNotes', source.whiteboard_notes")
+    && copyBody.includes("'budgetConfig', source.budget_config")
+    && copyBody.includes("'idleConfig', normalized_idle.idle_config")
+    && copyBody.includes("'agentFilterMode', source.agent_filter_mode"),
+  'legacy preservation projects only the reviewed private preference fields',
+);
+check(
+  !copyBody.includes("office_preferences -> 'telegramConfig'")
+    && !copyBody.includes("office_preferences ->> 'telegramConfig'"),
+  'legacy Telegram credentials never enter the preservation projection',
+);
+const archiveTableStart = migration.indexOf(
+  'CREATE TABLE IF NOT EXISTS public.office_user_legacy_appearances',
+);
+const archiveTableEnd = migration.indexOf(
+  'CREATE OR REPLACE FUNCTION public.read_my_office_preferences_v1(',
+  archiveTableStart,
+);
+const archiveTableBody = migration.slice(archiveTableStart, archiveTableEnd);
+check(
+  archiveTableStart >= 0
+    && archiveTableEnd > archiveTableStart
+    && archiveTableBody.includes('agent_key text COLLATE "C" NOT NULL')
+    && archiveTableBody.includes('appearance jsonb NOT NULL')
+    && archiveTableBody.includes('IF active_column_count <> 5')
+    && archiveTableBody.includes("ARRAY['user_id', 'circle_id', 'agent_key']::text[]")
+    && archiveTableBody.includes("('appearance'::text, 'jsonb'::text)")
+    && archiveTableBody.includes("('archived_at'::text, 'timestamp with time zone'::text)")
+    && archiveTableBody.includes('CHECK (\n      public.validate_office_user_preferences_v1(')
+    && archiveTableBody.includes("jsonb_build_object('archived-agent', appearance)"),
+  'archive stores only validated complete normalized appearances under a deterministic owner scope',
+);
+check(
+  archiveTableBody.includes('FORCE ROW LEVEL SECURITY')
+    && archiveTableBody.includes('DO $legacy_appearance_archive_policy_reset$')
+    && archiveTableBody.includes('DROP POLICY %I ON public.office_user_legacy_appearances')
+    && archiveTableBody.includes('CREATE POLICY office_user_legacy_appearances_select_own')
+    && archiveTableBody.includes('REVOKE ALL ON TABLE public.office_user_legacy_appearances')
+    && archiveTableBody.includes('GRANT SELECT ON TABLE public.office_user_legacy_appearances TO authenticated')
+    && !archiveTableBody.includes('GRANT INSERT ON TABLE public.office_user_legacy_appearances TO authenticated')
+    && !archiveTableBody.includes('GRANT UPDATE ON TABLE public.office_user_legacy_appearances TO authenticated')
+    && !archiveTableBody.includes('GRANT DELETE ON TABLE public.office_user_legacy_appearances TO authenticated'),
+  'archive resets policy drift and keeps authenticated users to owner/member SELECT with no direct DML',
+);
+const preflightStart = migration.indexOf('DO $legacy_private_office_preflight$');
+const preflightEnd = migration.indexOf('$legacy_private_office_preflight$;', preflightStart + 4);
+const preflightBody = migration.slice(preflightStart, preflightEnd);
+check(
+  preflightStart >= 0
+    && preflightEnd > preflightStart
+    && preflightBody.includes('office_legacy_preference_membership_ambiguous')
+    && preflightBody.includes('office_legacy_preference_reviewed_source_unsafe')
+    && preflightBody.includes('office_legacy_preference_source_invalid')
+    && preflightBody.includes('office_legacy_appearance_entry_invalid')
+    && preflightBody.includes('office_legacy_preference_reviewed_field_invalid')
+    && !/RAISE EXCEPTION [^;]*(profile\.id|agent_key|office_preferences|agent_appearance)/.test(preflightBody),
+  'ambiguous ownership, secrets, and invalid reviewed sources fail before archive or preference publication with constant errors',
+);
+const expectedStart = migration.indexOf('CREATE TEMP TABLE office_legacy_appearance_expected_v1');
+const expectedEnd = migration.indexOf('DO $legacy_active_appearance_capacity$', expectedStart);
+const expectedBody = migration.slice(expectedStart, expectedEnd);
+check(
+  expectedStart >= 0
+    && expectedEnd > expectedStart
+    && expectedBody.includes('public.normalize_legacy_office_agent_appearance_v1(')
+    && expectedBody.includes('PRIMARY KEY (user_id, circle_id, agent_key)')
+    && expectedBody.includes('INSERT INTO public.office_user_legacy_appearances(')
+    && expectedBody.includes('ON CONFLICT (user_id, circle_id, agent_key) DO NOTHING')
+    && expectedBody.includes('archived.appearance IS DISTINCT FROM expected.appearance')
+    && expectedBody.includes('office_legacy_appearance_archive_receipt_mismatch'),
+  'every normalized source key is archived once and exact key plus JSON equality is proven before scrub',
+);
+check(
+  copyBody.includes('JOIN public.circle_office_agents AS roster')
+    && copyBody.includes('0 AS source_priority')
+    && copyBody.includes('1 AS source_priority')
+    && copyBody.includes('ORDER BY\n          user_id,\n          circle_id,\n          agent_key COLLATE "C",\n          source_priority')
+    && copyBody.includes('ORDER BY source_priority, agent_key COLLATE "C"')
+    && copyBody.includes('WHERE active_rank <= 128')
+    && migration.includes('office_legacy_active_roster_appearance_capacity_exceeded'),
+  'active preference projection deterministically prefers exact roster ids, then agentNames keys, and is bounded at 128',
+);
+check(
+  (copyBody.match(/ELSE false/g) || []).length >= 3
+    && copyBody.includes("'enabled', CASE")
+    && copyBody.includes("'cooldownMinutes', CASE")
+    && copyBody.includes("'lastRanAt', CASE")
+    && copyBody.includes('ELSE 1440')
+    && copyBody.includes('ELSE NULL')
+    && copyBody.includes('octet_length(behavior.value::text) <= 4096'),
+  'legacy idle state preserves bounded fields and fills fail-closed nested defaults',
+);
+const candidateStart = copyBody.indexOf('candidate_documents AS (');
+const candidateBody = copyBody.slice(candidateStart);
+check(
+  candidateStart >= 0
+    && candidateBody.includes('jsonb_object_agg(preference.key, preference.value ORDER BY preference.key)')
+    && candidateBody.includes("WHERE preference.value <> 'null'::jsonb")
+    && !candidateBody.includes('jsonb_strip_nulls'),
+  'candidate assembly removes only absent top-level fields and retains nested lastRanAt null defaults',
+);
+check(
+  copyBody.includes("preferences <> '{}'::jsonb")
+    && copyBody.includes('source_contains_secret')
+    && copyBody.includes('AND NOT source_contains_secret')
+    && copyBody.includes('public.validate_office_user_preferences_v1(preferences)'),
+  'empty, invalid, and secret-bearing legacy candidates are rejected before insert',
+);
+const archiveReceiptStart = migration.indexOf('DO $legacy_appearance_archive_receipt$');
+const copyReceiptStart = migration.indexOf('DO $legacy_private_office_copy_receipt$');
+check(
+  expectedStart < archiveReceiptStart
+    && archiveReceiptStart < copyStart
+    && copyStart < copyReceiptStart
+    && copyReceiptStart < scrubStart
+    && scrubStart < migration.indexOf('DO $legacy_agent_appearance_scrub$'),
+  'archive equality, bounded active projection, and preference receipt all succeed before either legacy source is scrubbed',
+);
+check(
+  copyBody.includes('ON CONFLICT (user_id, circle_id) DO NOTHING')
+    && !copyBody.includes('DO UPDATE'),
+  'legacy preservation never overwrites a newer private preference row',
+);
 for (const privateKey of [
   'telegramConfig',
   'agentNames',
@@ -270,9 +482,16 @@ check(
 check(
   (migration.match(/CREATE OR REPLACE FUNCTION/g) || []).length >= 5
     && migration.includes('CREATE TABLE IF NOT EXISTS')
-    && migration.includes('DROP POLICY IF EXISTS office_user_preferences_select_own')
+    && migration.includes('DO $office_user_preferences_policy_reset$')
+    && migration.includes("WHERE policy.polrelid = 'public.office_user_preferences'::regclass")
+    && migration.includes("'DROP POLICY %I ON public.office_user_preferences'")
+    && migration.includes('CREATE POLICY office_user_preferences_select_own')
+    && migration.includes('DO $legacy_appearance_archive_policy_reset$')
+    && migration.includes("WHERE policy.polrelid = 'public.office_user_legacy_appearances'::regclass")
+    && migration.includes("'DROP POLICY %I ON public.office_user_legacy_appearances'")
+    && migration.includes('CREATE POLICY office_user_legacy_appearances_select_own')
     && migration.includes('DROP CONSTRAINT IF EXISTS office_user_preferences_document_valid'),
-  'migration is safe to reapply',
+  'migration resets unknown policy inventory and safely reapplies exact owner-only policies',
 );
 
 console.log(`Office user preferences SQL smoke passed (${assertions} assertions).`);

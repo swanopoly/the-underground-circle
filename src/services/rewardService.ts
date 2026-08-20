@@ -48,7 +48,10 @@ export async function getUserPoints(userId: string): Promise<UserPoints | null> 
     .from('user_points')
     .select('*')
     .eq('user_id', userId)
-    .single();
+    // A newly created account legitimately has no points row until its first
+    // server-owned reward event. Preserve that as the uninitialized `null`
+    // state instead of asking PostgREST for exactly one row and emitting 406.
+    .maybeSingle();
   return data;
 }
 

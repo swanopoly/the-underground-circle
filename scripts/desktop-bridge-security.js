@@ -5,6 +5,13 @@ const fs = require('fs');
 const path = require('path');
 
 const LOOPBACK_ADDRESSES = new Set(['127.0.0.1', '::1']);
+const OPENSWAN_TOOL_UNAVAILABLE_MAX_BYTES = 8 * 1024;
+// These are the only capability-probe tool names whose expected 404s are
+// normalized by the browser proxy. Every current caller of these names parses
+// the structured result. Keep direct-send tools (especially sessions_send) out
+// of this list: several legacy callers use HTTP status as their delivery
+// receipt and must continue to fail closed.
+const OPENSWAN_TOOL_UNAVAILABLE_HTTP_200_TOOLS = new Set(['agents_list', 'cron']);
 const EXEC_BLOCKED_BINARIES = new Set([
   'sudo', 'doas', 'su', 'shutdown', 'reboot', 'halt', 'poweroff',
   'mkfs', 'diskutil', 'dd', 'launchctl', 'nvram', 'csrutil', 'fdisk',
@@ -200,6 +207,43 @@ function isAllowedBridgeHostHeader(rawHost, expectedPort) {
   } catch {
     return false;
   }
+}
+
+/**
+ * The browser reports every HTTP 404 as a failed resource, even when the
+ * OpenSwan gateway is using 404 as its documented, structured signal that one
+ * of the known capability probes is unavailable under the current policy.
+ * The loopback proxy may translate only that exact application response to
+ * HTTP 200 because every current consumer of those tool names parses the
+ * structured result before claiming success.
+ *
+ * Keep this deliberately narrower than a generic JSON/error detector:
+ * endpoint-level 404s, HTML responses, oversized bodies, extra fields, and
+ * malformed or attacker-controlled messages must retain their original HTTP
+ * status.
+ */
+function isExactOpenSwanToolUnavailableResponse(input) {
+  if (!input || input.requestMethod !== 'POST' || input.requestUrl !== '/tools/invoke' || input.statusCode !== 404) return false;
+  const contentType = String(input.contentType || '').trim();
+  if (!/^application\/json(?:\s*;|$)/i.test(contentType)) return false;
+  const body = Buffer.isBuffer(input.body) ? input.body : null;
+  if (!body || body.length === 0 || body.length > OPENSWAN_TOOL_UNAVAILABLE_MAX_BYTES) return false;
+
+  let parsed;
+  try {
+    parsed = JSON.parse(body.toString('utf8'));
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+  if (parsed.ok !== false) return false;
+  if (Object.keys(parsed).sort().join(',') !== 'error,ok') return false;
+  const error = parsed.error;
+  if (!error || typeof error !== 'object' || Array.isArray(error)) return false;
+  if (Object.keys(error).sort().join(',') !== 'message,type') return false;
+  if (error.type !== 'not_found' || typeof error.message !== 'string') return false;
+  const match = /^Tool not available: ([A-Za-z0-9][A-Za-z0-9_.:-]{0,127})$/.exec(error.message);
+  return !!match && OPENSWAN_TOOL_UNAVAILABLE_HTTP_200_TOOLS.has(match[1]);
 }
 
 /**
@@ -512,6 +556,7 @@ function prepareSupportedDiagnosticCommand(command, cwd) {
 }
 
 module.exports = {
+  OPENSWAN_TOOL_UNAVAILABLE_MAX_BYTES,
   auditRepoGitConfig,
   buildBridgeCorsHeaders,
   timingSafeTokenEqual,
@@ -524,6 +569,7 @@ module.exports = {
   isBridgeRequestSourceAllowed,
   isLoopbackAddress,
   isLoopbackRequest,
+  isExactOpenSwanToolUnavailableResponse,
   isPairingRequestSourceAllowed,
   normalizeSocketAddress,
   prepareSupportedDiagnosticCommand,

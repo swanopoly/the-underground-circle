@@ -11,6 +11,7 @@
  */
 
 import { getSupabaseClientForAccessToken, supabase } from './supabase';
+import { safeGetUserForAccessToken } from './authSession';
 import { subscribeWithReconnect } from './subscribeWithReconnect';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -161,6 +162,20 @@ async function resolveAuthority(
   const { data, error } = await supabase.auth.getUser(authority.accessToken);
   if (error || !data.user || data.user.id !== authority.userId) return null;
   return authority;
+}
+
+/**
+ * Verify a caller-captured scope without consulting the mutable session or
+ * waiting indefinitely on a direct auth request. Compatibility callers keep
+ * the legacy resolver above; authority-sensitive panels enter here directly.
+ */
+async function resolveExactAuthority(
+  capturedScope: CircleOfficeAuthScope,
+): Promise<ResolvedCircleOfficeAuthority | null> {
+  const authority = normalizeAuthScope(capturedScope);
+  if (!authority) return null;
+  const { value: verifiedUser } = await safeGetUserForAccessToken(authority.accessToken);
+  return verifiedUser?.id === authority.userId ? authority : null;
 }
 
 // ─── Provider → Icon + Color map ─────────────────────────────────────────────
@@ -531,7 +546,7 @@ export async function getUserCircleAgentsExact(
   try {
     const normalizedCircleId = normalizeResourceId(circleId);
     if (!normalizedCircleId) return { ok: false, error: 'The Circle Office scope is invalid.' };
-    const authority = await resolveAuthority(capturedScope);
+    const authority = await resolveExactAuthority(capturedScope);
     if (!authority) return { ok: false, error: 'The captured Office authority is no longer valid.' };
     const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
 

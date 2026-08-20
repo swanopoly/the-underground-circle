@@ -103,6 +103,25 @@ export interface OfficeUserPreferencesPatchResult {
   error?: string;
 }
 
+/**
+ * Public build flags are deployment-readiness assertions, never data or user
+ * authority. They stay default-off so shipping app code before its reviewed
+ * SQL cannot turn a known-absent optional RPC into a recurring production 404.
+ * Exact bearer, owner, circle, and lifecycle checks still guard every enabled
+ * server operation and every legacy-table fallback.
+ */
+function isExplicitOfficeBuildCapabilityEnabled(value: unknown): boolean {
+  return value === 'true';
+}
+
+export const HAS_OFFICE_USER_PREFERENCES_STORAGE_V1 = isExplicitOfficeBuildCapabilityEnabled(
+  process.env.EXPO_PUBLIC_OFFICE_USER_PREFERENCES_STORAGE_V1,
+);
+
+export const HAS_OFFICE_ATTENTION_SERVER_CLOCK_V1 = isExplicitOfficeBuildCapabilityEnabled(
+  process.env.EXPO_PUBLIC_OFFICE_ATTENTION_SERVER_CLOCK_V1,
+);
+
 function normalizeLayoutAuthScope(input: OfficeLayoutAuthScope): OfficeLayoutAuthScope | null {
   const userId = String(input?.userId || '').trim();
   const accessToken = String(input?.accessToken || '').trim();
@@ -180,7 +199,7 @@ function isMissingOfficeDashboardSql(error: unknown): boolean {
   return ['42P01', '42883', 'PGRST202', 'PGRST204', 'PGRST205'].includes(code)
     || /relation ["']?(office_layouts|office_floor_presets|office_attention_acknowledgements)["']? does not exist/.test(message)
     || /relation ["']?(office_layouts|office_floor_presets|office_attention_acknowledgements|office_user_preferences)["']? does not exist/.test(message)
-    || /function ["']?(save_office_layout_v2|read_my_office_preferences_v1|patch_my_office_preferences_v1)/.test(message)
+    || /function ["']?(save_office_layout_v2|read_my_office_preferences_v1|patch_my_office_preferences_v1|list_active_office_attention_acknowledgements)/.test(message)
       && /does not exist|schema cache/.test(message);
 }
 
@@ -254,6 +273,15 @@ export async function loadOfficeUserPreferences(
   if (!normalizedCircleId || !authority) {
     return { ok: false, preferences: null, revision: 0, error: 'Sign in required.' };
   }
+  if (!HAS_OFFICE_USER_PREFERENCES_STORAGE_V1) {
+    return {
+      ok: false,
+      preferences: null,
+      revision: 0,
+      unavailable: true,
+      error: 'Private per-circle Office preferences are not enabled for this build. Device-only settings remain available.',
+    };
+  }
   const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
   try {
     const { data, error } = await runOfficeLayoutRequestWithDeadline((signal) => (
@@ -311,6 +339,15 @@ export async function patchOfficeUserPreferences(
   const authority = normalizeLayoutAuthScope(authScope);
   if (!normalizedCircleId || !authority || !partial || typeof partial !== 'object' || Array.isArray(partial)) {
     return { ok: false, revision: 0, retryable: false, error: 'Office preferences failed validation.' };
+  }
+  if (!HAS_OFFICE_USER_PREFERENCES_STORAGE_V1) {
+    return {
+      ok: false,
+      revision: 0,
+      unavailable: true,
+      retryable: false,
+      error: 'Private per-circle Office preferences are not enabled for this build. Device-only settings remain available.',
+    };
   }
   const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
   try {
@@ -495,39 +532,42 @@ export async function listOfficeAttentionAcknowledgements(
   const authority = await resolveExactAuthority(circleId, capturedAuthority, isCurrent);
   if (!authority) return [];
   const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
-  const { data, error } = attentionRpcMissingThisSession
-    ? { data: null, error: { code: 'PGRST202', message: 'cached: rpc missing this session' } }
-    : await exactClient.rpc('list_active_office_attention_acknowledgements', {
-        p_circle_id: authority.circleId,
-      }).setHeader('Authorization', `Bearer ${authority.accessToken}`);
-  if (!authorityGuardPasses(isCurrent)) return [];
-  if (error) {
+  if (HAS_OFFICE_ATTENTION_SERVER_CLOCK_V1 && !attentionRpcMissingThisSession) {
+    const { data, error } = await exactClient.rpc('list_active_office_attention_acknowledgements', {
+      p_circle_id: authority.circleId,
+    }).setHeader('Authorization', `Bearer ${authority.accessToken}`);
+    if (!authorityGuardPasses(isCurrent)) return [];
+    if (!error) {
+      return (data || [])
+        .map((row: { attention_id?: unknown }) => typeof row.attention_id === 'string' ? row.attention_id : '')
+        .filter(Boolean);
+    }
     if (!isMissingOfficeDashboardSql(error)) {
       console.warn('[OfficeDashboardPersistence] attention load failed:', errorText(error));
       return [];
     }
     attentionRpcMissingThisSession = true;
-    // Compatibility for a target that has the historical §37 objects but has
-    // not installed the server-clock follow-up yet. Keep current dismissals
-    // working; once the migration lands, every read uses the RPC above.
-    const { data: legacyData, error: legacyError } = await exactClient
-      .from('office_attention_acknowledgements')
-      .select('attention_id,expires_at')
-      .eq('user_id', authority.userId)
-      .eq('circle_id', authority.circleId)
-      .setHeader('Authorization', `Bearer ${authority.accessToken}`)
-      .limit(500);
-    if (legacyError || !authorityGuardPasses(isCurrent)) return [];
-    const nowMs = Date.now();
-    return (legacyData || [])
-      .filter((row: { expires_at?: unknown }) => {
-        const expiresAtMs = typeof row.expires_at === 'string' ? Date.parse(row.expires_at) : Number.NaN;
-        return Number.isFinite(expiresAtMs) && expiresAtMs > nowMs;
-      })
-      .map((row: { attention_id?: unknown }) => typeof row.attention_id === 'string' ? row.attention_id : '')
-      .filter(Boolean);
   }
-  return (data || [])
+
+  // Compatibility for a target that has the historical §37 table but has not
+  // installed and explicitly enabled the server-clock follow-up. The default-
+  // off build path goes directly here and never probes the absent RPC. Keep
+  // exact owner/circle filters and the captured bearer; the client clock makes
+  // this a legacy compatibility read, not equivalent server-clock proof.
+  const { data: legacyData, error: legacyError } = await exactClient
+    .from('office_attention_acknowledgements')
+    .select('attention_id,expires_at')
+    .eq('user_id', authority.userId)
+    .eq('circle_id', authority.circleId)
+    .setHeader('Authorization', `Bearer ${authority.accessToken}`)
+    .limit(500);
+  if (legacyError || !authorityGuardPasses(isCurrent)) return [];
+  const nowMs = Date.now();
+  return (legacyData || [])
+    .filter((row: { expires_at?: unknown }) => {
+      const expiresAtMs = typeof row.expires_at === 'string' ? Date.parse(row.expires_at) : Number.NaN;
+      return Number.isFinite(expiresAtMs) && expiresAtMs > nowMs;
+    })
     .map((row: { attention_id?: unknown }) => typeof row.attention_id === 'string' ? row.attention_id : '')
     .filter(Boolean);
 }

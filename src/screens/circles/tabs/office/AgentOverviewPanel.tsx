@@ -18,7 +18,7 @@ import {
   type AgentControl,
   type AgentControlExactAuthority,
 } from '../../../../services/hitlService';
-import { supabase } from '../../../../lib/supabase';
+import { getSupabaseClientForAccessToken } from '../../../../lib/supabase';
 import { formatRelativeTime, MONO, shortPath } from './AgentPanelShared';
 
 // ─── Quick Actions strip ────────────────────────────────────────────────────
@@ -58,7 +58,7 @@ function QuickActionsStrip({
     control: null,
     message: null,
   });
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ message: string; kind: 'status' | 'error' } | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const diagnosticInFlightRef = useRef(false);
   const controlReadGenerationRef = useRef(0);
@@ -69,9 +69,9 @@ function QuickActionsStrip({
   const isPaused = controlState.control?.is_paused === true;
   const controlReady = controlState.status === 'ready';
 
-  const showToast = (msg: string) => {
+  const showToast = (message: string, kind: 'status' | 'error' = 'status') => {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-    setToast(msg);
+    setToast({ message, kind });
     toastTimerRef.current = setTimeout(() => {
       toastTimerRef.current = null;
       setToast(null);
@@ -148,7 +148,7 @@ function QuickActionsStrip({
         const res = await onRunCommand(text);
         const output = String(res.stdout || res.stderr || '').trim().slice(0, 100);
         if (!res.ok) {
-          showToast('Diagnostic failed. Review bridge status and retry.');
+          showToast('Diagnostic failed. Review bridge status and retry.', 'error');
           return;
         }
         showToast(output || 'Diagnostic completed');
@@ -157,7 +157,7 @@ function QuickActionsStrip({
         showToast('Use Chat, OpenSwan, or Terminal to send this agent a task');
       }
     } catch {
-      showToast('Diagnostic failed. Review bridge status and retry.');
+      showToast('Diagnostic failed. Review bridge status and retry.', 'error');
     } finally {
       diagnosticInFlightRef.current = false;
       setSending(false);
@@ -365,8 +365,12 @@ function QuickActionsStrip({
       )}
 
       {toast && (
-        <View style={overviewStyles.notice} accessibilityRole="alert" accessibilityLiveRegion="polite">
-          <Text style={overviewStyles.noticeText}>{toast}</Text>
+        <View
+          style={overviewStyles.notice}
+          accessibilityRole={toast.kind === 'error' ? 'alert' : undefined}
+          accessibilityLiveRegion={toast.kind === 'error' ? 'assertive' : 'polite'}
+        >
+          <Text style={overviewStyles.noticeText}>{toast.message}</Text>
         </View>
       )}
     </View>
@@ -576,7 +580,8 @@ function useMemorySyncStatus(
     const tick = async () => {
       try {
         if (!identityAuthority || !isIdentityAuthorityCurrent(identityAuthority)) return;
-        const { data, error } = await supabase
+        const exactClient = getSupabaseClientForAccessToken(accessToken);
+        const { data, error } = await exactClient
           .from('memory_entries')
           .select('updated_at')
           .eq('circle_id', circleId)
@@ -584,8 +589,7 @@ function useMemorySyncStatus(
           .eq('is_active', true)
           .order('updated_at', { ascending: false })
           .limit(1)
-          .maybeSingle()
-          .setHeader('Authorization', `Bearer ${accessToken}`);
+          .maybeSingle();
         if (cancelled || !isIdentityAuthorityCurrent(identityAuthority)) return;
         if (error) {
           setState('error');

@@ -69,6 +69,9 @@ export interface ChatModelDispatchIdentity {
 
 export const CHAT_MODEL_CATALOG_LOAD_TIMEOUT_MS = 8_000;
 export const CHAT_TRANSIENT_PROVIDER_COOLDOWN_MS = 60_000;
+/** A valid provider account that refuses spend should yield to another ready
+ * route for several subsequent turns, but recover without a key edit. */
+export const CHAT_BILLING_PROVIDER_COOLDOWN_MS = 5 * 60_000;
 
 const PROVIDER_FREE_COMPOUND_COMMAND_HEAD_RE =
   /^(?:\/?(research|wiki|poll|propose|search|schedule|remember|forget|trace|context|watch|mission|room|vault|cron|screen|apps|desktop|v2|v2loop|memory-bank|mb|record|replay|automation|automations|integrations?)|search[^\S\r\n]+(research|wiki))(?=[^\S\r\n]+\S)/i;

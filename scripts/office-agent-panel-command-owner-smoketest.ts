@@ -98,7 +98,10 @@ const removeOwner = section(
   '// ─── Reversible floor editor helpers',
 );
 check(
-  removeOwner.includes(".eq('id', publishedAgentId)")
+  removeOwner.includes('const exactClient = getSupabaseClientForAccessToken(requestedAuthority.accessToken)')
+    && removeOwner.includes("exactClient\n        .from('circle_office_agents')")
+    && !removeOwner.includes('.setHeader(')
+    && removeOwner.includes(".eq('id', publishedAgentId)")
     && removeOwner.includes(".eq('circle_id', requestedAuthority.circleId)")
     && removeOwner.includes(".eq('owner_id', requestedAuthority.userId)")
     && removeOwner.includes('removedRows?.length === 1')

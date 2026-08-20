@@ -33,6 +33,7 @@ check(
 check(
   shell.includes("role: 'dialog'")
     && shell.includes("'aria-modal': panelMode === 'center' ? true : undefined")
+    && shell.includes("'aria-hidden': true")
     && shell.includes('testID="agent-panel-backdrop"')
     && shell.includes('return panelLayer;'),
   'web centered and docked presentation keeps its dialog path with a stable, testable backdrop',
@@ -44,6 +45,19 @@ check(
     && webPortal.includes('return createPortal(children, document.body);')
     && nativePortal.includes('return <>{children}</>;'),
   'the centered web dialog escapes Office stacking contexts while native keeps its Modal-owned tree',
+);
+check(
+  shell.includes(": Platform.OS === 'web'")
+    && shell.includes("? null\n              : { transform: [{ translateY: slideAnim }] }"),
+  'compact web presentation cannot inherit the native sheet off-screen translate value',
+);
+check(
+  shell.includes("role: 'slider'")
+    && shell.includes("'aria-valuemin': 380")
+    && shell.includes("'aria-valuemax': 720")
+    && shell.includes("'aria-valuenow': Math.round(panelGeometry.width)")
+    && shell.includes("'aria-valuetext': `${Math.round(panelGeometry.width)} pixels wide`"),
+  'web dock resize exposes its exact current width when RN Web omits adjustable value attributes',
 );
 check(
   shell.includes('<Text nativeID="uc-agent-panel-title" style={styles.visuallyHiddenTitle}>{agent.name}</Text>')

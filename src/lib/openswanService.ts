@@ -2,7 +2,11 @@
 // Connects to a user's OpenSwan instance to get real agent data
 import { Platform } from 'react-native';
 import { estimateCostWithCache } from './modelPricing';
-import { diagnoseConnection, DiagnosticResult } from './connectionDiagnostics';
+import {
+  diagnoseConnection,
+  isExactOpenSwanToolUnavailablePayload,
+  type DiagnosticResult,
+} from './connectionDiagnostics';
 import {
   parseOpenSwanSessionSendHandle as parseOpenSwanSessionSendHandleCore,
   parseOpenSwanSpawnDisposition as parseOpenSwanSpawnDispositionCore,
@@ -151,10 +155,7 @@ function markToolRpcEndpointUnsupported(endpoint: string): void {
 function isExactToolUnavailable(error: unknown, tool: string): boolean {
   const record = error as { type?: unknown; message?: unknown } | null | undefined;
   if (record?.type === 'unsupported') return true;
-  if (record?.type !== 'not_found' || typeof record.message !== 'string') return false;
-  const message = record.message.replace(/\s+/g, ' ').trim().toLowerCase();
-  return message === `tool not available: ${tool.toLowerCase()}`
-    || message === `tool not found: ${tool.toLowerCase()}`;
+  return isExactOpenSwanToolUnavailablePayload({ ok: false, error: record }, tool);
 }
 
 function isAuthFailed(authKey: string): boolean {
@@ -258,13 +259,16 @@ async function invokeToolRaw(
     };
   }
 
-  const timeoutMs = FAST_TOOLS.has(tool) ? FAST_TOOL_TIMEOUT_MS : SLOW_TOOL_TIMEOUT_MS;
+  // `cron` is one RPC tool for both inventory and mutations. Only its list
+  // action belongs on the fast read boundary; create/run/update/remove retain
+  // the slower mutation budget and their outcome-unknown handling.
+  const isFastRead = FAST_TOOLS.has(tool) || (tool === 'cron' && args.action === 'list');
+  const timeoutMs = isFastRead ? FAST_TOOL_TIMEOUT_MS : SLOW_TOOL_TIMEOUT_MS;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  let res: Response;
   try {
-    res = await fetch(`${endpointKey}/tools/invoke`, {
+    const res = await fetch(`${endpointKey}/tools/invoke`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${config.token}`,
@@ -273,9 +277,48 @@ async function invokeToolRaw(
       body: JSON.stringify({ tool, args }),
       signal: controller.signal,
     });
+
+    if (res.status === 404 || res.status === 405) {
+      markToolUnsupported(endpointKey, tool);
+      // An optional tool can be absent while the shared /tools/invoke endpoint
+      // remains healthy. Only the baseline session inventory may classify the
+      // endpoint itself as unsupported, and even that classification expires so
+      // an in-place gateway upgrade can be discovered without a page reload.
+      if (tool === 'sessions_list') markToolRpcEndpointUnsupported(endpointKey);
+      unavailableEndpointCache.delete(endpointKey);
+      return {
+        ok: false,
+        error: { type: 'unsupported', message: `Tool not supported: ${tool}` },
+      };
+    }
+    if (res.status === 401 || res.status === 403) {
+      authFailedEndpointCache.set(endpointAuthKey, Date.now() + AUTH_FAILED_COOLDOWN_MS);
+      unavailableEndpointCache.delete(endpointKey);
+      return {
+        ok: false,
+        error: { type: 'auth', message: 'Authentication failed — wrong or missing token' },
+      };
+    }
+    authFailedEndpointCache.delete(endpointAuthKey);
+    unavailableEndpointCache.delete(endpointKey);
+    // Keep the same abort budget alive through body consumption. `fetch()` can
+    // resolve as soon as headers arrive while a proxy/upstream body remains
+    // open; clearing the timer before `json()` left panel reads unbounded.
+    const payload = await res.json();
+    if (isExactOpenSwanToolUnavailablePayload(payload, tool)) {
+      markToolUnsupported(endpointKey, tool);
+      if (tool === 'sessions_list') markToolRpcEndpointUnsupported(endpointKey);
+      return {
+        ok: false,
+        error: { type: 'unsupported', message: `Tool not supported: ${tool}` },
+      };
+    }
+    return payload;
   } catch (error: any) {
-    clearTimeout(timer);
-    const aborted = error?.name === 'AbortError';
+    // Preserve the prior malformed-JSON behavior for the high-level parser;
+    // only transport/body-read failures are normalized here.
+    if (error instanceof SyntaxError) throw error;
+    const aborted = controller.signal.aborted || error?.name === 'AbortError';
     const message = aborted
       ? `Timeout after ${timeoutMs}ms — gateway unresponsive`
       : (typeof error?.message === 'string' ? error.message : 'Network request failed');
@@ -290,31 +333,6 @@ async function invokeToolRaw(
   } finally {
     clearTimeout(timer);
   }
-
-  if (res.status === 404 || res.status === 405) {
-    markToolUnsupported(endpointKey, tool);
-    // An optional tool can be absent while the shared /tools/invoke endpoint
-    // remains healthy. Only the baseline session inventory may classify the
-    // endpoint itself as unsupported, and even that classification expires so
-    // an in-place gateway upgrade can be discovered without a page reload.
-    if (tool === 'sessions_list') markToolRpcEndpointUnsupported(endpointKey);
-    unavailableEndpointCache.delete(endpointKey);
-    return {
-      ok: false,
-      error: { type: 'unsupported', message: `Tool not supported: ${tool}` },
-    };
-  }
-  if (res.status === 401 || res.status === 403) {
-    authFailedEndpointCache.set(endpointAuthKey, Date.now() + AUTH_FAILED_COOLDOWN_MS);
-    unavailableEndpointCache.delete(endpointKey);
-    return {
-      ok: false,
-      error: { type: 'auth', message: 'Authentication failed — wrong or missing token' },
-    };
-  }
-  authFailedEndpointCache.delete(endpointAuthKey);
-  unavailableEndpointCache.delete(endpointKey);
-  return res.json();
 }
 async function chatCompletion(
   config: OpenSwanConfig,

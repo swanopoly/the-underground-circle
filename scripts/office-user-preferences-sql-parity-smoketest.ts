@@ -74,6 +74,8 @@ const expectedScripts: Record<string, string> = {
     'sh scripts/office-user-preferences-sql-behavior-smoketest.sh',
   'smoke:office-user-preferences-sql-parity':
     'npx tsx scripts/office-user-preferences-sql-parity-smoketest.ts',
+  'smoke:openswan-office-preference-appearance':
+    'npx tsx scripts/openswan-office-preference-appearance-smoketest.ts',
   'smoke:office-session-storage-scope':
     'npx tsx scripts/office-session-storage-scope-smoketest.ts',
   'smoke:circle-office-exact-auth-scope':

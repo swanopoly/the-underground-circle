@@ -19,6 +19,7 @@ const {
   canonicalizePathWithExistingAncestor,
   createPairingChallengeStore,
   isAllowedBridgeHostHeader,
+  isExactOpenSwanToolUnavailableResponse,
   isLoopbackAddress,
   isPairingRequestSourceAllowed,
   prepareSupportedDiagnosticCommand,
@@ -44,6 +45,13 @@ const {
     consume: (challenge: string, remoteAddress: string) => boolean;
   };
   isAllowedBridgeHostHeader: (host: string, port: number) => boolean;
+  isExactOpenSwanToolUnavailableResponse: (input: {
+    requestMethod?: string;
+    requestUrl?: string;
+    statusCode?: number;
+    contentType?: string;
+    body?: Buffer;
+  }) => boolean;
   isLoopbackAddress: (address: string) => boolean;
   isPairingRequestSourceAllowed: (
     req: { socket: { remoteAddress: string }; headers: { host?: string; origin?: string } },
@@ -84,6 +92,33 @@ function mockRequest(
 }
 
 function main(): void {
+  const unavailableToolResponse = (tool: string, requestMethod = 'POST') => ({
+    requestMethod,
+    requestUrl: '/tools/invoke',
+    statusCode: 404,
+    contentType: 'application/json',
+    body: Buffer.from(JSON.stringify({
+      ok: false,
+      error: { type: 'not_found', message: `Tool not available: ${tool}` },
+    })),
+  });
+  assert(
+    isExactOpenSwanToolUnavailableResponse(unavailableToolResponse('cron')),
+    'proxy normalization: exact cron capability miss is eligible for HTTP 200',
+  );
+  assert(
+    isExactOpenSwanToolUnavailableResponse(unavailableToolResponse('agents_list')),
+    'proxy normalization: exact agents_list capability miss is eligible for HTTP 200',
+  );
+  assert(
+    !isExactOpenSwanToolUnavailableResponse(unavailableToolResponse('sessions_send')),
+    'proxy normalization: sessions_send remains HTTP 404 for fail-closed delivery callers',
+  );
+  assert(
+    !isExactOpenSwanToolUnavailableResponse(unavailableToolResponse('cron', 'GET')),
+    'proxy normalization: non-POST requests remain HTTP 404',
+  );
+
   assert(isLoopbackAddress('127.0.0.1'), 'socket: IPv4 loopback is allowed');
   assert(isLoopbackAddress('::ffff:127.0.0.1'), 'socket: IPv4-mapped loopback is allowed');
   assert(isLoopbackAddress('::1'), 'socket: IPv6 loopback is recognized');

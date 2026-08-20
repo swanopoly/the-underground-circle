@@ -46,6 +46,11 @@ const fixtureLane = section(
   'let result = null;',
   'let cleanupFailure = null;',
 );
+const http4xxDiagnostics = section(
+  canary,
+  'const HTTP_4XX_DIAGNOSTIC_SAMPLE_LIMIT',
+  'const POPUP_CONSOLE_ERROR_ALLOWLIST',
+);
 
 check(
   canary.includes("if (process.env.RUN_LIVE_OFFICE_E2E !== '1')")
@@ -122,7 +127,16 @@ check(
     && !popupLane.includes('managementDatabaseQuery(')
     && !popupLane.includes('.from(')
     && !popupLane.includes('fetch('),
-  'the runner issues no direct agent/provider/application-data control mutation inside the lane; routine app background writes stay on the disposable fixture',
+  'the runner issues no out-of-band application-data request inside the lane; tested UI writes stay on the disposable fixture',
+);
+check(
+  canary.includes('async function verifyAgentPauseRoundTrip(page, record)')
+    && canary.includes("const toggledLabel = initialLabel === 'Pause OpenSwan' ? 'Resume OpenSwan' : 'Pause OpenSwan';")
+    && canary.includes("assertPopupSectionHealthy(page, record, 'Agent pause toggle')")
+    && canary.includes("assertPopupSectionHealthy(page, record, 'Agent pause restore')")
+    && popupLane.includes('const pauseControlRoundTrip = await verifyAgentPauseRoundTrip(firstPage, firstRecord);')
+    && popupLane.includes('pauseControlRoundTrip,'),
+  'the disposable fixture executes and restores the exact Agent pause control through the mounted popup UI',
 );
 
 check(
@@ -216,6 +230,15 @@ check(
   'the live canary discovers and visits every route actually advertised by the exact popup capability snapshot',
 );
 check(
+  canary.includes('function isAgentProgressionStorageRequest(requestUrl)')
+    && canary.includes('record.progressionRequests.push(`${request.method()} ${requestUrl.pathname}`)')
+    && popupLane.includes("destination.routes.includes('XP & Achievements section')")
+    && popupLane.includes('The default-off Agent progression capability unexpectedly advertised XP & Achievements.')
+    && popupLane.includes('const progressionRequests = records.flatMap((record) => record.progressionRequests);')
+    && popupLane.includes('Default-off Agent progression made ${progressionRequests.length} unexpected storage request(s)'),
+  'the default-off progression capability advertises no XP route and performs no progression-table request',
+);
+check(
   canary.includes('async function waitForAgentPanelRouteSettled(')
     && canary.includes("destinationControl?.getAttribute('aria-selected') === 'true'")
     && canary.includes("routeControl?.getAttribute('aria-selected') === 'true'")
@@ -224,6 +247,23 @@ check(
     && canary.includes('/^Loading\\s+.+(?:…|\\.\\.\\.)$/u')
     && canary.includes('assertVisitedAgentPanelRoute(page, record, destinationLabel'),
   'each discovered route must settle its lazy loader and expose coherent selected-tab and labelled-tabpanel semantics',
+);
+check(
+  canary.includes('async function readAgentPanelRouteDiagnostics(page)')
+    && canary.includes("destinations: selected(' destination')")
+    && canary.includes("routes: selected(' tab')")
+    && canary.includes("loading: leafText.filter((text) => /^Loading\\s+.+(?:…|\\.\\.\\.)$/u.test(text))")
+    && canary.includes("progressbars: Array.from(element.querySelectorAll('[role=\"progressbar\"]'))")
+    && canary.includes("alerts: Array.from(element.querySelectorAll('[role=\"alert\"]'))")
+    && canary.includes('sectionFallback: leafText.includes(\'This section could not load\')')
+    && canary.includes('`Agent popup route ${expectedRoute} did not settle: ${JSON.stringify(diagnostics)}; cause=')
+    && canary.includes('popupConsoleErrors=${JSON.stringify(record.popupConsoleErrors.slice(-5))}'),
+  'a route timeout names the active destination, tab, section, loading state, fallback, alerts, focus, and nearby console errors',
+);
+check(
+  canary.includes("const loadingProgress = root.querySelector('[role=\"progressbar\"]');")
+    && canary.includes('&& !loadingProgress;'),
+  'route settlement waits for accessible progress indicators as well as visible loading copy',
 );
 check(
   canary.includes('await assertPopupSectionHealthy(page, record, `Agent popup route ${label}`);')
@@ -304,6 +344,32 @@ check(
     && canary.includes('record.consoleErrorDetails.push({ text, args });')
     && canary.includes('updateLoopConsoleDetails:'),
   'console errors are scoped to the mounted popup and fail completion unless they match the single URL-and-message favicon exception',
+);
+check(
+  http4xxDiagnostics.includes("const HTTP_4XX_METHOD_ALLOWLIST = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);")
+    && http4xxDiagnostics.includes('const HTTP_4XX_TOOL_POST_DATA_MAX_BYTES = 16 * 1024;')
+    && http4xxDiagnostics.includes('const HTTP_4XX_TOOL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;')
+    && http4xxDiagnostics.includes("requestUrl.protocol !== 'http:' && requestUrl.protocol !== 'https:'")
+    && http4xxDiagnostics.includes("method === 'POST' && requestUrl.pathname === '/tools/invoke'")
+    && http4xxDiagnostics.includes('const postData = request.postData();')
+    && http4xxDiagnostics.includes('postData.length <= HTTP_4XX_TOOL_POST_DATA_MAX_BYTES')
+    && http4xxDiagnostics.includes('HTTP_4XX_TOOL_NAME_PATTERN.test(parsed.tool)')
+    && http4xxDiagnostics.includes('origin: requestUrl.origin.slice(0, 200)')
+    && http4xxDiagnostics.includes('path: requestUrl.pathname.slice(0, 500)')
+    && !http4xxDiagnostics.includes('request.headers')
+    && !http4xxDiagnostics.includes('requestUrl.search')
+    && !http4xxDiagnostics.includes('requestUrl.hash'),
+  '4xx diagnostics retain only bounded method, origin, path, and a character-allowlisted OpenSwan tool name without headers, query, fragment, or raw body output',
+);
+check(
+  canary.includes('const http4xxEvidence = readSanitizedHttp4xxEvidence(response);')
+    && canary.includes('record.http4xxResponseCount += 1;')
+    && canary.includes('record.http4xxResponseSamples.length > HTTP_4XX_DIAGNOSTIC_SAMPLE_LIMIT')
+    && (canary.match(/http4xxResponses: entry\.http4xxResponseCount,/g) || []).length === 2
+    && (canary.match(/sampleHttp4xxResponses: entry\.http4xxResponseSamples\.slice\(-/g) || []).length === 2
+    && !canary.includes('http4xxResponseCount > 0')
+    && !canary.includes('http4xxResponseSamples.length > 0'),
+  'success and failure receipts include bounded 4xx counts and samples for diagnosis without allowlisting or failing broad client responses',
 );
 check(
   canary.includes('function assertNoReactUpdateLoopErrors(record, label)')

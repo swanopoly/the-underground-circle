@@ -525,7 +525,10 @@ export default function AgentPanelShell({
           accessible={false}
           accessibilityElementsHidden
           importantForAccessibility="no-hide-descendants"
-          {...(Platform.OS === 'web' ? ({ className: 'uc-agent-panel-backdrop' } as any) : {})}
+          {...(Platform.OS === 'web' ? ({
+            className: 'uc-agent-panel-backdrop',
+            'aria-hidden': true,
+          } as any) : {})}
           style={[
             styles.modalBackdrop,
             { opacity: backdropOpacity },
@@ -565,7 +568,13 @@ export default function AgentPanelShell({
                 left: panelGeometry.left,
                 top: panelGeometry.top,
               }
-            : { transform: [{ translateY: slideAnim }] },
+            : Platform.OS === 'web'
+              // CSS/backdrop state owns web presentation. The Animated value
+              // starts at 400 for native bottom-sheet entrance; consuming it
+              // after a desktop-to-compact web resize pushes the sheet 400px
+              // below the viewport.
+              ? null
+              : { transform: [{ translateY: slideAnim }] },
           isDesktop && styles.panelDesktop,
           isDesktop && panelMode === 'side' && styles.panelSide,
           Platform.OS === 'web' && panelMode === 'center'
@@ -588,6 +597,13 @@ export default function AgentPanelShell({
             }}
             {...({
               tabIndex: 0,
+              ...(Platform.OS === 'web' ? {
+                role: 'slider',
+                'aria-valuemin': 380,
+                'aria-valuemax': 720,
+                'aria-valuenow': Math.round(panelGeometry.width),
+                'aria-valuetext': `${Math.round(panelGeometry.width)} pixels wide`,
+              } : {}),
               onKeyDown: (event: any) => {
                 if (event.key === 'ArrowLeft') {
                   event.preventDefault?.();

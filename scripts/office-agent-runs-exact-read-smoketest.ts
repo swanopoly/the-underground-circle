@@ -76,8 +76,11 @@ for (const [name, reader] of [
     `${name} keeps a backward-compatible optional strict read argument`,
   );
   check(
-    reader.includes(".setHeader('Authorization', `Bearer ${authority.accessToken}`)"),
-    `${name} binds its query to the captured bearer`,
+    reader.includes('const client = authority')
+      && reader.includes('getSupabaseClientForAccessToken(authority.accessToken)')
+      && reader.includes(': supabase;')
+      && !reader.includes('.setHeader('),
+    `${name} dispatches strict reads through a pinned captured-bearer client while preserving the legacy client branch`,
   );
   check(
     reader.includes("if (strictRead) throw new AgentRunExactReadError(error ? 'backend_error' : 'invalid_response')"),

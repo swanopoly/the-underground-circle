@@ -51,6 +51,30 @@ assert(
 );
 
 const rewardSource = readFileSync('src/services/rewardService.ts', 'utf8');
+const getUserPointsBody = between(
+  rewardSource,
+  'export async function getUserPoints(',
+  'export async function getUserBadges(',
+);
+assert(
+  getUserPointsBody.includes(".from('user_points')")
+    && getUserPointsBody.includes('.maybeSingle()')
+    && !getUserPointsBody.includes('.single()'),
+  'a legitimately missing first user_points row remains an uninitialized reward state without a 406 response',
+);
+const whiteboardSource = readFileSync('src/screens/circles/tabs/office/Whiteboard.tsx', 'utf8');
+const whiteboardRewardHook = between(
+  whiteboardSource,
+  'function useRewardState(): RewardState {',
+  '// ── MAIN COMPONENT',
+);
+assert(
+  whiteboardRewardHook.includes(".from('user_points')")
+    && whiteboardRewardHook.includes(".select('lifetime_points')")
+    && whiteboardRewardHook.includes('.maybeSingle()')
+    && !whiteboardRewardHook.includes('.single()'),
+  'the Office whiteboard accepts an empty first reward row without a lifetime-points 406 response',
+);
 const awardPointsBody = between(
   rewardSource,
   'export async function awardPoints(',

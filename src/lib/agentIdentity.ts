@@ -10,10 +10,11 @@
 
 import { Platform } from 'react-native';
 import { storage } from './storage';
-import { supabase } from './supabase';
+import { getSupabaseClientForAccessToken, supabase } from './supabase';
 import type { OfficeAgent } from './officeAgents';
 import { DEFAULT_APPEARANCE, type AgentAppearance } from './officeConfig';
 import { getAgentIdentityKey, type AgentIdentityKeyInput } from './agentIdentityKey';
+import { safeGetUserForAccessToken } from './authSession';
 
 export { getAgentIdentityKey } from './agentIdentityKey';
 
@@ -63,8 +64,13 @@ export type AgentIdentityExactAuthorityFence = (
 export interface AgentIdentityExactSyncResult {
   ok: boolean;
   identities: Map<string, AgentIdentity>;
-  error?: 'invalid_authority' | 'authority_mismatch' | 'server_unavailable' | 'invalid_response';
+  error?: 'invalid_authority' | 'authority_mismatch' | 'authority_retired' | 'server_unavailable' | 'invalid_response';
 }
+
+export type AgentIdentityExactSyncOptions = Readonly<{
+  fence?: AgentIdentityExactAuthorityFence;
+  signal?: AbortSignal;
+}>;
 
 export type AgentIdentityExactRefreshError =
   | 'invalid_authority'
@@ -610,14 +616,10 @@ async function verifyAgentIdentityExactAuthority(
     })
     : null;
   if (fence && (!writeAuthority || !isAgentIdentityExactAuthorityCurrent(writeAuthority, fence))) return null;
-  try {
-    const { data, error } = await supabase.auth.getUser(authority.accessToken);
-    if (error || !data.user || data.user.id !== authority.userId) return null;
-    if (fence && (!writeAuthority || !isAgentIdentityExactAuthorityCurrent(writeAuthority, fence))) return null;
-    return authority;
-  } catch {
-    return null;
-  }
+  const { value: verifiedUser } = await safeGetUserForAccessToken(authority.accessToken);
+  if (!verifiedUser || verifiedUser.id !== authority.userId) return null;
+  if (fence && (!writeAuthority || !isAgentIdentityExactAuthorityCurrent(writeAuthority, fence))) return null;
+  return authority;
 }
 
 /**
@@ -658,12 +660,12 @@ async function fetchAgentIdentitiesServerSnapshotExact(
     return { ok: false, identities: new Map(), error: 'server_unavailable' };
   }
   try {
-    let query = supabase
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+    let query = exactClient
       .from('agent_identities')
       .select('*', { count: 'exact' })
       .eq('user_id', authority.userId)
-      .limit(MAX_AGENT_IDENTITIES_PER_SCOPE + 1)
-      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+      .limit(MAX_AGENT_IDENTITIES_PER_SCOPE + 1);
     if (signal) query = query.abortSignal(signal);
     const { data, error, count } = await query;
     if (signal?.aborted || error || !Array.isArray(data)) {
@@ -722,16 +724,43 @@ async function fetchAgentIdentitiesServerSnapshotExact(
 
 export async function syncAgentIdentitiesFromServerExact(
   capturedAuthority: AgentIdentityExactAuthority,
+  options: AgentIdentityExactSyncOptions = {},
 ): Promise<AgentIdentityExactSyncResult> {
+  const { fence, signal } = options;
+  if (signal?.aborted) {
+    return { ok: false, identities: new Map(), error: 'server_unavailable' };
+  }
   const syntacticAuthority = normalizeAgentIdentityExactAuthority(capturedAuthority);
   if (!syntacticAuthority) {
     return { ok: false, identities: new Map(), error: 'invalid_authority' };
   }
-  const authority = await verifyAgentIdentityExactAuthority(syntacticAuthority);
-  if (!authority) {
-    return { ok: false, identities: new Map(), error: 'authority_mismatch' };
+  const writeAuthority = fence
+    ? normalizeAgentIdentityExactWriteAuthority(syntacticAuthority as AgentIdentityExactWriteAuthority)
+    : null;
+  if (fence && (!writeAuthority || !isAgentIdentityExactAuthorityCurrent(writeAuthority, fence))) {
+    return { ok: false, identities: new Map(), error: 'authority_retired' };
   }
-  return fetchAgentIdentitiesServerSnapshotExact(authority);
+  const authority = await verifyAgentIdentityExactAuthority(syntacticAuthority, fence);
+  if (signal?.aborted) {
+    return { ok: false, identities: new Map(), error: 'server_unavailable' };
+  }
+  if (!authority) {
+    return {
+      ok: false,
+      identities: new Map(),
+      error: fence && writeAuthority && !isAgentIdentityExactAuthorityCurrent(writeAuthority, fence)
+        ? 'authority_retired'
+        : 'authority_mismatch',
+    };
+  }
+  const snapshot = await fetchAgentIdentitiesServerSnapshotExact(authority, signal);
+  if (signal?.aborted) {
+    return { ok: false, identities: new Map(), error: 'server_unavailable' };
+  }
+  if (fence && writeAuthority && !isAgentIdentityExactAuthorityCurrent(writeAuthority, fence)) {
+    return { ok: false, identities: new Map(), error: 'authority_retired' };
+  }
+  return snapshot;
 }
 
 /**
@@ -1027,15 +1056,15 @@ async function loadAgentIdentityMutationBaseExact(
   try {
     const serverVersions = new Map<string, string>();
     const serverIdentities = new Map<string, AgentIdentity>();
-    let query = supabase
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+    let query = exactClient
       .from('agent_identities')
       .select('*')
       .eq('user_id', authority.userId);
     query = sessionKey
       ? query.eq('session_key', sessionKey).limit(2)
       : query.limit(MAX_AGENT_IDENTITIES_PER_SCOPE + 1);
-    const { data, error } = await query
-      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+    const { data, error } = await query;
     if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
       return { ok: false, error: 'authority_retired' };
     }
@@ -1499,6 +1528,7 @@ async function persistIdentitiesToServerExact(
   const rows = Array.from(identities.values()).map(identity => identityToRow(authority.userId, identity));
   if (rows.length === 0) return { ok: false, error: 'invalid_receipt' };
   try {
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
     // Targeted panel mutations update only the requested columns and compare
     // the exact server version observed immediately before the write. This
     // prevents two tabs changing disjoint fields from silently replacing each
@@ -1523,20 +1553,18 @@ async function persistIdentitiesToServerExact(
             patch[column] = row[column];
           }
           if (Object.keys(patch).length === 0) return { ok: false, error: 'invalid_receipt' };
-          response = await supabase
+          response = await exactClient
             .from('agent_identities')
             .update(patch)
             .eq('user_id', authority.userId)
             .eq('session_key', row.session_key)
             .eq('updated_at', serverVersion)
-            .select('*')
-            .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+            .select('*');
         } else {
-          response = await supabase
+          response = await exactClient
             .from('agent_identities')
             .insert(row)
-            .select('*')
-            .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+            .select('*');
         }
         if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
           return { ok: false, error: 'authority_retired' };
@@ -1557,11 +1585,10 @@ async function persistIdentitiesToServerExact(
       return { ok: true };
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await exactClient
       .from('agent_identities')
       .upsert(rows, { onConflict: 'user_id,session_key' })
-      .select('*')
-      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+      .select('*');
     if (!isAgentIdentityExactAuthorityCurrent(authority, fence)) {
       return { ok: false, error: 'authority_retired' };
     }
@@ -2106,15 +2133,15 @@ export async function updatePublishedAgentSpiritExact(
   let data: unknown;
   let rpcError: any;
   try {
-    const response = await supabase
+    const exactClient = getSupabaseClientForAccessToken(verifiedAuthority.accessToken);
+    const response = await exactClient
       .rpc('set_published_agent_spirit_v1', {
         p_circle_id: verifiedAuthority.circleId,
         p_office_agent_id: officeAgentId,
         p_spirit_id: spiritId,
         p_spirit_emoji: spiritEmoji,
         p_custom_profile_id: customProfileId,
-      })
-      .setHeader('Authorization', `Bearer ${verifiedAuthority.accessToken}`);
+      });
     data = response.data;
     rpcError = response.error;
   } catch {
@@ -2212,11 +2239,11 @@ export async function deleteUnreferencedCustomAgentProfileExact(
   let data: unknown;
   let rpcError: any;
   try {
-    const response = await supabase
+    const exactClient = getSupabaseClientForAccessToken(verifiedAuthority.accessToken);
+    const response = await exactClient
       .rpc('delete_unreferenced_custom_agent_profile_v1', {
         p_profile_id: profileId,
-      })
-      .setHeader('Authorization', `Bearer ${verifiedAuthority.accessToken}`);
+      });
     data = response.data;
     rpcError = response.error;
   } catch {
@@ -2520,12 +2547,12 @@ export async function setMainAgentForProviderExact(
   let data: unknown;
   let rpcError: any;
   try {
-    const response = await supabase
+    const exactClient = getSupabaseClientForAccessToken(verifiedAuthority.accessToken);
+    const response = await exactClient
       .rpc('set_main_agent_for_provider_v1', {
         p_session_key: normalizedSessionKey,
         p_provider_type: normalizedProviderType,
-      })
-      .setHeader('Authorization', `Bearer ${verifiedAuthority.accessToken}`);
+      });
     data = response.data;
     rpcError = response.error;
   } catch {

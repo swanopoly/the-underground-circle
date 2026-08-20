@@ -6,7 +6,11 @@ import {
 import OfficeFloorView from './office/OfficeFloor';
 import PixelAgent from './office/PixelAgent';
 import AgentPanel from './office/AgentPanel';
-import { resolveAgentPanelRuntimeConnectionId } from './office/AgentPanelTabs';
+import {
+  isAgentPanelRuntimeConnectionSnapshotCurrent,
+  resolveAgentPanelRuntimeConnectionSnapshot,
+  type AgentPanelRuntimeConnectionSnapshot,
+} from './office/AgentPanelTabs';
 import { OfficeIntelligenceSection, OfficeRuntimeSection, OfficeWorkspaceSection } from './office/OfficeSections';
 import { OFFICE_DESK_POSITIONS, OFFICE_FLOOR_GRID_SIZE, OFFICE_FLOOR_HEIGHT, OFFICE_FLOOR_WIDTH } from './office/officeFloorLayout';
 import CustomizePanel, { TelegramConfig } from './office/CustomizePanel';
@@ -298,7 +302,7 @@ import {
   normalizeIdleConfig,
   startIdleScheduler,
 } from '../../../lib/idleBehaviors';
-import { supabase } from '../../../lib/supabase';
+import { getSupabaseClientForAccessToken, supabase } from '../../../lib/supabase';
 import { subscribeWithReconnect } from '../../../lib/subscribeWithReconnect';
 // Stylesheets live in their own module — see office/officeTabStyles.ts.
 import {
@@ -650,6 +654,19 @@ export default function OfficeTab({
   }), [authUser?.id, circleId]);
   const surfaceState = useOfficeSurfaceState();
   const [selectedAgent, setSelectedAgent] = useState<OfficeAgent | null>(null);
+  // A bearer refresh retires every exact-authority object and rehydrates the
+  // Office from scratch. The panel may survive that same-subject refresh, but
+  // only by retaining this non-sensitive logical-scope id. Never retain the
+  // prior Agent object (it may contain stale runtime presentation authority),
+  // and never carry the id across an account/circle boundary.
+  const selectedAgentRefreshRetentionRef = useRef<{
+    scope: string;
+    agentId: string;
+  } | null>(null);
+  const clearSelectedAgentPanel = useCallback(() => {
+    selectedAgentRefreshRetentionRef.current = null;
+    setSelectedAgent(null);
+  }, []);
   // Filter chips that sit above the agents list. Persisted in localStorage so
   // a user who always works in "mine" doesn't have to re-toggle every visit.
   // The durable profile preference is the only persistence owner; the retired
@@ -1139,8 +1156,8 @@ export default function OfficeTab({
   // Disconnect handler — stops poller and marks agent offline
   const handleDisconnectAgent = React.useCallback(() => {
     if (!selectedAgent) return;
-    setSelectedAgent(null);
-  }, [selectedAgent]);
+    clearSelectedAgentPanel();
+  }, [clearSelectedAgentPanel, selectedAgent]);
 
   // Load custom themes from Supabase
   const { themes: customThemeRecords, refresh: refreshCustomThemes } = useCustomThemesExact(
@@ -1282,6 +1299,16 @@ export default function OfficeTab({
   const currentUserId = authReady ? authUser?.id || '' : '';
   const [currentUserName, setCurrentUserName] = useState<string>('');
   const floorLayoutScope = currentUserId ? `${currentUserId}:${circleId}` : null;
+  useEffect(() => {
+    const retained = selectedAgentRefreshRetentionRef.current;
+    if (
+      authReady
+      && floorLayoutScope
+      && (!retained || retained.scope === floorLayoutScope)
+    ) return;
+    selectedAgentRefreshRetentionRef.current = null;
+    setSelectedAgent(null);
+  }, [authReady, floorLayoutScope]);
   const officeSessionStorageScope = useMemo<OfficeSessionStorageScope | null>(() => (
     currentUserId ? { userId: currentUserId, circleId } : null
   ), [circleId, currentUserId]);
@@ -2781,6 +2808,10 @@ export default function OfficeTab({
       authorityGeneration: requestedAuthorityGeneration,
     };
     const requestedScope = floorLayoutScope;
+    const retainedAgentSelection = selectedAgentRefreshRetentionRef.current;
+    if (retainedAgentSelection?.scope !== requestedScope) {
+      selectedAgentRefreshRetentionRef.current = null;
+    }
     const requestIsCurrent = () => (
       !cancelled
       && layoutSaveScopeRef.current === requestedScope
@@ -2839,6 +2870,9 @@ export default function OfficeTab({
     setEnrichedSessions([]);
     setCronJobs([]);
     setAgentFilterMode('all');
+    // Token rotation for the same exact user+circle keeps only the selected
+    // id above. The old Agent object is retired with the old generation and a
+    // unique current roster row may restore it after membership hydration.
     setSelectedAgent(null);
     setUserNfts([]);
     setNftsLoading(false);
@@ -2952,6 +2986,8 @@ export default function OfficeTab({
       );
       if (!requestIsCurrent()) return;
       if (!membership.ok) {
+        selectedAgentRefreshRetentionRef.current = null;
+        setSelectedAgent(null);
         setOfficeAccessError(membership.error);
         setFloorLayoutSaveState('error');
         setFloorLayoutSaveDetail(membership.error);
@@ -3339,6 +3375,8 @@ export default function OfficeTab({
       if (!requestIsCurrent()) return;
       if (!membershipProven) {
         const message = 'The circle access check could not be completed. Check your connection and retry.';
+        selectedAgentRefreshRetentionRef.current = null;
+        setSelectedAgent(null);
         setOfficeAccessError(message);
         setFloorLayoutSaveState('error');
         setFloorLayoutSaveDetail(message);
@@ -3405,6 +3443,8 @@ export default function OfficeTab({
       setIdleConfigReadyAuthorityKey(null);
       idleLoadedRef.current = false;
       setOfficeAccessError(message);
+      selectedAgentRefreshRetentionRef.current = null;
+      setSelectedAgent(null);
       setComputerTaskCard(null);
       setOfficeAgentPlans([]);
       setStatusHistory([]);
@@ -3859,113 +3899,119 @@ export default function OfficeTab({
   }, [matchedFloor, floors]);
 
   // Derive agents from ALL connected sessions
-  const connectedConns = connections.filter(c => c.status === 'connected');
+  const connectedConns = useMemo(
+    () => connections.filter(c => c.status === 'connected'),
+    [connections],
+  );
   const anyConnected = connectedConns.length > 0;
+  const ownDbCostRows = useMemo(
+    () => mergedCircleAgents.filter(agent => agent.ownerId === currentUserId),
+    [currentUserId, mergedCircleAgents],
+  );
 
-  const rawAgents: OfficeAgent[] = [];
-  const seenSessionIds = new Set<string>();
-  let indexOffset = 0;
-  for (const conn of connectedConns) {
-    const sessions = sessionsRef.current.get(conn.id) || [];
-    const connAgents = sessionsToAgents(sessions, conn.id, conn.name, conn.provider);
-    for (const a of connAgents) {
-      const sessionIdentity = `${a.connectionId}::${a.sessionKey}`;
-      if (!seenSessionIds.has(sessionIdentity)) {
-        seenSessionIds.add(sessionIdentity);
-        rawAgents.push(a);
-      }
-    }
-    indexOffset += connAgents.length;
-  }
-  // Merge auto-detected sessions by exact connection + session identity. Session
-  // keys are provider-local and may legitimately repeat on different bridges.
-  // when the same bridge is connected both manually and via auto-detect
-  const autoKeys = ['claude-code-auto', 'codex-auto', 'gemini-cli-auto', 'cursor-auto'] as const;
-  for (const key of autoKeys) {
-    const autoAgents = sessionsRef.current.get(key) as unknown as OfficeAgent[] | undefined;
-    if (autoAgents && autoAgents.length > 0) {
-      for (const a of autoAgents) {
-        const sessionIdentity = `${a.connectionId}::${a.sessionKey}`;
+  // Roster projection is an identity boundary for the open Agent panel. A raw
+  // array rebuilt during every Office render makes the selected-agent sync
+  // effect store a fresh object, which renders Office again and creates an
+  // unbounded passive-effect loop. Session pollers advance `sessionsTick`, so
+  // this memo still publishes every real runtime update without coupling the
+  // roster to unrelated editor/modal state.
+  const rawAgents = useMemo<OfficeAgent[]>(() => {
+    const projected: OfficeAgent[] = [];
+    const seenSessionIds = new Set<string>();
+    for (const conn of connectedConns) {
+      const sessions = sessionsRef.current.get(conn.id) || [];
+      const connAgents = sessionsToAgents(sessions, conn.id, conn.name, conn.provider);
+      for (const agent of connAgents) {
+        const sessionIdentity = `${agent.connectionId}::${agent.sessionKey}`;
         if (!seenSessionIds.has(sessionIdentity)) {
           seenSessionIds.add(sessionIdentity);
-          rawAgents.push(a);
+          projected.push(agent);
         }
       }
     }
-  }
-
-  // Merge DB-backed agents that have no corresponding live session
-  // Only show if active within the last 2 hours — stale agents are hidden
-  // Skip if a live agent already exists for this provider (prevents ghost duplicates)
-  const STALE_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
-  const now = Date.now();
-  const liveAgentNames = new Set(rawAgents.map(a => a.name));
-  const liveProviders = new Set(rawAgents.map(a => a.providerType));
-  const myDbAgents = mergedCircleAgents.filter(a => {
-    if (a.ownerId !== currentUserId) return false;
-    if (liveAgentNames.has(a.name)) return false;
-    // Skip if there's already a live agent for this provider type
-    if (a.provider && liveProviders.has(a.provider as any)) return false;
-    // Filter out stale agents — if no lastActiveAt or too old, hide them
-    if (!a.lastActiveAt) return false;
-    const age = now - new Date(a.lastActiveAt).getTime();
-    return age < STALE_THRESHOLD_MS;
-  });
-  for (const dbAgent of myDbAgents) {
-    rawAgents.push({
-      id: `db::${dbAgent.id}`,
-      name: dbAgent.name,
-      role: dbAgent.provider || 'Agent',
-      status: dbAgent.status,
-      color: dbAgent.color,
-      deskIndex: rawAgents.length,
-      activity: dbAgent.currentTask || 'Idling',
-      messagesProcessed: dbAgent.message_count_total || 0,
-      uptimeHours: 0,
-      uptime: '',
-      lastActive: dbAgent.lastActiveAt || '',
-      recentActions: [],
-      recentMessages: [],
-      costToday: dbAgent.estimated_cost_today || 0,
-      costTotal: dbAgent.estimated_cost_total || 0,
-      costWeek: 0,
-      tokensUsed: dbAgent.token_usage_total || 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      cachedTokens: 0,
-      newTokens: 0,
-      turns: dbAgent.message_count_total || 0,
-      sessionKey: dbAgent.id,
-      model: 'unknown',
-      connectionId: 'db-agent',
-      connectionName: dbAgent.name,
-      providerType: (dbAgent.provider || 'generic-agent') as ProviderType,
-      spirit: dbAgent.spirit ?? undefined,
-    });
-  }
-
-  // Enrich live agents from one durable Circle Office row. Exact name/id wins;
-  // provider fallback is allowed only when both the live provider and DB row
-  // are singular. This keeps cost attribution deterministic across reloads and
-  // prevents multiple same-provider sessions from inheriting one aggregate.
-  const ownDbCostRows = mergedCircleAgents.filter(a => a.ownerId === currentUserId);
-  const liveProviderAgentCounts = new Map<ProviderType, number>();
-  for (const agent of rawAgents) {
-    if (agent.connectionId === 'db-agent') continue;
-    liveProviderAgentCounts.set(
-      agent.providerType,
-      (liveProviderAgentCounts.get(agent.providerType) || 0) + 1,
-    );
-  }
-  for (const agent of rawAgents) {
-    const dbMatch = findDurableOfficeAgentCost(agent, ownDbCostRows, {
-      liveProviderAgentCount: liveProviderAgentCounts.get(agent.providerType) || 0,
-    });
-    if (dbMatch) {
-      if (!agent.spirit && dbMatch.spirit) agent.spirit = dbMatch.spirit;
+    // Merge auto-detected sessions by exact connection + session identity.
+    // Session keys are provider-local and may repeat on different bridges.
+    const autoKeys = ['claude-code-auto', 'codex-auto', 'gemini-cli-auto', 'cursor-auto'] as const;
+    for (const key of autoKeys) {
+      const autoAgents = sessionsRef.current.get(key) as unknown as OfficeAgent[] | undefined;
+      if (autoAgents && autoAgents.length > 0) {
+        for (const agent of autoAgents) {
+          const sessionIdentity = `${agent.connectionId}::${agent.sessionKey}`;
+          if (!seenSessionIds.has(sessionIdentity)) {
+            seenSessionIds.add(sessionIdentity);
+            projected.push(agent);
+          }
+        }
+      }
     }
-    Object.assign(agent, applyDurableOfficeAgentCost(agent, dbMatch));
-  }
+
+    // Merge DB-backed agents that have no corresponding live session. Only
+    // show recent rows, and avoid provider/name ghosts beside a live session.
+    const staleThresholdMs = 2 * 60 * 60 * 1000;
+    const now = Date.now();
+    const liveAgentNames = new Set(projected.map(agent => agent.name));
+    const liveProviders = new Set(projected.map(agent => agent.providerType));
+    const myDbAgents = mergedCircleAgents.filter(agent => {
+      if (agent.ownerId !== currentUserId) return false;
+      if (liveAgentNames.has(agent.name)) return false;
+      if (agent.provider && liveProviders.has(agent.provider as ProviderType)) return false;
+      if (!agent.lastActiveAt) return false;
+      const age = now - new Date(agent.lastActiveAt).getTime();
+      return age < staleThresholdMs;
+    });
+    for (const dbAgent of myDbAgents) {
+      projected.push({
+        id: `db::${dbAgent.id}`,
+        name: dbAgent.name,
+        role: dbAgent.provider || 'Agent',
+        status: dbAgent.status,
+        color: dbAgent.color,
+        deskIndex: projected.length,
+        activity: dbAgent.currentTask || 'Idling',
+        messagesProcessed: dbAgent.message_count_total || 0,
+        uptimeHours: 0,
+        uptime: '',
+        lastActive: dbAgent.lastActiveAt || '',
+        recentActions: [],
+        recentMessages: [],
+        costToday: dbAgent.estimated_cost_today || 0,
+        costTotal: dbAgent.estimated_cost_total || 0,
+        costWeek: 0,
+        tokensUsed: dbAgent.token_usage_total || 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cachedTokens: 0,
+        newTokens: 0,
+        turns: dbAgent.message_count_total || 0,
+        sessionKey: dbAgent.id,
+        model: 'unknown',
+        connectionId: 'db-agent',
+        connectionName: dbAgent.name,
+        providerType: (dbAgent.provider || 'generic-agent') as ProviderType,
+        spirit: dbAgent.spirit ?? undefined,
+      });
+    }
+
+    // Enrich live agents from one durable Circle Office row. Exact name/id
+    // wins; provider fallback is allowed only when both sides are singular.
+    const liveProviderAgentCounts = new Map<ProviderType, number>();
+    for (const agent of projected) {
+      if (agent.connectionId === 'db-agent') continue;
+      liveProviderAgentCounts.set(
+        agent.providerType,
+        (liveProviderAgentCounts.get(agent.providerType) || 0) + 1,
+      );
+    }
+    for (const agent of projected) {
+      const dbMatch = findDurableOfficeAgentCost(agent, ownDbCostRows, {
+        liveProviderAgentCount: liveProviderAgentCounts.get(agent.providerType) || 0,
+      });
+      if (dbMatch && !agent.spirit && dbMatch.spirit) agent.spirit = dbMatch.spirit;
+      Object.assign(agent, applyDurableOfficeAgentCost(agent, dbMatch));
+    }
+
+    return projected;
+  }, [connectedConns, currentUserId, mergedCircleAgents, ownDbCostRows, sessionsTick]);
 
   // Apply custom names
   const allAgents = useMemo(() =>
@@ -4144,18 +4190,61 @@ export default function OfficeTab({
   const displayAgentsRef = useRef<readonly OfficeAgent[]>(displayAgents);
   displayAgentsRef.current = displayAgents;
   useEffect(() => {
-    setSelectedAgent(previous => {
-      if (!previous) return null;
-      const current = resolveUniqueOfficeAgentById(displayAgents, previous.id);
-      // The popup is a live projection of the canonical roster, never a
-      // snapshot captured at click time. If the subject retires, close it.
-      return current;
-    });
-  }, [displayAgents]);
-  const selectedAgentRuntimeConnectionId = useMemo(
-    () => resolveAgentPanelRuntimeConnectionId(selectedAgent, connections),
-    [connections, selectedAgent],
+    const retained = selectedAgentRefreshRetentionRef.current;
+    if (!floorLayoutHydrated || !floorLayoutScope || !retained) return;
+    if (retained.scope !== floorLayoutScope) {
+      selectedAgentRefreshRetentionRef.current = null;
+      setSelectedAgent(null);
+      return;
+    }
+    const matchCount = displayAgents.reduce(
+      (count, candidate) => count + (candidate.id === retained.agentId ? 1 : 0),
+      0,
+    );
+    const current = matchCount === 1
+      ? resolveUniqueOfficeAgentById(displayAgents, retained.agentId)
+      : null;
+    // The popup is a live projection of the newly hydrated canonical roster,
+    // never the Agent object captured by the retired bearer generation. A
+    // missing or duplicate subject closes and discards retention fail-closed.
+    if (!current) selectedAgentRefreshRetentionRef.current = null;
+    setSelectedAgent(previous => previous === current ? previous : current);
+  }, [displayAgents, floorLayoutHydrated, floorLayoutScope]);
+  const selectedAgentRuntimeConnectionCandidate = resolveAgentPanelRuntimeConnectionSnapshot(
+    selectedAgent,
+    connections,
   );
+  const selectedAgentRuntimeConnectionIdCandidate = selectedAgentRuntimeConnectionCandidate?.connectionId || null;
+  const selectedAgentRuntimeAgentBotIdCandidate = selectedAgentRuntimeConnectionCandidate?.agentBotId || null;
+  const selectedAgentRuntimeEndpointCandidate = selectedAgentRuntimeConnectionCandidate?.normalizedEndpoint || null;
+  // Roster/session polling replaces otherwise equivalent agent and connection
+  // objects. Keep the captured live verdict referentially stable while its
+  // non-secret fingerprint is unchanged so mounted runtime panels do not retire
+  // and restart the same exact-authority read on every telemetry refresh.
+  const selectedAgentRuntimeConnectionSnapshot = useMemo<AgentPanelRuntimeConnectionSnapshot | null>(
+    () => selectedAgentRuntimeConnectionIdCandidate && selectedAgentRuntimeEndpointCandidate
+      ? Object.freeze({
+        connectionId: selectedAgentRuntimeConnectionIdCandidate,
+        agentBotId: selectedAgentRuntimeAgentBotIdCandidate,
+        normalizedEndpoint: selectedAgentRuntimeEndpointCandidate,
+        status: 'connected' as const,
+      })
+      : null,
+    [
+      selectedAgentRuntimeAgentBotIdCandidate,
+      selectedAgentRuntimeConnectionIdCandidate,
+      selectedAgentRuntimeEndpointCandidate,
+    ],
+  );
+  const selectedAgentRuntimeConnectionId = selectedAgentRuntimeConnectionSnapshot?.connectionId || null;
+  const isSelectedAgentRuntimeConnectionCurrent = useCallback((
+    snapshot: AgentPanelRuntimeConnectionSnapshot,
+  ): boolean => {
+    const connectionAuthority = connectionsAuthorityRef.current;
+    return !!connectionAuthority
+      && isOfficeAuthorityCurrent(connectionAuthority)
+      && isAgentPanelRuntimeConnectionSnapshotCurrent(snapshot, connectionsRef.current);
+  }, [isOfficeAuthorityCurrent]);
   const terminalCommandAgents = useMemo<CircleOfficeAgent[]>(() => (
     [
       {
@@ -4699,11 +4788,20 @@ export default function OfficeTab({
     if (editMode) return;
     const agent = resolveUniqueOfficeAgentById(displayAgentsRef.current, agentId);
     if (!agent) {
-      setSelectedAgent(null);
+      clearSelectedAgentPanel();
       return;
     }
-    setSelectedAgent(prev => prev?.id === agent.id ? null : agent);
-  }, [editMode]);
+    setSelectedAgent(prev => {
+      if (prev?.id === agent.id) {
+        selectedAgentRefreshRetentionRef.current = null;
+        return null;
+      }
+      selectedAgentRefreshRetentionRef.current = floorLayoutScope
+        ? { scope: floorLayoutScope, agentId: agent.id }
+        : null;
+      return agent;
+    });
+  }, [clearSelectedAgentPanel, editMode, floorLayoutScope]);
 
   const handleOpenAgentInChat = useCallback((agentId: string, draft?: string) => {
     const focus = encodeEntityHandle({ surface: 'chat', kind: 'agent', id: agentId });
@@ -4711,9 +4809,9 @@ export default function OfficeTab({
     // Office stays mounted after switching tabs. Retire its modal before the
     // validated handoff so a hidden aria-modal/focus trap cannot reappear when
     // the user returns from Chat.
-    setSelectedAgent(null);
+    clearSelectedAgentPanel();
     onOpenAgentInChat?.(focus, normalizeChatAgentFocusDraft(draft) || undefined);
-  }, [onOpenAgentInChat]);
+  }, [clearSelectedAgentPanel, onOpenAgentInChat]);
 
   const handleOpenAutomate = useCallback(() => {
     setTerminalInitialTab('automations');
@@ -4730,10 +4828,12 @@ export default function OfficeTab({
     try {
       // The panel opens published agents with their exact UUID in sessionKey.
       // Never widen a destructive action to a same-name row or multiple rows.
-      const { data: removedRows, error } = await supabase
+      // Use the captured-token client so this exact mutation cannot wait on a
+      // mutable browser auth lock held by another Office tab.
+      const exactClient = getSupabaseClientForAccessToken(requestedAuthority.accessToken);
+      const { data: removedRows, error } = await exactClient
         .from('circle_office_agents')
         .delete()
-        .setHeader('Authorization', `Bearer ${requestedAuthority.accessToken}`)
         .eq('id', publishedAgentId)
         .eq('circle_id', requestedAuthority.circleId)
         .eq('owner_id', requestedAuthority.userId)
@@ -6785,7 +6885,13 @@ export default function OfficeTab({
     if (cmd.type === 'theme') handleChangeFloorTheme(currentFloor.id, cmd.value);
     if (cmd.type === 'info') {
       const agent = agents.find(a => a.name === cmd.query);
-      if (agent) setSelectedAgent(agent);
+      if (agent && floorLayoutScope) {
+        selectedAgentRefreshRetentionRef.current = {
+          scope: floorLayoutScope,
+          agentId: agent.id,
+        };
+        setSelectedAgent(agent);
+      }
     }
   };
 
@@ -8122,7 +8228,7 @@ export default function OfficeTab({
       {!editMode && (
         <AgentPanel
           agent={selectedAgent}
-          onClose={() => setSelectedAgent(null)}
+          onClose={clearSelectedAgentPanel}
           isDesktop={isDesktop}
           onRenameAgent={handleRenameAgent}
           onAgentIdentityChange={refreshAgentIdentities}
@@ -8131,6 +8237,8 @@ export default function OfficeTab({
           sessionStorageScope={officeSessionStorageScope || undefined}
           identityAuthority={captureOfficeAuthority()}
           runtimeConnectionId={selectedAgentRuntimeConnectionId}
+          runtimeConnectionSnapshot={selectedAgentRuntimeConnectionSnapshot}
+          isRuntimeConnectionSnapshotCurrent={isSelectedAgentRuntimeConnectionCurrent}
           onAddSessionTag={handleAddSessionTag}
           onRemoveSessionTag={handleRemoveSessionTag}
           circleId={circleId}

@@ -14,6 +14,8 @@ import {
   type ProviderModelCatalogSnapshot,
 } from '../src/lib/modelCatalogReadinessCore';
 import {
+  CHAT_BILLING_PROVIDER_COOLDOWN_MS,
+  CHAT_TRANSIENT_PROVIDER_COOLDOWN_MS,
   classifyProviderFreeChatTurn,
   collectActiveChatProviderQuarantines,
   hasIndependentChatActionContinuation,
@@ -107,6 +109,22 @@ assert(
   !rejectedCredential.connected && rejectedCredential.state === 'not_connected',
   'a provider-rejected saved key cannot make curated rows look ready',
   rejectedCredential,
+);
+const billingUnavailable = buildModelCatalogReadinessProfile({
+  connected: true,
+  snapshotStatus: 'fallback',
+  selectableModelCount: 4,
+  failureCode: 'provider_billing_unavailable',
+});
+assert(
+  billingUnavailable.connected && billingUnavailable.state === 'curated_fallback',
+  'a valid but unfunded provider stays connected while exact runtime quarantine owns temporary selection exclusion',
+  billingUnavailable,
+);
+assert(
+  CHAT_BILLING_PROVIDER_COOLDOWN_MS === 5 * 60_000
+    && CHAT_BILLING_PROVIDER_COOLDOWN_MS > CHAT_TRANSIENT_PROVIDER_COOLDOWN_MS,
+  'billing refusal cooldown is finite and longer than ambiguous transport cooldown',
 );
 const unsupported = buildModelCatalogReadinessProfile({ connected: true, snapshotStatus: 'unsupported', selectableModelCount: 4 });
 assert(unsupported.state === 'catalog_unsupported' && !unsupported.accountInventoryVerified, 'missing list endpoint remains distinct from transport failure');
@@ -768,6 +786,19 @@ assert(
     && proxy.includes('error.status === 401 || error.status === 403'),
   'provider 401/403 catalog failures keep a bounded stable credential-rejected code',
 );
+assert(
+  proxy.includes('error.status === 402')
+    && proxy.includes('"provider_billing_unavailable"'),
+  'provider HTTP 402 has a stable client-readable billing-unavailable code',
+);
+assert(
+  proxy.includes('status: "unavailable"')
+    && proxy.includes('models: []')
+    && proxy.includes('fetchedAt: null')
+    && providers.includes("} else if (data?.error) {")
+    && providers.includes("details.code || 'request_failed'"),
+  'passive unreadable catalogs return a handled non-ready envelope that the client parses as failure, never verified empty',
+);
 
 assert(chat.includes('group.catalogLabel'), 'Chat model groups render the shared catalog label');
 assert(chat.includes("model.availability === 'account_listed'"), 'Chat distinguishes account-listed models from fallback rows');
@@ -841,6 +872,13 @@ assert(
     && chat.includes("excludedGroupProviders: ['blackswan', ...quarantinedProviders]")
     && chat.includes('loadChatModelCatalogWithinDeadline'),
   'Chat bounds and serializes stale readiness refresh, then quarantines failed providers until a key change',
+);
+assert(
+  chat.includes("failureKind: 'credential' | 'billing' | 'transient'")
+    && chat.includes('CHAT_BILLING_PROVIDER_COOLDOWN_MS')
+    && chat.includes('getLLMProxyProviderQuarantineKind')
+    && chat.includes('same-turn fallback suppressed'),
+  'typed billing failures terminate the attempted turn and apply only a finite exact-provider quarantine for later turns',
 );
 assert(
   chat.includes('failedModelProviderQuarantineScopeRef')

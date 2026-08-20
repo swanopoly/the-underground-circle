@@ -4,7 +4,9 @@ import {
   getAgentPanelGroups,
   getAgentPanelTabs,
   getFallbackAgentPanelTab,
+  isAgentPanelRuntimeConnectionSnapshotCurrent,
   resolveAgentPanelRuntimeConnectionId,
+  resolveAgentPanelRuntimeConnectionSnapshot,
   type AgentPanelCapabilities,
 } from '../src/screens/circles/tabs/office/AgentPanelTabs';
 import { resolveOpenSwanConnectionTransport } from '../src/lib/officeAgentSessionBindingCore';
@@ -36,12 +38,14 @@ const openSwanConnection = (id: string) => ({
 const fullCapabilities: AgentPanelCapabilities = {
   hasCircleContext: true,
   hasIdentityAuthority: true,
+  hasProgressionStorage: true,
   canCustomize: true,
   hasRuntimeConnection: true,
 };
 const restrictedCapabilities: AgentPanelCapabilities = {
   hasCircleContext: false,
   hasIdentityAuthority: false,
+  hasProgressionStorage: false,
   canCustomize: false,
   hasRuntimeConnection: true,
 };
@@ -67,6 +71,30 @@ assert.equal(
   new Set(fullGroups.flatMap(group => group.tabs.map(tab => tab.key))).size,
   fullTabs.length,
   'each available route belongs to exactly one destination',
+);
+
+const progressionUnavailableCapabilities: AgentPanelCapabilities = {
+  ...fullCapabilities,
+  hasProgressionStorage: false,
+};
+const progressionUnavailableTabs = getAgentPanelTabs(openSwanAgent, progressionUnavailableCapabilities);
+const progressionUnavailableKeys = progressionUnavailableTabs.map(tab => tab.key);
+assert(!progressionUnavailableKeys.includes('evolution'), 'XP stays hidden until its storage contract is explicitly ready');
+assert(
+  progressionUnavailableKeys.includes('spirit') && progressionUnavailableKeys.includes('customize'),
+  'a missing optional progression schema does not hide verified Spirit or Customize routes',
+);
+assert.deepEqual(
+  getAgentPanelGroups(progressionUnavailableTabs)
+    .find(group => group.key === 'more')
+    ?.tabs.map(tab => tab.key),
+  ['spirit', 'customize'],
+  'More retains its usable routes while omitting only unavailable progression',
+);
+assert.equal(
+  getFallbackAgentPanelTab(openSwanAgent, 'evolution', progressionUnavailableCapabilities),
+  'overview',
+  'a saved Evolution route falls back to Overview when progression storage is unavailable',
 );
 
 const restrictedTabs = getAgentPanelTabs(openSwanAgent, restrictedCapabilities);
@@ -186,6 +214,38 @@ for (const connection of [
   );
 }
 assert.equal(resolveAgentPanelRuntimeConnectionId(builtInOpenSwan, [openSwanConnection('conn-a'), openSwanConnection('conn-b')]), null, 'built-in OpenSwan never guesses between multiple connected runtimes');
+const connectedRuntimeSnapshot = resolveAgentPanelRuntimeConnectionSnapshot(
+  builtInOpenSwan,
+  [openSwanConnection('conn-a')],
+);
+assert.deepEqual(
+  connectedRuntimeSnapshot,
+  {
+    connectionId: 'conn-a',
+    agentBotId: null,
+    normalizedEndpoint: 'http://localhost:18790/',
+    status: 'connected',
+  },
+  'the panel captures a non-secret live runtime identity without copying its bearer token',
+);
+assert(
+  isAgentPanelRuntimeConnectionSnapshotCurrent(connectedRuntimeSnapshot, [openSwanConnection('conn-a')]),
+  'a captured runtime identity is current only while the same exact connection remains live',
+);
+assert(
+  !isAgentPanelRuntimeConnectionSnapshotCurrent(connectedRuntimeSnapshot, [{
+    ...openSwanConnection('conn-a'),
+    status: 'disconnected',
+  }]),
+  'a durable disconnected connection cannot preserve a stale live runtime verdict',
+);
+assert(
+  !isAgentPanelRuntimeConnectionSnapshotCurrent(connectedRuntimeSnapshot, [{
+    ...openSwanConnection('conn-a'),
+    endpoint: 'http://localhost:18791',
+  }]),
+  'replacing an endpoint in place retires the captured runtime fingerprint',
+);
 assert.equal(
   resolveAgentPanelRuntimeConnectionId({ ...openSwanAgent, connectionId: 'conn-b' } as PanelAgent, [openSwanConnection('conn-a'), openSwanConnection('conn-b')]),
   'conn-b',
@@ -194,6 +254,7 @@ assert.equal(
 
 const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 const panel = read('src/screens/circles/tabs/office/AgentPanel.tsx');
+const panelTabsSource = read('src/screens/circles/tabs/office/AgentPanelTabs.ts');
 const shell = read('src/screens/circles/tabs/office/AgentPanelShell.tsx');
 const terminal = read('src/screens/circles/tabs/office/AgentTerminalPanels.tsx');
 const runs = read('src/screens/circles/tabs/office/AgentRunsPanel.tsx');
@@ -205,12 +266,36 @@ const xpFeed = read('src/components/rpg/XPEventFeed.tsx');
 const office = read('src/screens/circles/tabs/OfficeTab.tsx');
 const customize = read('src/screens/circles/tabs/office/AgentCustomizePanel.tsx');
 const gateway = read('src/screens/circles/tabs/office/AgentGatewayPanels.tsx');
+const envExample = read('.env.example');
 assert.equal(
-  (gateway.match(/resolveOpenSwanConnectionTransport\(match\)/g) || []).length,
-  2,
-  'Runtime and Schedules consume the same capability verdict used to expose their routes',
+  (gateway.match(/loadPanelOpenSwanConfigExact\(/g) || []).length,
+  3,
+  'Runtime and Schedules share one exact-storage plus live-snapshot config resolver',
 );
 assert(!gateway.includes('|| !match.token'), 'panel executors do not re-reject the canonical tokenless proxy');
+assert(
+  gateway.includes('matchesOpenSwanConnectionFingerprint(runtimeConnectionSnapshot, storedConnection)')
+    && gateway.includes("const liveExactConnection: AgentConnection = { ...storedConnection, status: 'connected' };")
+    && gateway.includes('isRuntimeConnectionSnapshotCurrent(runtimeConnectionSnapshot)')
+    && gateway.includes('resolveOpenSwanConnectionTransport(liveExactConnection)'),
+  'runtime config uses the exact-authority secret only after the current non-secret live fingerprint matches',
+);
+assert(
+  gateway.includes("const [cronCapability, setCronCapability] = useState<'unknown' | 'supported' | 'unsupported'>('unknown');")
+    && gateway.includes("setCronCapability('unsupported');")
+    && gateway.includes('This verified OpenSwan runtime does not expose connection-level schedules.')
+    && gateway.includes('accessibilityLabel="Schedule capability status"')
+    && gateway.includes('cronCapability === \'unsupported\' || !hasVerifiedSnapshot ? null'),
+  'verified unsupported cron capability renders a neutral accessible status without claiming an empty inventory',
+);
+assert(
+  office.includes('const selectedAgentRuntimeConnectionCandidate = resolveAgentPanelRuntimeConnectionSnapshot(')
+    && office.includes('const selectedAgentRuntimeConnectionIdCandidate = selectedAgentRuntimeConnectionCandidate?.connectionId || null;')
+    && office.includes('const selectedAgentRuntimeConnectionSnapshot = useMemo<AgentPanelRuntimeConnectionSnapshot | null>(')
+    && office.includes('selectedAgentRuntimeAgentBotIdCandidate,\n      selectedAgentRuntimeConnectionIdCandidate,\n      selectedAgentRuntimeEndpointCandidate,')
+    && !office.includes('() => resolveAgentPanelRuntimeConnectionSnapshot(selectedAgent, connections),\n    [connections, selectedAgent],'),
+  'Office preserves one runtime-snapshot object across equivalent roster and session polling replacements',
+);
 
 for (const marker of [
   'requestGenerationRef',
@@ -220,7 +305,9 @@ for (const marker of [
   "scopeKey: panelScopeKey, tab: 'overview'",
   "panelRoute.scopeKey === panelScopeKey ? panelRoute.tab : 'overview'",
   'identityAuthority?.generation',
-  'const hasRuntimeConnection = !!agent && !!runtimeConnectionId;',
+  'const hasRuntimeConnection = Boolean(',
+  'runtimeConnectionSnapshot.connectionId === runtimeConnectionId',
+  'isRuntimeConnectionSnapshotCurrent?.(runtimeConnectionSnapshot)',
   'const contentKey = `${panelScopeKey}:${panelTab}`;',
   'const executionTruth = resolveOfficeAgentExecutionTruth(agent);',
   "executionTruth.state === 'warning' ? '#f59e0b'",
@@ -241,6 +328,23 @@ assert(
     && panel.includes('const panelRoutingKey = agent ? `${agent.id}\\u0000${agent.providerType}` : \'closed\';')
     && panel.includes('[panelCapabilities, panelRoutingKey]'),
   'route capabilities and tab catalogs ignore live roster object churn',
+);
+assert(
+  panel.includes('runtimeConnectionSnapshot={runtimeConnectionSnapshot}')
+    && panel.includes('isRuntimeConnectionSnapshotCurrent={isRuntimeConnectionSnapshotCurrent}')
+    && office.includes('const selectedAgentRuntimeConnectionCandidate = resolveAgentPanelRuntimeConnectionSnapshot(')
+    && office.includes('selectedAgent,\n    connections,')
+    && office.includes('isAgentPanelRuntimeConnectionSnapshotCurrent(snapshot, connectionsRef.current)')
+    && office.includes('isOfficeAuthorityCurrent(connectionAuthority)'),
+  'Office hands the popup a non-secret exact runtime snapshot with a live authority-and-connection fence',
+);
+assert(
+  panel.includes("const HAS_AGENT_PROGRESSION_STORAGE_V1 = process.env.EXPO_PUBLIC_AGENT_PROGRESSION_STORAGE_V1 === 'true';")
+    && panel.includes('hasProgressionStorage: HAS_AGENT_PROGRESSION_STORAGE_V1,')
+    && panelTabsSource.includes('capabilities.hasProgressionStorage === true')
+    && panelTabsSource.includes('hasPrivateScope && hasProgressionStorage ? [TAB_CATALOG.evolution] : []')
+    && envExample.includes('EXPO_PUBLIC_AGENT_PROGRESSION_STORAGE_V1=false'),
+  'the live XP route is default-off and requires one exact positive deployment-readiness flag',
 );
 assert(!panel.includes('requestIdleCallback'), 'panel chunks are not speculatively prefetched');
 assert(!panel.includes('error.message'), 'lazy-section copy never exposes a raw loader error');
@@ -329,9 +433,23 @@ assert(
   'Evolution resolves progression, streaks, and XP through the exact circle and agent aliases',
 );
 assert(
-  office.includes('The popup is a live projection of the canonical roster')
-    && office.includes('resolveUniqueOfficeAgentById(displayAgents, previous.id)'),
-  'the open popup follows the live roster instead of retaining a click-time snapshot',
+  office.includes('selectedAgentRefreshRetentionRef')
+    && office.includes('scope: floorLayoutScope, agentId: agent.id')
+    && office.includes('if (retainedAgentSelection?.scope !== requestedScope)')
+    && office.includes('const matchCount = displayAgents.reduce(')
+    && office.includes('matchCount === 1')
+    && office.includes('resolveUniqueOfficeAgentById(displayAgents, retained.agentId)')
+    && office.includes('if (!current) selectedAgentRefreshRetentionRef.current = null;')
+    && office.includes('selectedAgentRefreshRetentionRef.current = null;\n        setSelectedAgent(null);\n        setOfficeAccessError(membership.error);')
+    && office.includes('onClose={clearSelectedAgentPanel}')
+    && !office.includes('onClose={() => setSelectedAgent(null)}'),
+  'same-scope token refresh retains only an agent id, then uniquely rebinds or closes fail-closed',
+);
+assert(
+  office.includes('const rawAgents = useMemo<OfficeAgent[]>(() => {')
+    && office.includes('return projected;\n  }, [connectedConns, currentUserId, mergedCircleAgents, ownDbCostRows, sessionsTick]);')
+    && !office.includes('const rawAgents: OfficeAgent[] = [];'),
+  'unrelated Office renders retain roster object identity so selected-agent synchronization cannot feed back forever',
 );
 assert(
   office.includes('authority.accessToken !== authSession?.access_token')

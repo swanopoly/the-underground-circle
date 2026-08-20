@@ -42,12 +42,22 @@ import {
 } from '../../../../lib/openswanService';
 import { MONO, formatRelativeTime } from './AgentPanelShared';
 import { cronJobControlSnapshotMatches } from './agentCronControlCore';
+import type {
+  AgentPanelRuntimeConnectionFence,
+  AgentPanelRuntimeConnectionSnapshot,
+} from './AgentPanelTabs';
 
 type PanelOpenSwanConfig = OpenSwanConfig & { connection: AgentConnection };
 
 type PanelAuthorityProps = {
   identityAuthority: OfficeConnectionExactAuthority | null;
   isIdentityAuthorityCurrent: OfficeConnectionAuthorityFence;
+};
+
+type PanelRuntimeConnectionProps = {
+  runtimeConnectionId: string;
+  runtimeConnectionSnapshot: AgentPanelRuntimeConnectionSnapshot;
+  isRuntimeConnectionSnapshotCurrent: AgentPanelRuntimeConnectionFence;
 };
 
 type AdvancedLane = 'sessions' | 'subagents' | 'jobs' | 'runtimeAgents' | 'sessionStatus' | 'sessionHistory';
@@ -74,6 +84,49 @@ function hasCurrentPanelAuthority(
   fence: OfficeConnectionAuthorityFence,
 ): authority is OfficeConnectionExactAuthority {
   return !!authority && fence(authority);
+}
+
+/**
+ * Join two deliberately separate truths: exact storage owns endpoint metadata
+ * and the hydrated local secret, while Office's live connection lane owns the
+ * transient connected verdict. The non-secret live fingerprint must still be
+ * current and must match the exact-authority row before either can be used.
+ */
+async function loadPanelOpenSwanConfigExact(
+  identityAuthority: OfficeConnectionExactAuthority | null,
+  isIdentityAuthorityCurrent: OfficeConnectionAuthorityFence,
+  runtime: PanelRuntimeConnectionProps,
+): Promise<PanelOpenSwanConfig | null> {
+  const {
+    runtimeConnectionId,
+    runtimeConnectionSnapshot,
+    isRuntimeConnectionSnapshotCurrent,
+  } = runtime;
+  if (
+    !hasCurrentPanelAuthority(identityAuthority, isIdentityAuthorityCurrent)
+    || runtimeConnectionSnapshot.connectionId !== runtimeConnectionId
+    || !isRuntimeConnectionSnapshotCurrent(runtimeConnectionSnapshot)
+  ) return null;
+
+  const result = await loadOfficeConnectionsExact(identityAuthority, isIdentityAuthorityCurrent);
+  if (
+    !result.ok
+    || !isIdentityAuthorityCurrent(identityAuthority)
+    || !isRuntimeConnectionSnapshotCurrent(runtimeConnectionSnapshot)
+  ) return null;
+  const matches = result.connections.filter((connection) => connection.id === runtimeConnectionId);
+  const storedConnection = matches.length === 1 ? matches[0] : null;
+  if (
+    !storedConnection
+    || !matchesOpenSwanConnectionFingerprint(runtimeConnectionSnapshot, storedConnection)
+  ) return null;
+
+  // Exact metadata is intentionally hydrated as disconnected because durable
+  // storage cannot prove liveness. Only after matching Office's current live
+  // fingerprint may the transport resolver consume that exact hydrated row.
+  const liveExactConnection: AgentConnection = { ...storedConnection, status: 'connected' };
+  const transport = resolveOpenSwanConnectionTransport(liveExactConnection);
+  return transport ? { ...transport, connection: liveExactConnection } : null;
 }
 
 function confirmPanelMutation(title: string, message: string, confirmLabel: string): Promise<boolean> {
@@ -124,6 +177,8 @@ export function OpenSwanFrontendPanel({
   circleId,
   userId,
   runtimeConnectionId,
+  runtimeConnectionSnapshot,
+  isRuntimeConnectionSnapshotCurrent,
   identityAuthority,
   isIdentityAuthorityCurrent,
   onOpenInChat,
@@ -132,9 +187,8 @@ export function OpenSwanFrontendPanel({
   accentColor: string;
   circleId?: string;
   userId?: string;
-  runtimeConnectionId: string;
   onOpenInChat?: (draft?: string) => void;
-} & PanelAuthorityProps) {
+} & PanelAuthorityProps & PanelRuntimeConnectionProps) {
   const isBlackSwanRuntime = agent.providerType === 'blackswan-local'
     || agent.id === 'default::blackswan'
     || agent.id === 'blackswan-default'
@@ -186,19 +240,19 @@ export function OpenSwanFrontendPanel({
       setConnection(null);
       return null;
     }
-    const result = await loadOfficeConnectionsExact(identityAuthority, isIdentityAuthorityCurrent);
-    if (!result.ok || !isIdentityAuthorityCurrent(identityAuthority)) return null;
-    const matches = result.connections.filter((conn) => conn.id === runtimeConnectionId);
-    const match = matches.length === 1 ? matches[0] : null;
-    const transport = resolveOpenSwanConnectionTransport(match);
-    if (!match || !transport) {
-      setConnection(match || null);
+    const config = await loadPanelOpenSwanConfigExact(
+      identityAuthority,
+      isIdentityAuthorityCurrent,
+      { runtimeConnectionId, runtimeConnectionSnapshot, isRuntimeConnectionSnapshotCurrent },
+    );
+    if (!config) {
+      setConnection(null);
       return null;
     }
 
-    setConnection(match);
-    return { ...transport, connection: match };
-  }, [identityAuthority, isIdentityAuthorityCurrent, runtimeConnectionId]);
+    setConnection(config.connection);
+    return config;
+  }, [identityAuthority, isIdentityAuthorityCurrent, isRuntimeConnectionSnapshotCurrent, runtimeConnectionId, runtimeConnectionSnapshot]);
 
   const refresh = useCallback(async () => {
     if (refreshInFlight.current) return;
@@ -1243,14 +1297,15 @@ export function CronJobsPanel({
   circleId,
   accentColor,
   runtimeConnectionId,
+  runtimeConnectionSnapshot,
+  isRuntimeConnectionSnapshotCurrent,
   identityAuthority,
   isIdentityAuthorityCurrent,
 }: {
   agent: OfficeAgent;
   circleId: string;
   accentColor: string;
-  runtimeConnectionId: string;
-} & PanelAuthorityProps) {
+} & PanelAuthorityProps & PanelRuntimeConnectionProps) {
   const [jobs, setJobs] = useState<CronJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -1261,35 +1316,38 @@ export function CronJobsPanel({
   const [newJob, setNewJob] = useState({ name: '', schedule: '', task: '', sessionTarget: 'isolated' });
   const [connection, setConnection] = useState<AgentConnection | null>(null);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null);
+  const [cronCapability, setCronCapability] = useState<'unknown' | 'supported' | 'unsupported'>('unknown');
   const [verifiedScopeKey, setVerifiedScopeKey] = useState<string | null>(null);
   const [verifiedConnectionFingerprint, setVerifiedConnectionFingerprint] = useState<OpenSwanConnectionFingerprint | null>(null);
   const actionInFlight = useRef(false);
   const refreshGeneration = useRef(0);
+  const runtimeFingerprintScope = `${runtimeConnectionSnapshot.connectionId}\u0000${runtimeConnectionSnapshot.agentBotId || 'local'}\u0000${runtimeConnectionSnapshot.normalizedEndpoint}`;
   const cronScopeKey = identityAuthority
-    ? `${identityAuthority.userId}\u0000${identityAuthority.circleId}\u0000${identityAuthority.generation}\u0000${runtimeConnectionId}`
-    : `locked\u0000${runtimeConnectionId}`;
-  const hasVerifiedSnapshot = verifiedScopeKey === cronScopeKey
+    ? `${identityAuthority.userId}\u0000${identityAuthority.circleId}\u0000${identityAuthority.generation}\u0000${runtimeFingerprintScope}`
+    : `locked\u0000${runtimeFingerprintScope}`;
+  const hasVerifiedConnection = verifiedScopeKey === cronScopeKey
     && !!connection
     && !!verifiedConnectionFingerprint
     && matchesOpenSwanConnectionFingerprint(verifiedConnectionFingerprint, connection);
+  const hasVerifiedSnapshot = hasVerifiedConnection && cronCapability === 'supported';
   const visibleJobs = hasVerifiedSnapshot ? jobs : [];
-  const visibleConnection = hasVerifiedSnapshot ? connection : null;
-  const mutationsUnavailable = loading || !!loadError || !hasVerifiedSnapshot;
+  const visibleConnection = hasVerifiedConnection ? connection : null;
+  const mutationsUnavailable = loading || !!loadError || !hasVerifiedSnapshot || cronCapability !== 'supported';
 
   const resolveConfig = useCallback(async (): Promise<PanelOpenSwanConfig | null> => {
     if (!hasCurrentPanelAuthority(identityAuthority, isIdentityAuthorityCurrent)) {
       setConnection(null);
       return null;
     }
-    const result = await loadOfficeConnectionsExact(identityAuthority, isIdentityAuthorityCurrent);
-    if (!result.ok || !isIdentityAuthorityCurrent(identityAuthority)) return null;
-    const matches = result.connections.filter((conn) => conn.id === runtimeConnectionId);
-    const match = matches.length === 1 ? matches[0] : null;
-    const transport = resolveOpenSwanConnectionTransport(match);
-    if (!match || !transport) { setConnection(match || null); return null; }
-    setConnection(match);
-    return { ...transport, connection: match };
-  }, [identityAuthority, isIdentityAuthorityCurrent, runtimeConnectionId]);
+    const config = await loadPanelOpenSwanConfigExact(
+      identityAuthority,
+      isIdentityAuthorityCurrent,
+      { runtimeConnectionId, runtimeConnectionSnapshot, isRuntimeConnectionSnapshotCurrent },
+    );
+    if (!config) { setConnection(null); return null; }
+    setConnection(config.connection);
+    return config;
+  }, [identityAuthority, isIdentityAuthorityCurrent, isRuntimeConnectionSnapshotCurrent, runtimeConnectionId, runtimeConnectionSnapshot]);
 
   const refresh = useCallback(async () => {
     const generation = ++refreshGeneration.current;
@@ -1318,10 +1376,16 @@ export function CronJobsPanel({
         return;
       }
       if (!result.supported) {
-        setLoadError('This OpenSwan connection does not expose the cron tool. Update or reconnect that runtime before creating schedules.');
+        setJobs([]);
+        setCronCapability('unsupported');
+        setVerifiedConnectionFingerprint(connectionFingerprint);
+        setVerifiedScopeKey(cronScopeKey);
+        setLastRefreshedAt(new Date().toISOString());
+        setShowCreate(false);
         return;
       }
       setJobs(result.jobs || []);
+      setCronCapability('supported');
       setVerifiedConnectionFingerprint(connectionFingerprint);
       setVerifiedScopeKey(cronScopeKey);
       setLastRefreshedAt(new Date().toISOString());
@@ -1341,6 +1405,7 @@ export function CronJobsPanel({
     setNewJob({ name: '', schedule: '', task: '', sessionTarget: 'isolated' });
     setJobs([]);
     setConnection(null);
+    setCronCapability('unknown');
     setVerifiedScopeKey(null);
     setVerifiedConnectionFingerprint(null);
     setLastRefreshedAt(null);
@@ -1652,7 +1717,7 @@ export function CronJobsPanel({
           <Text style={{ color: '#f59e0b', fontSize: 12, fontWeight: '800', fontFamily: MONO }}>C</Text>
         </View>
         <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>CONNECTION CRON JOBS</Text>
-        <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO }}>({visibleJobs.length})</Text>
+        <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO }}>({cronCapability === 'unsupported' ? 'N/A' : visibleJobs.length})</Text>
         <Pressable accessibilityRole="button" accessibilityLabel="Refresh cron jobs" accessibilityState={{ disabled: loading || actionLoading !== null, busy: loading }} disabled={loading || actionLoading !== null} onPress={refresh} style={[{ marginLeft: 'auto', minHeight: 44, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e', backgroundColor: '#1a1a28', opacity: loading || actionLoading !== null ? 0.5 : 1, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: loading || actionLoading !== null ? 'default' : 'pointer' } as any]}>
           <Text style={{ color: '#909098', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{loading ? '..' : 'REFRESH'}</Text>
         </Pressable>
@@ -1672,7 +1737,9 @@ export function CronJobsPanel({
             <Text style={{ color: '#6366f1', fontSize: 11, fontFamily: MONO }}>CONNECTION-LEVEL JOBS</Text>
           </View>
           <View style={{ backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff14', borderRadius: 2, paddingHorizontal: 10, paddingVertical: 6 }}>
-            <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>{visibleJobs.length} JOBS</Text>
+            <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>
+              {cronCapability === 'unsupported' ? 'SCHEDULES NOT EXPOSED' : `${visibleJobs.length} JOBS`}
+            </Text>
           </View>
           {hasVerifiedSnapshot && lastRefreshedAt && (
             <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>REFRESHED {formatRelativeTime(lastRefreshedAt)}</Text>
@@ -1700,6 +1767,29 @@ export function CronJobsPanel({
             style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 12, borderRadius: 2, borderWidth: 1, borderColor: '#ef444450', justifyContent: 'center', opacity: loading || actionLoading !== null ? 0.5 : 1 }, Platform.OS === 'web' && { cursor: loading || actionLoading !== null ? 'default' : 'pointer' } as any]}
           >
             <Text style={{ color: '#f0a09b', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{loading ? 'RETRYING…' : 'RETRY'}</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
+      {!loadError && cronCapability === 'unsupported' ? (
+        <View
+          accessibilityLabel="Schedule capability status"
+          accessibilityLiveRegion="polite"
+          {...(Platform.OS === 'web' ? ({ role: 'status' } as any) : {})}
+          style={{ backgroundColor: '#f59e0b0d', borderWidth: 1, borderColor: '#f59e0b30', borderRadius: 2, padding: 10, gap: 8 }}
+        >
+          <Text style={{ color: '#d6a84c', fontSize: 12, fontFamily: MONO, lineHeight: 18 }}>
+            This verified OpenSwan runtime does not expose connection-level schedules. No job inventory was claimed, and schedule controls remain disabled.
+          </Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Recheck connection schedule capability"
+            accessibilityState={{ disabled: loading || actionLoading !== null, busy: loading }}
+            disabled={loading || actionLoading !== null}
+            onPress={() => { void refresh(); }}
+            style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 12, borderRadius: 2, borderWidth: 1, borderColor: '#f59e0b40', justifyContent: 'center', opacity: loading || actionLoading !== null ? 0.5 : 1 }, Platform.OS === 'web' && { cursor: loading || actionLoading !== null ? 'default' : 'pointer' } as any]}
+          >
+            <Text style={{ color: '#d6a84c', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{loading ? 'CHECKING…' : 'RECHECK'}</Text>
           </Pressable>
         </View>
       ) : null}
@@ -1745,9 +1835,9 @@ export function CronJobsPanel({
       )}
 
       <View>
-        {loading && !hasVerifiedSnapshot ? (
+        {loading && !hasVerifiedSnapshot && cronCapability !== 'unsupported' ? (
           <ActivityIndicator accessibilityRole="progressbar" accessibilityLabel="Loading connection cron jobs" size="small" color={accentColor} style={{ padding: 20 }} />
-        ) : !hasVerifiedSnapshot ? null : visibleJobs.length === 0 ? (
+        ) : cronCapability === 'unsupported' || !hasVerifiedSnapshot ? null : visibleJobs.length === 0 ? (
           <Text style={{ color: '#808090', fontSize: 13, fontFamily: MONO, fontStyle: 'italic', padding: 12, textAlign: 'center' }}>No cron jobs configured. Click + NEW to create one.</Text>
         ) : (
           visibleJobs.map(job => {

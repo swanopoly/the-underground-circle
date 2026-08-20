@@ -20,6 +20,7 @@ export type ProviderModelCatalogFailureCode =
   | 'key_missing'
   | 'credential_unreadable'
   | 'provider_credential_rejected'
+  | 'provider_billing_unavailable'
   | 'unsupported_provider'
   | 'upstream_error'
   | 'internal';

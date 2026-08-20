@@ -32,6 +32,8 @@ import {
   resolveOpenSwanDesktopAttachmentOpenEvidence,
   type OpenSwanDesktopAttachmentApprovalLeaseReceipt,
   type OpenSwanDesktopAttachmentOpenReceipt,
+  type OpenSwanExactCircleAuthority,
+  type OpenSwanExactCircleAuthorityFence,
   type OpenSwanRuntimeToolContext,
   type OpenSwanRuntimeToolName,
   type OpenSwanPublishedActionArtifactKind,
@@ -227,6 +229,10 @@ export type OpenSwanTurnOptions = {
    */
   originalUserTaskText?: string | null;
   context: SwanBotContext;
+  /** Process-private exact authority for owner/circle Office preference tools. */
+  exactCircleAuthority?: OpenSwanExactCircleAuthority | null;
+  /** Live UI-owned fence; never persisted or exposed to a provider. */
+  isExactCircleAuthorityCurrent?: OpenSwanExactCircleAuthorityFence;
   connectedProviders?: ConnectedProviderSet | string[];
   surface: AgenticCodingSurface;
   runSurface?: RunSurface;
@@ -2647,6 +2653,8 @@ async function runTypedCoreToolLoop(args: {
   model: string;
   circleId: string;
   userId: string;
+  exactCircleAuthority?: OpenSwanExactCircleAuthority | null;
+  isExactCircleAuthorityCurrent?: OpenSwanExactCircleAuthorityFence;
   threadId?: string;
   runId?: string;
   activeSoulKey?: string;
@@ -2743,6 +2751,8 @@ async function runTypedCoreToolLoop(args: {
   const toolCtx: OpenSwanRuntimeToolContext = {
     circleId: args.circleId,
     userId: args.userId,
+    exactCircleAuthority: args.exactCircleAuthority,
+    isExactCircleAuthorityCurrent: args.isExactCircleAuthorityCurrent,
     threadId: args.threadId,
     runId: args.runId,
     activeSoulKey: args.activeSoulKey,
@@ -4631,6 +4641,8 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
               context: {
                 circleId: opts.context.circleId!,
                 userId: opts.context.userId,
+                exactCircleAuthority: opts.exactCircleAuthority,
+                isExactCircleAuthorityCurrent: opts.isExactCircleAuthorityCurrent,
                 threadId: opts.chatSessionId || undefined,
                 runId: run?.id,
                 activeSoulKey,
@@ -4655,6 +4667,8 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
               model: resolvedModel || 'claude-haiku-4-5',
               circleId: opts.context.circleId!,
               userId: opts.context.userId,
+              exactCircleAuthority: opts.exactCircleAuthority,
+              isExactCircleAuthorityCurrent: opts.isExactCircleAuthorityCurrent,
               threadId: opts.chatSessionId || undefined,
               runId: run?.id,
               activeSoulKey,
@@ -4684,6 +4698,8 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
               model: resolvedModel || 'claude-haiku-4-5',
               circleId: opts.context.circleId!,
               userId: opts.context.userId,
+              exactCircleAuthority: opts.exactCircleAuthority,
+              isExactCircleAuthorityCurrent: opts.isExactCircleAuthorityCurrent,
               threadId: opts.chatSessionId || undefined,
               runId: run?.id,
               activeSoulKey,

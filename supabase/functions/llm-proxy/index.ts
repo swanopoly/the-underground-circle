@@ -18,6 +18,7 @@ import {
   getAuthenticatedUser,
   resolveUserModelApiKey,
   StoredApiKeyLookupError,
+  type ResolvedApiKey,
 } from "../_shared/edge.ts";
 
 const corsHeaders = {
@@ -33,6 +34,7 @@ type ErrorCode =
   | "key_missing"
   | "credential_unreadable"
   | "provider_credential_rejected"
+  | "provider_billing_unavailable"
   | "unsupported_provider"
   | "upstream_error"
   | "internal";
@@ -79,6 +81,13 @@ function mapUpstreamError(error: unknown): Response {
         502,
         "provider_credential_rejected",
         "The saved model provider credential was rejected. Reconnect it in Marketplace.",
+      );
+    }
+    if (error.kind === "http" && error.status === 402) {
+      return errResponse(
+        502,
+        "provider_billing_unavailable",
+        "The selected model provider account has no available billing capacity. Add provider credits or use another connected model.",
       );
     }
     const statusDetail = error.kind === "http" && error.status
@@ -1210,14 +1219,34 @@ Deno.serve(async (req: Request) => {
           "This provider does not expose a hosted model catalog.",
         );
       }
-      const catalogKey = await resolveUserModelApiKey({
-        supabase,
-        userId,
-        provider,
-        requestApiKey: body.api_key,
-        label: null,
-        credentialPolicy: "user_required",
-      });
+      let catalogKey: ResolvedApiKey | null;
+      try {
+        catalogKey = await resolveUserModelApiKey({
+          supabase,
+          userId,
+          provider,
+          requestApiKey: body.api_key,
+          label: null,
+          credentialPolicy: "user_required",
+        });
+      } catch (error) {
+        if (error instanceof StoredApiKeyLookupError) {
+          // Catalog hydration is a passive readiness probe. Return a handled,
+          // typed non-ready envelope so browsers do not report a failed HTTP
+          // resource on every refresh. No models are authorized by this
+          // response; interactive chat keeps the fail-closed HTTP 409 below.
+          return jsonResponse({
+            status: "unavailable",
+            provider,
+            models: [],
+            count: 0,
+            fetchedAt: null,
+            error: byokUnreadableMessage(provider),
+            code: "credential_unreadable",
+          });
+        }
+        throw error;
+      }
       if (!catalogKey) {
         return errResponse(400, "key_missing", byokMissingMessage(provider));
       }

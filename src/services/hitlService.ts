@@ -1,4 +1,4 @@
-import { supabase } from '../lib/supabase';
+import { getSupabaseClientForAccessToken, supabase } from '../lib/supabase';
 import { useEffect, useState } from 'react';
 import { safeGetUserForAccessToken } from '../lib/authSession';
 
@@ -99,12 +99,12 @@ export async function getAgentControlExact(
   if (verifiedUser?.id !== authority.userId || !isCurrent(authority)) {
     return { ok: false, error: 'The signed-in Office account changed while controls were loading.' };
   }
-  const { data, error } = await supabase
+  const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+  const { data, error } = await exactClient
     .from('agent_controls')
     .select('*')
     .eq('circle_id', authority.circleId)
     .eq('session_key', exactSessionKey)
-    .setHeader('Authorization', `Bearer ${authority.accessToken}`)
     .maybeSingle();
   if (!isCurrent(authority)) {
     return { ok: false, error: 'The Office session changed while controls were loading.' };
@@ -139,7 +139,8 @@ export async function upsertAgentControlExact(
   if (verifiedUser?.id !== authority.userId || !isCurrent(authority)) {
     return { ok: false, error: 'The signed-in Office account changed before the control could be saved.' };
   }
-  const { data, error } = await supabase
+  const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+  const { data, error } = await exactClient
     .from('agent_controls')
     .upsert({
       ...updates,
@@ -148,7 +149,6 @@ export async function upsertAgentControlExact(
       agent_name: exactAgentName,
       updated_at: new Date().toISOString(),
     }, { onConflict: 'circle_id,session_key' })
-    .setHeader('Authorization', `Bearer ${authority.accessToken}`)
     .select('*');
   if (!isCurrent(authority)) {
     return { ok: false, error: 'The Office session changed while the control was saving.' };
@@ -160,6 +160,19 @@ export async function upsertAgentControlExact(
     || row.circle_id !== authority.circleId
     || row.session_key !== exactSessionKey
     || row.agent_name !== exactAgentName
+    || (updates.is_paused !== undefined && row.is_paused !== updates.is_paused)
+    || (
+      updates.spending_limit_daily !== undefined
+      && Number(row.spending_limit_daily) !== Number(updates.spending_limit_daily)
+    )
+    || (
+      updates.require_approval_for !== undefined
+      && (
+        !Array.isArray(row.require_approval_for)
+        || row.require_approval_for.length !== updates.require_approval_for.length
+        || row.require_approval_for.some((value, index) => value !== updates.require_approval_for?.[index])
+      )
+    )
   ) return { ok: false, error: 'Agent controls returned an invalid save receipt.' };
   return { ok: true, control: row };
 }

@@ -32,7 +32,7 @@ const authoritySource = section(
   '// ─── Provider',
 ).replace(/\bexport\s+/g, '');
 const compiled = ts.transpileModule(
-  `${authoritySource}\n;(globalThis as any).__authority = { normalizeAuthScope, resolveAuthority };`,
+  `${authoritySource}\n;(globalThis as any).__authority = { normalizeAuthScope, resolveAuthority, resolveExactAuthority };`,
   {
     compilerOptions: {
       module: ts.ModuleKind.None,
@@ -71,6 +71,15 @@ const sandbox: Record<string, unknown> = {
       },
     },
   },
+  safeGetUserForAccessToken: async (token: string) => {
+    calls.push({ method: 'getUser', token });
+    const id = token === 'token-a'
+      ? 'user-a'
+      : token === 'token-b'
+        ? 'user-b'
+        : 'unexpected-user';
+    return { value: { id }, error: null };
+  },
 };
 vm.runInNewContext(compiled, sandbox);
 const authority = sandbox.__authority as {
@@ -79,19 +88,23 @@ const authority = sandbox.__authority as {
     userId: string;
     accessToken: string;
   } | null>;
+  resolveExactAuthority: (scope: { userId: string; accessToken: string }) => Promise<{
+    userId: string;
+    accessToken: string;
+  } | null>;
 };
 
 async function main(): Promise<void> {
 console.log('Captured authority behavior');
 calls.length = 0;
-const captured = await authority.resolveAuthority({ userId: ' user-a ', accessToken: ' token-a ' });
+const captured = await authority.resolveExactAuthority({ userId: ' user-a ', accessToken: ' token-a ' });
 assert(captured?.userId === 'user-a', 'captured user is normalized and retained');
 assert(captured?.accessToken === 'token-a', 'captured bearer is normalized and retained');
 assert(calls.length === 1 && calls[0]?.method === 'getUser', 'captured scope never falls back to mutable getSession');
 assert(calls[0]?.token === 'token-a', 'captured bearer is the token verified by getUser');
 
 calls.length = 0;
-const mismatched = await authority.resolveAuthority({ userId: 'user-a', accessToken: 'token-b' });
+const mismatched = await authority.resolveExactAuthority({ userId: 'user-a', accessToken: 'token-b' });
 assert(mismatched === null, 'a bearer belonging to another user fails closed');
 assert(calls.length === 1 && calls[0]?.token === 'token-b', 'mismatched captured bearer is checked exactly once');
 assert(authority.normalizeAuthScope({ userId: '', accessToken: 'token-a' }) === null, 'empty user id is rejected');
@@ -114,7 +127,16 @@ assert(
 assert(calls[1]?.token === 'token-a', 'legacy verification uses the captured session bearer');
 
 console.log('Exact bearer source boundaries');
-assert(!/auth\.getUser\(\s*\)/.test(source), 'module has no mutable zero-argument getUser read');
+const exactResolver = section('async function resolveExactAuthority', '// ─── Provider');
+assert(exactResolver.includes('safeGetUserForAccessToken(authority.accessToken)'), 'exact panel authority uses the bounded explicit-token auth helper');
+assert(!exactResolver.includes('supabase.auth'), 'exact panel authority never enters shared mutable auth');
+const exactOwnedAgents = section('export async function getUserCircleAgentsExact', 'export async function getUserCircleAgents(');
+assert(exactOwnedAgents.includes('resolveExactAuthority(capturedScope)'), 'strict owned-agent inventory uses only the exact bounded resolver');
+assert(exactOwnedAgents.includes(".setHeader('Authorization', `Bearer ${authority.accessToken}`)"), 'strict owned-agent inventory binds the captured bearer');
+assert(exactOwnedAgents.includes(".eq('owner_id', authority.userId)"), 'strict owned-agent inventory filters the captured owner');
+const compatibleOwnedAgents = section('export async function getUserCircleAgents(', '// ─── Subscribe');
+assert(compatibleOwnedAgents.includes('const authority = await resolveAuthority();'), 'legacy owned-agent inventory still captures the current session only in its compatibility branch');
+assert(compatibleOwnedAgents.includes('getUserCircleAgentsExact(circleId,'), 'legacy owned-agent inventory delegates database access to the strict reader');
 const load = section('export async function loadCircleOfficeAgents', '// ─── Hidden-agent suppression');
 assert(load.includes('capturedScope?: CircleOfficeAuthScope'), 'roster load accepts a captured auth scope');
 assert(load.includes('resolveAuthority(capturedScope)'), 'roster load resolves that exact scope');
@@ -139,7 +161,6 @@ const operationSections = [
   ['unpublish', 'export async function unpublishAgentFromCircle', '// ─── Update live status'],
   ['status', 'export async function updateAgentStatus', '// ─── Set all user'],
   ['offline', 'export async function setAgentsOffline', '// ─── Check if user'],
-  ['own roster', 'export async function getUserCircleAgents', '// ─── Subscribe'],
   ['gateway', 'export async function updateAgentGatewayUrl', '// ─── Remove a published'],
   ['remove', 'export async function removeCircleOfficeAgent', '__END__'],
 ] as const;

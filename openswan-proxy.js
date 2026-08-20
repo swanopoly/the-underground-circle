@@ -14,7 +14,9 @@ const WebSocket = require('./node_modules/ws');
 const WebSocketServer = WebSocket.Server;
 const { URL } = require('url');
 const {
+  OPENSWAN_TOOL_UNAVAILABLE_MAX_BYTES,
   isAllowedBridgeHostHeader,
+  isExactOpenSwanToolUnavailableResponse,
   isLoopbackRequest,
 } = require('./scripts/desktop-bridge-security');
 
@@ -157,6 +159,71 @@ const server = http.createServer((req, res) => {
 
   const proxyReq = http.request(options, (proxyRes) => {
     const headers = { ...proxyRes.headers, ...cors };
+
+    // OpenSwan documents an exact JSON 404 for a tool hidden by the active
+    // gateway policy. In a browser, expected misses for the known cron and
+    // agent-list probes are rendered as failed resources even though the
+    // shared /tools/invoke route is healthy. Buffer only a small candidate
+    // response and translate only those exact probe misses; mutation-capable
+    // tools plus route-level/non-JSON/oversized 404s keep their original status
+    // so direct HTTP-status callers and connection diagnostics fail closed.
+    const shouldInspectToolUnavailable = req.url === '/tools/invoke'
+      && proxyRes.statusCode === 404
+      && /^application\/json(?:\s*;|$)/i.test(String(proxyRes.headers['content-type'] || '').trim());
+    if (shouldInspectToolUnavailable) {
+      let buffered = [];
+      let bufferedBytes = 0;
+      let forwardingOriginal = false;
+
+      const beginOriginalForward = () => {
+        if (forwardingOriginal) return;
+        forwardingOriginal = true;
+        res.writeHead(proxyRes.statusCode || 404, headers);
+        for (const chunk of buffered) res.write(chunk);
+        buffered = [];
+      };
+
+      proxyRes.on('data', (rawChunk) => {
+        const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+        if (forwardingOriginal) {
+          res.write(chunk);
+          return;
+        }
+        if (bufferedBytes + chunk.length > OPENSWAN_TOOL_UNAVAILABLE_MAX_BYTES) {
+          beginOriginalForward();
+          res.write(chunk);
+          return;
+        }
+        buffered.push(chunk);
+        bufferedBytes += chunk.length;
+      });
+      proxyRes.on('end', () => {
+        if (forwardingOriginal) {
+          res.end();
+          return;
+        }
+        const body = Buffer.concat(buffered, bufferedBytes);
+        const applicationLevelUnsupported = isExactOpenSwanToolUnavailableResponse({
+          requestMethod: req.method,
+          requestUrl: req.url,
+          statusCode: proxyRes.statusCode,
+          contentType: proxyRes.headers['content-type'],
+          body,
+        });
+        res.writeHead(applicationLevelUnsupported ? 200 : (proxyRes.statusCode || 404), headers);
+        res.end(body);
+      });
+      proxyRes.on('error', (err) => {
+        console.error('[proxy] HTTP response error:', err.message);
+        if (res.headersSent) {
+          res.destroy(err);
+          return;
+        }
+        res.writeHead(502, { ...cors, 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Gateway response failed' }));
+      });
+      return;
+    }
     res.writeHead(proxyRes.statusCode || 200, headers);
     proxyRes.pipe(res, { end: true });
   });

@@ -8,7 +8,9 @@ type RemoteRow = Record<string, any>;
 const metadataStore = new Map<string, string>();
 const secretStore = new Map<string, string>();
 const remoteRows: RemoteRow[] = [];
-const bearerHeaders: string[] = [];
+const safeAuthTokens: string[] = [];
+const exactClientTokens: string[] = [];
+const exactQueryTokens: string[] = [];
 const tokenOwners = new Map([
   ['token-a', 'user-a'],
   ['token-b', 'user-b'],
@@ -18,6 +20,9 @@ let secretWritesAvailable = true;
 let secretReadsUnavailable = false;
 let nextRemoteId = 1;
 let authGate: Promise<void> | null = null;
+let sharedAuthCalls = 0;
+let sharedQueryCalls = 0;
+let explicitQueryHeaderCalls = 0;
 
 const fakeStorage = {
   getItem: async (key: string) => metadataStore.get(key) ?? null,
@@ -39,7 +44,11 @@ class FakeQuery implements PromiseLike<{ data: any; error: any }> {
   private payload: RemoteRow | null = null;
   private filters: Array<[string, unknown]> = [];
   private containsFilters: Array<[string, Record<string, unknown>]> = [];
-  private bearer = '';
+  private bearer: string;
+
+  constructor(bearer = '') {
+    this.bearer = bearer;
+  }
 
   select(): this { return this; }
   order(): this { return this; }
@@ -51,7 +60,7 @@ class FakeQuery implements PromiseLike<{ data: any; error: any }> {
   setHeader(name: string, value: string): this {
     if (name === 'Authorization') {
       this.bearer = value;
-      bearerHeaders.push(value);
+      explicitQueryHeaderCalls += 1;
     }
     return this;
   }
@@ -93,14 +102,38 @@ class FakeQuery implements PromiseLike<{ data: any; error: any }> {
 const fakeSupabase = {
   auth: {
     getUser: async (token: string) => {
-      if (authGate) await authGate;
+      sharedAuthCalls += 1;
       const owner = tokenOwners.get(token);
       return owner
         ? { data: { user: { id: owner } }, error: null }
         : { data: { user: null }, error: { message: 'invalid token' } };
     },
   },
-  from: () => new FakeQuery(),
+  from: () => {
+    sharedQueryCalls += 1;
+    return new FakeQuery();
+  },
+};
+
+const getFakeSupabaseClientForAccessToken = (token: string) => {
+  exactClientTokens.push(token);
+  return {
+    from: () => {
+      exactQueryTokens.push(token);
+      return new FakeQuery(`Bearer ${token}`);
+    },
+  };
+};
+
+const fakeAuthSession = {
+  safeGetUserForAccessToken: async (token: string) => {
+    safeAuthTokens.push(token);
+    if (authGate) await authGate;
+    const owner = tokenOwners.get(token);
+    return owner
+      ? { value: { id: owner }, error: null }
+      : { value: null, error: new Error('invalid token') };
+  },
 };
 
 const originalLoad = (Module as any)._load;
@@ -112,7 +145,13 @@ const originalLoad = (Module as any)._load;
   const fromConnectionManager = parent?.filename?.endsWith('/src/lib/connectionManager.ts')
     || parent?.filename?.endsWith('/src/lib/connectionManager.js');
   if (fromConnectionManager && request === './storage') return { storage: fakeStorage };
-  if (fromConnectionManager && request === './supabase') return { supabase: fakeSupabase };
+  if (fromConnectionManager && request === './authSession') return fakeAuthSession;
+  if (fromConnectionManager && request === './supabase') {
+    return {
+      supabase: fakeSupabase,
+      getSupabaseClientForAccessToken: getFakeSupabaseClientForAccessToken,
+    };
+  }
   if (fromConnectionManager && request === 'react-native') return { Platform: { OS: 'web' } };
   if (fromConnectionManager && request === './bridgeEnvironment') {
     return { getBridgeUrl: (port: number) => `http://localhost:${port}` };
@@ -205,7 +244,12 @@ async function main(): Promise<void> {
   assert.equal(saveA.localSaved, true, 'metadata and protected secret have readback proof');
   assert.equal(saveA.remoteSaved, true, 'captured-bearer remote synchronization succeeds');
   assert.equal(saveA.connections[0]?.remoteId, 'remote-1', 'remote identity returns in the truthful receipt');
-  assert(bearerHeaders.length > 0 && bearerHeaders.every(header => header === 'Bearer token-a'), 'every server operation used only the captured bearer');
+  assert(safeAuthTokens.length > 0 && safeAuthTokens.every(token => token === 'token-a'), 'authority verification uses only the bounded exact-token helper');
+  assert(exactClientTokens.length > 0 && exactClientTokens.every(token => token === 'token-a'), 'every exact remote operation creates a captured-token client');
+  assert(exactQueryTokens.length > 0 && exactQueryTokens.every(token => token === 'token-a'), 'every exact remote query remains pinned to the captured bearer');
+  assert.equal(sharedAuthCalls, 0, 'the exact path never asks the shared auth client to verify a token');
+  assert.equal(sharedQueryCalls, 0, 'the exact path never dispatches through the shared Supabase client');
+  assert.equal(explicitQueryHeaderCalls, 0, 'the exact path relies on the pinned client rather than query header mutation');
 
   const storedEnvelope = JSON.parse(metadataStore.get(keyA!)!);
   assert.equal(storedEnvelope.userId, 'user-a');
@@ -226,12 +270,16 @@ async function main(): Promise<void> {
   assert.equal(legacyRemoteIdAttempt.connections[0]?.remoteId, 'remote-1', 'untrusted caller remote ids cannot retarget an exact row');
   assert(!remoteRows.some(row => row.id === 'legacy-global-row'), 'legacy/global remote ids are never mutated by the exact path');
 
-  bearerHeaders.length = 0;
+  safeAuthTokens.length = 0;
+  exactClientTokens.length = 0;
+  exactQueryTokens.length = 0;
   const loadA = await manager.loadOfficeConnectionsExact(authorityA, isCurrent);
   assert.equal(loadA.ok, true);
   assert.equal(loadA.connections[0]?.token, 'private-agent-token', 'the exact owner can hydrate its protected token');
   assert.equal(loadA.connections[0]?.status, 'disconnected', 'ephemeral status is never trusted from persistence');
-  assert(bearerHeaders.every(header => header === 'Bearer token-a'), 'exact load binds the captured bearer');
+  assert(safeAuthTokens.length === 1 && safeAuthTokens[0] === 'token-a', 'exact load verifies the captured bearer through the bounded helper');
+  assert(exactClientTokens.length > 0 && exactClientTokens.every(token => token === 'token-a'), 'exact load obtains only a captured-token client');
+  assert(exactQueryTokens.length > 0 && exactQueryTokens.every(token => token === 'token-a'), 'exact load binds each query to the captured bearer');
 
   secretReadsUnavailable = true;
   const unavailableSecretLoad = await manager.loadOfficeConnectionsExact(authorityA, isCurrent);
@@ -300,6 +348,9 @@ async function main(): Promise<void> {
   assert.equal(secretStore.has(`office_connection_v2:${secretIdA}`), false, 'removal deletes only the exact protected secret');
   assert.equal(remoteRows.length, 0, 'removal deletes the exact owner/circle remote row');
   assert(metadataStore.has('@office_connections'), 'exact removal does not touch legacy metadata');
+  assert.equal(sharedAuthCalls, 0, 'no exact authority operation touched mutable shared auth state');
+  assert.equal(sharedQueryCalls, 0, 'no exact remote operation touched the shared Supabase client');
+  assert.equal(explicitQueryHeaderCalls, 0, 'no exact remote operation mutated per-query authorization headers');
 
   console.log('office connections exact-authority smoketest: all assertions passed');
 }

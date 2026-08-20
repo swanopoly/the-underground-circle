@@ -1,5 +1,6 @@
 import { storage } from './storage';
-import { supabase } from './supabase';
+import { safeGetUserForAccessToken } from './authSession';
+import { getSupabaseClientForAccessToken, supabase } from './supabase';
 import { Platform } from 'react-native';
 import {
   deleteLocalSecret,
@@ -539,20 +540,16 @@ async function verifyOfficeConnectionExactAuthority(
 ): Promise<NormalizedOfficeConnectionExactAuthority | null> {
   const authority = normalizeOfficeConnectionExactAuthority(input);
   if (!authority) return null;
-  try {
-    const { data, error } = await supabase.auth.getUser(authority.accessToken);
-    if (error || !data.user || data.user.id !== authority.userId) return null;
-    return authority;
-  } catch {
-    return null;
-  }
+  const { value: verifiedUser } = await safeGetUserForAccessToken(authority.accessToken);
+  return verifiedUser?.id === authority.userId ? authority : null;
 }
 
 async function loadRemoteExact(
   authority: NormalizedOfficeConnectionExactAuthority,
 ): Promise<{ ok: boolean; connections: AgentConnection[]; invalid: boolean }> {
   try {
-    const { data, error } = await supabase
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+    const { data, error } = await exactClient
       .from('agents_bots')
       .select('*')
       .eq('owner_id', authority.userId)
@@ -560,8 +557,7 @@ async function loadRemoteExact(
         officeScopeVersion: EXACT_STORAGE_SCHEMA_VERSION,
         officeCircleId: authority.circleId,
       })
-      .order('created_at', { ascending: true })
-      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+      .order('created_at', { ascending: true });
     if (error || !Array.isArray(data)) return { ok: false, connections: [], invalid: false };
     if (data.length > MAX_EXACT_CONNECTIONS) return { ok: false, connections: [], invalid: true };
     const connections: AgentConnection[] = [];
@@ -587,12 +583,12 @@ async function upsertRemoteExact(
   authority: NormalizedOfficeConnectionExactAuthority,
 ): Promise<string | null> {
   try {
-    const { data, error } = await supabase
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+    const { data, error } = await exactClient
       .from('agents_bots')
       .upsert(toSupabaseRowExact(connection, authority), { onConflict: 'id' })
       .select('id')
-      .single()
-      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+      .single();
     const remoteId = normalizeExactScopePart(data?.id);
     if (error || !remoteId || (connection.remoteId && connection.remoteId !== remoteId)) return null;
     return remoteId;
@@ -606,7 +602,8 @@ async function deleteRemoteExact(
   authority: NormalizedOfficeConnectionExactAuthority,
 ): Promise<boolean> {
   try {
-    const { error } = await supabase
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+    const { error } = await exactClient
       .from('agents_bots')
       .delete()
       .eq('id', remoteId)
@@ -614,8 +611,7 @@ async function deleteRemoteExact(
       .contains('metadata', {
         officeScopeVersion: EXACT_STORAGE_SCHEMA_VERSION,
         officeCircleId: authority.circleId,
-      })
-      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+      });
     return !error;
   } catch {
     return false;

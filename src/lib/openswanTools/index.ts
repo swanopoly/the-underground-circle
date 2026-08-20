@@ -13,6 +13,8 @@ import {
   getOpenSwanToolPolicy,
   listOpenSwanAnthropicToolsForSurface,
   splitOpenSwanRuntimeToolResultMetadata,
+  type OpenSwanExactCircleAuthority,
+  type OpenSwanExactCircleAuthorityFence,
   type OpenSwanRuntimeToolContext,
   type OpenSwanRuntimeToolName,
   type OpenSwanToolSurface,
@@ -41,6 +43,10 @@ export interface OpenSwanToolDef {
 export interface ToolContext {
   circleId: string;
   userId: string;
+  /** Runtime-private exact authority for owner/circle Office preferences. */
+  exactCircleAuthority?: OpenSwanExactCircleAuthority | null;
+  /** Live UI-owned account/circle/generation fence. */
+  isExactCircleAuthorityCurrent?: OpenSwanExactCircleAuthorityFence;
   threadId?: string;
   activeSoulKey?: string;
   surface?: OpenSwanToolSurface;

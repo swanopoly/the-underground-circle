@@ -1716,6 +1716,9 @@ async function scanRunsForAgentSubject(
       scannedRows: runs.length,
     };
   }
+  const client = authority
+    ? getSupabaseClientForAccessToken(authority.accessToken)
+    : supabase;
 
   const scanPageSize = Math.max(requestedLimit, Math.min(Math.max(opts.scanPageSize || 200, 50), 500));
   const maxScanRows = Math.min(
@@ -1730,7 +1733,10 @@ async function scanRunsForAgentSubject(
   while (from < maxScanRows && matches.length < requestedLimit) {
     const to = Math.min(from + scanPageSize - 1, maxScanRows - 1);
     const requestedPageRows = to - from + 1;
-    let query = supabase
+    if (authority) {
+      assertAgentRunExactAuthorityCurrent(authority, readOptions!.isAuthorityCurrent);
+    }
+    let query = client
       .from('agent_runs')
       .select('*')
       .eq('circle_id', circleId)
@@ -1740,10 +1746,6 @@ async function scanRunsForAgentSubject(
     if (opts.status) query = query.eq('status', opts.status);
     if (opts.roomId) query = query.eq('room_id', opts.roomId);
     if (opts.userId) query = query.eq('user_id', opts.userId);
-    if (authority) {
-      assertAgentRunExactAuthorityCurrent(authority, readOptions!.isAuthorityCurrent);
-      query = query.setHeader('Authorization', `Bearer ${authority.accessToken}`);
-    }
 
     const { data, error } = await query;
     if (authority) {
@@ -1808,7 +1810,10 @@ export async function listChildRuns(
     ? await resolveAgentRunStrictReadAuthority(readOptions)
     : null;
   if (authority) assertAgentRunExactAuthorityCurrent(authority, readOptions!.isAuthorityCurrent);
-  let query = supabase
+  const client = authority
+    ? getSupabaseClientForAccessToken(authority.accessToken)
+    : supabase;
+  let query = client
     .from('agent_runs')
     .select('*')
     .eq('parent_run_id', parentRunId)
@@ -1816,8 +1821,7 @@ export async function listChildRuns(
     .limit(limit);
   if (authority) {
     query = query
-      .eq('circle_id', authority.circleId)
-      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+      .eq('circle_id', authority.circleId);
   }
   const { data, error } = await query;
   if (authority) assertAgentRunExactAuthorityCurrent(authority, readOptions!.isAuthorityCurrent);
@@ -2130,11 +2134,13 @@ export async function getRunSteps(
     ? await resolveAgentRunStrictReadAuthority(readOptions)
     : null;
   if (authority) assertAgentRunExactAuthorityCurrent(authority, readOptions!.isAuthorityCurrent);
-  let query = supabase.from('agent_run_steps').select('*').eq('run_id', runId).order('step_index');
+  const client = authority
+    ? getSupabaseClientForAccessToken(authority.accessToken)
+    : supabase;
+  let query = client.from('agent_run_steps').select('*').eq('run_id', runId).order('step_index');
   if (authority) {
     query = query
-      .eq('circle_id', authority.circleId)
-      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+      .eq('circle_id', authority.circleId);
   }
   const { data, error } = await query;
   if (authority) assertAgentRunExactAuthorityCurrent(authority, readOptions!.isAuthorityCurrent);

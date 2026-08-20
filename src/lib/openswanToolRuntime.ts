@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { getSupabaseClientForAccessToken, supabase } from './supabase';
 import { semanticSearchMemories } from './memoryEmbeddings';
 import { summarizeDiagnostics } from './verificationDiagnosticsCore';
 import { applyToolSearchRelevanceFloor } from './toolSearchRelevanceCore';
@@ -20,6 +20,14 @@ import { describeComputerUsePlan, toBrowserPlanCardData, type BrowserPlanCardDat
 import { detectAutomationVerificationGate } from './desktopAutomationSafety';
 import { boundListWithBudget, formatBulletList, resolveResponseFormat, truncateText, truncationMarker, type ToolResponseFormat } from './toolResultFormatters';
 import type { DesktopBridgeError, DesktopResult } from './desktopBridgeProtocol';
+import {
+  loadOfficeUserPreferences,
+  patchOfficeUserPreferences,
+} from './officeDashboardPersistence';
+import {
+  buildOpenSwanAgentAppearance,
+  normalizeOpenSwanAgentAppearancePatch,
+} from './openswanOfficePreferenceAppearanceCore';
 import type {
   BoundedNativeOpenPathObservation,
   NativeOpenPathApprovalProposal,
@@ -172,6 +180,23 @@ import type {
 } from './desktopBridge';
 
 export type OpenSwanToolSurface = 'main_chat' | 'room_chat' | 'office' | 'task_run';
+
+/**
+ * Process-private Circle authority captured by the owning Chat surface. It is
+ * never model-visible or persisted. The live fence must still accept the exact
+ * snapshot immediately before a private Office mutation dispatches.
+ */
+export type OpenSwanExactCircleAuthority = Readonly<{
+  userId: string;
+  circleId: string;
+  accessToken: string;
+  generation: number;
+}>;
+
+export type OpenSwanExactCircleAuthorityFence = (
+  authority: OpenSwanExactCircleAuthority,
+) => boolean;
+
 export type OpenSwanRuntimeToolName =
   | OpenSwanToolName
   | 'attachments.read_source'
@@ -469,6 +494,10 @@ export type OpenSwanToolEvent = {
 export type OpenSwanRuntimeToolContext = {
   circleId: string;
   userId: string;
+  /** Exact runtime-private authority for owner/circle Office preferences. */
+  exactCircleAuthority?: OpenSwanExactCircleAuthority | null;
+  /** Live account/circle/generation fence owned by the calling UI. */
+  isExactCircleAuthorityCurrent?: OpenSwanExactCircleAuthorityFence;
   surface?: OpenSwanToolSurface;
   /** Trusted session mode; opaque attachment opening is execute-only. */
   mode?: string | null;
@@ -536,6 +565,28 @@ export type OpenSwanRuntimeToolContext = {
    */
   userConstraints?: ChatComputerUserConstraints | null;
 };
+
+function resolveOpenSwanExactOfficePreferenceAuthority(
+  context: OpenSwanRuntimeToolContext,
+): OpenSwanExactCircleAuthority | null {
+  const authority = context.exactCircleAuthority;
+  const fence = context.isExactCircleAuthorityCurrent;
+  if (
+    !authority
+    || typeof fence !== 'function'
+    || authority.userId !== context.userId
+    || authority.circleId !== context.circleId
+    || !authority.accessToken
+    || authority.accessToken.length > 16_384
+    || !Number.isSafeInteger(authority.generation)
+    || authority.generation <= 0
+  ) return null;
+  try {
+    return fence(authority) ? authority : null;
+  } catch {
+    return null;
+  }
+}
 
 function isOpenSwanApprovalResumeStopped(context: OpenSwanRuntimeToolContext): boolean {
   return context.approvalResumeBinding != null
@@ -2700,7 +2751,12 @@ export type OpenSwanToolExecutionResultMap = {
   'circle.update_settings':    { ok: boolean; resultsText: string };
   'circle.update_budget_caps': { ok: boolean; resultsText: string };
   'circle.update_office_theme':{ ok: boolean; resultsText: string };
-  'agent.update_appearance':   { ok: boolean; resultsText: string };
+  'agent.update_appearance':   {
+    ok: boolean;
+    resultsText: string;
+    completionVerified?: boolean;
+    outcomeUnknown?: boolean;
+  };
   'agent.rename':              { ok: boolean; resultsText: string };
   'rooms.rename':              { ok: boolean; resultsText: string };
   'rooms.archive':             { ok: boolean; resultsText: string };
@@ -4265,7 +4321,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     name: 'agent.update_appearance',
     label: 'Update Agent Appearance',
     surfaces: ['main_chat', 'room_chat', 'office'],
-    description: 'Update a single agent\'s pixel-art customization. Use when the user asks to change how an agent looks in the Office. Pass the agent name (e.g. "BlackSwan") and a `patch` with any of the 14 appearance properties: skinTone, hairStyle, hairColor, shirtColor, pantsColor, shoeColor, accessory, hat, expression, backItem, eyeColor, facialHair, pet, aura. Only patched props change; everything else stays.',
+    description: 'Update a single agent\'s pixel-art customization. Use when the user asks to change how an agent looks in the Office. Pass the agent name (e.g. "BlackSwan") and a `patch` with any of the 15 appearance properties: skinTone, hairStyle, hairColor, shirtColor, pantsColor, shoeColor, accessory, hat, expression, backItem, eyeColor, facialHair, pet, aura, handItem. Only patched props change; everything else stays.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -6267,6 +6323,10 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
  * overstating the current universal-computer-use coverage.
  */
 const ACTION_LEDGER_MUTATION_TOOLS = [
+  // Exact owner-private Office preference mutation. The handler binds the
+  // observed revision and complete next appearance document before its one
+  // canonical RPC dispatch, then accepts only the server revision receipt.
+  'agent.update_appearance',
   // Exact browser target mutations using the local durable dispatcher.
   'browser.fill_field',
   'browser.open_url',
@@ -6305,7 +6365,6 @@ const UNSUPPORTED_MUTATION_TOOLS = [
   'agent.recover_failed_task',
   'agent.rename',
   'agent.set_spirit',
-  'agent.update_appearance',
   'approvals.resolve',
   'automations.toggle_enabled',
   'browser.click_role',
@@ -7372,7 +7431,7 @@ const TOOL_DEPENDENCY_DOMAINS: Partial<Record<OpenSwanRuntimeToolName, { writes?
   // Agent identity / office roster (auto-approved in-app writes).
   'agent.rename': { writes: ['circle_agents'] },
   'agent.set_spirit': { writes: ['circle_agents'] },
-  'agent.update_appearance': { writes: ['circle_agents'] },
+  'agent.update_appearance': { writes: ['office_user_preferences'] },
   'office.list_agents': { reads: ['circle_agents'] },
   // Accountability, research library, automations, and the approvals
   // control plane — all auto-approved in-app mutations, so they declare
@@ -11435,6 +11494,151 @@ async function finishDurableAgentAction(
     && (finished.disposition === 'finished' || finished.disposition === 'already_finished')
     && finished.call.state === finalState
   );
+}
+
+type DurableOfficeAppearanceClaimResult =
+  | { ok: true; lease: DurableAgentActionLease }
+  | {
+      ok: false;
+      error: string;
+      priorState?: AgentActionCallState;
+    };
+
+/**
+ * Bind one owner-private appearance write to the shared durable action ledger.
+ *
+ * This is deliberately separate from `claimDurableAgentAction`: Office
+ * preferences are an authenticated in-app mutation, not a computer-app
+ * capability, so manufacturing a computer-app authorization object here would
+ * weaken that boundary. The exact provider call, normalized intent, captured
+ * authority generation, observed server revision, and complete next document
+ * are instead SHA-256 bound directly to the §26 identity.
+ */
+async function claimDurableOfficeAppearanceAction(input: {
+  context: OpenSwanRuntimeToolContext;
+  authority: OpenSwanExactCircleAuthority;
+  agentName: string;
+  patch: Readonly<Record<string, unknown>>;
+  observedRevision: number;
+  nextAppearances: Readonly<Record<string, unknown>>;
+}): Promise<DurableOfficeAppearanceClaimResult> {
+  const { context, authority } = input;
+  const normalizedToolArgs = Object.freeze({
+    agent_name: input.agentName,
+    patch: input.patch,
+  });
+  const toolArgsFingerprint = await buildComputerAppToolArgsFingerprintAsync(
+    normalizedToolArgs,
+  );
+  const contractFingerprint = await buildComputerAppToolArgsFingerprintAsync({
+    schemaVersion: 1,
+    operation: 'patch_my_office_preferences_v1:appearances',
+    userId: authority.userId,
+    circleId: authority.circleId,
+    authorityGeneration: authority.generation,
+    observedRevision: input.observedRevision,
+    nextAppearances: input.nextAppearances,
+  });
+  const exactCallFingerprint = await buildComputerAppToolArgsFingerprintAsync({
+    schemaVersion: 1,
+    userId: authority.userId,
+    circleId: authority.circleId,
+    runId: context.runId,
+    tool: 'agent.update_appearance',
+    toolUseId: context.toolUseId,
+    iteration: context.iteration,
+    toolArgsFingerprint,
+    contractFingerprint,
+  });
+  const exactCallDigest = exactCallFingerprint.startsWith('args-v2:sha256:')
+    ? exactCallFingerprint.slice('args-v2:sha256:'.length)
+    : '';
+  if (
+    !hasExactOpenSwanRuntimeCallIdentity('agent.update_appearance', context)
+    || !OPEN_SWAN_RUNTIME_UUID_RE.test(authority.userId)
+    || !OPEN_SWAN_RUNTIME_UUID_RE.test(authority.circleId)
+    || !OPEN_SWAN_RUNTIME_UUID_RE.test(String(context.runId || ''))
+    || !toolArgsFingerprint
+    || !contractFingerprint
+    || !/^[0-9a-f]{64}$/.test(exactCallDigest)
+  ) {
+    return {
+      ok: false,
+      error: 'The appearance change requires a persisted UUID run, exact provider call identity, and SHA-256 mutation binding. Nothing was dispatched.',
+    };
+  }
+
+  const identity: AgentActionCallIdentity = Object.freeze({
+    schemaVersion: 1,
+    userId: authority.userId,
+    circleId: authority.circleId,
+    runId: String(context.runId),
+    tool: 'agent.update_appearance',
+    toolUseId: String(context.toolUseId),
+    actionId: `office-appearance:${exactCallDigest}`,
+    toolArgsFingerprint,
+    contractFingerprint,
+    idempotencyKey: `office-appearance-v1:${exactCallDigest}`,
+  });
+  // Hashing the complete private document is asynchronous. Recheck the live
+  // generation at the last synchronous boundary before the §26 claim RPC so
+  // an authority retired during SHA-256 preparation cannot initiate a late
+  // ledger write with an otherwise still-valid captured bearer.
+  if (resolveOpenSwanExactOfficePreferenceAuthority(context) !== authority) {
+    return {
+      ok: false,
+      error: 'The signed-in user or Circle changed before the durable appearance claim. Nothing was dispatched.',
+    };
+  }
+  const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+  const store = createAgentActionCallStore(
+    exactClient as unknown as AgentActionCallsRpcClient,
+  );
+  const claim = await store.claim({
+    identity,
+    ttlSeconds: 120,
+    metadata: {
+      surface: 'system',
+      risk: 'low',
+      verificationKind: 'app_state',
+      source: 'openswan_tool_runtime',
+      actor: 'user_authorized_agent',
+    },
+  });
+  if (claim.ok && claim.disposition === 'duplicate') {
+    return {
+      ok: false,
+      priorState: claim.call.state,
+      error: `This exact appearance call already has durable state ${claim.call.state}; it was not executed again.`,
+    };
+  }
+  if (
+    !claim.ok
+    || (claim.disposition !== 'claimed' && claim.disposition !== 'already_claimed')
+    || claim.call.state !== 'claimed'
+    || !claim.call.claimToken
+  ) {
+    const code = claim.ok ? 'duplicate_or_state_conflict' : claim.code;
+    const recovery = code === 'rpc_error'
+      ? 'Ensure §26 is deployed and reachable with the exact captured bearer.'
+      : code === 'not_authenticated' || code === 'run_identity_mismatch'
+        ? 'Start a persisted run owned by this signed-in user and Circle, then issue a fresh appearance request.'
+        : 'Reconcile the prior durable call before issuing a fresh appearance request.';
+    return {
+      ok: false,
+      error: `Durable appearance claim failed closed (${code}). Nothing was dispatched. ${recovery}`,
+    };
+  }
+  return {
+    ok: true,
+    lease: {
+      identity,
+      claimToken: claim.call.claimToken,
+      store,
+      startAttempted: false,
+      started: false,
+    },
+  };
 }
 
 function durableStartDuplicateResult<T>(
@@ -19209,30 +19413,260 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     case 'agent.update_appearance': {
+      let lease: DurableAgentActionLease | null = null;
       try {
         const a = args as any;
         const agentName = typeof a.agent_name === 'string' ? a.agent_name.trim() : '';
-        const patch = (a.patch && typeof a.patch === 'object') ? a.patch : null;
-        if (!agentName || !patch || Object.keys(patch).length === 0) {
-          return { ok: false, resultsText: 'agent_name and a non-empty patch are required.' } as any;
+        const patch = normalizeOpenSwanAgentAppearancePatch(a.patch);
+        if (
+          !agentName
+          || agentName.length > 80
+          || ['__proto__', 'prototype', 'constructor'].includes(agentName.toLowerCase())
+          || !patch
+        ) {
+          return {
+            ok: false,
+            resultsText: 'agent_name and a valid non-empty §45 appearance patch are required.',
+            completionVerified: false,
+            outcomeUnknown: false,
+          } as any;
         }
-        // Appearance lives on the invoking user's profile — each user's
-        // agents customize independently. Fetch current, merge, write.
-        const { data: profile, error: readErr } = await supabase
-          .from('profiles').select('agent_appearance').eq('id', context.userId).maybeSingle();
-        if (readErr) return { ok: false, resultsText: `Profile read failed: ${readErr.message}` } as any;
-        const appearances = ((profile?.agent_appearance as any) || {}) as Record<string, any>;
-        const existingForAgent = (appearances[agentName] && typeof appearances[agentName] === 'object') ? appearances[agentName] : {};
-        const nextForAgent = { ...existingForAgent, ...patch };
-        const nextAppearances = { ...appearances, [agentName]: nextForAgent };
-        const { error: writeErr } = await supabase
-          .from('profiles').update({ agent_appearance: nextAppearances }).eq('id', context.userId);
-        if (writeErr) return { ok: false, resultsText: `Appearance update failed: ${writeErr.message}` } as any;
+
+        const authority = resolveOpenSwanExactOfficePreferenceAuthority(context);
+        if (!authority) {
+          return {
+            ok: false,
+            resultsText: 'The exact signed-in user and Circle authority is unavailable or changed. No appearance was updated.',
+            completionVerified: false,
+            outcomeUnknown: false,
+          } as any;
+        }
+        const authScope = Object.freeze({
+          userId: authority.userId,
+          accessToken: authority.accessToken,
+        });
+        const loaded = await loadOfficeUserPreferences(authority.circleId, authScope);
+        if (!resolveOpenSwanExactOfficePreferenceAuthority(context)) {
+          return {
+            ok: false,
+            resultsText: 'The signed-in user or Circle changed while Office preferences were loading. No appearance was updated.',
+            completionVerified: false,
+            outcomeUnknown: false,
+          } as any;
+        }
+        if (!loaded.ok) {
+          return {
+            ok: false,
+            resultsText: loaded.error || 'The private Office preferences could not be loaded. No appearance was updated.',
+            completionVerified: false,
+            outcomeUnknown: false,
+          } as any;
+        }
+        const currentAppearances = loaded.preferences?.appearances
+          && typeof loaded.preferences.appearances === 'object'
+          && !Array.isArray(loaded.preferences.appearances)
+            ? loaded.preferences.appearances as Record<string, unknown>
+            : {};
+        const nextAppearances = Object.fromEntries(Object.entries(currentAppearances));
+        nextAppearances[agentName] = buildOpenSwanAgentAppearance(
+          currentAppearances[agentName],
+          patch,
+        );
+
+        const claimed = await claimDurableOfficeAppearanceAction({
+          context,
+          authority,
+          agentName,
+          patch: patch as Readonly<Record<string, unknown>>,
+          observedRevision: loaded.revision,
+          nextAppearances,
+        });
+        if (!claimed.ok) {
+          const outcomeUnknown = claimed.priorState === 'dispatched'
+            || claimed.priorState === 'outcome_unknown';
+          return {
+            ok: false,
+            resultsText: claimed.error,
+            completionVerified: false,
+            outcomeUnknown,
+          } as any;
+        }
+        lease = claimed.lease;
+
+        if (!resolveOpenSwanExactOfficePreferenceAuthority(context)) {
+          const durableStateSealed = await finishDurableAgentAction(lease, 'failed', {
+            surface: 'system',
+            risk: 'low',
+            verificationKind: 'app_state',
+            errorCode: 'authority_retired_before_dispatch',
+            completionVerified: false,
+            outcomeUnknown: false,
+            source: 'openswan_tool_runtime',
+            actor: 'user_authorized_agent',
+          });
+          return {
+            ok: false,
+            resultsText: `The signed-in user or Circle changed before durable dispatch. No appearance was updated.${durableStateSealed ? '' : ' The unused claim will remain closed until its lease expires.'}`,
+            completionVerified: false,
+            outcomeUnknown: false,
+          } as any;
+        }
+        if (isOpenSwanApprovalResumeStopped(context)) {
+          const durableStateSealed = await finishDurableAgentAction(lease, 'failed', {
+            surface: 'system',
+            risk: 'low',
+            verificationKind: 'app_state',
+            errorCode: 'stopped_before_dispatch',
+            completionVerified: false,
+            outcomeUnknown: false,
+            source: 'openswan_tool_runtime',
+            actor: 'user_authorized_agent',
+          });
+          return {
+            ok: false,
+            resultsText: `The approved continuation stopped before durable appearance dispatch. No appearance was updated.${durableStateSealed ? '' : ' The unused claim will remain closed until its lease expires.'}`,
+            completionVerified: false,
+            outcomeUnknown: false,
+          } as any;
+        }
+
+        lease.startAttempted = true;
+        const started = await lease.store.start({
+          identity: lease.identity,
+          claimToken: lease.claimToken,
+        });
+        if (
+          started.ok
+          && started.disposition === 'duplicate'
+          && started.call.state !== 'claimed'
+        ) {
+          const outcomeUnknown = started.call.state === 'dispatched'
+            || started.call.state === 'outcome_unknown';
+          return {
+            ok: false,
+            resultsText: `This exact appearance call reached durable state ${started.call.state} before handler entry; the §45 mutation was not dispatched again.`,
+            completionVerified: false,
+            outcomeUnknown,
+          } as any;
+        }
+        if (
+          !started.ok
+          || started.disposition !== 'started'
+          || started.call.state !== 'dispatched'
+        ) {
+          return {
+            ok: false,
+            resultsText: 'Durable appearance dispatch start was not confirmed. The §45 mutation was not called by this worker, and the exact call must not be replayed automatically.',
+            completionVerified: false,
+            outcomeUnknown: true,
+          } as any;
+        }
+        lease.started = true;
+
+        if (
+          !resolveOpenSwanExactOfficePreferenceAuthority(context)
+          || isOpenSwanApprovalResumeStopped(context)
+        ) {
+          const durableStateSealed = await finishDurableAgentAction(lease, 'outcome_unknown', {
+            surface: 'system',
+            risk: 'low',
+            verificationKind: 'app_state',
+            errorCode: isOpenSwanApprovalResumeStopped(context)
+              ? 'stopped_after_durable_start'
+              : 'authority_retired_after_start',
+            completionVerified: false,
+            outcomeUnknown: true,
+            source: 'openswan_tool_runtime',
+            actor: 'user_authorized_agent',
+          });
+          return {
+            ok: false,
+            resultsText: `The appearance call stopped after its one-shot durable start but before the §45 preference RPC. No preference mutation was sent, and this exact call is replay-blocked.${durableStateSealed ? '' : ' Durable finalization acknowledgement was unavailable.'}`,
+            completionVerified: false,
+            outcomeUnknown: false,
+          } as any;
+        }
+
+        const receipt = await patchOfficeUserPreferences(
+          authority.circleId,
+          { appearances: nextAppearances },
+          authScope,
+          context.approvalResumeAbortSignal || undefined,
+        );
+        if (!receipt.ok) {
+          const durableStateSealed = await finishDurableAgentAction(lease, 'outcome_unknown', {
+            surface: 'system',
+            risk: 'low',
+            verificationKind: 'app_state',
+            errorCode: 'preference_receipt_unavailable',
+            completionVerified: false,
+            outcomeUnknown: true,
+            source: 'openswan_tool_runtime',
+            actor: 'user_authorized_agent',
+          });
+          return {
+            ok: false,
+            resultsText: `${receipt.error || 'The Office preference mutation did not return an accepted receipt.'} The outcome is unknown and this exact call is replay-blocked.${durableStateSealed ? '' : ' Durable finalization acknowledgement was unavailable.'}`,
+            completionVerified: false,
+            outcomeUnknown: true,
+          } as any;
+        }
+
+        const durableStateSealed = await finishDurableAgentAction(lease, 'verified', {
+          surface: 'system',
+          risk: 'low',
+          verificationKind: 'app_state',
+          evidenceCount: 1,
+          completionVerified: true,
+          outcomeUnknown: false,
+          source: 'openswan_tool_runtime',
+          actor: 'user_authorized_agent',
+        });
+        if (!resolveOpenSwanExactOfficePreferenceAuthority(context)) {
+          return {
+            ok: true,
+            resultsText: `Office accepted preference revision ${receipt.revision}, but the signed-in user or Circle changed before the result could be published to that surface. The accepted change is durably replay-blocked; refresh Office before making another change.${durableStateSealed ? '' : ' Durable finalization acknowledgement was unavailable, so do not submit it again.'}`,
+            completionVerified: true,
+            outcomeUnknown: false,
+          } as any;
+        }
         return {
           ok: true,
-          resultsText: `Updated ${agentName}'s appearance: ${Object.keys(patch).join(', ')}.`,
+          resultsText: `Updated ${agentName}'s Office appearance at private preference revision ${receipt.revision}: ${Object.keys(patch).join(', ')}.${durableStateSealed ? '' : ' Durable finalization acknowledgement was unavailable, so do not submit this exact call again.'}`,
+          completionVerified: true,
+          outcomeUnknown: false,
         } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      } catch (e: any) {
+        // An exception before `start()` is a definitive no-dispatch failure.
+        // Once start was attempted, a lost RPC response may hide a committed
+        // transition, so never force that row to `failed`; preserve the lease
+        // or seal only a confirmed dispatched row as outcome_unknown.
+        const durableStateSealed = lease && (!lease.startAttempted || lease.started)
+          ? await finishDurableAgentAction(
+              lease,
+              lease.started ? 'outcome_unknown' : 'failed',
+              {
+                surface: 'system',
+                risk: 'low',
+                verificationKind: 'app_state',
+                errorCode: lease.started
+                  ? 'appearance_dispatch_exception'
+                  : 'appearance_pre_dispatch_exception',
+                completionVerified: false,
+                outcomeUnknown: lease.started,
+                source: 'openswan_tool_runtime',
+                actor: 'user_authorized_agent',
+              },
+            )
+          : false;
+        const outcomeUnknown = lease?.startAttempted === true;
+        return {
+          ok: false,
+          resultsText: `${e?.message || 'The appearance adapter failed.'}${outcomeUnknown ? ' The durable start outcome is unknown and this exact call must not be replayed automatically.' : ' No appearance mutation was dispatched.'}${lease && !durableStateSealed ? ' Durable finalization acknowledgement was unavailable.' : ''}`,
+          completionVerified: false,
+          outcomeUnknown,
+        } as any;
+      }
     }
     case 'agent.rename': {
       try {
