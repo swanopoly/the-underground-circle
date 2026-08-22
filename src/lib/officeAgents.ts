@@ -93,6 +93,7 @@ export function formatOfficeTrackedCost(value: number): string {
   const normalized = normalizeOfficeTrackedCost(value);
   if (normalized === null) return '—';
   if (normalized === 0) return '$0.00';
+  if (normalized < 0.0001) return '<$0.0001';
   if (normalized < 0.01) return `$${normalized.toFixed(4)}`;
   if (normalized < 1) return `$${normalized.toFixed(3)}`;
   return `$${normalized.toFixed(2)}`;

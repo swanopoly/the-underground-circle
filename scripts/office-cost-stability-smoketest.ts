@@ -208,6 +208,7 @@ async function main(): Promise<void> {
   check('negative tracked spend stays unavailable', normalizeOfficeTrackedCost(-1) === null);
   check('verified zero remains a real zero', normalizeOfficeTrackedCost(0) === 0);
   check('zero spend formats as dollars', formatOfficeTrackedCost(0) === '$0.00');
+  check('tiny positive spend never formats as zero', formatOfficeTrackedCost(0.000001) === '<$0.0001');
   check('sub-cent spend is not rounded to zero', formatOfficeTrackedCost(0.0042) === '$0.0042');
   check('cent-level spend keeps useful precision', formatOfficeTrackedCost(0.012) === '$0.012');
   check('ordinary spend uses two decimals', formatOfficeTrackedCost(1.23) === '$1.23');
