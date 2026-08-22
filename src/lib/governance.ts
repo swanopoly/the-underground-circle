@@ -4,6 +4,7 @@
 import { supabase } from './supabase';
 import { safeGetUser } from './authSession';
 import { Proposal, ProposalVote, VoteSummary, PinnedMessage, ProposalType } from '../types';
+import { indexSafeProfiles, loadSafeCircleProfiles } from './safeProfiles';
 
 // ─── Proposals ──────────────────────────────────────────────────────
 
@@ -61,7 +62,7 @@ export async function getProposals(circleId: string, status?: string): Promise<P
   const { data: votes } = proposalIds.length > 0
     ? await supabase
         .from('proposal_votes')
-        .select('*, user:profiles!user_id(username, display_name)')
+        .select('*')
         .in('proposal_id', proposalIds)
     : { data: [] };
 
@@ -71,8 +72,15 @@ export async function getProposals(circleId: string, status?: string): Promise<P
     .select('*', { count: 'exact', head: true })
     .eq('circle_id', circleId);
 
+  const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+    circleId,
+    userIds: (votes || []).map((vote: any) => vote.user_id),
+  }));
   return data.map(p => {
-    const pVotes = (votes || []).filter(v => v.proposal_id === p.id);
+    const pVotes = (votes || []).filter(v => v.proposal_id === p.id).map((vote: any) => ({
+      ...vote,
+      user: profileById.get(vote.user_id) || null,
+    }));
     return {
       ...p,
       votes: pVotes,
@@ -92,7 +100,7 @@ export async function getProposal(proposalId: string): Promise<Proposal | null> 
 
   const { data: votes } = await supabase
     .from('proposal_votes')
-    .select('*, user:profiles!user_id(username, display_name)')
+    .select('*')
     .eq('proposal_id', proposalId);
 
   const { count: memberCount } = await supabase
@@ -100,10 +108,18 @@ export async function getProposal(proposalId: string): Promise<Proposal | null> 
     .select('*', { count: 'exact', head: true })
     .eq('circle_id', data.circle_id);
 
+  const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+    circleId: data.circle_id,
+    userIds: (votes || []).map((vote: any) => vote.user_id),
+  }));
+  const hydratedVotes = (votes || []).map((vote: any) => ({
+    ...vote,
+    user: profileById.get(vote.user_id) || null,
+  }));
   return {
     ...data,
-    votes: votes || [],
-    vote_summary: computeVoteSummary(votes || [], data, memberCount || 1),
+    votes: hydratedVotes,
+    vote_summary: computeVoteSummary(hydratedVotes, data, memberCount || 1),
   };
 }
 
@@ -205,16 +221,20 @@ export async function unpinMessage(circleId: string, messageId: string): Promise
 export async function getPinnedMessages(circleId: string): Promise<PinnedMessage[]> {
   const { data, error } = await supabase
     .from('pinned_messages')
-    .select('*, message:messages(content, user:profiles!user_id(display_name))')
+    .select('*, message:messages(content, user_id)')
     .eq('circle_id', circleId)
     .order('created_at', { ascending: false })
     .limit(20);
 
   if (error || !data) return [];
+  const pinnedProfileById = indexSafeProfiles(await loadSafeCircleProfiles({
+    circleId,
+    userIds: data.map((row: any) => row.message?.user_id),
+  }));
   return data.map((p: any) => ({
     ...p,
     message_content: p.message?.content,
-    pinned_by_name: p.message?.user?.display_name,
+    pinned_by_name: pinnedProfileById.get(p.message?.user_id)?.display_name,
   }));
 }
 

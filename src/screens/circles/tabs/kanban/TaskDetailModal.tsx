@@ -37,6 +37,7 @@ import {
   fetchTaskRunMetadataByOpenSwanRunId,
 } from '../../../../lib/taskRunMetadata';
 import { readFeedTaskRunHandoffSnapshot } from '../../../../lib/feedTimelineMergeCore';
+import { toTaskImageStorageReference } from '../../../../lib/taskImageStorage';
 
 // ─── Automation Report Section Parser ────────────────────────────────────────
 
@@ -582,24 +583,11 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
     if (!file || !kanban.currentUserId) return;
     setUploading(true);
     try {
-      const ext = file.name.split('.').pop() || 'png';
-      const path = `${task.id}/${Date.now()}.${ext}`;
-      const { error: uploadError } = await supabase.storage
-        .from('task-images')
-        .upload(path, file, { cacheControl: '3600', upsert: false });
-
-      if (uploadError) {
-        console.error('Image upload error:', uploadError);
-        return;
-      }
-
-      const { data: urlData } = supabase.storage
-        .from('task-images')
-        .getPublicUrl(path);
-
-      if (urlData?.publicUrl) {
-        await kanban.updateTask(task.id, { image_url: urlData.publicUrl } as any);
-      }
+      const attachment = await kanban.uploadTaskFile(task.id, file);
+      if (!attachment?.storage_path) return;
+      await kanban.updateTask(task.id, {
+        image_url: toTaskImageStorageReference(attachment.storage_path),
+      } as any);
     } catch (err) {
       console.error('Image upload unexpected:', err);
     } finally {

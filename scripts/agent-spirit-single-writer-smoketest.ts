@@ -59,5 +59,13 @@ check((deploy.match(/error === 'outcome_unknown'/g) || []).length === 2, 'Spawn 
 check(deploy.includes('do not deploy it again'), 'Spawn truthfully warns on a durable save with local cache failure');
 check(!deploy.includes('updateAgentIdentity(') && !deploy.includes('updateAgentSpirit('), 'Spawn has no legacy split writer');
 check(!deploy.includes('boundAiProvider:'), 'Spawn cannot overwrite the RPC-owned primary provider lane');
+check(spawn.includes("if (step === 'spirit') return !!config.spirit;"), 'Spawn requires a selected specialty SOUL before continuing');
+check(deploy.includes("setError('Choose a specialty and SOUL before deploying this agent.')"), 'Spawn fails closed if deploy is reached without a SOUL');
+check(!spawn.includes('No Spirit (General Purpose)'), 'Spawn no longer offers a specialty-free agent');
+check(deploy.includes('spiritId: selectedSpirit.id') && deploy.includes('skillBundleId: selectedSpirit.skillBundle'), 'Spawn receipts bind the exact SOUL and linked skill bundle');
+check(spawn.includes('SKILL · {sp.skillBundle}'), 'Spawn discloses each SOUL-linked skill bundle before selection');
+check(spawn.includes('Resolve its exact SOUL and skill knowledge for each task'), 'Spawn review states the execution-time specialty contract');
+check(deploy.includes('if (!config.name.trim() || deployInFlightRef.current) return;'), 'Spawn synchronously rejects duplicate publication clicks');
+check(deploy.includes('deployInFlightRef.current = true;') && deploy.includes('deployInFlightRef.current = false;'), 'Spawn owns and releases one publication single-flight token');
 
 console.log(`\nPASS: ${assertions} published Spirit single-writer assertions`);

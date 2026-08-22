@@ -242,6 +242,17 @@ export function buildModelCatalogReadinessProfile(input: {
     ? Math.max(0, Math.min(1000, Math.floor(input.selectableModelCount)))
     : 0;
 
+  if (isProviderModelCatalogAuthorityFailure(input.failureCode)) {
+    return {
+      state: 'not_connected',
+      connected: false,
+      accountInventoryVerified: false,
+      selectableModelCount: count,
+      label: 'Access check required',
+      hint: 'Sign in again or verify circle access before this account catalog can be used.',
+    };
+  }
+
   if (!input.connected || isStableProviderCredentialFailure(input.failureCode)) {
     return {
       state: 'not_connected',
@@ -297,13 +308,21 @@ export function buildModelCatalogReadinessProfile(input: {
   };
 }
 
-/** Stable credential failures cannot recover by dispatching the same key. */
+/** Account/circle authority failures require auth or membership recovery, not
+ * replacing an otherwise unrelated provider credential. */
+export function isProviderModelCatalogAuthorityFailure(
+  failureCode: ProviderModelCatalogFailureCode | null | undefined,
+): boolean {
+  return failureCode === 'auth_unavailable'
+    || failureCode === 'unauthenticated'
+    || failureCode === 'forbidden';
+}
+
+/** Stable provider credential failures cannot recover by dispatching the same key. */
 export function isStableProviderCredentialFailure(
   failureCode: ProviderModelCatalogFailureCode | null | undefined,
 ): boolean {
-  return failureCode === 'unauthenticated'
-    || failureCode === 'forbidden'
-    || failureCode === 'key_missing'
+  return failureCode === 'key_missing'
     || failureCode === 'credential_unreadable'
     || failureCode === 'provider_credential_rejected';
 }

@@ -201,6 +201,8 @@ export interface KanbanTask {
 
 export interface TaskAttachment {
   url: string;
+  /** Private task-images object path; never a public or persisted signed URL. */
+  storage_path?: string;
   name: string;
   type: 'image' | 'file' | 'code';
   mime?: string;

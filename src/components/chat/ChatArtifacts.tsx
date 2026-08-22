@@ -1,5 +1,5 @@
-import React, { useMemo, useState } from 'react';
-import { Image, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Image, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { getOpenSwanExecutionStatusLabel } from '../../lib/openswanExecution';
 import { buildOpenSwanExecutionStream } from '../../lib/openswanExecution';
 import type { SwanBotStructuredArtifact } from '../../lib/swanbot';
@@ -12,6 +12,12 @@ import { buildOpenSwanTaskPlan } from '../../lib/openswanTaskPlanner';
 import { executeOpenSwanTool, type OpenSwanToolEvent } from '../../lib/openswanToolRuntime';
 import { executeOpenSwanVerificationPlan, type OpenSwanVerificationResult } from '../../lib/openswanVerificationRuntime';
 import { appendRunToolEvent, mergeRunMetadata } from '../../lib/agentRunSystem';
+import {
+  isGeneratedChatImageArtifact,
+  readFreshGeneratedChatImageUrl,
+  readGeneratedChatImageMetadata,
+  refreshGeneratedChatImageUrl,
+} from '../../lib/generatedChatImages';
 import VerificationResultCard from './VerificationResultCard';
 
 type ChatArtifactsProps = {
@@ -109,6 +115,293 @@ function describeTableDimensions(table: ParsedTable): string {
   const truncated = sourceRows > table.rows.length || sourceCols > table.headers.length;
   const base = `${sourceRows} row${sourceRows === 1 ? '' : 's'} × ${sourceCols} col${sourceCols === 1 ? '' : 's'}`;
   return truncated ? `${base} — showing first ${table.rows.length}×${table.headers.length}` : base;
+}
+
+function openImageFullSize(title: string, url: string) {
+  if (Platform.OS !== 'web') {
+    void Linking.openURL(url).catch(() => {});
+    return;
+  }
+  if (typeof window === 'undefined') return;
+  // Construct the preview with DOM properties. The URL is never interpolated
+  // into markup, so a crafted member-controlled value cannot escape an HTML
+  // attribute or execute in the app origin.
+  const preview = window.open('');
+  if (!preview) return;
+  preview.document.title = title;
+  preview.document.body.style.margin = '0';
+  preview.document.body.style.background = '#000';
+  const image = preview.document.createElement('img');
+  image.src = url;
+  image.alt = title;
+  image.style.display = 'block';
+  image.style.width = '100%';
+  image.style.height = 'auto';
+  image.style.maxWidth = '100%';
+  preview.document.body.appendChild(image);
+}
+
+function artifactModelLabel(artifact: SwanBotStructuredArtifact): string | null {
+  const generated = readGeneratedChatImageMetadata(artifact);
+  if (generated) return `${imageProviderLabel(generated.provider)} · ${generated.model}`;
+  const model = typeof artifact.metadata?.model === 'string' ? artifact.metadata.model.trim() : '';
+  return model ? model.slice(0, 160) : null;
+}
+
+function imageProviderLabel(provider: string): string {
+  switch (provider.trim().toLowerCase()) {
+    case 'openai': return 'OpenAI';
+    case 'replicate': return 'Replicate';
+    case 'huggingface': return 'Hugging Face';
+    default: return provider.trim();
+  }
+}
+
+type GeneratedImageState = {
+  scopeKey: string;
+  phase: 'resolving' | 'loading' | 'ready' | 'error';
+  url: string | null;
+  message: string | null;
+  retryable: boolean;
+};
+
+function GeneratedChatImageBody({
+  artifact,
+  circleId,
+  accentColor,
+}: {
+  artifact: SwanBotStructuredArtifact;
+  circleId?: string;
+  accentColor: string;
+}) {
+  const metadataSource = typeof artifact.metadata?.source === 'string' ? artifact.metadata.source : '';
+  const metadataImageId = typeof artifact.metadata?.generatedImageId === 'string' ? artifact.metadata.generatedImageId : '';
+  const metadataProvider = typeof artifact.metadata?.provider === 'string' ? artifact.metadata.provider : '';
+  const metadataModel = typeof artifact.metadata?.model === 'string' ? artifact.metadata.model : '';
+  const metadataRequestedModel = typeof artifact.metadata?.requestedModel === 'string' ? artifact.metadata.requestedModel : '';
+  const metadataMimeType = typeof artifact.metadata?.mimeType === 'string' ? artifact.metadata.mimeType : '';
+  const metadataSha256 = typeof artifact.metadata?.sha256 === 'string' ? artifact.metadata.sha256 : '';
+  const metadataExpiresAt = typeof artifact.metadata?.expiresAt === 'string' ? artifact.metadata.expiresAt : '';
+  const artifactUrl = typeof artifact.url === 'string' ? artifact.url : '';
+  const artifactTitle = artifact.title || 'Generated image';
+  const stableArtifact = useMemo<SwanBotStructuredArtifact>(() => ({
+    kind: 'image',
+    title: artifactTitle,
+    url: artifactUrl || null,
+    metadata: {
+      source: metadataSource,
+      generatedImageId: metadataImageId,
+      provider: metadataProvider,
+      model: metadataModel,
+      ...(metadataRequestedModel ? { requestedModel: metadataRequestedModel } : {}),
+      mimeType: metadataMimeType,
+      sha256: metadataSha256,
+      ...(metadataExpiresAt ? { expiresAt: metadataExpiresAt } : {}),
+    },
+  }), [
+    artifactTitle,
+    artifactUrl,
+    metadataExpiresAt,
+    metadataImageId,
+    metadataMimeType,
+    metadataModel,
+    metadataProvider,
+    metadataRequestedModel,
+    metadataSha256,
+    metadataSource,
+  ]);
+  const reference = useMemo(() => readGeneratedChatImageMetadata(stableArtifact), [stableArtifact]);
+  const imageId = reference?.generatedImageId || '';
+  const scopeKey = `${circleId || ''}:${imageId}`;
+  const initialUrl = useMemo(
+    () => circleId ? readFreshGeneratedChatImageUrl(stableArtifact, { circleId }) : null,
+    [circleId, stableArtifact],
+  );
+  const [attempt, setAttempt] = useState(0);
+  const [state, setState] = useState<GeneratedImageState>(() => ({
+    scopeKey,
+    phase: initialUrl ? 'loading' : 'resolving',
+    url: initialUrl,
+    message: null,
+    retryable: true,
+  }));
+  const automaticRefreshScopeRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    automaticRefreshScopeRef.current = null;
+  }, [scopeKey]);
+
+  useEffect(() => {
+    const trustedImmediateUrl = attempt === 0 ? initialUrl : null;
+    if (!imageId) {
+      setState({
+        scopeKey,
+        phase: 'error',
+        url: null,
+        message: 'This generated image has an invalid durable reference.',
+        retryable: false,
+      });
+      return undefined;
+    }
+    if (!circleId) {
+      setState({
+        scopeKey,
+        phase: 'error',
+        url: null,
+        message: 'Open this image from its circle chat to verify access.',
+        retryable: false,
+      });
+      return undefined;
+    }
+    if (trustedImmediateUrl) {
+      setState({
+        scopeKey,
+        phase: 'loading',
+        url: trustedImmediateUrl,
+        message: null,
+        retryable: true,
+      });
+      return undefined;
+    }
+
+    let active = true;
+    const controller = new AbortController();
+    setState({
+      scopeKey,
+      phase: 'resolving',
+      url: null,
+      message: null,
+      retryable: true,
+    });
+    void refreshGeneratedChatImageUrl({
+      imageId,
+      circleId,
+      signal: controller.signal,
+    }).then((result) => {
+      if (!active) return;
+      if (!result.ok) {
+        if (result.code === 'aborted') return;
+        setState({
+          scopeKey,
+          phase: 'error',
+          url: null,
+          message: result.message,
+          retryable: result.retryable !== false,
+        });
+        return;
+      }
+      setState({
+        scopeKey,
+        phase: 'loading',
+        url: result.url,
+        message: null,
+        retryable: true,
+      });
+    });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [attempt, circleId, imageId, initialUrl, scopeKey]);
+
+  const currentState: GeneratedImageState = state.scopeKey === scopeKey
+    ? state
+    : {
+        scopeKey,
+        phase: 'resolving',
+        url: null,
+        message: null,
+        retryable: true,
+      };
+  const providerLabel = reference
+    ? `${imageProviderLabel(reference.provider)} ${reference.model}`
+    : 'the image provider';
+  const imageLabel = `${artifactTitle}. Generated by ${providerLabel}.`;
+
+  const retry = () => {
+    automaticRefreshScopeRef.current = null;
+    setAttempt((value) => value + 1);
+  };
+
+  const handleImageError = () => {
+    if (currentState.url && automaticRefreshScopeRef.current !== scopeKey) {
+      automaticRefreshScopeRef.current = scopeKey;
+      setAttempt((value) => value + 1);
+      return;
+    }
+    setState({
+      scopeKey,
+      phase: 'error',
+      url: null,
+      message: 'The image could not be displayed. Refresh its secure link and try again.',
+      retryable: true,
+    });
+  };
+
+  return (
+    <View>
+      {currentState.url ? (
+        <Image
+          source={{ uri: currentState.url }}
+          style={styles.image}
+          resizeMode="contain"
+          accessible
+          accessibilityLabel={imageLabel}
+          onLoad={() => {
+            setState((current) => current.scopeKey === scopeKey
+              ? { ...current, phase: 'ready', message: null }
+              : current);
+          }}
+          onError={handleImageError}
+        />
+      ) : (
+        <View style={styles.imagePlaceholder}>
+          {currentState.phase === 'resolving' ? <ActivityIndicator color={accentColor} /> : null}
+        </View>
+      )}
+
+      {currentState.phase === 'resolving' || currentState.phase === 'loading' ? (
+        <Text
+          style={styles.imageStatus}
+          accessibilityRole="text"
+          accessibilityLiveRegion="polite"
+        >
+          {currentState.phase === 'resolving' ? 'Securing image access…' : 'Loading generated image…'}
+        </Text>
+      ) : null}
+
+      {currentState.phase === 'error' ? (
+        <View style={styles.imageError} accessibilityLiveRegion="polite">
+          <Text style={styles.imageErrorText}>{currentState.message || 'The generated image is unavailable.'}</Text>
+          {currentState.retryable ? (
+            <Pressable
+              onPress={retry}
+              accessibilityRole="button"
+              accessibilityLabel={`Retry loading ${artifactTitle}`}
+              accessibilityHint="Requests a fresh secure image link for this circle."
+              style={[styles.actionButton, styles.imageActionButton]}
+            >
+              <Text style={styles.actionButtonText}>Retry</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
+
+      {currentState.phase === 'ready' && currentState.url ? (
+        <Pressable
+          onPress={() => openImageFullSize(artifactTitle, currentState.url!)}
+          accessibilityRole="button"
+          accessibilityLabel={`Open ${artifactTitle} full size`}
+          accessibilityHint={Platform.OS === 'web'
+            ? 'Opens the generated image in a new browser tab.'
+            : 'Opens the generated image in the system viewer.'}
+          style={[styles.actionButton, styles.imageActionButton]}
+        >
+          <Text style={styles.actionButtonText}>Open Full Size</Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
 }
 
 /**
@@ -244,6 +537,8 @@ export default function ChatArtifacts({ artifacts, accentColor, circleId, sessio
         const verificationResults = verificationByKey[key] || [];
         const toolEvents = toolEventsByKey[key] || [];
         const canVerify = artifact.kind === 'code' || artifact.kind === 'webpage';
+        const modelLabel = artifactModelLabel(artifact);
+        const generatedImage = isGeneratedChatImageArtifact(artifact);
 
         const handleCreateWorkspace = async () => {
           if (!canCreateWorkspace(artifact) || isCreating) return;
@@ -386,40 +681,27 @@ export default function ChatArtifacts({ artifacts, accentColor, circleId, sessio
             <Text style={[styles.title, { color: accentColor, flex: 1 }]} numberOfLines={1}>
               {artifact.title}
             </Text>
-            {(artifact.metadata as any)?.model && (
-              <Text style={styles.meta}>{String((artifact.metadata as any).model)}</Text>
-            )}
+            {modelLabel ? <Text style={styles.meta}>{modelLabel}</Text> : null}
           </View>
 
-          {artifact.kind === 'image' && artifact.url ? (
+          {generatedImage ? (
+            <GeneratedChatImageBody artifact={artifact} circleId={circleId} accentColor={accentColor} />
+          ) : artifact.kind === 'image' && artifact.url ? (
             <View>
-              <Image source={{ uri: artifact.url }} style={styles.image} resizeMode="contain" />
+              <Image
+                source={{ uri: artifact.url }}
+                style={styles.image}
+                resizeMode="contain"
+                accessible
+                accessibilityLabel={artifact.title || 'Image artifact'}
+              />
               {Platform.OS === 'web' && artifact.url.startsWith('data:') ? (
                 <Pressable
-                  onPress={() => {
-                    // Build the node with DOM APIs, never by interpolating the
-                    // URL into an HTML string. The old
-                    // `document.write(\`<img src="${'${url}'}">\`)` let a crafted
-                    // data: URL close the src attribute and add its own
-                    // onerror handler — and because about:blank inherits the
-                    // OPENER's origin, that handler ran on the app origin with
-                    // access to localStorage (Supabase access + refresh token).
-                    // Artifacts persist in message metadata and render for
-                    // every circle member, so this was cross-user reachable.
-                    // A property assignment is not parsed, so there is nothing
-                    // to break out of.
-                    const w = window.open('');
-                    if (w) {
-                      w.document.title = artifact.title;
-                      w.document.body.style.margin = '0';
-                      const img = w.document.createElement('img');
-                      img.src = artifact.url!;
-                      img.style.maxWidth = '100%';
-                      img.style.background = '#000';
-                      w.document.body.appendChild(img);
-                    }
-                  }}
-                  style={styles.actionButton}
+                  onPress={() => openImageFullSize(artifact.title || 'Image artifact', artifact.url!)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Open ${artifact.title || 'image artifact'} full size`}
+                  accessibilityHint="Opens the image in a new browser tab."
+                  style={[styles.actionButton, styles.imageActionButton]}
                 >
                   <Text style={styles.actionButtonText}>Open Full Size</Text>
                 </Pressable>
@@ -642,6 +924,35 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     backgroundColor: '#05050a',
   },
+  imagePlaceholder: {
+    width: '100%',
+    height: 220,
+    borderRadius: 8,
+    backgroundColor: '#05050a',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  imageStatus: {
+    color: '#8d8da3',
+    fontSize: 10,
+    marginTop: 8,
+  },
+  imageError: {
+    minHeight: 72,
+    marginTop: 8,
+    gap: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#512f3a',
+    backgroundColor: '#1b1015',
+    padding: 10,
+    justifyContent: 'center',
+  },
+  imageErrorText: {
+    color: '#f0b7c2',
+    fontSize: 10,
+    lineHeight: 15,
+  },
   actionButton: {
     marginTop: 4,
     alignSelf: 'flex-start',
@@ -656,6 +967,13 @@ const styles = StyleSheet.create({
     color: '#a0a0b0',
     fontSize: 9,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  imageActionButton: {
+    minWidth: 44,
+    minHeight: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 12,
   },
   primaryActionButton: {
     backgroundColor: '#171f14',

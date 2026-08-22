@@ -92,11 +92,13 @@ Deno.serve(async (req) => {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, supabaseKey);
-    const authHeader = req.headers.get("Authorization") || req.headers.get("authorization") || "";
-    const token = authHeader.replace(/^Bearer\s+/i, "");
-    const isServiceRole = Boolean(token && token === supabaseKey);
-    const authUser = isServiceRole ? null : await getAuthenticatedUser(req);
-    if (!isServiceRole && authUser?.id !== userId) {
+    // This function reads personal trading learnings and decrypts the selected
+    // account's model keys. A bare service-role `{ userId }` override has no
+    // durable user-scoped authorization to prove, so only the account itself
+    // may initiate this work. The verified function can still use the service
+    // client for its owner-bound reads and inserts below.
+    const authUser = await getAuthenticatedUser(req);
+    if (!authUser || authUser.id !== userId) {
       return new Response(JSON.stringify({ error: "Valid JWT required for requested userId" }), {
         status: 401,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -347,9 +349,11 @@ Return ONLY a JSON array of trade objects. No markdown, no explanation outside t
     }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
-  } catch (err: any) {
-    console.error("[featured-trades] Error:", err);
-    return new Response(JSON.stringify({ error: err.message }), {
+  } catch (err: unknown) {
+    console.error("[featured-trades] request failed", {
+      name: err instanceof Error ? err.name : typeof err,
+    });
+    return new Response(JSON.stringify({ error: "Featured trade generation failed" }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

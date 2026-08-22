@@ -17,6 +17,7 @@ import {
 } from '../../../../lib/brandPack';
 
 interface Props {
+  userId: string | null | undefined;
   circleId: string | null | undefined;
   visible: boolean;
   onClose: () => void;
@@ -25,27 +26,28 @@ interface Props {
 
 const VOICE_OPTIONS: BrandVoice[] = ['professional', 'playful', 'minimal', 'bold', 'warm', 'technical'];
 
-export default function BrandPackEditor({ circleId, visible, onClose, onSaved }: Props) {
+export default function BrandPackEditor({ userId, circleId, visible, onClose, onSaved }: Props) {
   const [pack, setPack] = useState<BrandPack>({});
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (!visible || !circleId) return;
+    setPack({});
+    if (!visible || !userId || !circleId) return;
     let cancelled = false;
-    loadBrandPack(circleId)
+    loadBrandPack({ userId, circleId })
       .then((p) => { if (!cancelled && p) setPack(p); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [visible, circleId]);
+  }, [circleId, userId, visible]);
 
-  if (!circleId) return null;
+  if (!userId || !circleId) return null;
 
   const patch = (partial: Partial<BrandPack>) => setPack(prev => ({ ...prev, ...partial }));
 
   const handleSave = async () => {
     setSaving(true);
     try {
-      await saveBrandPack(circleId, pack);
+      await saveBrandPack({ userId, circleId }, pack);
       onSaved?.(pack);
       onClose();
     } finally {
@@ -54,7 +56,7 @@ export default function BrandPackEditor({ circleId, visible, onClose, onSaved }:
   };
 
   const handleReset = async () => {
-    await clearBrandPack(circleId);
+    await clearBrandPack({ userId, circleId });
     setPack({});
     onSaved?.({});
     onClose();

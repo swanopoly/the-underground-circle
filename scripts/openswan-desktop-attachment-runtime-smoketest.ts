@@ -33,7 +33,7 @@ assert.match(runtimeSource, /'desktop\.open_attachment':\s*\{ writes: \['desktop
 const executeStart = runtimeSource.indexOf('export async function executeOpenSwanRuntimeTool');
 const opaqueBranch = runtimeSource.indexOf("if (tool === 'desktop.open_attachment')", executeStart);
 const pathBranch = runtimeSource.indexOf("if (tool === 'desktop.open_path')", opaqueBranch);
-const genericApproval = runtimeSource.indexOf('const approvalGate = await maybeRequestToolApproval(', opaqueBranch);
+const genericApproval = runtimeSource.indexOf('const approvalGate = await maybeAuthorizeToolWithWorkflowReview(', opaqueBranch);
 assert.ok(opaqueBranch > 0, 'opaque handler branch must exist');
 assert.ok(pathBranch > opaqueBranch, 'opaque handler must run before the legacy path gateway');
 assert.ok(genericApproval > opaqueBranch, 'opaque handler must run before generic approval');
@@ -51,7 +51,7 @@ const opaqueHandler = runtimeSource.slice(opaqueHandlerStart, opaqueHandlerEnd);
 assert.ok(opaqueHandlerStart > 0 && opaqueHandlerEnd > opaqueHandlerStart);
 assert.ok(
   opaqueHandler.indexOf('inspectDesktopAttachmentOpenCapability')
-    < opaqueHandler.indexOf("maybeRequestToolApproval(\n      'desktop.open_attachment'"),
+    < opaqueHandler.indexOf("maybeAuthorizeToolWithWorkflowReview(\n      'desktop.open_attachment'"),
   'exact non-consuming byte inspection must precede approval',
 );
 assert.equal(

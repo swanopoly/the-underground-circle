@@ -28,31 +28,96 @@ import { useProjectRooms } from '../../../services/projectRooms';
 import type { CircleIntegrationGroupKey } from '../../../lib/circleIntegrationCatalog';
 
 import { supabase } from '../../../lib/supabase';
-import CircleStoriesRail from '../../../components/stories/CircleStoriesRail.web';
-import AgentTopBar from './kanban/AgentTopBar';
-import OrchestraPanel from './kanban/OrchestraPanel';
-import GoalsPanel from './kanban/GoalsPanel';
-import ActivityFeedPanel from './kanban/ActivityFeedPanel';
-import KanbanBoard from './kanban/KanbanBoard';
-import TaskDetailModal from './kanban/TaskDetailModal';
-import GoalDetailModal from './kanban/GoalDetailModal';
-import TaskCalendar from '../../../components/TaskCalendar';
-import TaskTable from '../../../components/TaskTable';
-import MemberCardModal from '../../../components/MemberCardModal';
-
 // ─── Loading Animation (uses shared circle loader) ──────────────────────
 
 import { LoadingScreen as FeedLoadingAnimation } from '../../../components/LoadingWave';
-import MissionsTab from './MissionsTab';
 import { useMissions, useMissionDetail, missionProgress, isOverdue, type Mission } from '../../../lib/missions';
 import SuggestedTaskChips from '../../../components/SuggestedTaskChips';
 import { getEmptyStateSuggestions, type EmptyStateSuggestionAction } from '../../../lib/emptyStateSuggestions';
 import { classifyRunFreshness, runEmptyStateModel, freshnessRank } from '../../../lib/runFreshnessCore';
-import NeedsAttentionPanel from '../../../components/feed/NeedsAttentionPanel';
 import { buildNeedsAttention } from '../../../lib/accountabilityNagCore';
 import { SEED_EVENT_NAME, buildComposerSeedDetail } from '../../../lib/chatComposerSeedCore';
 import { isAwaitingConnectedAgentResultMetadata } from '../../../lib/officeOpsBoard';
 import { bucketRunForHistory } from '../../../lib/runHistoryFilterCore';
+
+// Feed's first interaction is reading and organizing work. Editors, detail
+// modals, activity telemetry, and the full Missions surface are deferred so
+// the tab shell does not download every secondary dashboard before it paints.
+const loadCircleStoriesRail = () => import('../../../components/stories/CircleStoriesRail.web');
+const loadAgentTopBar = () => import('./kanban/AgentTopBar');
+const loadOrchestraPanel = () => import('./kanban/OrchestraPanel');
+const loadGoalsPanel = () => import('./kanban/GoalsPanel');
+const loadActivityFeedPanel = () => import('./kanban/ActivityFeedPanel');
+const loadKanbanBoard = () => import('./kanban/KanbanBoard');
+
+const CircleStoriesRail = React.lazy(loadCircleStoriesRail);
+const AgentTopBar = React.lazy(loadAgentTopBar);
+const OrchestraPanel = React.lazy(loadOrchestraPanel);
+const GoalsPanel = React.lazy(loadGoalsPanel);
+const ActivityFeedPanel = React.lazy(loadActivityFeedPanel);
+const KanbanBoard = React.lazy(loadKanbanBoard);
+const TaskDetailModal = React.lazy(() => import('./kanban/TaskDetailModal'));
+const GoalDetailModal = React.lazy(() => import('./kanban/GoalDetailModal'));
+const TaskCalendar = React.lazy(() => import('../../../components/TaskCalendar'));
+const TaskTable = React.lazy(() => import('../../../components/TaskTable'));
+const MemberCardModal = React.lazy(() => import('../../../components/MemberCardModal'));
+const MissionsTab = React.lazy(() => import('./MissionsTab'));
+const NeedsAttentionPanel = React.lazy(() => import('../../../components/feed/NeedsAttentionPanel'));
+
+/** Warm only the panels used by the default Feed layouts. Editors, alternate
+ * task projections, Missions, and detail modals remain interaction-deferred. */
+export function preloadFeedDashboardPanels(): Promise<void> {
+  return Promise.allSettled([
+    loadCircleStoriesRail(),
+    loadAgentTopBar(),
+    loadOrchestraPanel(),
+    loadGoalsPanel(),
+    loadActivityFeedPanel(),
+    loadKanbanBoard(),
+  ]).then(() => undefined);
+}
+
+function DeferredFeedPanel({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <React.Suspense
+      fallback={(
+        <View
+          style={deferredPanelStyles.shell}
+          accessibilityRole="progressbar"
+          accessibilityLabel={`Loading ${label}`}
+        >
+          <View style={deferredPanelStyles.bar} />
+          <Text style={deferredPanelStyles.text}>Loading {label}…</Text>
+        </View>
+      )}
+    >
+      {children}
+    </React.Suspense>
+  );
+}
+
+const deferredPanelStyles = StyleSheet.create({
+  shell: {
+    minHeight: 120,
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    backgroundColor: '#0d1117',
+  },
+  bar: {
+    width: 72,
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: '#6366f1',
+    opacity: 0.75,
+  },
+  text: {
+    color: '#8b949e',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+});
 
 // ─── Task Search Bar (rendered in FeedTab, right under OrchestraPanel) ────
 
@@ -831,16 +896,18 @@ function FeedOverviewBar({
         </View>
       </View>
       {expanded && (
-        <View style={s.overviewDetails}>
-          <AgentTopBar agents={agents} />
-          {Platform.OS === 'web' && <CircleStoriesRail circleId={circleId} accentColor="#6366f1" />}
-          <OrchestraPanel
-            agents={agents}
-            automationStats={automationStats}
-            taskStats={taskStats}
-            missionStats={missionStats}
-          />
-        </View>
+        <DeferredFeedPanel label="workspace status">
+          <View style={s.overviewDetails}>
+            <AgentTopBar agents={agents} />
+            {Platform.OS === 'web' && <CircleStoriesRail circleId={circleId} accentColor="#6366f1" />}
+            <OrchestraPanel
+              agents={agents}
+              automationStats={automationStats}
+              taskStats={taskStats}
+              missionStats={missionStats}
+            />
+          </View>
+        </DeferredFeedPanel>
       )}
     </View>
   );
@@ -875,7 +942,11 @@ function FeedAttentionDisclosure({
         </View>
         <Text style={s.attentionChevron}>{expanded ? '−' : '+'}</Text>
       </Pressable>
-      {expanded && <NeedsAttentionPanel items={items} onAction={onAction} />}
+      {expanded && (
+        <DeferredFeedPanel label="items needing attention">
+          <NeedsAttentionPanel items={items} onAction={onAction} />
+        </DeferredFeedPanel>
+      )}
     </View>
   );
 }
@@ -1356,40 +1427,46 @@ export default function FeedTab({
         <View style={s.mobileBody}>
           {mobileTab === 'missions' && (
             <View style={s.mobilePanel}>
-              <MissionsTab
-                circleId={circleId}
-                accentColor={accentColor || '#6366f1'}
-                missions={allMissions}
-                loading={missionsLoading}
-                onRefresh={refreshMissions}
-              />
+              <DeferredFeedPanel label="missions">
+                <MissionsTab
+                  circleId={circleId}
+                  accentColor={accentColor || '#6366f1'}
+                  missions={allMissions}
+                  loading={missionsLoading}
+                  onRefresh={refreshMissions}
+                />
+              </DeferredFeedPanel>
             </View>
           )}
           {mobileTab === 'goals' && (
             <View style={s.mobilePanel}>
-              <GoalsPanel
-                goals={goalsHook.goals}
-                agents={agents}
-                filteredGoalId={filteredGoalId}
-                onFilter={setFilteredGoalId}
-                onCreateGoal={goalsHook.createGoal}
-                onUpdateGoal={goalsHook.updateGoal}
-                onDeleteGoal={goalsHook.deleteGoal}
-                onCreateTask={async (fields) => { await kanban.createTask(fields); }}
-                onEditGoal={setEditGoal}
-                plans={plansHook.plans}
-                onOpenMarketplace={handleOpenMarketplace}
-                circleId={circleId}
-                onCreatePlan={plansHook.createPlan}
-                onUpdatePlan={plansHook.updatePlan}
-                onDeletePlan={plansHook.deletePlan}
-                onGenerateTasks={plansHook.generateTasksFromPlan}
-              />
+              <DeferredFeedPanel label="goals">
+                <GoalsPanel
+                  goals={goalsHook.goals}
+                  agents={agents}
+                  filteredGoalId={filteredGoalId}
+                  onFilter={setFilteredGoalId}
+                  onCreateGoal={goalsHook.createGoal}
+                  onUpdateGoal={goalsHook.updateGoal}
+                  onDeleteGoal={goalsHook.deleteGoal}
+                  onCreateTask={async (fields) => { await kanban.createTask(fields); }}
+                  onEditGoal={setEditGoal}
+                  plans={plansHook.plans}
+                  onOpenMarketplace={handleOpenMarketplace}
+                  circleId={circleId}
+                  onCreatePlan={plansHook.createPlan}
+                  onUpdatePlan={plansHook.updatePlan}
+                  onDeletePlan={plansHook.deletePlan}
+                  onGenerateTasks={plansHook.generateTasksFromPlan}
+                />
+              </DeferredFeedPanel>
             </View>
           )}
           {mobileTab === 'activity' && (
             <View style={s.mobilePanel}>
-              <ActivityFeedPanel circleId={circleId} agents={agents} onOpenOfficeRun={onOpenOfficeRun} />
+              <DeferredFeedPanel label="recent activity">
+                <ActivityFeedPanel circleId={circleId} agents={agents} onOpenOfficeRun={onOpenOfficeRun} />
+              </DeferredFeedPanel>
             </View>
           )}
           {mobileTab === 'agents' && (
@@ -1415,52 +1492,54 @@ export default function FeedTab({
           {mobileTab === 'board' && (
             <>
               <KanbanViewToggle mode={kanbanViewMode} onChange={setKanbanViewMode} />
-              {kanbanViewMode === 'calendar' ? (
-                <TaskCalendar
-                  tasks={Object.values(visibleTasksByColumn).flat()}
-                  accentColor={accentColor || '#6366f1'}
-                  isFiltered={hasActiveFilters}
-                  onClearFilters={clearAllTaskFilters}
-                  onSelectTask={(id) => {
-                    const t = Object.values(visibleTasksByColumn).flat().find(x => x.id === id);
-                    if (t) setDetailTask(t);
-                  }}
-                />
-              ) : kanbanViewMode === 'table' ? (
-                <TaskTable
-                  tasks={Object.values(visibleTasksByColumn).flat()}
-                  accentColor={accentColor || '#6366f1'}
-                  isFiltered={hasActiveFilters}
-                  onClearFilters={clearAllTaskFilters}
-                  onSelectTask={(id) => {
-                    const t = Object.values(visibleTasksByColumn).flat().find(x => x.id === id);
-                    if (t) setDetailTask(t);
-                  }}
-                  onStatusChange={(taskId, nextStatus) => kanban.moveTask(taskId, nextStatus)}
-                />
-              ) : (
-            <KanbanBoard
-              columns={COLUMNS}
-              tasksByColumn={visibleTasksByColumn}
-              agents={agents}
-              goals={goalsHook.goals}
-              isFiltered={hasActiveFilters}
-              onClearFilters={clearAllTaskFilters}
-              onCardPress={setDetailTask}
-              onMoveTask={kanban.moveTask}
-              onQuickAdd={(status, title) => kanban.createTask({
-                title,
-                status,
-                goal_id: filteredGoalId || undefined,
-                room_id: filterRoom || undefined,
-              })}
-              onAddTask={(status) => { setCreateInColumn(status); setShowCreate(true); }}
-              onBatchMove={handleBatchMove}
-              onBatchAssignRoom={handleBatchAssignRoom}
-              roomOptions={roomOptions}
-              onArchiveDone={handleArchiveDone}
-            />
-              )}
+              <DeferredFeedPanel label={`${kanbanViewMode} tasks`}>
+                {kanbanViewMode === 'calendar' ? (
+                  <TaskCalendar
+                    tasks={Object.values(visibleTasksByColumn).flat()}
+                    accentColor={accentColor || '#6366f1'}
+                    isFiltered={hasActiveFilters}
+                    onClearFilters={clearAllTaskFilters}
+                    onSelectTask={(id) => {
+                      const t = Object.values(visibleTasksByColumn).flat().find(x => x.id === id);
+                      if (t) setDetailTask(t);
+                    }}
+                  />
+                ) : kanbanViewMode === 'table' ? (
+                  <TaskTable
+                    tasks={Object.values(visibleTasksByColumn).flat()}
+                    accentColor={accentColor || '#6366f1'}
+                    isFiltered={hasActiveFilters}
+                    onClearFilters={clearAllTaskFilters}
+                    onSelectTask={(id) => {
+                      const t = Object.values(visibleTasksByColumn).flat().find(x => x.id === id);
+                      if (t) setDetailTask(t);
+                    }}
+                    onStatusChange={(taskId, nextStatus) => kanban.moveTask(taskId, nextStatus)}
+                  />
+                ) : (
+                  <KanbanBoard
+                    columns={COLUMNS}
+                    tasksByColumn={visibleTasksByColumn}
+                    agents={agents}
+                    goals={goalsHook.goals}
+                    isFiltered={hasActiveFilters}
+                    onClearFilters={clearAllTaskFilters}
+                    onCardPress={setDetailTask}
+                    onMoveTask={kanban.moveTask}
+                    onQuickAdd={(status, title) => kanban.createTask({
+                      title,
+                      status,
+                      goal_id: filteredGoalId || undefined,
+                      room_id: filterRoom || undefined,
+                    })}
+                    onAddTask={(status) => { setCreateInColumn(status); setShowCreate(true); }}
+                    onBatchMove={handleBatchMove}
+                    onBatchAssignRoom={handleBatchAssignRoom}
+                    roomOptions={roomOptions}
+                    onArchiveDone={handleArchiveDone}
+                  />
+                )}
+              </DeferredFeedPanel>
             </>
           )}
         </View>
@@ -1533,27 +1612,31 @@ export default function FeedTab({
         )}
 
         {detailTask && (
-      <TaskDetailModal
-        task={detailTask}
-        kanban={kanban}
-        agents={sortedAgentsForAssign}
-        goals={goalsHook.goals}
-        circleId={circleId}
-        onOpenMarketplace={handleOpenMarketplace}
-        onOpenOfficeRun={onOpenOfficeRun}
-        onClose={() => setDetailTask(null)}
-      />
+          <DeferredFeedPanel label="task details">
+            <TaskDetailModal
+              task={detailTask}
+              kanban={kanban}
+              agents={sortedAgentsForAssign}
+              goals={goalsHook.goals}
+              circleId={circleId}
+              onOpenMarketplace={handleOpenMarketplace}
+              onOpenOfficeRun={onOpenOfficeRun}
+              onClose={() => setDetailTask(null)}
+            />
+          </DeferredFeedPanel>
         )}
 
         {editGoal && (
-          <GoalDetailModal
-            goal={editGoal}
-            agents={agents}
-            onClose={() => setEditGoal(null)}
-            onUpdate={(goalId, fields) => { goalsHook.updateGoal(goalId, fields); setEditGoal(null); }}
-            onDelete={(goalId) => { goalsHook.deleteGoal(goalId); setEditGoal(null); }}
-            onCreateTask={async (fields) => { await kanban.createTask(fields); }}
-          />
+          <DeferredFeedPanel label="goal details">
+            <GoalDetailModal
+              goal={editGoal}
+              agents={agents}
+              onClose={() => setEditGoal(null)}
+              onUpdate={(goalId, fields) => { goalsHook.updateGoal(goalId, fields); setEditGoal(null); }}
+              onDelete={(goalId) => { goalsHook.deleteGoal(goalId); setEditGoal(null); }}
+              onCreateTask={async (fields) => { await kanban.createTask(fields); }}
+            />
+          </DeferredFeedPanel>
         )}
 
         {showCreate && (
@@ -1600,34 +1683,38 @@ export default function FeedTab({
       />
 
       <View style={s.body}>
-        <GoalsPanel
-          goals={goalsHook.goals}
-          agents={agents}
-          filteredGoalId={filteredGoalId}
-          onFilter={setFilteredGoalId}
-          onCreateGoal={goalsHook.createGoal}
-          onUpdateGoal={goalsHook.updateGoal}
-          onDeleteGoal={goalsHook.deleteGoal}
-          onCreateTask={async (fields) => { await kanban.createTask(fields); }}
-          onEditGoal={setEditGoal}
-          plans={plansHook.plans}
-          circleId={circleId}
-          onCreatePlan={plansHook.createPlan}
-          onUpdatePlan={plansHook.updatePlan}
-          onDeletePlan={plansHook.deletePlan}
-          onGenerateTasks={plansHook.generateTasksFromPlan}
-          onOpenMarketplace={handleOpenMarketplace}
-        />
+        <DeferredFeedPanel label="goals">
+          <GoalsPanel
+            goals={goalsHook.goals}
+            agents={agents}
+            filteredGoalId={filteredGoalId}
+            onFilter={setFilteredGoalId}
+            onCreateGoal={goalsHook.createGoal}
+            onUpdateGoal={goalsHook.updateGoal}
+            onDeleteGoal={goalsHook.deleteGoal}
+            onCreateTask={async (fields) => { await kanban.createTask(fields); }}
+            onEditGoal={setEditGoal}
+            plans={plansHook.plans}
+            circleId={circleId}
+            onCreatePlan={plansHook.createPlan}
+            onUpdatePlan={plansHook.updatePlan}
+            onDeletePlan={plansHook.deletePlan}
+            onGenerateTasks={plansHook.generateTasksFromPlan}
+            onOpenMarketplace={handleOpenMarketplace}
+          />
+        </DeferredFeedPanel>
 
         {/* Center panel: Missions only (full height) */}
         <View style={ct.wrapper}>
-          <MissionsTab
-            circleId={circleId}
-            accentColor={accentColor || '#6366f1'}
-            missions={allMissions}
-            loading={missionsLoading}
-            onRefresh={refreshMissions}
-          />
+          <DeferredFeedPanel label="missions">
+            <MissionsTab
+              circleId={circleId}
+              accentColor={accentColor || '#6366f1'}
+              missions={allMissions}
+              loading={missionsLoading}
+              onRefresh={refreshMissions}
+            />
+          </DeferredFeedPanel>
         </View>
 
         <View style={{ flex: 1, flexDirection: 'column', minWidth: 0 }}>
@@ -1661,52 +1748,54 @@ export default function FeedTab({
             </Pressable>
           )}
           <KanbanViewToggle mode={kanbanViewMode} onChange={setKanbanViewMode} />
-          {kanbanViewMode === 'calendar' ? (
-            <TaskCalendar
-              tasks={Object.values(visibleTasksByColumn).flat()}
-              accentColor={accentColor || '#6366f1'}
-              isFiltered={hasActiveFilters}
-              onClearFilters={clearAllTaskFilters}
-              onSelectTask={(id) => {
-                const t = Object.values(visibleTasksByColumn).flat().find(x => x.id === id);
-                if (t) setDetailTask(t);
-              }}
-            />
-          ) : kanbanViewMode === 'table' ? (
-            <TaskTable
-              tasks={Object.values(visibleTasksByColumn).flat()}
-              accentColor={accentColor || '#6366f1'}
-              isFiltered={hasActiveFilters}
-              onClearFilters={clearAllTaskFilters}
-              onSelectTask={(id) => {
-                const t = Object.values(visibleTasksByColumn).flat().find(x => x.id === id);
-                if (t) setDetailTask(t);
-              }}
-              onStatusChange={(taskId, nextStatus) => kanban.moveTask(taskId, nextStatus)}
-            />
-          ) : (
-            <KanbanBoard
-              columns={COLUMNS}
-              tasksByColumn={visibleTasksByColumn}
-              agents={agents}
-              goals={goalsHook.goals}
-              isFiltered={hasActiveFilters}
-              onClearFilters={clearAllTaskFilters}
-              onCardPress={setDetailTask}
-              onMoveTask={kanban.moveTask}
-              onQuickAdd={(status, title) => kanban.createTask({
-                title,
-                status,
-                goal_id: filteredGoalId || undefined,
-                room_id: filterRoom || undefined,
-              })}
-              onAddTask={(status) => { setCreateInColumn(status); setShowCreate(true); }}
-              onBatchMove={handleBatchMove}
-              onBatchAssignRoom={handleBatchAssignRoom}
-              roomOptions={roomOptions}
-              onArchiveDone={handleArchiveDone}
-            />
-          )}
+          <DeferredFeedPanel label={`${kanbanViewMode} tasks`}>
+            {kanbanViewMode === 'calendar' ? (
+              <TaskCalendar
+                tasks={Object.values(visibleTasksByColumn).flat()}
+                accentColor={accentColor || '#6366f1'}
+                isFiltered={hasActiveFilters}
+                onClearFilters={clearAllTaskFilters}
+                onSelectTask={(id) => {
+                  const t = Object.values(visibleTasksByColumn).flat().find(x => x.id === id);
+                  if (t) setDetailTask(t);
+                }}
+              />
+            ) : kanbanViewMode === 'table' ? (
+              <TaskTable
+                tasks={Object.values(visibleTasksByColumn).flat()}
+                accentColor={accentColor || '#6366f1'}
+                isFiltered={hasActiveFilters}
+                onClearFilters={clearAllTaskFilters}
+                onSelectTask={(id) => {
+                  const t = Object.values(visibleTasksByColumn).flat().find(x => x.id === id);
+                  if (t) setDetailTask(t);
+                }}
+                onStatusChange={(taskId, nextStatus) => kanban.moveTask(taskId, nextStatus)}
+              />
+            ) : (
+              <KanbanBoard
+                columns={COLUMNS}
+                tasksByColumn={visibleTasksByColumn}
+                agents={agents}
+                goals={goalsHook.goals}
+                isFiltered={hasActiveFilters}
+                onClearFilters={clearAllTaskFilters}
+                onCardPress={setDetailTask}
+                onMoveTask={kanban.moveTask}
+                onQuickAdd={(status, title) => kanban.createTask({
+                  title,
+                  status,
+                  goal_id: filteredGoalId || undefined,
+                  room_id: filterRoom || undefined,
+                })}
+                onAddTask={(status) => { setCreateInColumn(status); setShowCreate(true); }}
+                onBatchMove={handleBatchMove}
+                onBatchAssignRoom={handleBatchAssignRoom}
+                roomOptions={roomOptions}
+                onArchiveDone={handleArchiveDone}
+              />
+            )}
+          </DeferredFeedPanel>
         </View>
       </View>
 
@@ -1753,7 +1842,9 @@ export default function FeedTab({
           </ScrollView>
           <View style={s.activityDrawerBody}>
             {desktopLowerTab === 'activity' ? (
-              <ActivityFeedPanel circleId={circleId} agents={agents} onOpenOfficeRun={onOpenOfficeRun} />
+              <DeferredFeedPanel label="recent activity">
+                <ActivityFeedPanel circleId={circleId} agents={agents} onOpenOfficeRun={onOpenOfficeRun} />
+              </DeferredFeedPanel>
             ) : desktopLowerTab === 'agents' ? (
               <View style={{ flex: 1, paddingTop: 10 }}>
                 <ActiveRunsWidget circleId={circleId} />
@@ -1778,34 +1869,43 @@ export default function FeedTab({
       </View>
 
       {detailTask && (
-        <TaskDetailModal
-          task={detailTask}
-          kanban={kanban}
-          agents={sortedAgentsForAssign}
-          goals={goalsHook.goals}
-          circleId={circleId}
-          onOpenMarketplace={handleOpenMarketplace}
-          onOpenOfficeRun={onOpenOfficeRun}
-          onClose={() => setDetailTask(null)}
-        />
+        <DeferredFeedPanel label="task details">
+          <TaskDetailModal
+            task={detailTask}
+            kanban={kanban}
+            agents={sortedAgentsForAssign}
+            goals={goalsHook.goals}
+            circleId={circleId}
+            onOpenMarketplace={handleOpenMarketplace}
+            onOpenOfficeRun={onOpenOfficeRun}
+            onClose={() => setDetailTask(null)}
+          />
+        </DeferredFeedPanel>
       )}
 
       {editGoal && (
-        <GoalDetailModal
-          goal={editGoal}
-          agents={agents}
-          onClose={() => setEditGoal(null)}
-          onUpdate={(goalId, fields) => { goalsHook.updateGoal(goalId, fields); setEditGoal(null); }}
-          onDelete={(goalId) => { goalsHook.deleteGoal(goalId); setEditGoal(null); }}
-          onCreateTask={async (fields) => { await kanban.createTask(fields); }}
-        />
+        <DeferredFeedPanel label="goal details">
+          <GoalDetailModal
+            goal={editGoal}
+            agents={agents}
+            onClose={() => setEditGoal(null)}
+            onUpdate={(goalId, fields) => { goalsHook.updateGoal(goalId, fields); setEditGoal(null); }}
+            onDelete={(goalId) => { goalsHook.deleteGoal(goalId); setEditGoal(null); }}
+            onCreateTask={async (fields) => { await kanban.createTask(fields); }}
+          />
+        </DeferredFeedPanel>
       )}
 
       {/* Member-card modal — driven by the @user deeplink consumer above. */}
-      <MemberCardModal
-        userId={memberCardUserId}
-        onClose={() => setMemberCardUserId(null)}
-      />
+      {memberCardUserId && (
+        <DeferredFeedPanel label="member details">
+          <MemberCardModal
+            circleId={circleId}
+            userId={memberCardUserId}
+            onClose={() => setMemberCardUserId(null)}
+          />
+        </DeferredFeedPanel>
+      )}
 
       {showCreate && (
         <CreateTaskModal

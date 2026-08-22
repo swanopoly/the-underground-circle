@@ -101,7 +101,7 @@ const sourceChecks: Array<[boolean, string]> = [
   [chatSource.includes('const resumedSourceUserMessage = resumedSourceMessageId'), 'continuation reuses the exact source user row'],
   [chatSource.includes('const userMessage = resumedSourceUserMessage || addUserMessage('), 'continuation does not create a synthetic user bubble'],
   [chatSource.includes('if (!resumedSourceUserMessage) {\n      setInput(\'\');'), 'continuation preserves an unrelated composer draft'],
-  [chatSource.includes('if (!resumedSourceUserMessage) {\n      if (profileRef.current)'), 'continuation does not double-count profile or activity telemetry'],
+  [/if \(!resumedSourceUserMessage\) \{[\s\S]{0,220}updateCurrentUserChatProfile\([\s\S]{0,220}recordChatActivity\(circleId, 'message'\)/.test(chatSource), 'continuation does not double-count profile or activity telemetry'],
   [chatSource.includes('await requirePersistedUserMessageId()'), 'tool-capable OpenSwan waits for durable source lineage before dispatch'],
   [!chatSource.includes('For each approved tool call that has not already executed'), 'technical retry prose is removed'],
   [!chatSource.includes('Approval ${q.id.slice(0, 8)}'), 'approval ids never enter Chat prompt prose'],

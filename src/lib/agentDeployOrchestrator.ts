@@ -49,6 +49,7 @@ import {
   MAX_CONCURRENT_DEPLOY_LAUNCHES,
 } from './agentDeployPolicy';
 import {
+  buildSubagentBridgeTask,
   getSubagentCapability,
   listSubagentCapabilities,
   type SubagentCapabilityProfile,
@@ -257,7 +258,10 @@ async function deployViaBridge(
   // fail-closed to claude-* upstream for the bridge channel, so the explicit
   // per-agent model rides through to the CLI session here too.
   const tasks: SpawnTask[] = specs.map((spec) => ({
-    task: spec.prompt || `Deployed agent ${spec.index + 1} task.`,
+    task: buildSubagentBridgeTask(
+      spec.role,
+      spec.prompt || `Deployed agent ${spec.index + 1} task.`,
+    ),
     model: spec.model,
   }));
 

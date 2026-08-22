@@ -68,7 +68,23 @@ check(memoryService.includes('Connect or verify a Google AI key in Marketplace')
 const capabilities = source('src/lib/modelCapabilities.ts');
 check(capabilities.includes("supabase.functions.invoke('llm-proxy'"), 'webpage capability uses llm-proxy');
 check(!capabilities.includes('generateImageGemini'), 'image capability has no direct Gemini fallback');
-check(capabilities.includes("OpenSwan's image-generation tool"), 'image capability names a safe recovery path');
+check(!capabilities.includes('generateImageHF'), 'legacy image capability has no direct browser provider path');
+check(!capabilities.includes('URL.createObjectURL'), 'legacy image capability cannot create transient browser image URLs');
+check(
+  capabilities.includes('This legacy capability') && capabilities.includes('must stay network-free'),
+  'legacy image capability explicitly delegates the provider boundary',
+);
+
+const generatedImages = source('src/lib/generatedChatImages.ts');
+check(generatedImages.includes("const FUNCTION_NAME = 'image-generate'"), 'Chat images use the canonical Edge function');
+check(
+  generatedImages.includes('getSupabaseClientForAccessToken'),
+  'Chat image generation uses a captured-token client',
+);
+check(
+  generatedImages.includes("action: 'generate'") && generatedImages.includes('sourceMessageId: args.sourceMessageId'),
+  'Chat image generation binds durable source-message authority',
+);
 
 const trending = source('src/lib/trendingContent.ts');
 check(trending.includes("await import('./llmProviders')"), 'trend enrichment lazy-loads the canonical provider client');

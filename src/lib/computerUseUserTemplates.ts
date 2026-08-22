@@ -12,7 +12,8 @@
 
 import { Platform } from 'react-native';
 
-const STORAGE_KEY = 'uc_saved_cu_templates_v1';
+const LEGACY_OWNERLESS_STORAGE_KEY = 'uc_saved_cu_templates_v1';
+const STORAGE_KEY_PREFIX = 'uc_saved_cu_templates_v2:';
 const MAX_TEMPLATES = 30;
 
 export interface SavedTemplate {
@@ -22,10 +23,24 @@ export interface SavedTemplate {
   createdAt: string;
 }
 
-export function loadSavedTemplates(): SavedTemplate[] {
+function storageKeyForUser(userId: string | null | undefined): string | null {
+  const normalized = typeof userId === 'string' ? userId.trim().toLowerCase() : '';
+  return normalized && normalized.length <= 200
+    ? `${STORAGE_KEY_PREFIX}${encodeURIComponent(normalized)}`
+    : null;
+}
+
+function retireOwnerlessTemplates(): void {
+  try { window.localStorage.removeItem(LEGACY_OWNERLESS_STORAGE_KEY); } catch {}
+}
+
+export function loadSavedTemplates(userId?: string | null): SavedTemplate[] {
   if (Platform.OS !== 'web' || typeof window === 'undefined') return [];
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    retireOwnerlessTemplates();
+    const storageKey = storageKeyForUser(userId);
+    if (!storageKey) return [];
+    const raw = window.localStorage.getItem(storageKey);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -35,13 +50,19 @@ export function loadSavedTemplates(): SavedTemplate[] {
   }
 }
 
-export function saveTemplate(task: string): { saved: boolean; alreadyExisted?: boolean } {
+export function saveTemplate(
+  task: string,
+  userId?: string | null,
+): { saved: boolean; alreadyExisted?: boolean } {
   const cleaned = task.trim();
   if (!cleaned || Platform.OS !== 'web' || typeof window === 'undefined') {
     return { saved: false };
   }
   try {
-    const existing = loadSavedTemplates();
+    retireOwnerlessTemplates();
+    const storageKey = storageKeyForUser(userId);
+    if (!storageKey) return { saved: false };
+    const existing = loadSavedTemplates(userId);
     // Dedupe case-insensitively.
     const match = existing.find((t) => t.task.toLowerCase() === cleaned.toLowerCase());
     if (match) return { saved: false, alreadyExisted: true };
@@ -52,18 +73,21 @@ export function saveTemplate(task: string): { saved: boolean; alreadyExisted?: b
       createdAt: new Date().toISOString(),
     };
     const next = [fresh, ...existing].slice(0, MAX_TEMPLATES);
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    window.localStorage.setItem(storageKey, JSON.stringify(next));
     return { saved: true };
   } catch {
     return { saved: false };
   }
 }
 
-export function deleteSavedTemplate(id: string): void {
+export function deleteSavedTemplate(id: string, userId?: string | null): void {
   if (Platform.OS !== 'web' || typeof window === 'undefined') return;
   try {
-    const existing = loadSavedTemplates();
+    retireOwnerlessTemplates();
+    const storageKey = storageKeyForUser(userId);
+    if (!storageKey) return;
+    const existing = loadSavedTemplates(userId);
     const next = existing.filter((t) => t.id !== id);
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    window.localStorage.setItem(storageKey, JSON.stringify(next));
   } catch {}
 }

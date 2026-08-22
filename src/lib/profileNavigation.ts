@@ -9,6 +9,19 @@ type CircleProfileContext = {
 
 let lastProfileCircleContext: CircleProfileContext | null = null;
 
+/**
+ * Retire device-local navigation context when authentication authority ends.
+ * The in-memory copy matters on web: removing localStorage alone would still
+ * let the next account inherit the previous account's Circle until reload.
+ */
+export function clearLastProfileCircleForLogout(): void {
+  lastProfileCircleContext = null;
+  if (Platform.OS !== 'web') return;
+  try {
+    localStorage.removeItem(LAST_PROFILE_CIRCLE_KEY);
+  } catch {}
+}
+
 export function rememberLastProfileCircle(circleId: string | null | undefined, circleName?: string | null): void {
   if (!circleId) return;
   lastProfileCircleContext = { circleId, circleName: circleName || null };

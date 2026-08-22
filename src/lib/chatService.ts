@@ -8,6 +8,7 @@ import {
   normalizePersistedMessageReactions,
   type PersistedMessageReactions,
 } from './chatMessageShape';
+import { indexSafeProfiles, loadSafeCircleProfiles } from './safeProfiles';
 
 export interface ChatCurrentUserProfile {
   id: string;
@@ -62,9 +63,9 @@ export interface PersistedChatMessageCursor {
 }
 
 const MESSAGE_SELECT =
-  'id, circle_id, user_id, content, reply_to, created_at, is_bot, reactions, thread_id, user:profiles(username, display_name)';
+  'id, circle_id, user_id, content, reply_to, created_at, is_bot, reactions, thread_id';
 const FALLBACK_MESSAGE_SELECT =
-  'id, circle_id, user_id, content, reply_to, created_at, thread_id, user:profiles(username, display_name)';
+  'id, circle_id, user_id, content, reply_to, created_at, thread_id';
 
 function isColumnMissingError(error: { code?: string; message?: string } | null | undefined): boolean {
   return !!error && (
@@ -75,16 +76,22 @@ function isColumnMissingError(error: { code?: string; message?: string } | null 
 }
 
 async function attachReplyPreviews(
+  circleId: string,
   rows: PersistedChatMessageRow[],
   fallbackSchema = false,
 ): Promise<PersistedChatMessageRow[]> {
   const parentIds = Array.from(new Set(
     rows.map((row) => row.reply_to).filter((id): id is string => typeof id === 'string' && id.length > 0),
   )).slice(0, 50);
-  if (parentIds.length === 0) return rows;
-
-  const fullSelect = 'id, content, user_id, is_bot, user:profiles(username, display_name)';
-  const fallbackSelect = 'id, content, user_id, user:profiles(username, display_name)';
+  const fullSelect = 'id, content, user_id, is_bot';
+  const fallbackSelect = 'id, content, user_id';
+  if (parentIds.length === 0) {
+    const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+      circleId,
+      userIds: rows.map(row => row.user_id),
+    }));
+    return rows.map(row => ({ ...row, user: profileById.get(row.user_id) || null }));
+  }
   const initial = await (supabase
     .from('messages')
     .select(fallbackSchema ? fallbackSelect : fullSelect)
@@ -99,10 +106,19 @@ async function attachReplyPreviews(
   // Reply context is helpful but must never make the transcript unavailable.
   // RLS may also intentionally hide a parent; those rows simply keep null.
   if (error) return rows;
+  const parentRows = (data || []) as any[];
+  const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+    circleId,
+    userIds: [...rows.map(row => row.user_id), ...parentRows.map(row => row.user_id)],
+  }));
   const parents = new Map<string, PersistedChatMessageRow['reply']>(
-    ((data || []) as any[]).map((row) => [row.id, row as PersistedChatMessageRow['reply']]),
+    parentRows.map((row) => [row.id, { ...row, user: profileById.get(row.user_id) || null } as PersistedChatMessageRow['reply']]),
   );
-  return rows.map((row) => ({ ...row, reply: row.reply_to ? parents.get(row.reply_to) || null : null }));
+  return rows.map((row) => ({
+    ...row,
+    user: profileById.get(row.user_id) || null,
+    reply: row.reply_to ? parents.get(row.reply_to) || null : null,
+  }));
 }
 
 /**
@@ -182,10 +198,10 @@ export async function getCurrentChatUserProfile(): Promise<ChatCurrentUserProfil
 export async function loadCircleChatMembers(circleId: string): Promise<CircleChatMemberOption[]> {
   const { data } = await supabase
     .from('circle_members')
-    .select('user:profiles(id, username, display_name)')
+    .select('user_id')
     .eq('circle_id', circleId);
 
-  return (data || []).map((row: any) => row.user).filter(Boolean);
+  return loadSafeCircleProfiles({ circleId, userIds: (data || []).map((row: any) => row.user_id) });
 }
 
 export async function loadThreadMessages(
@@ -211,7 +227,7 @@ export async function loadThreadMessages(
 
   if (!error) {
     const rows = (data || []) as PersistedChatMessageRow[];
-    const hydrated = await attachReplyPreviews(rows, false);
+    const hydrated = await attachReplyPreviews(circleId, rows, false);
     return { rows: hydrated.reverse(), usedFallback: false };
   }
 
@@ -229,7 +245,7 @@ export async function loadThreadMessages(
   const { data: fallback, error: fallbackError } = await fallbackQuery;
   if (fallbackError) throw fallbackError;
   const rows = (fallback || []) as PersistedChatMessageRow[];
-  const hydrated = await attachReplyPreviews(rows, true);
+  const hydrated = await attachReplyPreviews(circleId, rows, true);
   return { rows: hydrated.reverse(), usedFallback: true };
 }
 
@@ -279,11 +295,11 @@ export async function loadOlderThreadMessages(
     const { data: fbData, error: fbErr } = await fb;
     if (fbErr) throw fbErr;
     const rows = (fbData || []) as PersistedChatMessageRow[];
-    const hydrated = await attachReplyPreviews(rows, true);
+    const hydrated = await attachReplyPreviews(circleId, rows, true);
     return { rows: hydrated.reverse(), hasMore: rows.length >= limit };
   }
   const rows = (data || []) as PersistedChatMessageRow[];
-  const hydrated = await attachReplyPreviews(rows, false);
+  const hydrated = await attachReplyPreviews(circleId, rows, false);
   return { rows: hydrated.reverse(), hasMore: rows.length >= limit };
 }
 
@@ -322,9 +338,9 @@ export async function loadNewerThreadMessages(
     if (threadId) fb = fb.eq('thread_id', threadId);
     const { data: fbData, error: fbErr } = await fb;
     if (fbErr) throw fbErr;
-    return { rows: await attachReplyPreviews((fbData || []) as PersistedChatMessageRow[], true) };
+    return { rows: await attachReplyPreviews(circleId, (fbData || []) as PersistedChatMessageRow[], true) };
   }
-  return { rows: await attachReplyPreviews((data || []) as PersistedChatMessageRow[], false) };
+  return { rows: await attachReplyPreviews(circleId, (data || []) as PersistedChatMessageRow[], false) };
 }
 
 export async function persistChatMessage(input: PersistChatMessageInput): Promise<string | null> {

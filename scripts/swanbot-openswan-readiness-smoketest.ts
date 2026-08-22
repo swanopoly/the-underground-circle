@@ -138,6 +138,14 @@ function commandSegments(scriptName: string): string[] {
 }
 
 function assertExecutesOnce(scriptName: string, smokeName: string): void {
+  const command = packageScripts[scriptName];
+  if (scriptName === 'smoke:all' && command?.includes('scripts/run-smokes.mjs')) {
+    assert(
+      typeof packageScripts[smokeName] === 'string' && packageScripts[smokeName].length > 0,
+      `${scriptName} should dynamically discover registered ${smokeName}`,
+    );
+    return;
+  }
   const expected = `npm run ${smokeName}`;
   const count = commandSegments(scriptName).filter(segment => segment === expected).length;
   assert(

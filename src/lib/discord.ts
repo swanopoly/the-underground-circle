@@ -3,11 +3,52 @@
  * Connects Discord servers to circles, fetches channels and recent messages.
  */
 
-import { supabase } from './supabase';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import { getSupabaseClientForAccessToken, supabase } from './supabase';
 import { deleteLocalSecret, readLocalSecret, writeLocalSecret } from './localSecrets';
+import { safeGetSession, safeGetUserForAccessToken } from './authSession';
 
 const DISCORD_API = 'https://discord.com/api/v10';
 const DISCORD_TOKEN_PLACEHOLDER = '__local_secret__';
+const DISCORD_TOKEN_NAMESPACE = 'discord_bot_token_v2';
+
+type DiscordAuthority = Readonly<{
+  userId: string;
+  accessToken: string;
+  client: SupabaseClient;
+}>;
+
+function discordTokenSecretId(userId: string, circleId: string): string {
+  return `${encodeURIComponent(userId)}:${encodeURIComponent(circleId)}`;
+}
+
+async function captureDiscordAuthority(): Promise<DiscordAuthority | null> {
+  const { value: session } = await safeGetSession();
+  const accessToken = session?.access_token || '';
+  const userId = session?.user?.id || '';
+  if (!accessToken || !userId) return null;
+  const { value: verifiedUser } = await safeGetUserForAccessToken(accessToken);
+  if (verifiedUser?.id !== userId) return null;
+  return {
+    userId,
+    accessToken,
+    client: getSupabaseClientForAccessToken(accessToken),
+  };
+}
+
+async function discordAuthorityIsCurrent(authority: DiscordAuthority): Promise<boolean> {
+  const { value: session } = await safeGetSession();
+  return session?.user?.id === authority.userId;
+}
+
+function emptyDiscordConfig(): CircleDiscordConfig {
+  return {
+    guild_id: null,
+    bot_token: null,
+    webhook_url: null,
+    connected_at: null,
+  };
+}
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -89,6 +130,8 @@ export async function connectDiscordServer(
   botToken: string
 ): Promise<{ success: boolean; guild?: DiscordGuildInfo; error?: string }> {
   try {
+    const authority = await captureDiscordAuthority();
+    if (!authority || !circleId) throw new Error('An authenticated Circle is required.');
     // Validate the bot token by fetching bot user
     const botUser = await discordFetch('/users/@me', botToken);
     if (!botUser?.id) throw new Error('Invalid bot token');
@@ -102,19 +145,26 @@ export async function connectDiscordServer(
     // Use the first guild (or let user pick if multiple)
     const guild = guilds[0];
 
-    await writeLocalSecret('discord_bot_token', circleId, botToken);
-
     // Save to circle
-    const { error } = await supabase.from('circles').update({
+    const { data: receipt, error } = await authority.client.from('circles').update({
       discord_guild_id: guild.id,
       discord_bot_token: DISCORD_TOKEN_PLACEHOLDER,
       discord_connected_at: new Date().toISOString(),
-    }).eq('id', circleId);
+    }).eq('id', circleId).select('id').maybeSingle();
 
-    if (error) throw new Error(error.message);
+    if (error || !receipt) throw new Error(error?.message || 'Circle access could not be verified.');
+    await deleteLocalSecret('discord_bot_token', circleId);
+    await writeLocalSecret(
+      DISCORD_TOKEN_NAMESPACE,
+      discordTokenSecretId(authority.userId, circleId),
+      botToken,
+    );
 
     // Sync channels
-    await syncChannels(circleId, guild.id, botToken);
+    await syncChannels(circleId, guild.id, botToken, authority.client);
+    if (!(await discordAuthorityIsCurrent(authority))) {
+      throw new Error('The signed-in account changed before Discord setup completed.');
+    }
 
     return {
       success: true,
@@ -131,20 +181,29 @@ export async function connectDiscordWithGuildId(
   guildId: string
 ): Promise<{ success: boolean; guild?: DiscordGuildInfo; error?: string }> {
   try {
+    const authority = await captureDiscordAuthority();
+    if (!authority || !circleId) throw new Error('An authenticated Circle is required.');
     const guild = await discordFetch(`/guilds/${guildId}?with_counts=true`, botToken);
     if (!guild?.id) throw new Error('Could not find server. Make sure the bot is invited.');
 
-    await writeLocalSecret('discord_bot_token', circleId, botToken);
-
-    const { error } = await supabase.from('circles').update({
+    const { data: receipt, error } = await authority.client.from('circles').update({
       discord_guild_id: guild.id,
       discord_bot_token: DISCORD_TOKEN_PLACEHOLDER,
       discord_connected_at: new Date().toISOString(),
-    }).eq('id', circleId);
+    }).eq('id', circleId).select('id').maybeSingle();
 
-    if (error) throw new Error(error.message);
+    if (error || !receipt) throw new Error(error?.message || 'Circle access could not be verified.');
+    await deleteLocalSecret('discord_bot_token', circleId);
+    await writeLocalSecret(
+      DISCORD_TOKEN_NAMESPACE,
+      discordTokenSecretId(authority.userId, circleId),
+      botToken,
+    );
 
-    await syncChannels(circleId, guild.id, botToken);
+    await syncChannels(circleId, guild.id, botToken, authority.client);
+    if (!(await discordAuthorityIsCurrent(authority))) {
+      throw new Error('The signed-in account changed before Discord setup completed.');
+    }
 
     return {
       success: true,
@@ -161,17 +220,27 @@ export async function connectDiscordWithGuildId(
 }
 
 export async function disconnectDiscord(circleId: string): Promise<void> {
-  await supabase.from('circles').update({
+  const authority = await captureDiscordAuthority();
+  if (!authority || !circleId) throw new Error('An authenticated Circle is required.');
+  const { data: receipt, error } = await authority.client.from('circles').update({
     discord_guild_id: null,
     discord_bot_token: null,
     discord_webhook_url: null,
     discord_connected_at: null,
-  }).eq('id', circleId);
+  }).eq('id', circleId).select('id').maybeSingle();
+
+  if (error || !receipt) {
+    throw new Error(error?.message || 'Circle access could not be verified.');
+  }
 
   await deleteLocalSecret('discord_bot_token', circleId);
+  await deleteLocalSecret(
+    DISCORD_TOKEN_NAMESPACE,
+    discordTokenSecretId(authority.userId, circleId),
+  );
 
   // Remove cached channels
-  await supabase.from('discord_channels').delete().eq('circle_id', circleId);
+  await authority.client.from('discord_channels').delete().eq('circle_id', circleId);
 }
 
 // ─── Channels ────────────────────────────────────────────────────────
@@ -179,7 +248,8 @@ export async function disconnectDiscord(circleId: string): Promise<void> {
 export async function syncChannels(
   circleId: string,
   guildId: string,
-  botToken: string
+  botToken: string,
+  client: SupabaseClient = supabase,
 ): Promise<DiscordChannel[]> {
   const channels: any[] = await discordFetch(`/guilds/${guildId}/channels`, botToken);
 
@@ -187,10 +257,10 @@ export async function syncChannels(
   const relevant = channels.filter(c => [0, 2, 4, 5, 13, 15].includes(c.type));
 
   // Clear old + insert new
-  await supabase.from('discord_channels').delete().eq('circle_id', circleId);
+  await client.from('discord_channels').delete().eq('circle_id', circleId);
 
   if (relevant.length > 0) {
-    await supabase.from('discord_channels').insert(
+    await client.from('discord_channels').insert(
       relevant.map(c => ({
         id: c.id,
         circle_id: circleId,
@@ -293,30 +363,69 @@ export function getGuildIconUrl(guildId: string, iconHash: string | null): strin
 // ─── Circle Discord Config ──────────────────────────────────────────
 
 export async function getCircleDiscordConfig(circleId: string): Promise<CircleDiscordConfig> {
-  const { data } = await supabase
+  const authority = await captureDiscordAuthority();
+  if (!authority || !circleId) return emptyDiscordConfig();
+
+  const { data, error } = await authority.client
     .from('circles')
-    .select('discord_guild_id, discord_bot_token, discord_webhook_url, discord_connected_at')
+    .select('discord_guild_id, discord_connected_at')
     .eq('id', circleId)
-    .single();
+    .maybeSingle();
 
-  const localToken = await readLocalSecret('discord_bot_token', circleId);
-  const remoteToken = data?.discord_bot_token || null;
-  const legacyRemoteToken = remoteToken && remoteToken !== DISCORD_TOKEN_PLACEHOLDER ? remoteToken : null;
+  if (error || !data) return emptyDiscordConfig();
 
-  if (!localToken && legacyRemoteToken) {
-    await writeLocalSecret('discord_bot_token', circleId, legacyRemoteToken);
-    await supabase
-      .from('circles')
-      .update({ discord_bot_token: DISCORD_TOKEN_PLACEHOLDER })
-      .eq('id', circleId);
+  // A Circle-only device key is not attributable after an account switch.
+  // Delete it unread and use the exact account+Circle namespace instead.
+  await deleteLocalSecret('discord_bot_token', circleId);
+  let localToken = await readLocalSecret(
+    DISCORD_TOKEN_NAMESPACE,
+    discordTokenSecretId(authority.userId, circleId),
+  );
+  let webhookUrl: string | null = null;
+
+  // Legacy database secrets are creator-only. This bounded RPC lets the
+  // creator migrate a retained token to their encrypted device store without
+  // ever granting raw secret columns to ordinary Circle members.
+  if (!localToken) {
+    const { data: capabilityRow, error: capabilityError } = await authority.client
+      .rpc('get_circle_capability_secrets_v1', { p_circle_id: circleId })
+      .maybeSingle();
+    if (!capabilityError && capabilityRow) {
+      const capabilitySecrets = capabilityRow as {
+        discord_bot_token?: unknown;
+        discord_webhook_url?: unknown;
+      };
+      const remoteToken = typeof capabilitySecrets.discord_bot_token === 'string'
+        ? capabilitySecrets.discord_bot_token
+        : null;
+      const legacyRemoteToken = remoteToken && remoteToken !== DISCORD_TOKEN_PLACEHOLDER
+        ? remoteToken
+        : null;
+      webhookUrl = typeof capabilitySecrets.discord_webhook_url === 'string'
+        ? capabilitySecrets.discord_webhook_url
+        : null;
+      if (legacyRemoteToken) {
+        localToken = legacyRemoteToken;
+        await writeLocalSecret(
+          DISCORD_TOKEN_NAMESPACE,
+          discordTokenSecretId(authority.userId, circleId),
+          legacyRemoteToken,
+        );
+        await authority.client
+          .from('circles')
+          .update({ discord_bot_token: DISCORD_TOKEN_PLACEHOLDER })
+          .eq('id', circleId)
+          .eq('created_by', authority.userId);
+      }
+    }
   }
 
-  const hydratedToken = localToken || legacyRemoteToken || null;
+  if (!(await discordAuthorityIsCurrent(authority))) return emptyDiscordConfig();
 
   return {
     guild_id: data?.discord_guild_id || null,
-    bot_token: hydratedToken,
-    webhook_url: data?.discord_webhook_url || null,
+    bot_token: localToken || null,
+    webhook_url: webhookUrl,
     connected_at: data?.discord_connected_at || null,
   };
 }

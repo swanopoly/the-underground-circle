@@ -8,6 +8,14 @@ const read = (path: string) => readFileSync(`${root}/${path}`, 'utf8');
 const memory = read('src/screens/circles/tabs/office/AgentMemoryPanel.tsx');
 const runs = read('src/screens/circles/tabs/office/AgentRunsPanel.tsx');
 const spirit = read('src/screens/circles/tabs/office/AgentSpiritPanel.tsx');
+const panel = read('src/screens/circles/tabs/office/AgentPanel.tsx');
+const shell = read('src/screens/circles/tabs/office/AgentPanelShell.tsx');
+const overview = read('src/screens/circles/tabs/office/AgentOverviewPanel.tsx');
+const activity = read('src/screens/circles/tabs/office/AgentActivityPanel.tsx');
+const gateway = read('src/screens/circles/tabs/office/AgentGatewayPanels.tsx');
+const terminal = read('src/screens/circles/tabs/office/AgentTerminalPanels.tsx');
+const evolution = read('src/screens/circles/tabs/office/AgentEvolutionPanel.tsx');
+const customize = read('src/screens/circles/tabs/office/AgentCustomizePanel.tsx');
 const sessionTagInput = read('src/components/SessionTagInput.tsx');
 const sessionTagsHelp = read('src/components/SessionTagsHelp.tsx');
 
@@ -94,7 +102,7 @@ check(
 );
 
 const customProfilesStart = spirit.indexOf('{(customProfiles.length > 0 || Boolean(profileActionStatus))');
-const customProfilesEnd = spirit.indexOf('{SPIRIT_CATEGORIES.map', customProfilesStart);
+const customProfilesEnd = spirit.indexOf('<View testID="agent-soul-library"', customProfilesStart);
 assert.ok(customProfilesStart >= 0 && customProfilesEnd > customProfilesStart, 'custom profile section is discoverable');
 const customProfilesSection = spirit.slice(customProfilesStart, customProfilesEnd);
 assertions += 1;
@@ -153,12 +161,21 @@ check(
   (spirit.match(/^\s*<ScrollView\b/gmu) || []).length === 1
     && spirit.includes('<ScrollView\n                  ref={personalityScrollRef}\n                  horizontal')
     && spirit.includes('accessibilityLabel={`${showSoul ? \'Hide\' : \'Show\'} system prompt`}')
-    && spirit.includes('roleActionBtn: {\n    minHeight: 44')
-    && spirit.includes('roleSaveBtn: {\n    minHeight: 44')
     && spirit.includes('roleDismissBtn: {\n    minHeight: 44')
     && spirit.includes('opsActionBtn: {\n    minHeight: 44')
     && spirit.includes('opsSaveBtn: {\n    minHeight: 44'),
-  'Spirit leaves vertical scrolling to the shell and preserves accessible 44px artifact actions',
+  'Spirit leaves vertical scrolling to the shell and preserves accessible 44px operations-artifact actions',
+);
+
+check(
+  !spirit.includes('ROLE READINESS')
+    && !spirit.includes('spiritCareerProfiles')
+    && !spirit.includes('handleGenerateRoleArtifact')
+    && !spirit.includes('handleSaveRoleArtifact')
+    && !spirit.includes('Draft a resume artifact in this Spirit')
+    && !spirit.includes('Draft interview preparation in this Spirit')
+    && !spirit.includes('WORK SAMPLE'),
+  'Spirit omits the complete Role Readiness summary, source-link, and career-artifact surface',
 );
 
 check(
@@ -191,16 +208,51 @@ check(
   spirit.includes("accessibilityLabel={showSpirits ? 'Hide Spirit settings' : 'Show Spirit settings'}")
     && spirit.includes('accessibilityState={{ expanded: showSpirits }}')
     && spirit.includes("accessibilityLabel={`${editingSpirit ? 'Stop editing' : 'Edit'} ${s.name} Spirit settings`}")
-    && spirit.includes('accessibilityLabel="Draft a resume artifact in this Spirit"')
-    && spirit.includes('accessibilityLabel="Draft interview preparation in this Spirit"')
     && spirit.includes('accessibilityLabel="Draft an operations plan in this Spirit"')
-    && spirit.includes('accessibilityLabel="Dismiss role artifact"')
     && spirit.includes('accessibilityLabel="Dismiss operations artifact"')
     && spirit.includes('accessibilityLabel={`Save ${s.name} settings as a custom Spirit profile`}')
     && spirit.includes('accessibilityLabel="Loading verified Spirit identity"')
     && spirit.includes("spiritRow: {\n    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',\n    minHeight: 44")
     && spirit.includes("spiritClearBtn: {\n    minHeight: 44"),
-  'Spirit disclosure, editing, artifact, loading, and custom-profile actions expose named stateful 44px controls',
+  'Spirit disclosure, editing, operations-artifact, loading, and custom-profile actions expose named stateful 44px controls',
+);
+
+for (const [label, source] of [
+  ['Overview', overview],
+  ['Activity', activity],
+  ['OpenSwan and Schedules', gateway],
+  ['Terminal', terminal],
+  ['Memory', memory],
+  ['Runs', runs],
+  ['Spirit', spirit],
+  ['XP and Achievements', evolution],
+  ['Customize', customize],
+] as const) {
+  check(
+    !/borderRadius: [234]\b/.test(source) && !source.includes("fontWeight: '900'"),
+    `${label} uses the shared 6px-or-softer popup corner and type-weight language instead of legacy sharp/heavy controls`,
+  );
+}
+
+check(
+  shell.includes('style={styles.tabPanel}')
+    && shell.includes('tabPanel: {\n    gap: 16,')
+    && activity.includes('style={{ gap: 16, paddingBottom: 16 }}')
+    && gateway.includes('style={{ gap: 16, paddingBottom: 16 }}')
+    && !panel.includes('nativeID="section-agent-memory" style={{ paddingHorizontal: 8')
+    && !panel.includes('nativeID="section-agent-runs" style={{ paddingHorizontal: 8')
+    && !panel.includes('nativeID="section-agent-cron" style={{ paddingHorizontal: 8'),
+  'Every popup destination inherits one shell-owned horizontal inset and a stable 16px section rhythm',
+);
+
+check(
+  terminal.includes('disabled={cmdRunning || !cmdInput.trim()}')
+    && terminal.includes('accessibilityState={{ disabled: cmdRunning || !cmdInput.trim(), busy: cmdRunning }}')
+    && terminal.includes('accessibilityLabel="Running read-only diagnostic"')
+    && terminal.includes('accessibilityLabel="Loading verified terminal profile"')
+    && evolution.includes('accessibilityLiveRegion="polite"')
+    && evolution.includes('Loading verified progression…'),
+  'Terminal and progression expose consistent disabled and named loading states',
 );
 check(
   spirit.includes('const executionTruth = resolveOfficeAgentExecutionTruth(agent);')

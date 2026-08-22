@@ -419,7 +419,7 @@ const styles = StyleSheet.create({
   saveDot: {
     width: 6,
     height: 6,
-    borderRadius: 3,
+    borderRadius: 6,
   },
   saveLabel: {
     fontSize: 10,
@@ -505,7 +505,7 @@ const styles = StyleSheet.create({
   swatchCheck: {
     color: '#fff',
     fontSize: 14,
-    fontWeight: '900',
+    fontWeight: '700',
     textShadowColor: '#000',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,

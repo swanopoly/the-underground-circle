@@ -79,11 +79,10 @@ async function main() {
 
   {
     const pack = packFor('Debug the failing TypeScript build in src/lib/swanbot.ts and run typecheck after the fix');
-    assertEqual(pack.executionKind, 'run_build_discovery', 'coding: starts through build discovery');
-    assert(hasTarget(pack, 'codex'), 'coding: suggests Codex');
-    assert(hasTarget(pack, 'claude_code'), 'coding: suggests Claude Code');
-    assert(hasTarget(pack, 'cursor'), 'coding: suggests Cursor');
-    assertEqual(pack.allowParallelAgents, true, 'coding: allows parallel non-destructive agents');
+    assertEqual(pack.executionKind, 'run_openswan', 'coding: enters the canonical OpenSwan runtime');
+    assert(hasTarget(pack, 'openswan'), 'coding: suggests the canonical OpenSwan runtime');
+    assertEqual(pack.canDispatchToConnectedAgent, true, 'coding: remains eligible for runtime-owned delegation');
+    assertEqual(pack.allowParallelAgents, false, 'coding: does not infer parallel execution authority');
     assert(pack.acceptanceCriteria.length > 0, 'coding: carries acceptance criteria');
   }
 

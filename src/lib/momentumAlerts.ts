@@ -5,6 +5,7 @@ import React from 'react';
 import { supabase } from './supabase';
 import { getCurrentMultiplier, getNextMultiplier, PEAK_HOURS_SCHEDULE } from './peakHours';
 import { getXPForAction } from './gamification';
+import { indexSafeProfiles, loadSafeCircleProfiles } from './safeProfiles';
 
 export interface CircleMomentum {
   circleId: string;
@@ -111,11 +112,7 @@ class MomentumAlertsSystem {
 
     // Alert for major achievements by circle mates
     if (xpData.amount >= 100) { // Big XP gain
-      const { data: userData } = await supabase
-        .from('profiles')
-        .select('username, display_name')
-        .eq('id', xpData.user_id)
-        .single();
+      const [userData] = await loadSafeCircleProfiles({ circleId, userIds: [xpData.user_id] });
 
       const userName = userData?.display_name || userData?.username || 'Circle mate';
       
@@ -147,20 +144,20 @@ class MomentumAlertsSystem {
     
     const { data: recentCheckIns } = await supabase
       .from('check_ins')
-      .select(`
-        user_id,
-        created_at,
-        profiles!inner(username, display_name)
-      `)
+      .select('user_id, created_at')
       .eq('circle_id', circleId)
       .gte('created_at', twoHoursAgo.toISOString())
       .order('created_at', { ascending: false });
 
+    const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+      circleId,
+      userIds: (recentCheckIns || []).map(ci => ci.user_id),
+    }));
     const activeMembers = [...new Set((recentCheckIns || []).map(ci => ci.user_id))];
     
     const recentActivities: ActivityEvent[] = (recentCheckIns || []).map((ci: any) => ({
       userId: ci.user_id,
-      userName: ci.profiles?.display_name || ci.profiles?.username,
+      userName: profileById.get(ci.user_id)?.display_name || profileById.get(ci.user_id)?.username || 'Circle member',
       action: 'check_in',
       timestamp: new Date(ci.created_at),
       xpEarned: getXPForAction('check_in'),

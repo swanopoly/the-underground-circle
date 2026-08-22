@@ -130,13 +130,12 @@ export function parseBestOfNCommand(
     return { ok: false, error: `Missing task — what should the models race on? ${USAGE_TEXT}` };
   }
 
-  // Validate distinctness with a provider-less resolution pass, but return
-  // the RAW tokens: the caller re-runs resolveRaceModels with the live
-  // connected-provider set so `auto` gets real BYOK/OpenRouter bias (P12
-  // fix — resolving here with no providers made that re-resolution a dead
-  // condition and always raced `auto` on the platform key).
-  const distinct = resolveRaceModels(rawModels);
-  if (distinct.length < 2) {
+  // Only reject literal duplicates here. Alias resolution and dedupe require
+  // the caller's exact live Marketplace catalog: for example `auto,sonnet`
+  // may be two distinct connected providers even when a provider-less soul
+  // resolver would collapse them both to Claude.
+  const distinctRawModels = new Set(rawModels.map((model) => model.toLowerCase()));
+  if (distinctRawModels.size < 2) {
     return {
       ok: false,
       error: `Those entries resolve to the same model — pick at least 2 distinct models. ${USAGE_TEXT}`,

@@ -11,13 +11,15 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   View, Text, StyleSheet, ScrollView, Pressable, TextInput,
   Modal, Platform, useWindowDimensions, ActivityIndicator,
   Image, Alert, FlatList,
 } from 'react-native';
 import { LoadingScreen } from '../../../components/LoadingWave';
-import { supabase } from '../../../lib/supabase';
+import { getSupabaseClientForAccessToken, supabase } from '../../../lib/supabase';
+import { indexSafeProfiles, loadSafeCircleProfiles } from '../../../lib/safeProfiles';
 import { getSwanBotResponse as getAIResponse } from '../../../lib/swanbot';
 import { dispatchBridgeTask, spawnNewSession, wakeAndAssignTask } from '../../../lib/bridgeTaskDispatcher';
 import SpawnAgentPanel from '../../../components/SpawnAgentPanel';
@@ -73,6 +75,63 @@ const ROOM_STORAGE = {
   panelWidth: (roomId: string) => `uc_room_panel_w_${roomId}`,
 };
 
+const ROOM_FILE_BUCKET = 'room-files';
+const ROOM_FILE_REFERENCE_PREFIX = 'room-file:';
+const ROOM_FILE_SIGN_TTL_SECONDS = 15 * 60;
+const ROOM_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function roomFilePath(roomId: string, filename: string): string {
+  if (!ROOM_UUID_RE.test(roomId)) throw new Error('A persisted room id is required.');
+  const safeName = String(filename || 'file')
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+    .replace(/^\.+/, '')
+    .slice(0, 120) || 'file';
+  return `rooms/${roomId}/${Date.now()}_${safeName}`;
+}
+
+function validRoomFilePath(path: string): boolean {
+  const parts = path.split('/');
+  return parts.length === 3
+    && parts[0] === 'rooms'
+    && ROOM_UUID_RE.test(parts[1])
+    && parts[2].length > 0
+    && parts[2].length <= 180;
+}
+
+function roomFileReference(path: string): string {
+  if (!validRoomFilePath(path)) throw new Error('Invalid room file path.');
+  return `${ROOM_FILE_REFERENCE_PREFIX}${encodeURIComponent(path)}`;
+}
+
+function roomFilePathFromValue(value: unknown): string | null {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  if (!normalized) return null;
+  if (normalized.startsWith(ROOM_FILE_REFERENCE_PREFIX)) {
+    try {
+      const decoded = decodeURIComponent(normalized.slice(ROOM_FILE_REFERENCE_PREFIX.length));
+      return validRoomFilePath(decoded) ? decoded : null;
+    } catch {
+      return null;
+    }
+  }
+  try {
+    const configured = new URL(process.env.EXPO_PUBLIC_SUPABASE_URL || '');
+    const candidate = new URL(normalized);
+    if (candidate.origin !== configured.origin) return null;
+    const prefixes = [
+      `/storage/v1/object/public/${ROOM_FILE_BUCKET}/`,
+      `/storage/v1/object/sign/${ROOM_FILE_BUCKET}/`,
+      `/storage/v1/object/authenticated/${ROOM_FILE_BUCKET}/`,
+    ];
+    const prefix = prefixes.find(item => candidate.pathname.startsWith(item));
+    if (!prefix) return null;
+    const path = decodeURIComponent(candidate.pathname.slice(prefix.length));
+    return validRoomFilePath(path) ? path : null;
+  } catch {
+    return null;
+  }
+}
+
 function storageGet(key: string): string | null {
   try { return typeof localStorage !== 'undefined' ? localStorage.getItem(key) : null; } catch { return null; }
 }
@@ -109,8 +168,52 @@ interface RoomFile {
   created_at: string;
   updated_at: string;
   is_deleted: boolean;
+  /** Client-only private Storage path. Never render or persist a signed URL. */
+  storage_path?: string | null;
   /** Client-only marker: the current editor value differs from the saved row. */
   local_draft?: boolean;
+}
+
+async function hydratePrivateRoomFiles(
+  client: SupabaseClient,
+  rows: readonly RoomFile[],
+): Promise<RoomFile[]> {
+  const rowsByPath = new Map<string, number[]>();
+  rows.forEach((row, index) => {
+    const path = roomFilePathFromValue(row.storage_url)
+      || roomFilePathFromValue(row.content);
+    if (!path) return;
+    const indexes = rowsByPath.get(path) || [];
+    indexes.push(index);
+    rowsByPath.set(path, indexes);
+  });
+
+  const signedByPath = new Map<string, string>();
+  const paths = [...rowsByPath.keys()];
+  for (let offset = 0; offset < paths.length; offset += 20) {
+    const batch = paths.slice(offset, offset + 20);
+    const { data, error } = await client.storage
+      .from(ROOM_FILE_BUCKET)
+      .createSignedUrls(batch, ROOM_FILE_SIGN_TTL_SECONDS);
+    if (error) continue;
+    for (const item of data || []) {
+      if (item.path && item.signedUrl) signedByPath.set(item.path, item.signedUrl);
+    }
+  }
+
+  return rows.map((row) => {
+    const storagePath = roomFilePathFromValue(row.storage_url)
+      || roomFilePathFromValue(row.content);
+    if (!storagePath) return row;
+    const signedUrl = signedByPath.get(storagePath) || null;
+    const contentIsStorageReference = roomFilePathFromValue(row.content) === storagePath;
+    return {
+      ...row,
+      storage_path: storagePath,
+      storage_url: signedUrl,
+      content: contentIsStorageReference ? (signedUrl || '') : row.content,
+    };
+  });
 }
 
 interface RoomMessage {
@@ -1084,6 +1187,17 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
   room: Room; accentColor: string; isMobile: boolean;
   onClose: () => void; onDelete: () => void; onRoomUpdated: (r: Room) => void;
 }) {
+  const {
+    exactAuthority: roomAuthority,
+    isExactAuthorityCurrent: isRoomAuthorityCurrent,
+  } = useExactRunHistoryAuthority(room.circle_id);
+  const roomClient = useMemo(
+    () => roomAuthority
+      ? getSupabaseClientForAccessToken(roomAuthority.accessToken)
+      : null,
+    [roomAuthority?.accessToken],
+  );
+  const fileLoadGenerationRef = useRef(0);
   const [files, setFiles] = useState<RoomFile[]>([]);
   const [openTabs, setOpenTabs] = useState<RoomFile[]>([]);
   const savedTabIdsRef = React.useRef<string[]>(JSON.parse(storageGet(ROOM_STORAGE.openTabs(room.id)) || '[]'));
@@ -1311,14 +1425,35 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
 
   // Load files
   const loadFiles = useCallback(async () => {
-    const { data } = await supabase.from('room_files')
+    const authority = roomAuthority;
+    const client = roomClient;
+    const generation = fileLoadGenerationRef.current + 1;
+    fileLoadGenerationRef.current = generation;
+    if (!authority || !client || !isRoomAuthorityCurrent(authority)) {
+      setFiles([]);
+      setOpenTabs([]);
+      return;
+    }
+    const { data, error } = await client.from('room_files')
       .select('*').eq('room_id', room.id).eq('is_deleted', false)
       .order('folder').order('name');
-    if (data) {
-      setFiles(data);
+    if (error || !data) {
+      if (generation === fileLoadGenerationRef.current && isRoomAuthorityCurrent(authority)) {
+        setFiles([]);
+        setOpenTabs([]);
+      }
+      return;
+    }
+    const hydrated = await hydratePrivateRoomFiles(client, data as RoomFile[]);
+    if (
+      generation !== fileLoadGenerationRef.current
+      || !isRoomAuthorityCurrent(authority)
+    ) return;
+    if (hydrated) {
+      setFiles(hydrated);
       // Sync open tabs with latest file content from DB (e.g. after agent writes)
       setOpenTabs(prev => prev.map(tab => {
-        const updated = data.find((f: any) => f.id === tab.id);
+        const updated = hydrated.find((f: any) => f.id === tab.id);
         if (updated && updated.content !== tab.content) {
           // Only update if user hasn't made local edits
           setEditingContent(ec => {
@@ -1330,7 +1465,7 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
         return tab;
       }));
       // Seed initial tab from legacy content if no files yet
-      if (data.length === 0 && room.content) {
+      if (hydrated.length === 0 && room.content) {
         const seed: RoomFile = {
           id: 'legacy', room_id: room.id,
           name: room.file_path || room.name,
@@ -1341,15 +1476,19 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
         };
         setFiles([seed]);
         if (!hasOpenedRef.current) { hasOpenedRef.current = true; openFile(seed); }
-      } else if (data.length > 0 && !hasOpenedRef.current) {
+      } else if (hydrated.length > 0 && !hasOpenedRef.current) {
         hasOpenedRef.current = true;
-        openFile(data[0]);
+        openFile(hydrated[0]);
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [room.id]); // room.content/file_path/language intentionally excluded — only re-fetch on room switch
+  }, [isRoomAuthorityCurrent, room.id, roomAuthority, roomClient]); // room content fields intentionally excluded
 
   useEffect(() => { loadFiles(); }, [loadFiles]);
+
+  useEffect(() => () => {
+    fileLoadGenerationRef.current += 1;
+  }, [room.id, roomAuthority?.userId, roomAuthority?.circleId]);
 
   // Realtime file updates
   useEffect(() => {
@@ -1391,35 +1530,77 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
   };
 
   const uploadFile = async (file: File) => {
-    const { data:{ user } } = await supabase.auth.getUser();
+    const authority = roomAuthority;
+    const client = roomClient;
+    if (!authority || !client || !isRoomAuthorityCurrent(authority)) {
+      Alert.alert('Upload unavailable', 'Your Circle access changed. Reopen the room and try again.');
+      return;
+    }
+    let storagePath: string | null = null;
+    try {
     const isText = file.type.startsWith('text/') || file.name.match(/\.(ts|tsx|js|jsx|py|sql|json|md|txt|csv|html|css|yaml|yml|sh|rs|go)$/i);
     let content = '';
     let storageUrl: string | null = null;
+    let displayStorageUrl: string | null = null;
 
     if (isText) {
       content = await file.text();
     } else {
-      // Upload binary to Supabase Storage
-      const path = `rooms/${room.id}/${Date.now()}_${file.name}`;
-      const { data: uploaded } = await supabase.storage.from('room-files').upload(path, file);
-      if (uploaded) {
-        const { data: url } = supabase.storage.from('room-files').getPublicUrl(path);
-        storageUrl = url.publicUrl;
-        content = storageUrl; // store URL as content for images
+      storagePath = roomFilePath(room.id, file.name);
+      const { error: uploadError } = await client.storage
+        .from(ROOM_FILE_BUCKET)
+        .upload(storagePath, file, { contentType: file.type || undefined });
+      if (uploadError) throw uploadError;
+      if (!isRoomAuthorityCurrent(authority)) {
+        await client.storage.from(ROOM_FILE_BUCKET).remove([storagePath]);
+        return;
       }
+      const { data: signed, error: signError } = await client.storage
+        .from(ROOM_FILE_BUCKET)
+        .createSignedUrl(storagePath, ROOM_FILE_SIGN_TTL_SECONDS);
+      if (signError || !signed?.signedUrl) {
+        await client.storage.from(ROOM_FILE_BUCKET).remove([storagePath]);
+        throw signError || new Error('The private upload could not be signed.');
+      }
+      displayStorageUrl = signed.signedUrl;
+      storageUrl = roomFileReference(storagePath);
+      content = storageUrl;
     }
 
     const ft = detectFileType(file.name, 'plaintext');
-    const { data, error } = await supabase.from('room_files').insert({
+    if (!isRoomAuthorityCurrent(authority)) {
+      if (storagePath) await client.storage.from(ROOM_FILE_BUCKET).remove([storagePath]);
+      return;
+    }
+    const { data, error } = await client.from('room_files').insert({
       room_id: room.id, name: file.name, folder: '/',
       file_type: ft, content, storage_url: storageUrl,
       mime_type: file.type, size_bytes: file.size,
-      created_by: user?.id || null,
+      created_by: authority.userId,
     }).select().single();
 
-    if (!error && data) {
-      setFiles(p => [...p, data]);
-      openFile(data);
+    if (error || !data) {
+      if (storagePath) await client.storage.from(ROOM_FILE_BUCKET).remove([storagePath]);
+      throw error || new Error('The room file row was not created.');
+    }
+    if (isRoomAuthorityCurrent(authority)) {
+      const displayed: RoomFile = {
+        ...(data as RoomFile),
+        storage_path: storagePath,
+        storage_url: displayStorageUrl,
+        content: storagePath ? (displayStorageUrl || '') : content,
+      };
+      setFiles(p => [...p, displayed]);
+      openFile(displayed);
+    }
+    } catch (error) {
+      if (storagePath) {
+        await client.storage.from(ROOM_FILE_BUCKET).remove([storagePath]).catch(() => undefined);
+      }
+      Alert.alert(
+        'Upload failed',
+        error instanceof Error ? error.message : 'The private room file could not be uploaded.',
+      );
     }
   };
 
@@ -1470,7 +1651,25 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
         ]));
     if (!ok) return;
     if (file.id !== 'legacy') {
-      await supabase.from('room_files').delete().eq('id', file.id);
+      const authority = roomAuthority;
+      const client = roomClient;
+      if (!authority || !client || !isRoomAuthorityCurrent(authority)) return;
+      const { data: deleted, error } = await client.from('room_files')
+        .delete()
+        .eq('id', file.id)
+        .eq('room_id', room.id)
+        .select('id')
+        .maybeSingle();
+      if (error || !deleted || !isRoomAuthorityCurrent(authority)) {
+        Alert.alert('Delete failed', error?.message || 'The file was not removed.');
+        return;
+      }
+      const storagePath = file.storage_path
+        || roomFilePathFromValue(file.storage_url)
+        || roomFilePathFromValue(file.content);
+      if (storagePath) {
+        await client.storage.from(ROOM_FILE_BUCKET).remove([storagePath]);
+      }
     }
     setFiles(p => p.filter(f => f.id !== file.id));
     closeTab(file.id);
@@ -1819,11 +2018,11 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
             {/* Panel content */}
             {rightPanel === 'chat'        && <ChatPanel roomId={room.id} accentColor={accentColor} circleId={room.circle_id} activeFile={activeFileForAgent} githubRepoFullName={ghRepo?.full_name || null} onSubmitToGitHub={() => setGithubSubmitOpen(true)} />}
             {rightPanel === 'apis'        && <APIsPanel room={room} accentColor={accentColor} />}
-            {rightPanel === 'secrets'     && <SecretsPanel roomId={room.id} accentColor={accentColor} />}
+            {rightPanel === 'secrets'     && <SecretsPanel roomId={room.id} circleId={room.circle_id} accentColor={accentColor} />}
             {rightPanel === 'usage'       && <UsagePanel roomId={room.id} accentColor={accentColor} />}
             {rightPanel === 'sessions'    && <SessionsPanel roomId={room.id} roomName={room.name} accentColor={accentColor} />}
             {rightPanel === 'services'    && <ServicesPanel roomId={room.id} accentColor={accentColor} />}
-            {rightPanel === 'permissions' && <PermissionsPanel roomId={room.id} accentColor={accentColor} />}
+            {rightPanel === 'permissions' && <PermissionsPanel roomId={room.id} circleId={room.circle_id} accentColor={accentColor} />}
             {rightPanel === 'tasks'       && <TasksPanel roomId={room.id} accentColor={accentColor} />}
             {rightPanel === 'playground'  && <PlaygroundPanel roomId={room.id} accentColor={accentColor} activeFile={activeTab} circleId={room.circle_id} />}
             {rightPanel === 'github' && <GitHubPanel circleId={room.circle_id} accentColor={accentColor}
@@ -1883,11 +2082,11 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
           </ArrowScrollView>
           {rightPanel === 'chat'        && <ChatPanel roomId={room.id} accentColor={accentColor} circleId={room.circle_id} activeFile={activeFileForAgent} githubRepoFullName={ghRepo?.full_name || null} onSubmitToGitHub={() => setGithubSubmitOpen(true)} />}
           {rightPanel === 'apis'        && <APIsPanel room={room} accentColor={accentColor} />}
-          {rightPanel === 'secrets'     && <SecretsPanel roomId={room.id} accentColor={accentColor} />}
+          {rightPanel === 'secrets'     && <SecretsPanel roomId={room.id} circleId={room.circle_id} accentColor={accentColor} />}
           {rightPanel === 'usage'       && <UsagePanel roomId={room.id} accentColor={accentColor} />}
           {rightPanel === 'sessions'    && <SessionsPanel roomId={room.id} roomName={room.name} accentColor={accentColor} />}
           {rightPanel === 'services'    && <ServicesPanel roomId={room.id} accentColor={accentColor} />}
-          {rightPanel === 'permissions' && <PermissionsPanel roomId={room.id} accentColor={accentColor} />}
+          {rightPanel === 'permissions' && <PermissionsPanel roomId={room.id} circleId={room.circle_id} accentColor={accentColor} />}
           {rightPanel === 'tasks'       && <TasksPanel roomId={room.id} accentColor={accentColor} />}
             {rightPanel === 'playground'  && <PlaygroundPanel roomId={room.id} accentColor={accentColor} activeFile={activeTab} circleId={room.circle_id} />}
           {rightPanel === 'github' && <GitHubPanel circleId={room.circle_id} accentColor={accentColor}
@@ -2389,14 +2588,18 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile, githubRepoFullNa
   useEffect(() => {
     if (!circleId) return;
     supabase.from('circle_members')
-      .select('user_id, profiles!user_id(display_name, username)')
+      .select('user_id')
       .eq('circle_id', circleId)
-      .then(({ data }) => {
+      .then(async ({ data }) => {
         if (!Array.isArray(data)) return;
-        setCircleMembers(data.map((row: any) => ({
-          user_id: row.user_id,
-          name: row.profiles?.display_name || row.profiles?.username || 'Member',
-          username: row.profiles?.username || '',
+        const profiles = await loadSafeCircleProfiles({
+          circleId,
+          userIds: data.map((row: any) => row.user_id),
+        });
+        setCircleMembers(profiles.map(profile => ({
+          user_id: profile.id,
+          name: profile.display_name || profile.username || 'Member',
+          username: profile.username || '',
         })));
       });
   }, [circleId]);
@@ -5676,8 +5879,8 @@ function APIsPanel({ room, accentColor }: { room: Room; accentColor: string }) {
 
   const API_DETAILS: Record<string, { endpoint: string; example: string }> = {
     storage: {
-      endpoint: `supabase.storage\n  .from('room-files')\n  .upload('{roomId}/file.txt', data)`,
-      example: `import { supabase } from './lib/supabase'\n\n// Upload a file\nconst { data, error } = await supabase\n  .storage.from('room-files')\n  .upload('${roomShort}/report.pdf', file)\n\n// Download\nconst { data: blob } = await supabase\n  .storage.from('room-files')\n  .download('${roomShort}/report.pdf')\n\n// List files\nconst { data: list } = await supabase\n  .storage.from('room-files')\n  .list('${roomShort}/')`,
+      endpoint: `supabase.storage\n  .from('room-files')\n  .upload('rooms/{roomId}/file.txt', data)`,
+      example: `import { supabase } from './lib/supabase'\n\nconst path = 'rooms/${room.id}/report.pdf'\nconst { error } = await supabase\n  .storage.from('room-files')\n  .upload(path, file)\n\n// The bucket is private. Create a short member-authorized URL\n// for display; never persist this signed URL in room_files.\nconst { data } = await supabase\n  .storage.from('room-files')\n  .createSignedUrl(path, 900)\nconsole.log(data?.signedUrl)`,
     },
     database: {
       endpoint: `supabase\n  .from('room_files')\n  .select('*')\n  .eq('room_id', roomId)`,
@@ -5692,8 +5895,8 @@ function APIsPanel({ room, accentColor }: { room: Room; accentColor: string }) {
       example: `import { supabase } from './lib/supabase'\n\n// Enqueue a task\nconst { data } = await supabase.functions\n  .invoke('room-queue', {\n    body: {\n      room_id: '${roomShort}',\n      task: 'generate_summary',\n      payload: {\n        file_ids: ['...'],\n        model: 'claude-haiku'\n      }\n    }\n  })\n\nconsole.log('Task ID:', data.task_id)`,
     },
     secrets: {
-      endpoint: `supabase\n  .from('room_secrets')\n  .upsert({ room_id, key, value })`,
-      example: `import { supabase } from './lib/supabase'\n\n// Store a secret\nawait supabase.from('room_secrets')\n  .upsert({\n    room_id: '${roomShort}',\n    key: 'OPENAI_KEY',\n    value: 'sk-...',\n    created_by: userId\n  }, { onConflict: 'room_id,key' })\n\n// Read (only accessible by room members)\nconst { data } = await supabase\n  .from('room_secrets')\n  .select('key')\n  .eq('room_id', '${roomShort}')`,
+      endpoint: `Use the Room Secrets panel\nfor owner-private values`,
+      example: `// Add and remove values through the Secrets panel.\n// Direct room_secrets reads are intentionally owner-private,\n// and the client never reads a saved secret value back.\n// Share a capability through the Vault instead of pasting\n// a personal API key into Room chat or source files.`,
     },
     containers: {
       endpoint: `supabase.functions\n  .invoke('room-exec', { body: config })`,
@@ -5706,7 +5909,7 @@ function APIsPanel({ room, accentColor }: { room: Room; accentColor: string }) {
     database: 'All database queries go through Supabase\'s PostgREST API with Row Level Security enforced. You can only access data in rooms you\'re a member of. Use the Supabase JS client for type-safe queries.',
     messaging: 'Realtime messaging uses Supabase Channels (WebSocket). Messages are ephemeral by default — they\'re broadcast to connected clients but not stored. Use the database for persistent messages.',
     queues: 'Tasks are processed by a Supabase Edge Function. Enqueue jobs with a payload, and agents or workers will process them asynchronously. Results are stored in the room_usage table.',
-    secrets: 'Secrets are stored in the room_secrets table with RLS protection. Only room members can read/write secrets. Values are stored server-side — the API panel never exposes raw secret values to the client.',
+    secrets: 'Secret rows are private to the exact user who created them and still require current Room Circle membership. Other members cannot list, overwrite, or delete them. Use the Vault for an explicitly approved shared capability.',
     containers: 'Code runs in isolated containers via a Supabase Edge Function. Specify a Docker image, mount files, and set a timeout. Output (stdout/stderr) is captured and returned. Containers are destroyed after execution.',
   };
 
@@ -5773,7 +5976,17 @@ function APIsPanel({ room, accentColor }: { room: Room; accentColor: string }) {
 
 // ─── Secrets Panel ────────────────────────────────────────────────────────────
 
-function SecretsPanel({ roomId, accentColor }: { roomId: string; accentColor: string }) {
+function SecretsPanel({ roomId, circleId, accentColor }: { roomId: string; circleId: string; accentColor: string }) {
+  const {
+    exactAuthority,
+    isExactAuthorityCurrent,
+  } = useExactRunHistoryAuthority(circleId);
+  const client = useMemo(
+    () => exactAuthority
+      ? getSupabaseClientForAccessToken(exactAuthority.accessToken)
+      : null,
+    [exactAuthority?.accessToken],
+  );
   // Only fetch key names + IDs — never pull secret values to the client
   const [secrets, setSecrets] = useState<Array<{ id: string; key: string }>>([]);
   const [key, setKey] = useState('');
@@ -5781,18 +5994,32 @@ function SecretsPanel({ roomId, accentColor }: { roomId: string; accentColor: st
   const [adding, setAdding] = useState(false);
 
   useEffect(() => {
-    supabase.from('room_secrets').select('id,key').eq('room_id', roomId)
-      .then(({ data }) => setSecrets((data || []).map(d => ({ id: d.id, key: d.key }))));
-  }, [roomId]);
+    const authority = exactAuthority;
+    if (!authority || !client || !isExactAuthorityCurrent(authority)) {
+      setSecrets([]);
+      return;
+    }
+    let retired = false;
+    client.from('room_secrets')
+      .select('id,key')
+      .eq('room_id', roomId)
+      .eq('created_by', authority.userId)
+      .then(({ data, error }) => {
+        if (retired || !isExactAuthorityCurrent(authority)) return;
+        setSecrets(error ? [] : (data || []).map(d => ({ id: d.id, key: d.key })));
+      });
+    return () => { retired = true; };
+  }, [client, exactAuthority, isExactAuthorityCurrent, roomId]);
 
   const addSecret = async () => {
     if (!key.trim() || !val.trim()) return;
+    const authority = exactAuthority;
+    if (!authority || !client || !isExactAuthorityCurrent(authority)) return;
     setAdding(true);
-    const { data:{ user } } = await supabase.auth.getUser();
-    const { data, error } = await supabase.from('room_secrets').upsert({
-      room_id: roomId, key: key.trim(), value: val.trim(), created_by: user?.id||null,
-    }, { onConflict:'room_id,key' }).select('id,key').single();
-    if (!error && data) {
+    const { data, error } = await client.from('room_secrets').upsert({
+      room_id: roomId, key: key.trim(), value: val.trim(), created_by: authority.userId,
+    }, { onConflict:'room_id,created_by,key' }).select('id,key').single();
+    if (!error && data && isExactAuthorityCurrent(authority)) {
       setSecrets(p => [...p.filter(s=>s.key!==data.key), { id: data.id, key: data.key }]);
       setKey(''); setVal('');
     }
@@ -5800,18 +6027,28 @@ function SecretsPanel({ roomId, accentColor }: { roomId: string; accentColor: st
   };
 
   const deleteSecret = async (id: string) => {
-    await supabase.from('room_secrets').delete().eq('id', id);
-    setSecrets(p => p.filter(s => s.id !== id));
+    const authority = exactAuthority;
+    if (!authority || !client || !isExactAuthorityCurrent(authority)) return;
+    const { data, error } = await client.from('room_secrets')
+      .delete()
+      .eq('id', id)
+      .eq('room_id', roomId)
+      .eq('created_by', authority.userId)
+      .select('id')
+      .maybeSingle();
+    if (!error && data && isExactAuthorityCurrent(authority)) {
+      setSecrets(p => p.filter(s => s.id !== id));
+    }
   };
 
   return (
     <View style={s.panel}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingRight: 14 }}>
         <Text style={s.panelTitle}>Secrets</Text>
-        <HelpTip color="#9e9e9e" text="Secrets are stored server-side with Row Level Security. Only room members can add, view key names, or delete secrets. Secret values are never sent to the browser after saving — they can only be read server-side by Edge Functions or agents." />
+        <HelpTip color="#9e9e9e" text="Secrets are owner-private rows protected by exact user and Room membership policies. Other Circle members cannot list, replace, or delete them. Values are not read back into this panel after saving." />
       </View>
       <Text style={{color:'#666',fontSize:11,padding:14,paddingTop:0,lineHeight:16}}>
-        Encrypted KV store for this room. Store API keys, tokens, credentials.
+        Owner-private secret store for this room. Values are never shared with other members.
       </Text>
       <ScrollView style={{flex:1}} contentContainerStyle={{padding:14,gap:8}}>
         {secrets.map(sec => (
@@ -6898,25 +7135,30 @@ interface RoomMember {
   permissions: Permission[];
 }
 
-function PermissionsPanel({ roomId, accentColor }: { roomId: string; accentColor: string }) {
+function PermissionsPanel({ roomId, circleId, accentColor }: { roomId: string; circleId: string; accentColor: string }) {
   const [members, setMembers] = useState<RoomMember[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Load circle members with their profile emails
-    supabase.from('circle_members').select('user_id, role, profiles(display_name, username)')
-      .then(({ data }) => {
+    // Load only this Room's exact Circle members and hydrate the bounded
+    // presentation projection separately from owner-private profiles.
+    supabase.from('circle_members').select('user_id, role').eq('circle_id', circleId)
+      .then(async ({ data }) => {
         if (data) {
+          const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+            circleId,
+            userIds: data.map((row: any) => row.user_id),
+          }));
           setMembers(data.map((m: any) => ({
             userId: m.user_id,
-            email: m.profiles?.display_name || m.profiles?.username || m.user_id.slice(0, 8) + '...',
+            email: profileById.get(m.user_id)?.display_name || profileById.get(m.user_id)?.username || m.user_id.slice(0, 8) + '...',
             role: m.role || 'member',
             permissions: ALL_PERMISSIONS,
           })));
         }
         setLoading(false);
       });
-  }, [roomId]);
+  }, [circleId, roomId]);
 
   const ROLE_COLOR: Record<string, string> = {
     owner: '#f59e0b', admin: '#6366f1', member: '#22c55e', viewer: '#6f6f6f',

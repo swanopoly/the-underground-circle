@@ -2014,6 +2014,31 @@ Deno.serve(async (req: Request) => {
       return errResponse(400, "circle_mismatch", "Automation does not belong to the requested circle");
     }
 
+    // Autonomous service calls use the automation creator's personal model
+    // credential below. The saved automation is prior intent, not permanent
+    // authority to keep decrypting or spending that key after the creator
+    // leaves this Circle. Fail before run creation, context reads, or key use.
+    if (isServiceCaller) {
+      const creatorId = typeof automation.created_by === "string"
+        ? automation.created_by
+        : "";
+      if (!creatorId) {
+        return errResponse(403, "automation_creator_unavailable", "Automation creator access is unavailable");
+      }
+      const { data: creatorMembership, error: creatorMembershipError } = await supabase
+        .from("circle_members")
+        .select("user_id")
+        .eq("circle_id", circleId)
+        .eq("user_id", creatorId)
+        .maybeSingle();
+      if (creatorMembershipError) {
+        return errResponse(503, "automation_authority_unavailable", "Automation creator access could not be verified");
+      }
+      if (!creatorMembership) {
+        return errResponse(403, "automation_creator_revoked", "Automation creator no longer has access to this Circle");
+      }
+    }
+
     if (
       authedUser
       && !canManuallyRunAutomation(authedUser.id, callerCircleRole, automation.created_by)

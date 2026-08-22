@@ -302,9 +302,9 @@ expectMatch(pickerSource, /\bid:\s*string\s*;/, 'picker row contract retains imm
 expectMatch(pickerSource, /onPick:\s*\(agent:\s*AssignPickerAgent\)/, 'picker callback returns the exact picked agent record');
 expectMatch(pickerSource, /key=\{agent\.id\}/, 'picker rows are keyed by immutable agent id');
 
-expectMatch(
-  targetsSource,
-  /const\s+DEFAULT_CHAT_AGENT_RUNTIME_ID\s*=\s*['"]default::blackswan['"][\s\S]{0,12000}agent\.id\s*===\s*DEFAULT_CHAT_AGENT_RUNTIME_ID/,
+check(
+  /(?:export\s+)?const\s+DEFAULT_CHAT_AGENT_RUNTIME_ID\s*=\s*['"]default::blackswan['"]/.test(targetsSource)
+    && /const\s+isDefault\s*=\s*provider\s*===\s*['"]openswan['"]\s*&&\s*agent\.id\s*===\s*DEFAULT_CHAT_AGENT_RUNTIME_ID/.test(targetsSource),
   'default detection checks only the exact canonical runtime id',
 );
 expectNoMatch(targetsSource, /agent\.id\.includes\(\s*['"]default['"]\s*\)/, 'default detection never uses an id substring');

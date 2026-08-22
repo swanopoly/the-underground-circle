@@ -168,7 +168,7 @@ async function createExactPresenceTransport(
   });
   await client.setAuth(authority.accessToken);
   const channel = client.channel(`circle-presence-${circleId}`, {
-    config: { presence: { key: authority.userId } },
+    config: { private: true, presence: { key: authority.userId } },
   });
 
   return {

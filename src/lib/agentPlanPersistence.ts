@@ -8,6 +8,13 @@ import type {
 } from './agentPlanMode';
 import { buildAgentPlanMetadataSummary } from './agentPlanMode';
 
+const PERSISTED_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function canonicalChatThreadId(value: unknown): string | null {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  return PERSISTED_UUID_RE.test(normalized) ? normalized : null;
+}
+
 export type SaveAgentPlanResult =
   | { ok: true; plan: AgentPlanPersisted; warnings: string[] }
   | { ok: false; plan: AgentPlanDraft; error: string; code?: string | null };
@@ -174,6 +181,10 @@ export async function saveAgentPlanDraft(input: {
     sourceMessageId: sourceMessageId ?? input.draft.sourceMessageId ?? null,
     createdBy: userId ?? input.draft.createdBy ?? null,
   };
+  const chatThreadId = canonicalChatThreadId(draft.threadId);
+  if (draft.threadId && !chatThreadId) {
+    return { ok: false, plan: draft, error: 'A persisted Chat thread is required for a thread-scoped plan.', code: 'invalid_thread' };
+  }
 
   try {
     const { data: planRow, error: planError } = await supabase
@@ -181,6 +192,7 @@ export async function saveAgentPlanDraft(input: {
       .insert({
         circle_id: circleId,
         thread_id: draft.threadId || null,
+        chat_thread_id: chatThreadId,
         source_message_id: draft.sourceMessageId || null,
         created_by: draft.createdBy || null,
         title: draft.title,
@@ -281,7 +293,7 @@ function mapAgentPlanRow(row: any): AgentPlanPersisted {
   return {
     id: row.id,
     circleId: row.circle_id,
-    threadId: row.thread_id,
+    threadId: row.chat_thread_id || row.thread_id,
     sourceMessageId: row.source_message_id,
     createdBy: row.created_by,
     title: row.title,
@@ -320,7 +332,11 @@ export async function listAgentPlans(input: {
     .order('updated_at', { ascending: false })
     .limit(input.limit || 20);
 
-  if (input.threadId) query = query.eq('thread_id', input.threadId);
+  if (input.threadId) {
+    const chatThreadId = canonicalChatThreadId(input.threadId);
+    if (!chatThreadId) return [];
+    query = query.eq('chat_thread_id', chatThreadId);
+  }
 
   const { data, error } = await query;
   if (error || !Array.isArray(data)) return [];
@@ -416,6 +432,10 @@ export async function saveAgentPlanDraftExact(
     sourceMessageId: input.sourceMessageId ?? input.draft.sourceMessageId ?? null,
     createdBy: authority.userId,
   };
+  const chatThreadId = canonicalChatThreadId(draft.threadId);
+  if (draft.threadId && !chatThreadId) {
+    return exactSaveFailure(draft, authority, 'scope_mismatch', 'A persisted Chat thread is required for a thread-scoped plan.');
+  }
 
   try {
     if (!agentPlanAuthorityIsCurrent(authority, isCurrent)) {
@@ -426,6 +446,7 @@ export async function saveAgentPlanDraftExact(
       .insert({
         circle_id: authority.circleId,
         thread_id: draft.threadId || null,
+        chat_thread_id: chatThreadId,
         source_message_id: draft.sourceMessageId || null,
         created_by: authority.userId,
         title: draft.title,
@@ -575,7 +596,11 @@ export async function listAgentPlansExact(
       .order('updated_at', { ascending: false })
       .limit(Math.max(1, Math.min(Number(input.limit) || 20, 100)))
       .setHeader('Authorization', `Bearer ${authority.accessToken}`);
-    if (input.threadId) query = query.eq('thread_id', input.threadId);
+    if (input.threadId) {
+      const chatThreadId = canonicalChatThreadId(input.threadId);
+      if (!chatThreadId) return exactListFailure(authority, 'scope_mismatch');
+      query = query.eq('chat_thread_id', chatThreadId);
+    }
     const { data, error } = await query;
     if (!agentPlanAuthorityIsCurrent(authority, isCurrent)) {
       return exactListFailure(authority, 'authority_retired');

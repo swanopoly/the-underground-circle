@@ -287,6 +287,20 @@ async function saveNavState(state: object) {
   }
 }
 
+async function clearPersistedAccountUiState(): Promise<void> {
+  try {
+    if (Platform.OS === 'web') {
+      localStorage.removeItem(NAV_STATE_KEY);
+      localStorage.removeItem(ONBOARDING_KEY);
+      return;
+    }
+    await AsyncStorage.removeItem(NAV_STATE_KEY);
+  } catch {
+    // Residual-authority cleanup is best-effort here; server authorization and
+    // the in-memory session gate remain fail closed.
+  }
+}
+
 // ─── Deep Linking — maps URL paths to screens ──────────────────────────────
 const linking: LinkingOptions<any> = {
   prefixes: [
@@ -396,6 +410,17 @@ export default function App() {
     let coldStartSettled = false;
     let coldStartEventVerificationStarted = false;
     let authBootstrapFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+    let accountCleanupPromise: Promise<void> = Promise.resolve();
+
+    const queueAccountCleanup = (userId: string | null): Promise<void> => {
+      accountCleanupPromise = accountCleanupPromise.then(async () => {
+        await Promise.all([
+          clearLocalAuthResidualAuthority(userId),
+          clearPersistedAccountUiState(),
+        ]);
+      });
+      return accountCleanupPromise;
+    };
 
     // Setup notifications
     import('./src/lib/notifications').then(n => {
@@ -551,12 +576,14 @@ export default function App() {
       authBootstrapFallbackTimer = null;
       coldStartSettled = true;
       closeOpenSwanApprovalResumeOutboxAuthorityForLogout();
+      const rejectedUserId = activeUserId;
       activeSession = null;
       activeUserId = null;
       setSession(null);
       setLoading(false);
       setHasCircles(false);
       stopAgentAutoConnectDeferred();
+      void queueAccountCleanup(rejectedUserId);
       // An empty cache is the normal signed-out state. A server-confirmed
       // missing/mismatched user is the only validation result that should
       // delete persisted Auth state and emit a real SIGNED_OUT event.
@@ -570,6 +597,11 @@ export default function App() {
     ) => {
       const revision = ++authRevision;
       const validation = await inspectAuthSessionCandidate(candidate);
+      if (disposed || revision !== authRevision) return;
+
+      // A preceding sign-out/rejection may still be retiring device-local
+      // state. Never publish another account until that cleanup is complete.
+      await accountCleanupPromise;
       if (disposed || revision !== authRevision) return;
 
       if (validation.status === 'unavailable') {
@@ -593,6 +625,24 @@ export default function App() {
       if (validation.status === 'signed_out') {
         rejectSession(validation.reason);
         return;
+      }
+
+      // A session can be replaced without a preceding SIGNED_OUT event (for
+      // example, another browser tab signs in as a different account). Retire
+      // the old account completely before publishing the new account to the
+      // React tree; otherwise module caches and device-local Circle context can
+      // flash across accounts even though database RLS later rejects them.
+      const outgoingUserId = activeUserId;
+      if (outgoingUserId && outgoingUserId !== validation.session.user.id) {
+        closeOpenSwanApprovalResumeOutboxAuthorityForLogout();
+        activeSession = null;
+        activeUserId = null;
+        setSession(null);
+        setHasCircles(false);
+        setLoading(true);
+        stopAgentAutoConnectDeferred();
+        await queueAccountCleanup(outgoingUserId);
+        if (disposed || revision !== authRevision) return;
       }
 
       commitValidatedSession(validation.session, event);
@@ -648,16 +698,12 @@ export default function App() {
         setLoading(false);
         setPasswordRecovery(false);
         stopAgentAutoConnectDeferred();
-        void clearLocalAuthResidualAuthority(signedOutUserId);
+        void queueAccountCleanup(signedOutUserId);
         setShowOnboarding(false);
         setHasCircles(false);
         // Clear per-user persisted UI state so the NEXT account on this
         // browser doesn't inherit the previous user's last route (an
         // RLS-empty screen) or their onboarding-done flag.
-        try {
-          localStorage.removeItem(NAV_STATE_KEY);
-          localStorage.removeItem(ONBOARDING_KEY);
-        } catch {}
       }
     });
 

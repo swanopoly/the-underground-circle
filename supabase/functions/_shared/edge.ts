@@ -177,6 +177,18 @@ export async function getUserStoredApiKey(
   return null;
 }
 
+/**
+ * Legacy Marketplace rows used underscored provider names before the hosted
+ * model proxy standardized on the canonical provider ids. Only the
+ * user-required credential path may consult these aliases, and only after a
+ * clean canonical miss. An RPC/decryption error remains terminal.
+ */
+function legacyUserRequiredStorageProvider(provider: string): string | null {
+  if (provider === "huggingface") return "hugging_face";
+  if (provider === "zai") return "z_ai";
+  return null;
+}
+
 export async function resolveUserModelApiKey(opts: {
   supabase: any;
   userId: string;
@@ -202,13 +214,14 @@ export async function resolveUserModelApiKey(opts: {
 
   const credentialPolicy = opts.credentialPolicy ?? "user_then_platform";
   const lookupLabel = opts.label === undefined ? "default" : opts.label;
+  const storageProvider = opts.storageProvider || opts.provider;
   let stored: { apiKey: string; endpoint?: string | null } | null = null;
   let storedLookupError: StoredApiKeyLookupError | null = null;
   try {
     stored = await getUserStoredApiKey(
       opts.supabase,
       opts.userId,
-      opts.storageProvider || opts.provider,
+      storageProvider,
       lookupLabel,
     );
   } catch (error) {
@@ -221,6 +234,26 @@ export async function resolveUserModelApiKey(opts: {
   }
   if (stored?.apiKey) {
     return { ...stored, source: "user" };
+  }
+
+  // A canonical key always wins. For the two renamed Marketplace providers,
+  // a clean canonical miss may consult the legacy row so existing encrypted
+  // credentials remain executable. Do not enter this branch after a lookup
+  // error: user_required already threw above, and legacy policies keep their
+  // existing platform-fallback behavior without alias expansion.
+  const legacyStorageProvider = credentialPolicy === "user_required"
+    ? legacyUserRequiredStorageProvider(storageProvider)
+    : null;
+  if (legacyStorageProvider) {
+    stored = await getUserStoredApiKey(
+      opts.supabase,
+      opts.userId,
+      legacyStorageProvider,
+      lookupLabel,
+    );
+    if (stored?.apiKey) {
+      return { ...stored, source: "user" };
+    }
   }
 
   // This return intentionally precedes every Deno.env/platform-key read.
@@ -237,7 +270,7 @@ export async function resolveUserModelApiKey(opts: {
 }
 
 /**
- * True if `userId` belongs to the org and/or circle that owns an integration
+ * True if `userId` belongs to every org/circle that owns an integration
  * connection. Used to authorize outbound actions (Slack/Teams) so a caller
  * cannot drive a connection they don't belong to by guessing connectionId
  * (IDOR → message spoofing into any connected workspace).
@@ -248,23 +281,34 @@ export async function userOwnsConnection(
   orgId: string | null,
   circleId: string | null,
 ): Promise<boolean> {
-  if (circleId) {
-    const { data } = await supabase
-      .from("circle_members")
-      .select("user_id")
-      .eq("circle_id", circleId)
-      .eq("user_id", userId)
-      .maybeSingle();
-    if (data) return true;
-  }
+  if (!orgId && !circleId) return false;
+
   if (orgId) {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("org_members")
       .select("user_id")
       .eq("org_id", orgId)
       .eq("user_id", userId)
       .maybeSingle();
-    if (data) return true;
+    if (error || !data) return false;
   }
-  return false;
+
+  if (circleId) {
+    const { data: circle, error: circleError } = await supabase
+      .from("circles")
+      .select("org_id")
+      .eq("id", circleId)
+      .maybeSingle();
+    if (circleError || !circle || (orgId && circle.org_id !== orgId)) return false;
+
+    const { data, error } = await supabase
+      .from("circle_members")
+      .select("user_id")
+      .eq("circle_id", circleId)
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (error || !data) return false;
+  }
+
+  return true;
 }

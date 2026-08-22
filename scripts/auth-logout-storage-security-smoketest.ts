@@ -208,8 +208,11 @@ async function main() {
   ]) {
     assert.ok(logoutSource.includes(`'${officeStoragePrefix}'`), `logout clears Office storage prefix ${officeStoragePrefix}`);
   }
-  assert.ok(appSource.includes('clearLocalAuthResidualAuthority(signedOutUserId)'),
-    'external/expired SIGNED_OUT events trigger residual-authority cleanup');
+  assert.ok(
+    appSource.includes('queueAccountCleanup(signedOutUserId)')
+      && appSource.includes('clearLocalAuthResidualAuthority(userId)'),
+    'external/expired SIGNED_OUT events queue residual-authority cleanup before another account mounts',
+  );
   assert.ok(desktopBridgeSource.includes('desktopBridgeTokenGeneration += 1')
     && desktopBridgeSource.includes('tokenGeneration !== desktopBridgeTokenGeneration')
     && desktopBridgeSource.includes('pendingSecondaryTokenWrites'),

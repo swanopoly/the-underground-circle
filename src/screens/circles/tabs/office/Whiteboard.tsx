@@ -7,6 +7,8 @@ import {
   OfficeAgent,
   STATUS_COLORS,
   calculateDailyScore,
+  formatOfficeTrackedCost,
+  normalizeOfficeTrackedCost,
 } from '../../../../lib/officeAgents';
 import { isBlackSwanAvailable } from '../../../../lib/blackswanLLM';
 import { CronJob, formatCronSchedule } from '../../../../lib/openswanService';
@@ -44,9 +46,6 @@ interface Props {
   pendingApprovals?: AgentApproval[];
   budgetAlerts?: BudgetAlert[];
   periodCosts?: { today: number; week: number; month: number };
-  /** Trip-meter spend from OfficeTab: durable ledger since the user's last
-   *  explicit reset (all-time when never reset). Null until first fetch. */
-  runningCost?: { total: number; sinceIso: string | null } | null;
 }
 
 // ── COLORS ─────────────────────────────────────────────────────────────────
@@ -215,21 +214,11 @@ function fmtTok(n: number): string {
   return String(n);
 }
 
-// Same precision ladder as OfficeRunningCostStrip so the two readouts of the
-// trip meter can never disagree in the same viewport.
-function fmtUsd(n: number): string {
-  if (!Number.isFinite(n) || n === 0) return '$0.00';
-  if (n < 0.01) return `$${n.toFixed(4)}`;
-  if (n < 1) return `$${n.toFixed(3)}`;
-  return `$${n.toFixed(2)}`;
-}
-
 export default function Whiteboard({
   editable, notes = [], onNotesChange,
   agents = [], statusHistory = [], cronJobs = [], circleId,
   connectedCount = 0, totalConnections = 0,
   connections = [], pendingApprovals = [], budgetAlerts = [], periodCosts,
-  runningCost = null,
 }: Props) {
   const [activeTab, setActiveTab] = useState<TabKey>('overview');
   const [editing, setEditing] = useState(false);
@@ -395,6 +384,11 @@ export default function Whiteboard({
 
   // Farm metrics
   const farmMetrics = useMemo(() => calculateFarmMetrics(agents, []), [agents]);
+  // The parent merges the durable published-agent daily ledger with the
+  // circle-wide server usage aggregate. Do not substitute the compact roster
+  // total here: missing/ambiguous agent rows are exactly what made this tile
+  // show $0.00 beside real tracked spend.
+  const trackedCost24h = normalizeOfficeTrackedCost(periodCosts?.today);
   const healthCheck = useMemo(() => performHealthCheck(agents, []), [agents]);
   const workloads = useMemo(() => analyzeWorkloadDistribution(agents), [agents]);
   const costOpts = useMemo(() => generateCostOptimizations(agents, []), [agents]);
@@ -552,11 +546,7 @@ export default function Whiteboard({
     if (actionCues.length === 0) actionCues.push({ label: 'Ready for work', detail: 'No blockers detected. Agents are ready for the next mission.', tone: 'good' });
 
     const highestAlert = budgetAlerts[0];
-    const costs = periodCosts ?? {
-      today: farmMetrics.totalCostToday,
-      week: farmMetrics.totalCostWeek,
-      month: 0,
-    };
+    const costs = periodCosts;
     const missionCards: MissionCardVm[] = [
       {
         title: 'Active Runs',
@@ -581,10 +571,10 @@ export default function Whiteboard({
       },
       {
         title: 'Spend',
-        value: `$${costs.today.toFixed(2)}`,
-        detail: highestAlert?.message || `$${costs.week.toFixed(2)} this week`,
-        tone: dangerBudgetAlerts.length > 0 ? 'danger' : warningBudgetAlerts.length > 0 ? 'warn' : costs.today > 0 ? 'info' : 'muted',
-        foot: costs.month > 0 ? `$${costs.month.toFixed(2)} month` : 'Budget ledger',
+        value: costs ? formatOfficeTrackedCost(costs.today) : '—',
+        detail: highestAlert?.message || (costs ? `${formatOfficeTrackedCost(costs.week)} over 7 days` : 'Tracked spend is loading or unavailable'),
+        tone: dangerBudgetAlerts.length > 0 ? 'danger' : warningBudgetAlerts.length > 0 ? 'warn' : costs && costs.today > 0 ? 'info' : 'muted',
+        foot: costs && costs.month > 0 ? `${formatOfficeTrackedCost(costs.month)} over 30 days` : 'Budget ledger',
       },
       {
         title: 'Auto Ready',
@@ -640,8 +630,6 @@ export default function Whiteboard({
     connectedCount,
     connections,
     cronJobs,
-    farmMetrics.totalCostToday,
-    farmMetrics.totalCostWeek,
     healthCheck,
     pendingApprovals,
     periodCosts,
@@ -747,31 +735,15 @@ export default function Whiteboard({
               <Text style={s.statLabel}>TOKENS</Text>
             </View>
 
-            {/* Cost cell */}
-            <View style={[s.statCell, { backgroundColor: farmMetrics.totalCostToday > 0 ? '#22c55e10' : '#ffffff04', borderColor: farmMetrics.totalCostToday > 0 ? '#22c55e20' : '#ffffff10' }]}>
-              <Text style={[s.statValue, { color: farmMetrics.totalCostToday > 0 ? '#22c55e' : '#444' }]}>
-                ${farmMetrics.totalCostToday.toFixed(2)}
+            {/* Durable rolling spend. Null means the server snapshot has not
+                been verified, while a verified zero remains a real $0.00. */}
+            <View style={[s.statCell, { backgroundColor: trackedCost24h !== null && trackedCost24h > 0 ? '#22c55e10' : '#ffffff04', borderColor: trackedCost24h !== null && trackedCost24h > 0 ? '#22c55e20' : '#ffffff10' }]}>
+              <Text style={[s.statValue, { color: trackedCost24h !== null && trackedCost24h > 0 ? '#22c55e' : '#444' }]}>
+                {trackedCost24h === null ? '—' : formatOfficeTrackedCost(trackedCost24h)}
               </Text>
-              <CostBurnSparkline cost={farmMetrics.totalCostToday} />
-              <Text style={s.statLabel}>COST</Text>
+              {trackedCost24h !== null ? <CostBurnSparkline cost={trackedCost24h} /> : null}
+              <Text style={s.statLabel}>24H COST</Text>
             </View>
-
-            {/* Running-cost trip meter cell — durable spend since the user's
-                last reset ('all time' when never reset). Hidden until the
-                first fetch lands so it can't paint a convincing $0. */}
-            {runningCost ? (
-              <View style={[s.statCell, { backgroundColor: runningCost.total > 0 ? '#f59e0b10' : '#ffffff04', borderColor: runningCost.total > 0 ? '#f59e0b20' : '#ffffff10' }]}>
-                <Text style={[s.statValue, { color: runningCost.total > 0 ? '#f59e0b' : '#444' }]}>
-                  {fmtUsd(runningCost.total)}
-                </Text>
-                <Text style={s.statLabel}>RUNNING COST</Text>
-                <Text style={s.statSubLabel}>
-                  {runningCost.sinceIso
-                    ? `since ${new Date(runningCost.sinceIso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`
-                    : 'all time'}
-                </Text>
-              </View>
-            ) : null}
 
             {/* Output cell */}
             <View style={[s.statCell, { backgroundColor: totalMsgs > 0 ? '#3b82f610' : '#ffffff04', borderColor: totalMsgs > 0 ? '#3b82f620' : '#ffffff10' }]}>
@@ -848,6 +820,7 @@ export default function Whiteboard({
               agents={agents} sortedAgents={sortedAgents} activities={activities}
               runningTasks={runningTasks} farmMetrics={farmMetrics} healthCheck={healthCheck}
               workloads={workloads} costOpts={costOpts} todayStats={todayStats}
+              periodCosts={periodCosts}
               reward={reward} badgeColor={badgeColor} commandCenter={commandCenter}
               readinessLoading={readinessLoading} readinessError={readinessError} onRefreshReadiness={refreshReadiness}
               bridgeLoading={bridgeLoading} bridgeError={bridgeError} onRefreshBridgeReadiness={refreshBridgeReadiness}
@@ -1394,6 +1367,7 @@ function OverviewTab({
   workloads,
   costOpts,
   todayStats,
+  periodCosts,
   reward,
   badgeColor,
   commandCenter,
@@ -1484,8 +1458,8 @@ function OverviewTab({
       <View style={s.sec}>
         <Text style={s.secTitle}>FARM METRICS</Text>
         <View style={s.metricGrid}>
-          <MetricCell label="COST TODAY" value={`$${farmMetrics.totalCostToday.toFixed(2)}`} color={C.error} />
-          <MetricCell label="COST WEEK" value={`$${farmMetrics.totalCostWeek.toFixed(2)}`} color={C.amber} />
+          <MetricCell label="COST 24H" value={periodCosts ? formatOfficeTrackedCost(periodCosts.today) : '—'} color={C.error} />
+          <MetricCell label="COST 7D" value={periodCosts ? formatOfficeTrackedCost(periodCosts.week) : '—'} color={C.amber} />
           <MetricCell label="TOKENS" value={farmMetrics.totalTokensUsed > 0 ? `${(farmMetrics.totalTokensUsed / 1000).toFixed(0)}K` : '0'} color={C.pink} />
           <MetricCell label="MESSAGES" value={String(farmMetrics.totalMessagesProcessed)} color={C.accent} />
           <MetricCell label="AVG SCORE" value={String(farmMetrics.averageScore)} color={C.idle} />
@@ -1953,9 +1927,9 @@ function OpsTab({ cronJobs, activities, costOpts, commandCenter, budgetAlerts, p
       <View style={s.sec}>
         <Text style={s.secTitle}>TRACKED SPEND</Text>
         <View style={s.ledgerRow}>
-          <MetricCell label="24H" value={`$${(periodCosts?.today ?? 0).toFixed(2)}`} color={budgetAlerts.some(a => a.period === 'daily' && (a.level === 'danger' || a.level === 'critical')) ? C.error : C.active} />
-          <MetricCell label="7D" value={`$${(periodCosts?.week ?? 0).toFixed(2)}`} color={budgetAlerts.some(a => a.period === 'weekly' && (a.level === 'danger' || a.level === 'critical')) ? C.error : C.amber} />
-          <MetricCell label="30D" value={`$${(periodCosts?.month ?? 0).toFixed(2)}`} color={budgetAlerts.some(a => a.period === 'monthly' && (a.level === 'danger' || a.level === 'critical')) ? C.error : C.accent} />
+          <MetricCell label="24H" value={periodCosts ? formatOfficeTrackedCost(periodCosts.today) : '—'} color={budgetAlerts.some(a => a.period === 'daily' && (a.level === 'danger' || a.level === 'critical')) ? C.error : C.active} />
+          <MetricCell label="7D" value={periodCosts ? formatOfficeTrackedCost(periodCosts.week) : '—'} color={budgetAlerts.some(a => a.period === 'weekly' && (a.level === 'danger' || a.level === 'critical')) ? C.error : C.amber} />
+          <MetricCell label="30D" value={periodCosts ? formatOfficeTrackedCost(periodCosts.month) : '—'} color={budgetAlerts.some(a => a.period === 'monthly' && (a.level === 'danger' || a.level === 'critical')) ? C.error : C.accent} />
         </View>
         {budgetAlerts.length > 0 ? (
           budgetAlerts.slice(0, 3).map(alert => (
@@ -1965,7 +1939,9 @@ function OpsTab({ cronJobs, activities, costOpts, commandCenter, budgetAlerts, p
             </View>
           ))
         ) : (
-          <Text style={s.emptyInline}>No budget alerts active</Text>
+          <Text style={s.emptyInline}>
+            {periodCosts ? 'No budget alerts active' : 'Tracked spend is loading or unavailable'}
+          </Text>
         )}
       </View>
 

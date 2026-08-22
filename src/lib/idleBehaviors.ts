@@ -3,7 +3,8 @@
 // with 3 tiers: Tier 1 (pure Supabase; shared-chat writers require opt-in), Tier 2 (AI via automation-executor),
 // Tier 3 (owner-only, uses Claude Code bridge or AI analysis).
 
-import { supabase } from './supabase';
+import { getSupabaseClientForAccessToken, supabase } from './supabase';
+import { indexSafeProfiles, loadSafeCircleProfiles } from './safeProfiles';
 import { safeGetUserForAccessToken } from './authSession';
 import { storage } from './storage';
 import { updateAgentStatus } from './circleOffice';
@@ -1067,7 +1068,7 @@ async function execStreakGuardian(
 
   const { data: members } = await awaitWhileSchedulerCurrent(context, () => supabase
       .from('circle_members')
-      .select('user_id, profiles(id, display_name, username, current_streak)')
+      .select('user_id')
       .eq('circle_id', circleId)
       .setHeader('Authorization', `Bearer ${context.authority.accessToken}`));
 
@@ -1082,10 +1083,15 @@ async function execStreakGuardian(
       .gte('created_at', today)
       .setHeader('Authorization', `Bearer ${context.authority.accessToken}`));
 
+  const profileById = indexSafeProfiles(await awaitWhileSchedulerCurrent(context, () => loadSafeCircleProfiles({
+    circleId,
+    userIds: (members as any[]).map(member => member.user_id),
+    client: getSupabaseClientForAccessToken(context.authority.accessToken),
+  })));
   const checkedInIds = new Set((checkIns || []).map((c: any) => c.user_id));
   const notCheckedIn = (members as any[])
-    .filter(m => m.profiles && !checkedInIds.has(m.user_id))
-    .map(m => m.profiles);
+    .filter(m => profileById.has(m.user_id) && !checkedInIds.has(m.user_id))
+    .map(m => profileById.get(m.user_id));
 
   if (notCheckedIn.length === 0) {
     return { success: true, summary: 'Everyone checked in today' };
@@ -1293,7 +1299,7 @@ async function execMemoryDigest(
 
   const { data: checkIns } = await awaitWhileSchedulerCurrent(context, () => supabase
       .from('check_ins')
-      .select('content, created_at, user_id, profiles:user_id(display_name, username)')
+      .select('content, created_at, user_id')
       .eq('circle_id', circleId)
       .gte('created_at', yDate)
       .lt('created_at', todayDate)
@@ -1312,12 +1318,18 @@ async function execMemoryDigest(
     return { success: true, summary: 'No activity yesterday to digest' };
   }
 
+  const digestProfileById = indexSafeProfiles(await awaitWhileSchedulerCurrent(context, () => loadSafeCircleProfiles({
+    circleId,
+    userIds: (checkIns || []).map((row: any) => row.user_id),
+    client: getSupabaseClientForAccessToken(context.authority.accessToken),
+  })));
   let digest = `## Daily Digest \u2014 ${yDate}\n\n`;
 
   if (checkIns && checkIns.length > 0) {
     digest += `### Check-ins (${checkIns.length})\n`;
     for (const c of checkIns as any[]) {
-      const name = c.profiles?.display_name || c.profiles?.username || 'Unknown';
+      const profile = digestProfileById.get(c.user_id);
+      const name = profile?.display_name || profile?.username || 'Unknown';
       const content = typeof c.content === 'string' ? c.content : JSON.stringify(c.content);
       digest += `- **${name}**: ${content.slice(0, 200)}\n`;
     }

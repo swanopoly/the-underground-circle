@@ -8,6 +8,7 @@ import {
   searchHuggingFaceModels, fetchTrendingModels, addCustomModel,
   HF_CATEGORIES, type CustomModel, type HFModelResult, type HFCategory,
 } from '../../lib/customModels';
+import { useAuth } from '../../hooks/useAuth';
 
 const MONO = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
 
@@ -32,6 +33,7 @@ export default function AddModelPanel({
   marketplaceConnected,
   marketplaceHint,
 }: Props) {
+  const { user } = useAuth();
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<HFCategory>('text-generation');
   const [results, setResults] = useState<HFModelResult[]>([]);
@@ -81,11 +83,11 @@ export default function AddModelPanel({
         color: '',
         icon: shortName ? shortName.charAt(0) : 'H',
         provider: 'huggingface',
-      });
+      }, user?.id);
       onModelAdded(model);
     } catch {}
     setAdding(null);
-  }, [onModelAdded]);
+  }, [onModelAdded, user?.id]);
 
   return (
     <View style={s.container} nativeID="section-hf-model-browser">

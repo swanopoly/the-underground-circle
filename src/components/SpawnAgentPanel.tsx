@@ -7,12 +7,12 @@
  * circle office and can receive terminal commands + be assigned tasks.
  */
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, TextInput, Pressable, ScrollView, Platform, Alert,
 } from 'react-native';
 import { AGENT_SPIRITS, SPIRIT_CATEGORIES, type AgentSpirit } from '../lib/agentSpirits';
-import { publishAgentToCircle, PROVIDER_DISPLAY } from '../lib/circleOffice';
+import { publishAgentToCircle } from '../lib/circleOffice';
 import {
   updateAgentIdentityExact,
   updatePublishedAgentSpiritExact,
@@ -132,7 +132,7 @@ type Step = 'identity' | 'spirit' | 'brain' | 'personality' | 'deploy';
 
 const STEPS: { key: Step; label: string; num: number }[] = [
   { key: 'identity',    label: 'Identity',    num: 1 },
-  { key: 'spirit',      label: 'Spirit',      num: 2 },
+  { key: 'spirit',      label: 'SOUL',        num: 2 },
   { key: 'brain',       label: 'Brain',       num: 3 },
   { key: 'personality', label: 'Config',      num: 4 },
   { key: 'deploy',      label: 'Deploy',      num: 5 },
@@ -147,19 +147,26 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
   const { exactAuthority, isExactAuthorityCurrent } = useExactCircleAuthority(circleId);
   const [step, setStep] = useState<Step>('identity');
   const [deploying, setDeploying] = useState(false);
+  const deployInFlightRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [customHfModels, setCustomHfModels] = useState<typeof MODEL_PREFERENCES_BASE>([]);
 
   // Load custom HF models
   React.useEffect(() => {
+    const ownerId = exactAuthority?.userId;
+    if (!ownerId) {
+      setCustomHfModels([]);
+      MODEL_PREFERENCES = [...MODEL_PREFERENCES_BASE];
+      return;
+    }
     import('../lib/customModels').then(({ loadCustomModels }) => {
-      loadCustomModels().then(models => {
+      loadCustomModels(ownerId).then(models => {
         const mapped = models.map(m => ({ key: `hf:${m.id}`, label: `${m.label} (HF)`, desc: m.desc }));
         setCustomHfModels(mapped);
         MODEL_PREFERENCES = [...MODEL_PREFERENCES_BASE, ...mapped];
       });
     }).catch(() => {});
-  }, []);
+  }, [exactAuthority?.userId]);
 
   const [config, setConfig] = useState<AgentConfig>({
     name: '',
@@ -199,7 +206,7 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
   const stepIdx = STEPS.findIndex(s => s.key === step);
   const canNext = (() => {
     if (step === 'identity') return config.name.trim().length >= 2;
-    if (step === 'spirit') return true; // spirit is optional
+    if (step === 'spirit') return !!config.spirit;
     if (step === 'brain') return true;
     if (step === 'personality') return true;
     return true;
@@ -217,17 +224,23 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
 
   // ── Deploy agent ──
   const handleDeploy = useCallback(async () => {
-    if (!config.name.trim() || deploying) return;
+    if (!config.name.trim() || deployInFlightRef.current) return;
+    const selectedSpirit = config.spirit;
+    if (!selectedSpirit) {
+      setError('Choose a specialty and SOUL before deploying this agent.');
+      setStep('spirit');
+      return;
+    }
     const authority = exactAuthority;
     if (!authority || !isExactAuthorityCurrent(authority)) {
       setError('Sign in to this Circle again before publishing an agent.');
       return;
     }
+    deployInFlightRef.current = true;
     setDeploying(true);
     setError(null);
 
-    const providerInfo = PROVIDER_DISPLAY[config.provider] || PROVIDER_DISPLAY['generic-agent'];
-    const toolIcon = config.spirit?.emoji || providerInfo.icon;
+    const toolIcon = selectedSpirit.emoji;
     let localIdentityRefreshNeeded = false;
     try {
       const result = await publishAgentToCircle({
@@ -251,6 +264,8 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
       // Store extended config in the exact published row so Chat + Office can
       // reuse model/runtime preferences for assign and restore flows.
       const extendedConfig = {
+        spiritId: selectedSpirit.id,
+        skillBundleId: selectedSpirit.skillBundle,
         modelPreference: config.modelPreference,
         autonomy: config.autonomy,
         traits: config.traits,
@@ -302,6 +317,8 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
         boundModel: config.modelPreference === 'auto' ? undefined : config.modelPreference,
         tags: Array.from(new Set([
           config.provider,
+          `soul:${selectedSpirit.id}`,
+          `skill:${selectedSpirit.skillBundle}`,
           ...(config.tools || []),
           ...(config.traits || []),
           config.autonomy,
@@ -328,8 +345,8 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
       const spiritReceipt = await updatePublishedAgentSpiritExact({
         officeAgentId: publishedAgentId,
         sessionKey: publishedAgentId,
-        spiritId: config.spirit?.id || null,
-        spiritEmoji: config.spirit?.emoji || null,
+        spiritId: selectedSpirit.id,
+        spiritEmoji: selectedSpirit.emoji,
         customProfileId: null,
       }, authority, isExactAuthorityCurrent);
       if (!isExactAuthorityCurrent(authority)) return;
@@ -365,9 +382,10 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
         setError('The agent setup could not be verified. Check the connection and try again.');
       }
     } finally {
+      deployInFlightRef.current = false;
       setDeploying(false);
     }
-  }, [circleId, config, deploying, exactAuthority, isExactAuthorityCurrent, onCreated]);
+  }, [circleId, config, exactAuthority, isExactAuthorityCurrent, onCreated]);
 
   // ── Render steps ──
   return (
@@ -378,7 +396,14 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
           <View style={s.brandMark}><Text style={s.brandLetter}>+</Text></View>
           <Text style={s.headerTitle}>SPAWN AGENT</Text>
         </View>
-        <Pressable style={s.cancelBtn} onPress={onCancel}>
+        <Pressable
+          style={s.cancelBtn}
+          onPress={onCancel}
+          disabled={deploying}
+          accessibilityRole="button"
+          accessibilityLabel="Cancel agent setup"
+          accessibilityState={{ disabled: deploying }}
+        >
           <Text style={s.cancelText}>ESC</Text>
         </Pressable>
       </View>
@@ -390,6 +415,10 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
             key={st.key}
             style={[s.progressStep, i <= stepIdx && { borderBottomColor: T.accent }]}
             onPress={() => i <= stepIdx && setStep(st.key)}
+            disabled={i > stepIdx || deploying}
+            accessibilityRole="button"
+            accessibilityLabel={`Agent setup step ${st.num}: ${st.label}`}
+            accessibilityState={{ disabled: i > stepIdx || deploying, selected: i === stepIdx }}
           >
             <Text style={[s.progressNum, i <= stepIdx && { color: T.accent }]}>{st.num}</Text>
             <Text style={[s.progressLabel, i === stepIdx && { color: T.text }]}>{st.label}</Text>
@@ -409,6 +438,7 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
               style={s.textInput}
               value={config.name}
               onChangeText={v => update({ name: v })}
+              accessibilityLabel="Agent name"
               placeholder="e.g. CodeBot, ResearchAgent, DeployBot..."
               placeholderTextColor={T.textMuted}
               autoCapitalize="none"
@@ -423,6 +453,9 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
                   key={p.key}
                   style={[s.optionCard, config.provider === p.key && { borderColor: T.accent, backgroundColor: T.accent + '12' }]}
                   onPress={() => update({ provider: p.key })}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Provider ${p.label}`}
+                  accessibilityState={{ selected: config.provider === p.key }}
                 >
                   <View style={[s.optionIcon, config.provider === p.key && { backgroundColor: T.accent + '30' }]}>
                     <Text style={[s.optionIconText, config.provider === p.key && { color: T.accent }]}>{p.icon}</Text>
@@ -439,6 +472,10 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
                   key={c.color}
                   style={[s.colorDot, { backgroundColor: c.color }, config.color === c.color && s.colorDotActive]}
                   onPress={() => update({ color: c.color })}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Agent color ${c.label}`}
+                  accessibilityState={{ selected: config.color === c.color }}
+                  hitSlop={10}
                 />
               ))}
             </View>
@@ -447,22 +484,10 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
 
         {step === 'spirit' && (
           <>
-            <Text style={s.stepTitle}>Choose a Spirit</Text>
+            <Text style={s.stepTitle}>Choose a Specialty + SOUL</Text>
             <Text style={s.stepDesc}>
-              A spirit gives your agent deep domain expertise. Pick one that matches the task.
+              Required. The selected SOUL supplies the agent's specialty knowledge, operating posture, and linked skill bundle on every task.
             </Text>
-
-            {/* No spirit option */}
-            <Pressable
-              style={[s.spiritCard, !config.spirit && { borderColor: T.accent, backgroundColor: T.accent + '08' }]}
-              onPress={() => update({ spirit: null })}
-            >
-              <Text style={[s.spiritEmoji]}>-</Text>
-              <View style={s.spiritInfo}>
-                <Text style={[s.spiritName, !config.spirit && { color: T.accent }]}>No Spirit (General Purpose)</Text>
-                <Text style={s.spiritTagline}>Agent responds without a specialty focus</Text>
-              </View>
-            </Pressable>
 
             {SPIRIT_CATEGORIES.map(cat => (
               <View key={cat.key}>
@@ -471,12 +496,19 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
                   <Pressable
                     key={sp.id}
                     style={[s.spiritCard, config.spirit?.id === sp.id && { borderColor: sp.color, backgroundColor: sp.color + '08' }]}
-                    onPress={() => update({ spirit: sp })}
+                    onPress={() => {
+                      update({ spirit: sp });
+                      setError(null);
+                    }}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${sp.name} SOUL. Specialty skill bundle ${sp.skillBundle}. ${sp.tagline}`}
+                    accessibilityState={{ selected: config.spirit?.id === sp.id }}
                   >
                     <Text style={s.spiritEmoji}>{sp.emoji}</Text>
                     <View style={s.spiritInfo}>
                       <Text style={[s.spiritName, config.spirit?.id === sp.id && { color: sp.color }]}>{sp.name}</Text>
                       <Text style={s.spiritTagline} numberOfLines={1}>{sp.tagline}</Text>
+                      <Text style={s.spiritSkill} numberOfLines={1}>SKILL · {sp.skillBundle}</Text>
                     </View>
                     {config.spirit?.id === sp.id && (
                       <View style={[s.checkMark, { backgroundColor: sp.color }]}>
@@ -503,6 +535,9 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
                 key={m.key}
                 style={[s.radioRow, config.modelPreference === m.key && { borderColor: T.accent, backgroundColor: T.accent + '08' }]}
                 onPress={() => update({ modelPreference: m.key })}
+                accessibilityRole="button"
+                accessibilityLabel={`${m.label}. ${m.desc}`}
+                accessibilityState={{ selected: config.modelPreference === m.key }}
               >
                 <View style={[s.radio, config.modelPreference === m.key && { borderColor: T.accent }]}>
                   {config.modelPreference === m.key && <View style={s.radioFill} />}
@@ -520,6 +555,9 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
                 key={a.key}
                 style={[s.radioRow, config.autonomy === a.key && { borderColor: T.warning, backgroundColor: T.warning + '08' }]}
                 onPress={() => update({ autonomy: a.key })}
+                accessibilityRole="button"
+                accessibilityLabel={`${a.label} autonomy. ${a.desc}`}
+                accessibilityState={{ selected: config.autonomy === a.key }}
               >
                 <View style={[s.optionIcon, config.autonomy === a.key && { backgroundColor: T.warning + '30' }]}>
                   <Text style={[s.optionIconText, config.autonomy === a.key && { color: T.warning }]}>{a.icon}</Text>
@@ -547,6 +585,9 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
                   key={t.key}
                   style={[s.traitChip, config.traits.includes(t.key) && { borderColor: T.info, backgroundColor: T.info + '15' }]}
                   onPress={() => toggleTrait(t.key)}
+                  accessibilityRole="checkbox"
+                  accessibilityLabel={`${t.label} personality trait. ${t.desc}`}
+                  accessibilityState={{ checked: config.traits.includes(t.key) }}
                 >
                   <Text style={[s.traitLabel, config.traits.includes(t.key) && { color: T.info }]}>{t.label}</Text>
                   <Text style={s.traitDesc}>{t.desc}</Text>
@@ -561,6 +602,9 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
                   key={t.key}
                   style={[s.traitChip, config.tools.includes(t.key) && { borderColor: T.success, backgroundColor: T.success + '15' }]}
                   onPress={() => toggleTool(t.key)}
+                  accessibilityRole="checkbox"
+                  accessibilityLabel={`${t.label} tool capability. ${t.desc}`}
+                  accessibilityState={{ checked: config.tools.includes(t.key) }}
                 >
                   <Text style={[s.traitLabel, config.tools.includes(t.key) && { color: T.success }]}>{t.label}</Text>
                   <Text style={s.traitDesc}>{t.desc}</Text>
@@ -573,6 +617,7 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
               style={s.textInput}
               value={config.taskFocus}
               onChangeText={v => update({ taskFocus: v })}
+              accessibilityLabel="Agent task focus"
               placeholder="e.g. Frontend React components, API testing, DevOps..."
               placeholderTextColor={T.textMuted}
               multiline
@@ -583,6 +628,7 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
               style={[s.textInput, { minHeight: 60 }]}
               value={config.customInstructions}
               onChangeText={v => update({ customInstructions: v })}
+              accessibilityLabel="Agent custom instructions"
               placeholder="Additional instructions or context for this agent..."
               placeholderTextColor={T.textMuted}
               multiline
@@ -608,10 +654,14 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
               </View>
 
               <View style={s.summaryRow}>
-                <Text style={s.summaryKey}>Spirit</Text>
+                <Text style={s.summaryKey}>SOUL</Text>
                 <Text style={s.summaryValue}>
-                  {config.spirit ? `${config.spirit.emoji} ${config.spirit.name}` : 'General Purpose'}
+                  {config.spirit ? `${config.spirit.emoji} ${config.spirit.name}` : 'Required'}
                 </Text>
+              </View>
+              <View style={s.summaryRow}>
+                <Text style={s.summaryKey}>Skill</Text>
+                <Text style={s.summaryValue}>{config.spirit?.skillBundle || 'Required'}</Text>
               </View>
               <View style={s.summaryRow}>
                 <Text style={s.summaryKey}>Model</Text>
@@ -653,12 +703,12 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
                 - Appear in the terminal as @{config.name || 'Agent'}{'\n'}
                 - Be assignable to kanban tasks{'\n'}
                 - Show in the circle office{'\n'}
-                - Use its spirit expertise in all responses
+                - Resolve its exact SOUL and skill knowledge for each task
               </Text>
             </View>
 
             {error && (
-              <View style={s.errorBox}>
+              <View style={s.errorBox} accessibilityRole="alert" accessibilityLiveRegion="assertive">
                 <Text style={s.errorText}>{error}</Text>
               </View>
             )}
@@ -669,11 +719,18 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
       {/* Footer nav */}
       <View style={s.footer}>
         {stepIdx > 0 ? (
-          <Pressable style={s.backBtn} onPress={prevStep}>
+          <Pressable
+            style={[s.backBtn, deploying && { opacity: 0.45 }]}
+            onPress={prevStep}
+            disabled={deploying}
+            accessibilityRole="button"
+            accessibilityLabel="Previous agent setup step"
+            accessibilityState={{ disabled: deploying }}
+          >
             <Text style={s.backBtnText}>{'<'} Back</Text>
           </Pressable>
         ) : (
-          <Pressable style={s.backBtn} onPress={onCancel}>
+          <Pressable style={s.backBtn} onPress={onCancel} accessibilityRole="button" accessibilityLabel="Cancel agent setup">
             <Text style={s.backBtnText}>Cancel</Text>
           </Pressable>
         )}
@@ -684,7 +741,10 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
           <Pressable
             style={[s.deployBtn, deploying && { opacity: 0.5 }]}
             onPress={handleDeploy}
-            disabled={deploying}
+            disabled={deploying || !config.spirit}
+            accessibilityRole="button"
+            accessibilityLabel={deploying ? 'Deploying specialist agent' : 'Deploy specialist agent'}
+            accessibilityState={{ disabled: deploying || !config.spirit, busy: deploying }}
           >
             <Text style={s.deployBtnText}>{deploying ? 'Deploying...' : 'Deploy Agent'}</Text>
           </Pressable>
@@ -693,6 +753,9 @@ export default function SpawnAgentPanel({ circleId, onCreated, onCancel }: Props
             style={[s.nextBtn, !canNext && { opacity: 0.3 }]}
             onPress={nextStep}
             disabled={!canNext}
+            accessibilityRole="button"
+            accessibilityLabel={step === 'spirit' && !config.spirit ? 'Choose a SOUL to continue' : 'Continue to next agent setup step'}
+            accessibilityState={{ disabled: !canNext }}
           >
             <Text style={s.nextBtnText}>Next {'>'}</Text>
           </Pressable>
@@ -721,6 +784,7 @@ const s = StyleSheet.create({
   cancelBtn: {
     paddingHorizontal: 10, paddingVertical: 4, borderRadius: 2,
     backgroundColor: T.card, borderWidth: 1, borderColor: T.border,
+    minHeight: 44, justifyContent: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   cancelText: { color: T.textMuted, fontFamily: MONO, fontSize: 9, fontWeight: '700' },
@@ -733,7 +797,7 @@ const s = StyleSheet.create({
   progressStep: {
     flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     gap: 4, paddingVertical: 6,
-    borderBottomWidth: 2, borderBottomColor: 'transparent',
+    borderBottomWidth: 2, borderBottomColor: 'transparent', minHeight: 44,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   progressNum: { color: T.textMuted, fontFamily: MONO, fontSize: 10, fontWeight: '800' },
@@ -763,7 +827,7 @@ const s = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: 6,
     paddingHorizontal: 10, paddingVertical: 8, borderRadius: 2,
     backgroundColor: T.card, borderWidth: 1, borderColor: T.border,
-    minWidth: 100,
+    minWidth: 100, minHeight: 44,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   optionIcon: {
@@ -790,13 +854,14 @@ const s = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: 10,
     paddingHorizontal: 10, paddingVertical: 8, borderRadius: 2,
     backgroundColor: T.card, borderWidth: 1, borderColor: T.border,
-    marginBottom: 4,
+    marginBottom: 4, minHeight: 58,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   spiritEmoji: { fontSize: 18, width: 28, textAlign: 'center' },
   spiritInfo: { flex: 1 },
   spiritName: { color: T.textSec, fontFamily: MONO, fontSize: 11, fontWeight: '700' },
   spiritTagline: { color: T.textMuted, fontFamily: MONO, fontSize: 9, marginTop: 1 },
+  spiritSkill: { color: T.accentDim, fontFamily: MONO, fontSize: 8, marginTop: 3, letterSpacing: 0.4 },
   checkMark: {
     width: 18, height: 18, borderRadius: 2,
     alignItems: 'center', justifyContent: 'center',
@@ -808,7 +873,7 @@ const s = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: 10,
     paddingHorizontal: 10, paddingVertical: 8, borderRadius: 2,
     backgroundColor: T.card, borderWidth: 1, borderColor: T.border,
-    marginBottom: 4,
+    marginBottom: 4, minHeight: 48,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   radio: {
@@ -826,7 +891,7 @@ const s = StyleSheet.create({
   traitChip: {
     paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2,
     backgroundColor: T.card, borderWidth: 1, borderColor: T.border,
-    minWidth: 80,
+    minWidth: 80, minHeight: 44, justifyContent: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   traitLabel: { color: T.textSec, fontFamily: MONO, fontSize: 10, fontWeight: '700' },
@@ -866,18 +931,19 @@ const s = StyleSheet.create({
   backBtn: {
     paddingHorizontal: 12, paddingVertical: 6, borderRadius: 2,
     backgroundColor: T.card, borderWidth: 1, borderColor: T.border,
+    minHeight: 44, justifyContent: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   backBtnText: { color: T.textSec, fontFamily: MONO, fontSize: 10, fontWeight: '600' },
   nextBtn: {
     paddingHorizontal: 16, paddingVertical: 6, borderRadius: 2,
-    backgroundColor: T.accent,
+    backgroundColor: T.accent, minHeight: 44, justifyContent: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   nextBtnText: { color: '#fff', fontFamily: MONO, fontSize: 10, fontWeight: '800' },
   deployBtn: {
     paddingHorizontal: 20, paddingVertical: 8, borderRadius: 2,
-    backgroundColor: T.accent,
+    backgroundColor: T.accent, minHeight: 44, justifyContent: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   deployBtnText: { color: '#fff', fontFamily: MONO, fontSize: 11, fontWeight: '800', letterSpacing: 1 },

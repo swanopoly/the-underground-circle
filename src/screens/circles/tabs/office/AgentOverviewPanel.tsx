@@ -1118,7 +1118,7 @@ const overviewStyles = StyleSheet.create({
   currentWorkDot: {
     width: 8,
     height: 8,
-    borderRadius: 4,
+    borderRadius: 6,
   },
   currentWorkTitle: {
     color: '#e6edf3',
@@ -1321,7 +1321,7 @@ const overviewStyles = StyleSheet.create({
   memoryStatusDot: {
     width: 8,
     height: 8,
-    borderRadius: 4,
+    borderRadius: 6,
   },
   memoryStatusCopy: {
     flex: 1,
@@ -1369,7 +1369,7 @@ const overviewStyles = StyleSheet.create({
   primaryAgentMarker: {
     width: 8,
     height: 8,
-    borderRadius: 4,
+    borderRadius: 6,
   },
   primaryAgentText: {
     color: '#e6edf3',

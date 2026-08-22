@@ -1,7 +1,8 @@
 import React from 'react';
 import ProfileScreen from '../../profile/ProfileScreen';
-import { ActivityIndicator, ScrollView, Text, View } from 'react-native';
+import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from 'react-native';
 import AdaptiveWorkspaceCard from '../../../components/profile/AdaptiveWorkspaceCard';
+import { PROFILE_DASHBOARD_TOKENS as PD } from '../../../components/profile/profileDashboardTheme';
 import CompletedWorkPanel from '../../../components/CompletedWorkPanel';
 import ComputerUseHistoryPanel from '../../../components/ComputerUseHistoryPanel';
 import { useAuth } from '../../../hooks/useAuth';
@@ -80,25 +81,66 @@ export default function ProfileTab({ circleId, navigation }: Props) {
 
   if (!exactAuthority) {
     return (
-      <View style={{ padding: 24, alignItems: 'center', gap: 10 }}>
-        <ActivityIndicator color="#6366f1" size="small" />
-        <Text style={{ color: '#94a3b8' }}>Loading your private workspace…</Text>
+      <View style={styles.loadingState}>
+        <ActivityIndicator color={PD.accent} size="small" />
+        <Text style={styles.loadingText}>Loading your private workspace…</Text>
       </View>
     );
   }
 
   const authorityKey = `${exactAuthority.userId}:${exactAuthority.circleId}:${exactAuthority.generation}`;
   return (
-    <ScrollView key={authorityKey} contentContainerStyle={{ paddingBottom: 40 }}>
-      <ProfileScreen navigation={navigation} />
-      <CompletedWorkPanel circleId={circleId} />
-      <ComputerUseHistoryPanel
-        circleId={circleId}
-        exactAuthority={exactAuthority}
-        isExactAuthorityCurrent={isAuthorityCurrent}
-        onRerun={handleRerun}
+    <ScrollView
+      key={authorityKey}
+      style={styles.container}
+      contentContainerStyle={styles.content}
+      showsVerticalScrollIndicator={false}
+    >
+      <ProfileScreen
+        navigation={navigation}
+        exactAgentUsageAuthority={exactAuthority}
+        isExactAgentUsageAuthorityCurrent={isAuthorityCurrent}
       />
-      <AdaptiveWorkspaceCard circleId={circleId} />
+      <View style={styles.supplementalPanels}>
+        <CompletedWorkPanel circleId={circleId} />
+        <ComputerUseHistoryPanel
+          circleId={circleId}
+          exactAuthority={exactAuthority}
+          isExactAuthorityCurrent={isAuthorityCurrent}
+          onRerun={handleRerun}
+        />
+        <AdaptiveWorkspaceCard circleId={circleId} />
+      </View>
     </ScrollView>
   );
 }
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: PD.canvas,
+  },
+  content: {
+    paddingBottom: 40,
+  },
+  loadingState: {
+    flex: 1,
+    padding: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    backgroundColor: PD.canvas,
+  },
+  loadingText: {
+    color: PD.textSecondary,
+    fontSize: 12,
+  },
+  supplementalPanels: {
+    width: '100%',
+    maxWidth: PD.maxWidth,
+    alignSelf: 'center',
+    paddingHorizontal: 16,
+    paddingTop: 0,
+    gap: 12,
+  },
+});

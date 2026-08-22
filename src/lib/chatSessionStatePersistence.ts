@@ -17,6 +17,86 @@
 
 import type { ChatComputerAppResolution } from './chatComputerRequestRouter';
 
+export type ChatPersonalCircleStorageKind =
+  | 'last_app_resolution'
+  | 'failure_ledger'
+  | 'pending_clarifications'
+  | 'needs_you_strip_dismissed'
+  | 'visited'
+  | 'user_profile'
+  | 'brand_pack'
+  | 'agent_name'
+  | 'agent_avatar';
+
+export type ChatPersonalThreadStorageKind =
+  | 'mode'
+  | 'agent'
+  | 'session_profile'
+  | 'delegation_mode'
+  | 'pending_bot_messages'
+  | 'builder_history'
+  | 'builder_images'
+  | 'builder_artifact'
+  | 'automation_suggestion_seen';
+
+export type ChatPersonalStorageScope = Readonly<{
+  userId?: unknown;
+  circleId?: unknown;
+}>;
+
+const CHAT_PERSONAL_STORAGE_SEGMENT_MAX = 200;
+
+function personalStorageSegment(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed
+    .replace(/[^A-Za-z0-9_.-]/g, '_')
+    .slice(0, CHAT_PERSONAL_STORAGE_SEGMENT_MAX) || null;
+}
+
+/**
+ * Exact-account key for private Chat state that is shared by a user's devices
+ * only through this browser's storage. Missing identity fails closed: callers
+ * must not fall back to an ownerless key or import its value.
+ */
+export function chatPersonalCircleStorageKey(
+  kind: ChatPersonalCircleStorageKind,
+  scope: ChatPersonalStorageScope | null | undefined,
+): string | null {
+  const userId = personalStorageSegment(scope?.userId);
+  const circleId = personalStorageSegment(scope?.circleId);
+  if (!userId || !circleId) return null;
+  return `uc_chat_private_v2::${kind}::${userId}::${circleId}`;
+}
+
+/** Exact-account + exact-circle + exact-thread key for private Chat state. */
+export function chatPersonalThreadStorageKey(
+  kind: ChatPersonalThreadStorageKind,
+  scope: ChatPersonalStorageScope | null | undefined,
+  threadId: unknown,
+  discriminator?: unknown,
+): string | null {
+  const base = chatPersonalCircleStorageKey('visited', scope);
+  const thread = personalStorageSegment(threadId);
+  if (!base || !thread) return null;
+  const [userId, circleId] = base.split('::').slice(-2);
+  const suffix = discriminator === undefined
+    ? ''
+    : personalStorageSegment(discriminator);
+  if (discriminator !== undefined && !suffix) return null;
+  return `uc_chat_private_v2::${kind}::${userId}::${circleId}::${thread}${suffix ? `::${suffix}` : ''}`;
+}
+
+/** Runtime-only exact account/circle identity; never includes bearer text. */
+export function chatPersonalScopeKey(
+  scope: ChatPersonalStorageScope | null | undefined,
+): string | null {
+  const userId = personalStorageSegment(scope?.userId);
+  const circleId = personalStorageSegment(scope?.circleId);
+  return userId && circleId ? `${userId}::${circleId}` : null;
+}
+
 /**
  * One ledger entry as persisted. Mirrors ChatFailureRecoveryLedgerEntry in
  * ChatTab (kept structurally in sync — five small numeric-ish fields). Declared

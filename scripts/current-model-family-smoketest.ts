@@ -117,12 +117,12 @@ assert(
   'connected OpenAI Auto uses Luna for lightweight turns',
 );
 
-const resolvedModelDeclaration = chat.indexOf('const resolvedTurnModel =');
+const resolvedModelDeclaration = chat.indexOf('let resolvedTurnModel = requestedTurnModel;');
 const capabilityCall = chat.indexOf('const capResult = await routeByCapability(');
-const sendAssignment = chat.indexOf('const sendModel = resolvedTurnModel;');
-assert(resolvedModelDeclaration >= 0, 'Chat resolves one concrete model per turn');
+const sendAssignment = chat.indexOf('let sendModel = resolvedTurnModel;');
+assert(resolvedModelDeclaration >= 0, 'Chat resolves one concrete, catalog-replaceable model before dispatch');
 assert(capabilityCall > resolvedModelDeclaration, 'capability routing happens after concrete model resolution');
-assert(sendAssignment > capabilityCall, 'transport reuses the already-resolved model');
+assert(sendAssignment > capabilityCall, 'transport starts from the already-resolved model before the immutable dispatch seal');
 const capabilitySlice = chat.slice(capabilityCall, capabilityCall + 280);
 assert(capabilitySlice.includes('resolvedTurnModel || effectiveSelectedModel'), 'capability routing never receives raw Auto when resolution succeeds');
 assert(chat.includes('m.content.slice(-2000)'), 'latest assistant context keeps its tail for continuation');

@@ -26,7 +26,7 @@ export const EXPECTED_IMAGE_SIZE_AUDIT_CLOSURE = Object.freeze([
   'metro-transform-worker',
 ]);
 export const CONTROLLED_EXCEPTION_EXPIRES_AT_MS = Date.parse('2026-09-20T00:00:00.000Z');
-export const EXPECTED_AUDIT_SUBGRAPH_SHA256 = '594ea46c50d716e00e3769ec1ca7bd6e39f331b0cb7ee03c5ac175de8225b0c3';
+export const EXPECTED_AUDIT_SUBGRAPH_SHA256 = 'ea7f8616d2b4b9c2be0b6927bb201e715ec4aae92f9826e9bab9404f82a094fb';
 export const EXPECTED_LOCK_SUBGRAPH_SHA256 = '3c4fc3eb86abafa48308ff79597523a82ee5ae7fa7a1ee985a20cb24bf49eb1d';
 
 const EXPECTED_LOCK_NODE_PATHS = Object.freeze([

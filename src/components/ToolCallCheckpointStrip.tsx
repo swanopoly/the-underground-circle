@@ -20,6 +20,7 @@ import {
 
 interface Props {
   circleId: string;
+  threadId: string;
   /** Either a specific checkpoint id OR a planId to auto-list for. */
   checkpointId?: string;
   planId?: string;
@@ -33,6 +34,7 @@ interface Props {
 
 export default function ToolCallCheckpointStrip({
   circleId,
+  threadId,
   checkpointId,
   planId,
   accentColor = '#6366f1',
@@ -48,16 +50,16 @@ export default function ToolCallCheckpointStrip({
     if (checkpointId) {
       // Search a window, not just the newest row — the strip may render for
       // a checkpoint that is no longer the circle's latest.
-      const all = await listCheckpoints(circleId, { limit: 25 });
+      const all = await listCheckpoints(circleId, { threadId, limit: 25 });
       const match = all.find((r) => r.id === checkpointId);
       setRows(match ? [match] : []);
       return;
     }
     if (planId) {
-      const list = await listCheckpoints(circleId, { planId });
+      const list = await listCheckpoints(circleId, { planId, threadId });
       setRows(list);
     }
-  }, [circleId, checkpointId, planId]);
+  }, [circleId, checkpointId, planId, threadId]);
 
   useEffect(() => { refresh(); }, [refresh]);
 

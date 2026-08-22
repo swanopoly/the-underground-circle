@@ -258,7 +258,7 @@ async function searchCircleCandidates(
 
     let cQuery = supabase
       .from("circles")
-      .select("id, name, type")
+      .select("id, name, circle_type")
       .in("id", ids)
       .limit(limit);
     if (q) cQuery = cQuery.ilike("name", `%${q}%`);
@@ -268,7 +268,7 @@ async function searchCircleCandidates(
       kind: "circle" as const,
       id: String(c.id),
       label: String(c.name || "circle"),
-      sublabel: c.type ? String(c.type) : "circle",
+      sublabel: c.circle_type ? String(c.circle_type) : "circle",
     }));
   } catch {
     return [];

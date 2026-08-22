@@ -3,10 +3,10 @@
  * run-smokes.mjs — additive smoke-suite runner for The Underground Circle.
  *
  * Why this exists:
- *   `npm run smoke:all` is a single `&&` chain of every `smoke:*` script. The
- *   first failing suite aborts the chain, so every suite after it silently
- *   never runs, and nothing reports that fact. That masking has hidden real
- *   bugs and a large registration hole.
+ *   A hand-maintained `smoke:all` chain used to stop at the first failure and
+ *   routinely drift behind the registered `smoke:*` scripts. This runner is
+ *   now the canonical `smoke:all` implementation, so adding one package script
+ *   registers it for the full sweep automatically.
  *
  * What this does instead:
  *   - Discovers suites by parsing package.json `scripts` (never a hardcoded
@@ -16,14 +16,15 @@
  *   - Reports total / passed / failed / timed-out, failing output tails, and
  *     the slowest suites.
  *   - Reports registration drift: `scripts/*-smoketest.*` files with no
- *     `smoke:*` entry, entries pointing at missing files, and entries missing
- *     from the `smoke:all` chain.
+ *     `smoke:*` entry, entries pointing at missing files, and (for a legacy
+ *     static `smoke:all`) entries missing from its chain.
  *   - Exits non-zero if ANY suite failed or timed out (same gate strength).
  *
  * This file is plain Node ESM on purpose: it must not depend on tsx, and it
  * lives outside tsconfig so it needs no typecheck.
  *
- * `smoke:all` semantics are NOT changed by this file.
+ * The runner never invokes runner-backed aggregates, so `smoke:all`, report,
+ * list, and drift commands cannot recurse.
  */
 
 import { spawn } from 'node:child_process';
@@ -216,16 +217,32 @@ function referencedScriptFiles(command) {
 }
 
 /**
- * An aggregate re-runs other smoke scripts (`smoke:all`) or re-runs this
- * runner (e.g. a future `smoke:report`). Detecting them by shape rather than
- * by name means new aggregates never get executed recursively by accident.
+ * A pure aggregate only re-runs other smoke scripts, while runner-backed
+ * aggregates re-run this file. Hybrid scripts that invoke prerequisites and
+ * then execute their own `*-smoketest` file remain suites: otherwise their
+ * direct assertions would silently disappear from the dynamic full sweep.
  */
-function isAggregate(name, command) {
+function isAggregate(name, command, files) {
   if (name === 'smoke:all') return true;
   const text = String(command);
-  if (/\bnpm\s+run\s+smoke:/.test(text)) return true;
   if (text.includes(SELF_BASENAME)) return true;
-  return false;
+  const hasSmokeDependency = /\bnpm\s+run\s+smoke:/.test(text);
+  const hasDirectSuite = files.some((file) => SUITE_FILE_RE.test(file));
+  return hasSmokeDependency && !hasDirectSuite;
+}
+
+/**
+ * A hybrid package script may run prerequisite smoke aliases around its own
+ * test file. The full discovery sweep already schedules those prerequisites,
+ * so execute only the non-smoke segments here to keep every suite at one run.
+ * Direct `npm run` invocation of the hybrid alias retains its original chain.
+ */
+function flattenHybridCommand(command) {
+  const text = String(command).trim();
+  if (!/\bnpm\s+run\s+smoke:/.test(text)) return text;
+  const segments = text.split(/\s*&&\s*/u).map((segment) => segment.trim()).filter(Boolean);
+  const directSegments = segments.filter((segment) => !/^npm\s+run\s+smoke:[A-Za-z0-9:._-]+$/u.test(segment));
+  return directSegments.join(' && ');
 }
 
 function discoverSuites(scripts) {
@@ -235,8 +252,15 @@ function discoverSuites(scripts) {
     if (!name.startsWith('smoke:')) continue;
     if (typeof command !== 'string' || command.trim() === '') continue;
     const files = referencedScriptFiles(command);
-    const record = { name, command: command.trim(), files, file: files[0] ?? null };
-    if (isAggregate(name, command)) aggregates.push(record);
+    const registeredCommand = command.trim();
+    const record = {
+      name,
+      command: flattenHybridCommand(registeredCommand),
+      registeredCommand,
+      files,
+      file: files[0] ?? null,
+    };
+    if (isAggregate(name, command, files)) aggregates.push(record);
     else suites.push(record);
   }
   suites.sort((a, b) => a.name.localeCompare(b.name));
@@ -286,12 +310,19 @@ async function detectDrift(scripts, suites, aggregates) {
     }
   }
 
-  // Registered but absent from the `smoke:all` chain: real, and invisible
-  // today because the chain aborts long before anyone counts it.
+  // The canonical discovery runner covers every discovered suite by design.
+  // Keep checking explicit membership for an older/static smoke:all so a
+  // future rollback cannot quietly reintroduce the registration hole.
   const chain = typeof scripts['smoke:all'] === 'string' ? scripts['smoke:all'] : '';
+  const smokeAllUsesDiscovery = chain.includes(SELF_BASENAME)
+    && !/(?:^|\s)(?:--filter|-f|--list|-l)(?:\s|=|$)/u.test(chain);
   const chained = new Set((chain.match(/npm\s+run\s+(smoke:[A-Za-z0-9:._-]+)/g) || []).map((m) => m.replace(/npm\s+run\s+/, '')));
-  const notInSmokeAll = chain ? suites.filter((s) => !chained.has(s.name)).map((s) => s.name) : [];
-  const inSmokeAllUndefined = chain ? [...chained].filter((name) => !(name in scripts)) : [];
+  const notInSmokeAll = chain && !smokeAllUsesDiscovery
+    ? suites.filter((s) => !chained.has(s.name)).map((s) => s.name)
+    : [];
+  const inSmokeAllUndefined = chain && !smokeAllUsesDiscovery
+    ? [...chained].filter((name) => !(name in scripts))
+    : [];
 
   return {
     onDiskCount: onDisk.length,
@@ -300,7 +331,8 @@ async function detectDrift(scripts, suites, aggregates) {
     missingFiles,
     notInSmokeAll,
     inSmokeAllUndefined,
-    chainLength: chained.size,
+    smokeAllMode: smokeAllUsesDiscovery ? 'dynamic' : 'static',
+    chainLength: smokeAllUsesDiscovery ? suites.length : chained.size,
   };
 }
 
@@ -540,7 +572,7 @@ function reportDrift(drift) {
   const total = driftCount(drift);
   out(
     dim(
-      `  ${drift.onDiskCount} smoketest files on disk · ${drift.registeredFileCount} referenced by smoke:* entries · ${drift.chainLength} in the smoke:all chain`,
+      `  ${drift.onDiskCount} smoketest files on disk · ${drift.registeredFileCount} referenced by smoke:* entries · ${drift.chainLength} ${drift.smokeAllMode === 'dynamic' ? 'dynamically discovered by smoke:all' : 'in the smoke:all chain'}`,
     ),
   );
   if (total === 0) {
@@ -556,7 +588,7 @@ function reportDrift(drift) {
     for (const entry of drift.missingFiles) out(`      ${entry.suite} -> scripts/${entry.file}`);
   }
   if (drift.notInSmokeAll.length > 0) {
-    out(`  ${yellow(`${drift.notInSmokeAll.length} registered suite(s) missing from the smoke:all chain`)}:`);
+    out(`  ${yellow(`${drift.notInSmokeAll.length} registered suite(s) missing from smoke:all`)}:`);
     for (const name of drift.notInSmokeAll) out(`      ${name}`);
   }
   if (drift.inSmokeAllUndefined.length > 0) {

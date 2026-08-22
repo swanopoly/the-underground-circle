@@ -40,6 +40,7 @@ import {
   pruneExpiredVaultAccessGrants,
 } from '../../lib/vaultAgentAccess';
 import { supabase } from '../../lib/supabase';
+import { loadSafeCircleProfiles } from '../../lib/safeProfiles';
 import { useAuth } from '../../hooks/useAuth';
 
 interface Props {
@@ -542,14 +543,18 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     if (!vaultUnlocked) return;
     const { data } = await supabase
       .from('circle_members')
-      .select('user_id, profiles!user_id(display_name, username)')
+      .select('user_id')
       .eq('circle_id', circleId);
     if (Array.isArray(data)) {
+      const profiles = await loadSafeCircleProfiles({
+        circleId,
+        userIds: data.map((row: any) => row.user_id),
+      });
       setMembers(
-        data.map((row: any) => ({
-          user_id: row.user_id,
-          display_name: row.profiles?.display_name || row.profiles?.username || 'Member',
-          username: row.profiles?.username || '',
+        profiles.map(profile => ({
+          user_id: profile.id,
+          display_name: profile.display_name || profile.username || 'Member',
+          username: profile.username || '',
         })),
       );
     }

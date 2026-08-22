@@ -49,7 +49,11 @@ const moreOptions = moreOptionsStart >= 0 && moreOptionsEnd > moreOptionsStart
 
 assert(
   chatTab.includes('setCircleInitRetryToken((value) => value + 1);')
-    && chatTab.includes('}, [circleId, circleInitRetryToken]);'),
+    && chatTab.includes('void init(circleId, generation, requestedAuthority);')
+    && chatTab.includes('circleInitRetryToken,\n    isRunHistoryExactAuthorityCurrent,')
+    && chatTab.includes('runHistoryExactAuthority?.accessToken,')
+    && chatTab.includes('runHistoryExactAuthority?.generation,')
+    && chatTab.includes('runHistoryExactAuthority?.userId,'),
   'retrying an unresolved conversation reruns circle and default-thread initialization',
 );
 
@@ -93,7 +97,7 @@ assert(
 );
 assert(
   menu.includes('Switch mode and crew here.')
-    && menu.includes('Agent, model, approvals, and tools are in Control Panel.')
+    && menu.includes("Pick the agent from the composer's agent button. Model, approvals, and tools are in Control Panel.")
     && menu.includes('Past or blocked work is in Runs & recovery.'),
   'the service menu explains where each major control lives',
 );
@@ -131,7 +135,7 @@ assert(
   'the redundant Done row is removed because close and backdrop already own dismissal',
 );
 assert(
-  menu.includes('Agent · model · approvals · tools')
+  menu.includes('Model · approvals · tools')
     && menu.includes('Runs & recovery')
     && menu.includes('accessibilityLabel="Open OpenSwan runs and recovery"'),
   'control-panel and recovery routes have explicit, accessible labels',
@@ -175,7 +179,7 @@ assert(
   'mode and crew choices retain native state while emitting direct web pressed semantics',
 );
 assert(
-  menu.includes('accessibilityHint="Choose the agent and model, review approvals, and manage tools."')
+  menu.includes('accessibilityHint="Choose the model, review approvals, and manage tools. The agent is selected from the composer."')
     && menu.includes('accessibilityHint="Review and manage OpenSwan skills for this circle."')
     && menu.includes('accessibilityHint="Review active, completed, or blocked runs and available recovery actions."')
     && occurrences(menu, 'accessibilityHint="Close the service menu and return to Chat."') === 1,

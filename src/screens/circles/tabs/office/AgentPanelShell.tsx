@@ -677,6 +677,7 @@ export default function AgentPanelShell({
               nativeID="uc-agent-panel-tabpanel"
               accessibilityRole={'tabpanel' as any}
               accessibilityLabel={activeTab ? `${activeTab.label} section` : 'Agent section'}
+              style={styles.tabPanel}
               {...(Platform.OS === 'web' ? ({
                 role: 'tabpanel',
                 'aria-labelledby': activeTabLabelId,
@@ -1077,6 +1078,9 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     flex: 1,
+  },
+  tabPanel: {
+    gap: 16,
   },
   desktopScrollContent: {
     paddingHorizontal: 16,

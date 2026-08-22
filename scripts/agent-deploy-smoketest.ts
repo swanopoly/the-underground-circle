@@ -11,6 +11,8 @@
  * Run: npx tsx scripts/agent-deploy-smoketest.ts
  */
 
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   MAX_AGENTS_PER_DEPLOY,
   PER_DEPLOY_COST_CAP_USD,
@@ -22,6 +24,11 @@ import {
 } from '../src/lib/agentDeployPolicy';
 import { buildAgentDeployPlan } from '../src/lib/agentDeployPlan';
 import { resolveDeployModel } from '../src/lib/agentDeployModelPolicy';
+import {
+  buildSubagentBridgeTask,
+  detectSubagentCapability,
+  listSubagentCapabilities,
+} from '../src/lib/subagentCapabilities';
 
 let failures = 0;
 function assert(label: string, cond: boolean): void {
@@ -155,6 +162,21 @@ console.log('buildAgentDeployPlan');
   assert('individual[1] = sonnet', individual.specs[1].model === 'claude-sonnet-4-6');
   assert('individual[2] falls back to model', individual.specs[2].model === 'claude-haiku-4-5');
 
+  const specialized = buildAgentDeployPlan({
+    mode: 'individual',
+    count: 4,
+    role: 'coder',
+    perAgentRoles: ['researcher', '  designer  ', null, 'security'],
+  });
+  assert('individual preserves exact per-agent specialty roles', specialized.specs.map((s) => s.role).join(',') === 'researcher,designer,coder,security');
+
+  const uniformSpecialty = buildAgentDeployPlan({
+    mode: 'uniform',
+    count: 2,
+    role: '  tester  ',
+  });
+  assert('uniform trims and preserves one specialty role', uniformSpecialty.specs.every((s) => s.role === 'tester'));
+
   // max → fill to ceiling regardless of requested count
   const max = buildAgentDeployPlan({ mode: 'max', count: 3, model: 'claude-sonnet-4-6' });
   assert('max mode preserved', max.mode === 'max');
@@ -172,6 +194,52 @@ console.log('buildAgentDeployPlan');
   const noModel = buildAgentDeployPlan({ mode: 'uniform', count: 2 });
   assert('no-model plan still has specs', noModel.specs.length === 2);
   assert('no-model plan has a non-empty model', noModel.specs.every((s) => !!s.model));
+}
+
+// ── specialty/SOUL bridge handoff ────────────────────────────────────────────
+console.log('specialty/SOUL bridge handoff');
+{
+  const capabilities = listSubagentCapabilities();
+  assert('every launch specialty has an explicit SOUL', capabilities.every((capability) => !!capability.spiritId));
+  assert('every launch specialty has a skill bundle', capabilities.every((capability) => !!capability.skillBundleId));
+
+  const securityTask = buildSubagentBridgeTask('security', 'Audit the authorization boundary.');
+  assert('bridge handoff names exact specialty', securityTask.includes('Specialty: Security (security)'));
+  assert('bridge handoff names exact SOUL', securityTask.includes('SOUL: security'));
+  assert('bridge handoff names exact skill bundle', securityTask.includes('Skill bundle: seceng-harden-and-threatmodel'));
+  assert('bridge handoff includes specialty knowledge', securityTask.includes('SPECIALTY KNOWLEDGE'));
+  assert('bridge handoff preserves exact task brief', securityTask.endsWith('TASK\nAudit the authorization boundary.'));
+  assert('bridge handoff preserves approval/tool boundary', securityTask.includes('not permission to bypass approval'));
+
+  const unknownTask = buildSubagentBridgeTask('not-a-role', 'Build the feature.');
+  assert('unknown bridge role falls back visibly to Builder', unknownTask.includes('Specialty: Builder (coder)'));
+  assert('unknown bridge role still has the coder SOUL', unknownTask.includes('SOUL: sr-engineer'));
+
+  const exactReviewer = detectSubagentCapability('[specialty:reviewer] Design a new settings screen.');
+  assert('explicit specialty directive wins over task-keyword inference', exactReviewer?.role === 'reviewer');
+  const invalidDirective = detectSubagentCapability('[specialty:not-real] Research provider options.');
+  assert('invalid specialty directive falls back to safe task inference', invalidDirective?.role === 'researcher');
+}
+
+// ── production launch-surface wiring ─────────────────────────────────────────
+console.log('production launch-surface wiring');
+{
+  const root = resolve(__dirname, '..');
+  const modal = readFileSync(resolve(root, 'src/screens/circles/tabs/chat/SpawnAgentsModal.tsx'), 'utf8');
+  const chat = readFileSync(resolve(root, 'src/screens/circles/tabs/ChatTab.tsx'), 'utf8');
+  const officeGateway = readFileSync(resolve(root, 'src/screens/circles/tabs/office/AgentGatewayPanels.tsx'), 'utf8');
+  const massDeploy = chat.slice(chat.indexOf('<SpawnAgentsModal'), chat.indexOf('<ChatThreadHeader'));
+
+  assert('Chat gives mass deploy exact Circle scope', massDeploy.includes('circleId={circleId}'));
+  assert('Chat gives mass deploy exact user scope', massDeploy.includes('userId={currentUserId}'));
+  assert('mass deploy plan carries per-agent specialties', modal.includes('perAgentRoles: resolved.map((r) => r.role)'));
+  assert('bridge launch uses the specialty handoff', modal.includes('buildSubagentBridgeTask(rr.role, rr.task)'));
+  assert('mass deploy owns a synchronous single-flight gate', modal.includes('if (spawnInFlightRef.current) return;') && modal.includes('spawnInFlightRef.current = true;'));
+  assert('uniform launcher visibly selects specialty + SOUL + skill', modal.includes('SPECIALTY · SOUL + SKILL'));
+  assert('individual launcher exposes per-agent specialty selection', modal.includes('updateSlot(slot.id, { role: choice.role })'));
+  assert('Office popup exposes an exact subagent specialty selector', officeGateway.includes('setSpawnRole(specialty.role)'));
+  assert('Office popup carries the specialty directive into Chat', officeGateway.includes('`[specialty:${selectedSpawnSpecialty.role}] Launch a ${selectedSpawnSpecialty.displayName} specialist subagent'));
+  assert('Office popup discloses linked SOUL and skill bundle', officeGateway.includes('SOUL {selectedSpawnSpecialty.spiritId} · SKILL {selectedSpawnSpecialty.skillBundleId}'));
 }
 
 // ── resolveDeployModel: auto resolution + fail-closed bridge ──────────────────

@@ -16,7 +16,6 @@ interface DiscoverCircle {
   description: string | null;
   max_members: number;
   created_at: string;
-  circle_image_url: string | null;
   member_count: number;
   active_missions: number;
   is_member: boolean;

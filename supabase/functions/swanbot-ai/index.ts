@@ -54,6 +54,7 @@ interface RequestBody {
   message: string;
   circleId: string;
   userId: string;
+  threadId?: string;
   model?: string | null; // 'blackswan' | 'claude-haiku' | 'claude-sonnet' | 'claude-opus' | null (auto)
   thinkingLevel?: "fast" | "balanced" | "deep"; // Controls extended thinking
   maxTokens?: number;
@@ -597,6 +598,8 @@ function routeSkills(message: string, spirit?: string | null, ctx?: any): string
 
 async function gatherCircleContext(
   supabase: any,
+  messageSupabase: any,
+  messageThreadIds: string[],
   circleId: string,
   userId: string,
   userMessage?: string,
@@ -614,7 +617,14 @@ async function gatherCircleContext(
   ] = await Promise.all([
     supabase.from("circles").select("name, description").eq("id", circleId).single(),
     supabase.from("circle_members").select("role, user:profiles(id, username, display_name, current_streak, longest_streak, bio)").eq("circle_id", circleId),
-    supabase.from("messages").select("content, is_bot, created_at, user:profiles(display_name, username)").eq("circle_id", circleId).order("created_at", { ascending: false }).limit(30),
+    messageThreadIds.length > 0
+      ? messageSupabase.from("messages")
+        .select("content, is_bot, created_at, user:profiles(display_name, username)")
+        .eq("circle_id", circleId)
+        .in("thread_id", messageThreadIds)
+        .order("created_at", { ascending: false })
+        .limit(30)
+      : Promise.resolve({ data: [], error: null }),
     supabase.from("check_ins").select("content, created_at, user:profiles(display_name, username)").eq("circle_id", circleId).gte("created_at", today),
     supabase.from("tasks").select("title, description, status, priority, due_date, assignee:profiles!tasks_assigned_to_fkey(display_name, username), creator:profiles!tasks_created_by_fkey(display_name, username)").eq("circle_id", circleId).neq("status", "done").order("created_at", { ascending: false }).limit(20),
     supabase.from("tasks").select("title, status, priority, due_date").eq("circle_id", circleId).or(`assigned_to.eq.${userId},created_by.eq.${userId}`).neq("status", "done").limit(10),
@@ -2000,7 +2010,7 @@ async function executeToolCall(
       inputs: any,
       model?: string,
       options?: Record<string, any>,
-    ) => callHfProxy(task, inputs, model, options, userId);
+    ) => callHfProxy(task, inputs, model, options, userId, circleId);
 
     switch (toolName) {
       case "create_task": {
@@ -2464,6 +2474,7 @@ async function callHfProxy(
   model?: string,
   options?: Record<string, any>,
   userId?: string,
+  circleId?: string,
 ): Promise<{ result?: any; model?: string; error?: string }> {
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -2475,7 +2486,7 @@ async function callHfProxy(
         "Content-Type": "application/json",
         "Authorization": `Bearer ${serviceKey}`,
       },
-      body: JSON.stringify({ task, inputs, model, options, userId }),
+      body: JSON.stringify({ task, inputs, model, options, userId, circleId }),
       redirect: "manual",
       signal: AbortSignal.timeout(90_000),
     });
@@ -2499,8 +2510,8 @@ async function logHfActivity(
   supabase: any,
   circleId: string,
   tool: string,
-  inputPreview: string,
-  result: any,
+  _inputPreview: string,
+  _result: any,
 ): Promise<void> {
   try {
     await supabase.from("agent_activity").insert({
@@ -2508,8 +2519,12 @@ async function logHfActivity(
       agent_name: "HuggingSwan",
       source: "blackswan",
       activity_type: "tool_call",
-      title: `${tool}: ${inputPreview}...`,
-      body: JSON.stringify(result).slice(0, 2000),
+      // Activity is Circle-wide. A tool can run from a private Chat thread, so
+      // never copy its prompt, source content, provider output, or data URL into
+      // this broader feed. The exact Chat response remains in its authorized
+      // thread; this row is deliberately value-free telemetry.
+      title: `${tool} completed`,
+      body: "Hugging Face tool completed.",
       status: "completed",
       metadata: { tool, hf: true },
     });
@@ -3885,6 +3900,67 @@ async function requireSwanBotCircleMembership(
   return null;
 }
 
+type SwanBotV1MessageScopeDecision =
+  | { ok: true; threadIds: string[] }
+  | { ok: false; response: Response };
+
+function createSwanBotCallerClient(req: Request): any | null {
+  const authorization = req.headers.get("Authorization") ||
+    req.headers.get("authorization") || "";
+  const anonKey = Deno.env.get("SUPABASE_ANON_KEY") || "";
+  const supabaseUrl = Deno.env.get("SUPABASE_URL") || "";
+  if (!authorization || !anonKey || !supabaseUrl) return null;
+  return createClient(supabaseUrl, anonKey, {
+    global: { headers: { Authorization: authorization } },
+    auth: { persistSession: false },
+  });
+}
+
+/**
+ * Resolve only the Chat threads whose messages may enter the v1 system prompt.
+ * The query runs as the verified caller so database RLS remains the final
+ * authority. Without an exact active thread, only Circle-visible threads are
+ * eligible; private/shared threads must never be mixed into a Circle-wide turn.
+ */
+async function resolveSwanBotV1MessageScope(
+  callerSupabase: any,
+  circleId: string,
+  requestedThreadId?: string,
+): Promise<SwanBotV1MessageScopeDecision> {
+  let query = callerSupabase
+    .from("circle_chat_threads")
+    .select("id")
+    .eq("circle_id", circleId);
+  query = requestedThreadId
+    ? query.eq("id", requestedThreadId)
+    : query.eq("visibility", "circle").limit(50);
+  const { data, error } = await query;
+  if (error) {
+    return {
+      ok: false,
+      response: errResponse(
+        503,
+        "thread_authorization_unavailable",
+        "Could not verify the active Chat thread.",
+      ),
+    };
+  }
+  const threadIds = (data || [])
+    .map((row: { id?: unknown }) => typeof row.id === "string" ? row.id : null)
+    .filter((id: string | null): id is string => Boolean(id));
+  if (requestedThreadId && threadIds.length !== 1) {
+    return {
+      ok: false,
+      response: errResponse(
+        403,
+        "thread_forbidden",
+        "Not authorized for this Chat thread.",
+      ),
+    };
+  }
+  return { ok: true, threadIds };
+}
+
 const MAX_SWANBOT_REQUEST_BYTES = 2_000_000;
 const MAX_SWANBOT_MESSAGE_CHARS = 200_000;
 
@@ -3959,7 +4035,7 @@ Deno.serve(async (req: Request) => {
   let swanBotV1TargetAgentMetadata: Record<string, unknown> = {};
 
   try {
-    const { message, circleId, userId: _ignoredUserId, model, thinkingLevel, targetAgentName, wikiContext, systemDirective } = body;
+    const { message, circleId, userId: _ignoredUserId, threadId, model, thinkingLevel, targetAgentName, wikiContext, systemDirective } = body;
     const maxTokens = typeof body.maxTokens === "number" && Number.isFinite(body.maxTokens)
       ? Math.min(Math.max(Math.floor(body.maxTokens), 1), 8_192)
       : undefined;
@@ -3980,6 +4056,7 @@ Deno.serve(async (req: Request) => {
       || message.length > MAX_SWANBOT_MESSAGE_CHARS
       || typeof circleId !== "string"
       || !UUID_PATTERN.test(circleId)
+      || (threadId != null && (typeof threadId !== "string" || !UUID_PATTERN.test(threadId)))
       || (model != null && (typeof model !== "string" || model.length > 300))
       || (thinkingLevel != null && !["fast", "balanced", "deep"].includes(thinkingLevel))
       || (body.maxTokens != null && (typeof body.maxTokens !== "number" || !Number.isFinite(body.maxTokens)))
@@ -4437,6 +4514,21 @@ Deno.serve(async (req: Request) => {
     }
     // ─── End relay mode ───────────────────────────────────────────────
 
+    const callerSupabase = createSwanBotCallerClient(req);
+    if (!callerSupabase) {
+      return errResponse(
+        503,
+        "thread_authorization_unavailable",
+        "Authenticated Chat visibility is unavailable.",
+      );
+    }
+    const messageScope = await resolveSwanBotV1MessageScope(
+      callerSupabase,
+      circleId,
+      threadId,
+    );
+    if (!messageScope.ok) return messageScope.response;
+
     swanBotV1RunId = await createSwanBotV1Run(supabase, {
       circleId,
       userId,
@@ -4451,6 +4543,8 @@ Deno.serve(async (req: Request) => {
     // may enter gatherCircleContext's compatibility name lookup.
     const context: any = await gatherCircleContext(
       supabase,
+      callerSupabase,
+      messageScope.threadIds,
       circleId,
       userId,
       message,
@@ -5132,7 +5226,7 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
           { role: "system", content: combinedSystemPrompt },
           { role: "user", content: message },
         ],
-      }, hfModelId, undefined, userId);
+      }, hfModelId, undefined, userId, circleId);
 
       if (!hfResult.error && hfResult.result) {
         const rawHfResponse = hfResult.result?.choices?.[0]?.message?.content || JSON.stringify(hfResult.result);

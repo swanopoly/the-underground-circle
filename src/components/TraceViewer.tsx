@@ -7,6 +7,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { View, Text, StyleSheet, ScrollView, Pressable, Platform } from 'react-native';
 import { supabase } from '../lib/supabase';
+import { loadSafeCircleProfiles } from '../lib/safeProfiles';
 
 interface Trace {
   id: string;
@@ -82,10 +83,9 @@ export default function TraceViewer({ circleId, accentColor = '#6366f1' }: Props
 
       // Get sender profiles
       const senderIds = [...new Set((messages || []).map(m => m.sender_id).filter(Boolean))];
-      const { data: profiles, error: profilesError } = senderIds.length > 0
-        ? await supabase.from('profiles').select('id, display_name, username').in('id', senderIds)
-        : { data: [] as any[], error: null };
-      if (profilesError) throw profilesError;
+      const profiles = senderIds.length > 0
+        ? await loadSafeCircleProfiles({ circleId, userIds: senderIds })
+        : [];
       if (generation !== loadGenerationRef.current) return;
 
       const messageMap = new Map((messages || []).map(m => [m.id, m]));

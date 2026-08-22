@@ -915,39 +915,39 @@ export default function AgentMemoryPanel({
     const useLabel = getMemoryUseLabel(mem);
     const provenanceLabel = getAgentMemoryProvenanceLabel(mem, canonicalSubjectId);
     return (
-    <View key={mem.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 12, marginBottom: 8 }}>
+    <View key={mem.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 12, marginBottom: 8 }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 3 }}>
-        <View style={{ backgroundColor: (kindColors[mem.memory_kind] || '#606075') + '20', paddingHorizontal: 8, paddingVertical: 1, borderRadius: 2 }}>
+        <View style={{ backgroundColor: (kindColors[mem.memory_kind] || '#606075') + '20', paddingHorizontal: 8, paddingVertical: 1, borderRadius: 6 }}>
           <Text style={{ color: kindColors[mem.memory_kind] || '#606075', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{(mem.memory_kind || 'fact').toUpperCase()}</Text>
         </View>
-        <View style={{ backgroundColor: '#1a1a28', paddingHorizontal: 8, paddingVertical: 1, borderRadius: 2 }}>
+        <View style={{ backgroundColor: '#1a1a28', paddingHorizontal: 8, paddingVertical: 1, borderRadius: 6 }}>
           <Text style={{ color: scopeColors[mem.scope] || '#909098', fontSize: 10, fontFamily: MONO }}>
             {scopeLabels[mem.scope] || mem.scope}
           </Text>
         </View>
         {provenanceLabel ? (
-          <View style={{ backgroundColor: '#241a0b', paddingHorizontal: 8, paddingVertical: 1, borderRadius: 2, borderWidth: 1, borderColor: '#f59e0b40', maxWidth: 190 }}>
+          <View style={{ backgroundColor: '#241a0b', paddingHorizontal: 8, paddingVertical: 1, borderRadius: 6, borderWidth: 1, borderColor: '#f59e0b40', maxWidth: 190 }}>
             <Text style={{ color: '#fbbf24', fontSize: 10, fontFamily: MONO }} numberOfLines={1}>
               {provenanceLabel}
             </Text>
           </View>
         ) : null}
         {typeof mem.metadata?.soul_memory_mode === 'string' ? (
-          <View style={{ backgroundColor: '#221933', paddingHorizontal: 8, paddingVertical: 1, borderRadius: 2 }}>
+          <View style={{ backgroundColor: '#221933', paddingHorizontal: 8, paddingVertical: 1, borderRadius: 6 }}>
             <Text style={{ color: '#a78bfa', fontSize: 10, fontFamily: MONO }}>
               {String(mem.metadata.soul_memory_mode).replace(/_/g, ' ')}
             </Text>
           </View>
         ) : null}
         {getRelevantSouls(mem).length > 1 ? (
-          <View style={{ backgroundColor: '#102334', paddingHorizontal: 8, paddingVertical: 1, borderRadius: 2 }}>
+          <View style={{ backgroundColor: '#102334', paddingHorizontal: 8, paddingVertical: 1, borderRadius: 6 }}>
             <Text style={{ color: '#7dd3fc', fontSize: 10, fontFamily: MONO }}>
               {`${getRelevantSouls(mem).length} souls`}
             </Text>
           </View>
         ) : null}
         {useLabel ? (
-          <View style={{ backgroundColor: '#171717', paddingHorizontal: 8, paddingVertical: 1, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e' }}>
+          <View style={{ backgroundColor: '#171717', paddingHorizontal: 8, paddingVertical: 1, borderRadius: 6, borderWidth: 1, borderColor: '#2a2a3e' }}>
             <Text style={{ color: '#9a9aa8', fontSize: 10, fontFamily: MONO }}>
               {useLabel}
             </Text>
@@ -970,7 +970,7 @@ export default function AgentMemoryPanel({
         <View style={{ gap: 4 }}>
           <TextInput value={editContent} onChangeText={setEditContent} multiline autoFocus
             accessibilityLabel={`Edit memory: ${String(mem.title || 'Untitled memory')}`}
-            style={{ color: '#f0f0f5', fontSize: 12, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#2a2a3e', borderRadius: 2, padding: 10, minHeight: 44, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any} />
+            style={{ color: '#f0f0f5', fontSize: 12, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#2a2a3e', borderRadius: 6, padding: 10, minHeight: 44, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any} />
           <View style={{ flexDirection: 'row', gap: 4 }}>
             <Pressable
               accessibilityRole="button"
@@ -978,7 +978,7 @@ export default function AgentMemoryPanel({
               accessibilityState={{ disabled: mutatingMemoryId !== null, busy: mutatingMemoryId === mem.id }}
               disabled={mutatingMemoryId !== null}
               onPress={() => { void handleSave(); }}
-              style={{ backgroundColor: '#22c55e20', paddingHorizontal: 10, borderRadius: 2, borderWidth: 1, borderColor: '#22c55e40', minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center', opacity: mutatingMemoryId !== null ? 0.5 : 1 }}
+              style={{ backgroundColor: '#22c55e20', paddingHorizontal: 10, borderRadius: 6, borderWidth: 1, borderColor: '#22c55e40', minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center', opacity: mutatingMemoryId !== null ? 0.5 : 1 }}
             >
               <Text style={{ color: '#22c55e', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{mutatingMemoryId === mem.id ? 'Saving…' : 'Save'}</Text>
             </Pressable>
@@ -986,7 +986,7 @@ export default function AgentMemoryPanel({
               accessibilityRole="button"
               accessibilityLabel={`Cancel editing ${String(mem.title || 'memory')}`}
               onPress={cancelEditingMemory}
-              style={{ backgroundColor: '#1a1a28', paddingHorizontal: 10, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e', minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center' }}
+              style={{ backgroundColor: '#1a1a28', paddingHorizontal: 10, borderRadius: 6, borderWidth: 1, borderColor: '#2a2a3e', minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center' }}
             >
               <Text style={{ color: '#909098', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>Cancel</Text>
             </Pressable>
@@ -1003,7 +1003,7 @@ export default function AgentMemoryPanel({
                 disabled={mutatingMemoryId !== null}
                 accessibilityState={{ disabled: mutatingMemoryId !== null }}
                 onPress={() => beginEditingMemory(mem)}
-                style={[{ paddingHorizontal: 10, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e', minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center', opacity: mutatingMemoryId !== null ? 0.45 : 1 }, Platform.OS === 'web' && { cursor: mutatingMemoryId !== null ? 'default' : 'pointer' } as any]}
+                style={[{ paddingHorizontal: 10, borderRadius: 6, borderWidth: 1, borderColor: '#2a2a3e', minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center', opacity: mutatingMemoryId !== null ? 0.45 : 1 }, Platform.OS === 'web' && { cursor: mutatingMemoryId !== null ? 'default' : 'pointer' } as any]}
               >
                 <Text style={{ color: '#a0a0b0', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>Edit</Text>
               </Pressable>
@@ -1013,7 +1013,7 @@ export default function AgentMemoryPanel({
                 disabled={mutatingMemoryId !== null}
                 accessibilityState={{ disabled: mutatingMemoryId !== null, busy: mutatingMemoryId === mem.id, selected: !!mem.pinned }}
                 onPress={() => { void handlePinToggle(mem); }}
-                style={[{ paddingHorizontal: 10, borderRadius: 2, borderWidth: 1, borderColor: mem.pinned ? '#6366f140' : '#2a2a3e', backgroundColor: mem.pinned ? '#6366f110' : undefined, minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center', opacity: mutatingMemoryId !== null ? 0.45 : 1 }, Platform.OS === 'web' && { cursor: mutatingMemoryId !== null ? 'default' : 'pointer' } as any]}
+                style={[{ paddingHorizontal: 10, borderRadius: 6, borderWidth: 1, borderColor: mem.pinned ? '#6366f140' : '#2a2a3e', backgroundColor: mem.pinned ? '#6366f110' : undefined, minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center', opacity: mutatingMemoryId !== null ? 0.45 : 1 }, Platform.OS === 'web' && { cursor: mutatingMemoryId !== null ? 'default' : 'pointer' } as any]}
               >
                 <Text style={{ color: mem.pinned ? '#6366f1' : '#a0a0b0', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{mem.pinned ? 'Unpin' : 'Pin'}</Text>
               </Pressable>
@@ -1023,7 +1023,7 @@ export default function AgentMemoryPanel({
                 disabled={mutatingMemoryId !== null}
                 accessibilityState={{ disabled: mutatingMemoryId !== null, busy: mutatingMemoryId === mem.id }}
                 onPress={() => { void handlePromote(mem); }}
-                style={[{ paddingHorizontal: 10, borderRadius: 2, borderWidth: 1, borderColor: '#22c55e30', minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center', opacity: mutatingMemoryId !== null ? 0.45 : 1 }, Platform.OS === 'web' && { cursor: mutatingMemoryId !== null ? 'default' : 'pointer' } as any]}
+                style={[{ paddingHorizontal: 10, borderRadius: 6, borderWidth: 1, borderColor: '#22c55e30', minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center', opacity: mutatingMemoryId !== null ? 0.45 : 1 }, Platform.OS === 'web' && { cursor: mutatingMemoryId !== null ? 'default' : 'pointer' } as any]}
               >
                 <Text style={{ color: '#22c55e', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>Promote</Text>
               </Pressable>
@@ -1033,14 +1033,14 @@ export default function AgentMemoryPanel({
                 disabled={mutatingMemoryId !== null}
                 accessibilityState={{ disabled: mutatingMemoryId !== null, busy: deletingMemoryId === mem.id }}
                 onPress={() => requestDeleteMemory(mem)}
-                style={[{ paddingHorizontal: 10, borderRadius: 2, borderWidth: 1, borderColor: '#ef444450', minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center', opacity: mutatingMemoryId !== null && deletingMemoryId !== mem.id ? 0.45 : 1 }, Platform.OS === 'web' && { cursor: mutatingMemoryId === null ? 'pointer' : 'default' } as any]}
+                style={[{ paddingHorizontal: 10, borderRadius: 6, borderWidth: 1, borderColor: '#ef444450', minHeight: 44, minWidth: 44, alignItems: 'center', justifyContent: 'center', opacity: mutatingMemoryId !== null && deletingMemoryId !== mem.id ? 0.45 : 1 }, Platform.OS === 'web' && { cursor: mutatingMemoryId === null ? 'pointer' : 'default' } as any]}
               >
                 <Text style={{ color: '#ef4444', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{deletingMemoryId === mem.id ? 'Deleting…' : 'Delete'}</Text>
               </Pressable>
             </View>
           ) : (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 }}>
-              <View style={{ paddingHorizontal: 6, paddingVertical: 2, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e', backgroundColor: '#0a0a12' }}>
+              <View style={{ paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6, borderWidth: 1, borderColor: '#2a2a3e', backgroundColor: '#0a0a12' }}>
                 <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', fontFamily: MONO, letterSpacing: 0.5 }}>READ-ONLY</Text>
               </View>
               <Text style={{ color: '#505060', fontSize: 10, fontFamily: MONO, fontStyle: 'italic' }}>
@@ -1059,7 +1059,7 @@ export default function AgentMemoryPanel({
   };
 
   const renderMemorySection = (section: MemorySection) => (
-    <View key={section.key} style={{ backgroundColor: '#09090f', borderWidth: 1, borderColor: section.borderColor, borderRadius: 3, padding: 10, marginBottom: 10 }}>
+    <View key={section.key} style={{ backgroundColor: '#09090f', borderWidth: 1, borderColor: section.borderColor, borderRadius: 6, padding: 10, marginBottom: 10 }}>
       <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 8, marginBottom: 4 }}>
         <Text style={{ color: '#c8c8d4', fontSize: 12, fontWeight: '700', letterSpacing: 0.5, fontFamily: MONO }}>{section.title.toUpperCase()}</Text>
         <Text style={{ color: '#707086', fontSize: 11, fontFamily: MONO }}>({section.items.length})</Text>
@@ -1083,7 +1083,7 @@ export default function AgentMemoryPanel({
           accessibilityRole="button"
           accessibilityLabel="Continue in Chat to add the reasoning standard"
           onPress={continueReasoningStandardInChat}
-          style={[{ marginLeft: 'auto', paddingHorizontal: 10, borderRadius: 2, backgroundColor: accentColor + '20', borderWidth: 1, borderColor: accentColor + '40', minHeight: 44, alignItems: 'center', justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          style={[{ marginLeft: 'auto', paddingHorizontal: 10, borderRadius: 6, backgroundColor: accentColor + '20', borderWidth: 1, borderColor: accentColor + '40', minHeight: 44, alignItems: 'center', justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
         >
           <Text style={{ color: accentColor, fontSize: 10, fontWeight: '700', fontFamily: MONO }}>CONTINUE IN CHAT</Text>
         </Pressable>
@@ -1097,7 +1097,7 @@ export default function AgentMemoryPanel({
         </Text>
       ) : null}
       {loadError ? (
-        <View accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ borderWidth: 1, borderColor: '#ef444455', backgroundColor: '#2a0b0b', borderRadius: 2, padding: 10, gap: 8 }}>
+        <View accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ borderWidth: 1, borderColor: '#ef444455', backgroundColor: '#2a0b0b', borderRadius: 6, padding: 10, gap: 8 }}>
           <Text style={{ color: '#fca5a5', fontSize: 12, fontFamily: MONO, lineHeight: 17 }}>{loadError}</Text>
           <Pressable
             accessibilityRole="button"
@@ -1105,7 +1105,7 @@ export default function AgentMemoryPanel({
             accessibilityState={{ disabled: loading, busy: loading }}
             disabled={loading}
             onPress={() => { void load(); }}
-            style={[{ alignSelf: 'flex-start', minHeight: 44, minWidth: 72, paddingHorizontal: 12, borderWidth: 1, borderColor: '#ef444466', borderRadius: 2, alignItems: 'center', justifyContent: 'center', opacity: loading ? 0.55 : 1 }, Platform.OS === 'web' && { cursor: loading ? 'default' : 'pointer' } as any]}
+            style={[{ alignSelf: 'flex-start', minHeight: 44, minWidth: 72, paddingHorizontal: 12, borderWidth: 1, borderColor: '#ef444466', borderRadius: 6, alignItems: 'center', justifyContent: 'center', opacity: loading ? 0.55 : 1 }, Platform.OS === 'web' && { cursor: loading ? 'default' : 'pointer' } as any]}
           >
             <Text style={{ color: '#fca5a5', fontSize: 11, fontWeight: '800', fontFamily: MONO }}>{loading ? 'RETRYING…' : 'RETRY'}</Text>
           </Pressable>
@@ -1134,14 +1134,14 @@ export default function AgentMemoryPanel({
         accessibilityLabel="Inspect memory identity details"
         accessibilityState={{ expanded: showIdentityDetails }}
         onPress={() => setShowIdentityDetails(current => !current)}
-        style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 10, borderWidth: 1, borderColor: '#2a2a3e', borderRadius: 2, alignItems: 'center', justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+        style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 10, borderWidth: 1, borderColor: '#2a2a3e', borderRadius: 6, alignItems: 'center', justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
       >
         <Text style={{ color: '#8b92a8', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>
           {showIdentityDetails ? 'HIDE IDENTITY DETAILS' : 'INSPECT IDENTITY DETAILS'}
         </Text>
       </Pressable>
       {showIdentityDetails ? (
-        <View style={{ backgroundColor: '#080810', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 7, gap: 4 }}>
+        <View style={{ backgroundColor: '#080810', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 7, gap: 4 }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
             <Text style={{ color: '#707086', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>CANONICAL SUBJECT</Text>
             <Text style={{ color: accentColor, fontSize: 11, fontFamily: MONO, flex: 1 }} numberOfLines={1}>
@@ -1196,11 +1196,11 @@ export default function AgentMemoryPanel({
           placeholder="Draft a new memory for Chat..."
           editable={!!onOpenInChat && !!exactMemoryAuthority}
           placeholderTextColor="#606075"
-          style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, minHeight: 44, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+          style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 6, minHeight: 44, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
           onSubmitEditing={() => continueMemoryWriteInChat('memory')}
           returnKeyType="done"
         />
-        <Pressable accessibilityRole="button" accessibilityLabel="Continue in Chat with this new agent memory" onPress={() => continueMemoryWriteInChat('memory')} style={[{ backgroundColor: accentColor + '20', paddingHorizontal: 8, borderRadius: 2, borderWidth: 1, borderColor: accentColor + '40', minHeight: 44, minWidth: 56, alignItems: 'center', justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Continue in Chat with this new agent memory" onPress={() => continueMemoryWriteInChat('memory')} style={[{ backgroundColor: accentColor + '20', paddingHorizontal: 8, borderRadius: 6, borderWidth: 1, borderColor: accentColor + '40', minHeight: 44, minWidth: 56, alignItems: 'center', justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
           <Text style={{ color: accentColor, fontSize: 10, fontWeight: '700', fontFamily: MONO }}>CHAT</Text>
         </Pressable>
       </View>
@@ -1214,11 +1214,11 @@ export default function AgentMemoryPanel({
             placeholder="Draft a new instruction for Chat..."
             editable={!!onOpenInChat && !!exactMemoryAuthority}
             placeholderTextColor="#606075"
-            style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, minHeight: 44, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+            style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 6, minHeight: 44, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
             onSubmitEditing={() => continueMemoryWriteInChat('instruction')}
             returnKeyType="done"
           />
-          <Pressable accessibilityRole="button" accessibilityLabel="Continue in Chat with this new agent instruction" onPress={() => continueMemoryWriteInChat('instruction')} style={[{ backgroundColor: '#a855f720', paddingHorizontal: 8, borderRadius: 2, borderWidth: 1, borderColor: '#a855f740', minHeight: 44, minWidth: 56, alignItems: 'center', justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Continue in Chat with this new agent instruction" onPress={() => continueMemoryWriteInChat('instruction')} style={[{ backgroundColor: '#a855f720', paddingHorizontal: 8, borderRadius: 6, borderWidth: 1, borderColor: '#a855f740', minHeight: 44, minWidth: 56, alignItems: 'center', justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
             <Text style={{ color: '#a855f7', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>CHAT</Text>
           </Pressable>
         </View>

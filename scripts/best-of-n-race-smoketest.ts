@@ -157,8 +157,16 @@ async function main() {
     expect(!!single && single.ok === false, 'single model → ok:false');
     expect(!!single && !single.ok && /2/.test(single.error), 'single-model error mentions the 2-model minimum');
     const collapsed = parseBestOfNCommand('/bestof sonnet,claude-sonnet-4-6 write a haiku');
-    expect(!!collapsed && collapsed.ok === false, 'two entries collapsing to one model → ok:false');
-    expect(!!collapsed && !collapsed.ok && /distinct/i.test(collapsed.error), 'collapse error asks for distinct models');
+    expect(!!collapsed && collapsed.ok === true, 'alias candidates defer dedupe until the live catalog resolves them');
+    expect(
+      !!collapsed && collapsed.ok && collapsed.models.join('|') === 'sonnet|claude-sonnet-4-6',
+      'the parser preserves raw candidate intent for exact Marketplace resolution',
+    );
+    const liveAuto = parseBestOfNCommand('/bestof auto,sonnet compare the approaches');
+    expect(
+      !!liveAuto && liveAuto.ok && liveAuto.models.join('|') === 'auto|sonnet',
+      'auto plus an explicit model reaches live catalog resolution instead of provider-less dedupe',
+    );
     pass('parse: <2 models rejected');
   }
 

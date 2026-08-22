@@ -10,21 +10,24 @@
  * ("openrouter/anthropic/claude-sonnet-5", "huggingface/Qwen/Qwen2.5-72B-Instruct")
  * so the edge function can dispatch to the right API.
  */
-import { listCircleIntegrations, type CircleIntegrationProvider } from '../circleIntegrations';
+import { listCircleIntegrationsExact, type CircleIntegrationProvider } from '../circleIntegrations';
 import {
+  captureProviderModelCatalogAuthority,
   createProviderModelCatalogFallback,
-  listApiKeys,
+  listApiKeysStrict,
   loadProviderModelCatalogSnapshot,
   PROVIDER_MODELS,
   LIVE_MODEL_CATALOG_PROVIDERS,
   type LLMProvider,
   type ProviderModel,
+  type ProviderModelCatalogExactAuthority,
   type ProviderModelCatalogSnapshot,
 } from '../llmProviders';
 import { getModelsByProvider, refreshModelRegistry, type RegisteredModel } from '../modelRegistry';
 import { resolvePlainChatModelRoute } from '../crossProviderRouter';
 import {
   buildModelCatalogReadinessProfile,
+  isProviderModelCatalogAuthorityFailure,
   projectProviderCatalogModels,
   type ModelCatalogReadinessProfile,
   type ModelCatalogReadinessState,
@@ -255,13 +258,14 @@ const LIVE_CATALOG_UI_TIMEOUT_MS = 3500;
 
 async function loadProviderCatalogWithTimeout(
   provider: LLMProvider,
-  circleId: string | null | undefined,
+  circleId: string | null,
+  authority: ProviderModelCatalogExactAuthority,
   force = false,
 ): Promise<ProviderModelCatalogSnapshot> {
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      loadProviderModelCatalogSnapshot(provider, circleId, { force }),
+      loadProviderModelCatalogSnapshot(provider, circleId, { force, authority }),
       new Promise<ProviderModelCatalogSnapshot>((resolve) => {
         timeoutId = setTimeout(() => resolve(
           createProviderModelCatalogFallback(provider, 'catalog_timeout'),
@@ -275,16 +279,20 @@ async function loadProviderCatalogWithTimeout(
 
 async function loadConnectedProviderCatalogs(
   activeProviders: ReadonlySet<LLMProvider>,
-  circleId: string | null | undefined,
+  circleId: string | null,
+  authority: ProviderModelCatalogExactAuthority,
   force = false,
 ): Promise<Map<LLMProvider, ProviderModelCatalogSnapshot>> {
   const providers = [...activeProviders].filter(
     (provider) => LIVE_MODEL_CATALOG_PROVIDERS.has(provider),
   );
   const pairs = await Promise.all(providers.map(async (provider) => {
-    const snapshot = await loadProviderCatalogWithTimeout(provider, circleId, force);
+    const snapshot = await loadProviderCatalogWithTimeout(provider, circleId, authority, force);
     return [provider, snapshot] as const;
   }));
+  if (pairs.some(([, snapshot]) => isProviderModelCatalogAuthorityFailure(snapshot.failureCode))) {
+    throw new Error('Connected model catalog account or circle authority is unavailable.');
+  }
   return new Map(pairs);
 }
 
@@ -403,7 +411,28 @@ interface RegistryOpts {
 
 export async function loadModelGroups(circleId: string | null | undefined, opts: RegistryOpts = {}): Promise<ModelGroup[]> {
   const groups: ModelGroup[] = [];
-  const userApiKeys = await listApiKeys().catch(() => []);
+  const exactCircleId = typeof circleId === 'string' && circleId.trim()
+    ? circleId.trim()
+    : null;
+  const catalogAuthority = await captureProviderModelCatalogAuthority(exactCircleId);
+  if (!catalogAuthority) {
+    throw new Error('Connected model catalog account authority is unavailable.');
+  }
+  // This registry is readiness authority for Chat Auto. A failed or malformed
+  // key inventory is not the same thing as an account with zero connections.
+  const [userApiKeys, integrations] = await Promise.all([
+    listApiKeysStrict(catalogAuthority),
+    exactCircleId
+      ? listCircleIntegrationsExact({
+          circleId: exactCircleId,
+          authority: {
+            userId: catalogAuthority.userId,
+            circleId: exactCircleId,
+            accessToken: catalogAuthority.accessToken,
+          },
+        })
+      : Promise.resolve([]),
+  ]);
   const activeUserApiProviders = new Set(
     userApiKeys
       .filter((key) => key.isActive)
@@ -419,7 +448,8 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
   // and bounded; a slow/offline provider falls back to the curated rows.
   const liveCatalogs = await loadConnectedProviderCatalogs(
     activeUserApiProviders,
-    circleId,
+    exactCircleId,
+    catalogAuthority,
     opts.forceCatalogRefresh === true,
   );
 
@@ -475,9 +505,7 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
     models: readyModelOptions(anthropicModels, anthropicReady, anthropicReadiness),
   });
 
-  if (!circleId) return groups;
-
-  const integrations = await listCircleIntegrations(circleId);
+  if (!exactCircleId) return groups;
 
   // BlackSwan group — sources from its OWN dedicated Marketplace
   // integration (`blackswan` provider). Connect once, every circle

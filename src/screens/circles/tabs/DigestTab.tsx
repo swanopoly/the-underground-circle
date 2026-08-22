@@ -9,6 +9,7 @@ import {
 } from 'react-native';
 import { supabase } from '../../../lib/supabase';
 import { safeGetUser } from '../../../lib/authSession';
+import { indexSafeProfiles, loadSafeCircleProfiles } from '../../../lib/safeProfiles';
 import Card from '../../../components/Card';
 import { generateNudge, getProgressInsight, getOnThisDay } from '../../../lib/coach';
 import AccountabilityDigestCard from '../../../components/feed/AccountabilityDigestCard';
@@ -93,13 +94,18 @@ export default function DigestTab({ circleId }: DigestTabProps) {
     // Today's check-ins
     const { data: checkIns } = await supabase
       .from('check_ins')
-      .select('*, user:profiles(username, display_name)')
+      .select('*')
       .eq('circle_id', circleId)
       .gte('created_at', today + 'T00:00:00')
       .order('vote_count', { ascending: false })
       .limit(50);
 
-    setTodayCheckIns(checkIns || []);
+    const todayProfiles = indexSafeProfiles(await loadSafeCircleProfiles({
+      circleId,
+      userIds: (checkIns || []).map((row: any) => row.user_id),
+    }));
+    const hydratedCheckIns = (checkIns || []).map((row: any) => ({ ...row, user: todayProfiles.get(row.user_id) || null }));
+    setTodayCheckIns(hydratedCheckIns);
 
     // Active members (unique users who checked in today)
     const uniqueUsers = new Set((checkIns || []).map((c: any) => c.user_id));
@@ -120,6 +126,7 @@ export default function DigestTab({ circleId }: DigestTabProps) {
     const { data: xpEvents } = await supabase
       .from('xp_events')
       .select('user_id, xp_amount')
+      .eq('circle_id', circleId)
       .gte('created_at', today + 'T00:00:00')
       .limit(50);
 
@@ -130,11 +137,7 @@ export default function DigestTab({ circleId }: DigestTabProps) {
       }
       const topUserId = Object.entries(xpByUser).sort((a, b) => b[1] - a[1])[0];
       if (topUserId) {
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('display_name, username')
-          .eq('id', topUserId[0])
-          .single();
+        const [profile] = await loadSafeCircleProfiles({ circleId, userIds: [topUserId[0]] });
         setMvp({
           name: profile?.display_name || profile?.username || 'Unknown',
           xp: topUserId[1],
@@ -147,14 +150,22 @@ export default function DigestTab({ circleId }: DigestTabProps) {
     // Streak at risk — members who checked in yesterday but not today
     const { data: yesterdayCheckIns } = await supabase
       .from('check_ins')
-      .select('user_id, user:profiles(username, display_name, current_streak)')
+      .select('user_id')
       .eq('circle_id', circleId)
       .gte('created_at', yesterday + 'T00:00:00')
       .lt('created_at', today + 'T00:00:00')
       .limit(50);
 
+    const yesterdayProfiles = indexSafeProfiles(await loadSafeCircleProfiles({
+      circleId,
+      userIds: (yesterdayCheckIns || []).map((row: any) => row.user_id),
+    }));
+    const hydratedYesterday = (yesterdayCheckIns || []).map((row: any) => ({
+      ...row,
+      user: yesterdayProfiles.get(row.user_id) || null,
+    }));
     const todayUserIds = new Set((checkIns || []).map((c: any) => c.user_id));
-    const atRisk = (yesterdayCheckIns || []).filter(
+    const atRisk = hydratedYesterday.filter(
       (c: any) => !todayUserIds.has(c.user_id)
     );
     setStreakAtRisk(atRisk);

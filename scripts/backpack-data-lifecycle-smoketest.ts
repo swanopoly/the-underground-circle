@@ -73,18 +73,23 @@ assert.match(
 );
 assert.match(
   hookSource,
-  /if \(scopeChanged\) \{\s*hasSnapshotRef\.current = false;\s*snapshotUserIdRef\.current = '';\s*setSnapshot\(EMPTY_SNAPSHOT\);\s*\}/,
-  'a circle change must clear the prior circle snapshot before rendering',
+  /if \(scopeChanged \|\| userChanged\) \{\s*hasSnapshotRef\.current = false;\s*snapshotUserIdRef\.current = '';\s*setSnapshot\(EMPTY_SNAPSHOT\);\s*\}/,
+  'a circle or authenticated-user change must clear the prior private snapshot before rendering',
 );
 assert.match(
   hookSource,
-  /const snapshotIsVisible = snapshot\.scopeCircleId === normalizedCircleId;[\s\S]*?const visibleSnapshot = snapshotIsVisible \? snapshot : EMPTY_SNAPSHOT;/,
-  'rendering must synchronously mask a snapshot from another circle',
+  /const snapshotIsVisible = snapshot\.scopeCircleId === normalizedCircleId[\s\S]*?snapshot\.currentUserId === authUser\?\.id;[\s\S]*?const visibleSnapshot = snapshotIsVisible \? snapshot : EMPTY_SNAPSHOT;/,
+  'rendering must synchronously mask a snapshot from another circle or user',
 );
 assert.match(
   hookSource,
-  /supabase\.auth\.onAuthStateChange[\s\S]*?loadFenceRef\.current\.retire\(\)[\s\S]*?setSnapshot\(EMPTY_SNAPSHOT\)/,
-  'an authenticated user change must retire reads and clear the previous private snapshot',
+  /const \{ session: authSession, user: authUser, loading: authLoading \} = useAuth\(\)[\s\S]*?\[authLoading, authSession\?\.access_token, authUser\?\.id, circleId\]/,
+  'Backpack must reuse the app auth authority and reload on exact token, user, or circle changes',
+);
+assert.doesNotMatch(
+  hookSource,
+  /supabase\.auth\.(?:getSession|onAuthStateChange)/,
+  'Backpack must not add a second shared-client auth wait or listener to its initial load path',
 );
 
 const catchStart = hookSource.indexOf('} catch (err) {');
@@ -120,7 +125,7 @@ assert.match(
 );
 assert.match(
   hookSource,
-  /const exactScope = \{ userId: user\.id, accessToken: session\.access_token \};[\s\S]*?loadCircleOfficeAgents\(normalizedCircleId, exactScope\)/,
+  /const exactScope = \{ userId: user\.id, accessToken \};[\s\S]*?loadCircleOfficeAgents\(normalizedCircleId, exactScope\)/,
   'circle agents must be loaded with the authenticated exact scope',
 );
 assert.match(

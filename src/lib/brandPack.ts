@@ -8,6 +8,10 @@
  */
 
 import { storage } from './storage';
+import {
+  chatPersonalCircleStorageKey,
+  type ChatPersonalStorageScope,
+} from './chatSessionStatePersistence';
 
 export const BRAND_PACK_STORAGE_KEY = 'uc_builder_brand_pack';
 
@@ -37,14 +41,22 @@ export const DEFAULT_BRAND_VOICE_LABEL: Record<BrandVoice, string> = {
   technical: 'Technical — precise, jargon OK, engineer-grade',
 };
 
-function brandPackKey(circleId: string): string {
+function legacyBrandPackKey(circleId: string): string {
   return `${BRAND_PACK_STORAGE_KEY}_${circleId}`;
 }
 
-export async function loadBrandPack(circleId: string | null | undefined): Promise<BrandPack | null> {
-  if (!circleId) return null;
+function brandPackKey(scope: ChatPersonalStorageScope): string | null {
+  return chatPersonalCircleStorageKey('brand_pack', scope);
+}
+
+export async function loadBrandPack(scope: ChatPersonalStorageScope): Promise<BrandPack | null> {
+  const key = brandPackKey(scope);
+  if (!key || typeof scope.circleId !== 'string') return null;
   try {
-    const raw = await storage.getItem(brandPackKey(circleId));
+    // Free-form notes and logo URLs are personal, even within one Circle.
+    // Delete the legacy Circle-only value without assigning it to any user.
+    await storage.removeItem(legacyBrandPackKey(scope.circleId));
+    const raw = await storage.getItem(key);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object') return null;
@@ -55,19 +67,28 @@ export async function loadBrandPack(circleId: string | null | undefined): Promis
 }
 
 export async function saveBrandPack(
-  circleId: string,
+  scope: ChatPersonalStorageScope,
   pack: BrandPack,
 ): Promise<void> {
+  const key = brandPackKey(scope);
+  if (!key) return;
   const next: BrandPack = { ...pack, updatedAt: new Date().toISOString() };
   try {
-    await storage.setItem(brandPackKey(circleId), JSON.stringify(next));
+    await storage.setItem(key, JSON.stringify(next));
   } catch {
     // Quota exceeded on web, for example. Not fatal — pack just won't persist.
   }
 }
 
-export async function clearBrandPack(circleId: string): Promise<void> {
-  try { await storage.removeItem(brandPackKey(circleId)); } catch {}
+export async function clearBrandPack(scope: ChatPersonalStorageScope): Promise<void> {
+  const key = brandPackKey(scope);
+  if (!key) return;
+  try {
+    await storage.removeItem(key);
+    if (typeof scope.circleId === 'string') {
+      await storage.removeItem(legacyBrandPackKey(scope.circleId));
+    }
+  } catch {}
 }
 
 /**

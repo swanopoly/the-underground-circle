@@ -7,6 +7,7 @@ import { resolve } from 'node:path';
 import {
   loadChatModelCatalogWithinDeadline,
   prepareStableChatModelDispatch,
+  resolveReadyChatModelForTurn,
   sameChatModelDispatchIdentity,
 } from '../src/lib/chatModelFallbackCore';
 import { resolvePlainChatModelRoute } from '../src/lib/crossProviderRouter';
@@ -116,6 +117,49 @@ async function main(): Promise<void> {
     'the same Claude family through OpenRouter retains the gateway transport label',
   );
 
+  const openAiOnlyGroups = [{
+    provider: 'openai',
+    connected: true,
+    catalogStatus: 'account_verified' as const,
+    models: [{ id: 'openai/gpt-5.6-terra', ready: true }],
+  }];
+  assert.equal(
+    resolveReadyChatModelForTurn({
+      requestedModelId: 'openrouter/auto',
+      groups: openAiOnlyGroups.filter((group) => group.provider === 'openrouter'),
+    }),
+    null,
+    'an account without OpenRouter cannot prepare an OpenRouter web-search call',
+  );
+  const verifiedOpenRouterSelection = resolveReadyChatModelForTurn({
+    requestedModelId: 'openrouter/auto',
+    groups: [{
+      provider: 'openrouter',
+      connected: true,
+      catalogStatus: 'account_verified' as const,
+      models: [{ id: 'openrouter/openai/gpt-5.6-terra', ready: true }],
+    }],
+  });
+  assert.equal(
+    verifiedOpenRouterSelection?.modelId,
+    'openrouter/openai/gpt-5.6-terra',
+    'verified OpenRouter catalogs replace an absent auto sentinel with one exact listed model',
+  );
+  const staleSavedSelection = resolveReadyChatModelForTurn({
+    requestedModelId: 'openai/completely-unknown',
+    groups: openAiOnlyGroups,
+  });
+  assert.equal(
+    staleSavedSelection?.modelId,
+    'openai/gpt-5.6-terra',
+    'a stale saved id resolves to an exact ready model rather than probing the unknown id',
+  );
+  assert.equal(
+    staleSavedSelection?.fallbackFromModelId,
+    'openai/completely-unknown',
+    'the stale saved id remains explicit fallback provenance',
+  );
+
   const chat = readFileSync(resolve(process.cwd(), 'src/screens/circles/tabs/ChatTab.tsx'), 'utf8');
   const runtime = readFileSync(resolve(process.cwd(), 'src/lib/agentRuntime.ts'), 'utf8');
   const swanbot = readFileSync(resolve(process.cwd(), 'src/lib/swanbot.ts'), 'utf8');
@@ -189,6 +233,31 @@ async function main(): Promise<void> {
     /const provider = lastBot\.source\?\.provider \|\| lastBot\.routing\?\.provider_routed \|\| null;[\s\S]{0,1600}formatModelRouteDisplayName\(effectiveModel, provider\)[\s\S]{0,400}formatModelRouteDisplayName\(selectedModel\)/,
     'the persisted last-task model audit also distinguishes selected and served transports',
   );
+  assert.match(
+    chat,
+    /const shouldSelectFallback = !requestedReadiness\.ready/,
+    'an unknown or stale saved model id cannot bypass the exact ready Marketplace catalog',
+  );
+  assert.match(
+    chat,
+    /requestedModelId: 'openrouter\/auto',[\s\S]{0,3000}model: webSearchModel/,
+    'Web Search resolves and passes one exact ready OpenRouter catalog model before provider I/O',
+  );
+  assert.ok(
+    /createCatalogBoundRaceInvoker[\s\S]{0,1800}invokePlainChatModel/.test(chat)
+      && chat.includes('invoke: createCatalogBoundRaceInvoker(turnModelCatalogGeneration)'),
+    'Best-of candidates use the generation-bound exact one-model invoker instead of the default OpenRouter fallback',
+  );
+  assert.match(
+    chat,
+    /resolveReadyChatVisualBriefModel\(builderCatalog\.groups, selectedModel\)[\s\S]{0,6000}model: builderModel/,
+    'the Anthropic-only page builder starts only with an exact connected Anthropic model',
+  );
+  assert.match(
+    chat,
+    /model: isDirectImageCommand \? undefined : \(resolvedTurnModel \|\| undefined\),\s+modelDispatchSealed: !isDirectImageCommand/,
+    'text tool commands inherit and seal the exact catalog-resolved Chat model when Auto is selected',
+  );
 
   assert.match(
     swanbot,
@@ -206,7 +275,7 @@ async function main(): Promise<void> {
     'a failed sealed direct-Anthropic attempt cannot become successful fallback prose',
   );
 
-  console.log('chat model dispatch seal smoke: PASS (35 assertions)');
+  console.log('chat model dispatch seal smoke: PASS (44 assertions)');
 }
 
 main().catch((error) => {

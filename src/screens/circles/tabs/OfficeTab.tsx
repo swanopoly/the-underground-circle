@@ -26,6 +26,7 @@ import {
   getOfficeStatusSortRank,
   isConnectedOfficeStatus,
   applyDurableOfficeAgentCost,
+  applyOfficeAgentLifetimeUsage,
   findDurableOfficeAgentCost,
 } from '../../../lib/officeAgents';
 import {
@@ -257,6 +258,8 @@ import {
   updateAgentAnalytics,
   sendTerminalCommandExact,
   syncAgentTokenSnapshot,
+  loadOfficeAgentUsageProfilesExact,
+  type OfficeAgentUsageProfile,
   type SendCommandParams,
   type TerminalCommandDispatchReceipt,
   type TerminalExactAuthority,
@@ -394,6 +397,7 @@ export interface AgentStats {
   agentCount: number;
   sessionCount: number;
   costToday: number;
+  costTotal: number;
   costWeek: number;
   tokens: number;
   tokensTotal: number;
@@ -947,25 +951,6 @@ export default function OfficeTab({
     const timer = setInterval(() => { void refresh(); }, 60_000);
     return () => { cancelled = true; clearInterval(timer); };
   }, []);
-  // Durable running cost still feeds the Office whiteboard/reporting surfaces.
-  // Its saved per-circle baseline is retained for compatibility, but the
-  // header trip meter and reset controls are intentionally not rendered.
-  const [runningCost, setRunningCost] = useState<{ total: number; sinceIso: string | null } | null>(null);
-  const runningCostBaselineRef = useRef<string | null>(null);
-  const runningCostBaselineMapRef = useRef<Record<string, string>>({});
-  const runningCostSeqRef = useRef(0);
-  // Seq-guarded so a slow response can never land on a newer circle/baseline.
-  // Strict read: on failure keep the last known value; the 60s usage tick
-  // retries, so a transient error never paints a convincing $0.
-  const refreshRunningCost = useCallback(async () => {
-    const seq = runningCostSeqRef.current;
-    try {
-      const { getClaudeUsageCostSinceStrict } = await import('../../../lib/claudeUsage');
-      const total = await getClaudeUsageCostSinceStrict(circleId, runningCostBaselineRef.current);
-      if (seq !== runningCostSeqRef.current) return;
-      setRunningCost({ total, sinceIso: runningCostBaselineRef.current });
-    } catch { /* dashboard extra — never break Office */ }
-  }, [circleId]);
   const opsLiveRunsRef = useRef<AgentRun[]>([]);
   const opsUsageCacheRef = useRef<{
     todaySummary?: ClaudeUsageSummary;
@@ -976,15 +961,18 @@ export default function OfficeTab({
   }>({ fetchedAtMs: 0 });
 
   useEffect(() => {
+    const requestedAuthority = committedAuthAuthority;
     let cancelled = false;
     let unsubscribeRuns: (() => void) | null = null;
     let usageRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    const usageRequestIsCurrent = () => Boolean(
+      !cancelled
+      && requestedAuthority
+      && isOfficeAuthorityCurrent(requestedAuthority),
+    );
     // Reset per-circle so a circle switch can't show stale spend/runs.
     opsLiveRunsRef.current = [];
     opsUsageCacheRef.current = { fetchedAtMs: 0 };
-    runningCostSeqRef.current += 1;
-    setRunningCost(null);
-    runningCostBaselineRef.current = runningCostBaselineMapRef.current[circleId] || null;
     setOpsTokenTracker(null);
     setOpsDurableSpendPeriods(null);
     setOpsRunFreshness(new Map());
@@ -1038,20 +1026,21 @@ export default function OfficeTab({
     };
 
     const reloadUsage = async () => {
+      if (!requestedAuthority || !usageRequestIsCurrent()) return;
       // Cache: refresh Claude usage at most every 60s even if callers race.
       if (Date.now() - opsUsageCacheRef.current.fetchedAtMs < 60_000) return;
       opsUsageCacheRef.current.fetchedAtMs = Date.now(); // claim slot before await
       try {
         const { getClaudeUsageSummaryStrict, getClaudeUsageByModelStrict } = await import('../../../lib/claudeUsage');
+        const exactClient = getSupabaseClientForAccessToken(requestedAuthority.accessToken);
         const [todaySummary, weekSummary, monthSummary, byModel] = await Promise.all([
-          getClaudeUsageSummaryStrict(circleId, 1),
-          getClaudeUsageSummaryStrict(circleId, 7),
-          getClaudeUsageSummaryStrict(circleId, 30),
-          getClaudeUsageByModelStrict(circleId, 7),
+          getClaudeUsageSummaryStrict(circleId, 1, exactClient),
+          getClaudeUsageSummaryStrict(circleId, 7, exactClient),
+          getClaudeUsageSummaryStrict(circleId, 30, exactClient),
+          getClaudeUsageByModelStrict(circleId, 7, exactClient),
         ]);
-        if (cancelled) return;
+        if (!usageRequestIsCurrent()) return;
         opsUsageCacheRef.current = { todaySummary, weekSummary, monthSummary, byModel, fetchedAtMs: Date.now() };
-        void refreshRunningCost();
         setOpsDurableSpendPeriods({
           today: Math.max(0, todaySummary.total_cost),
           week: Math.max(0, weekSummary.total_cost),
@@ -1095,7 +1084,7 @@ export default function OfficeTab({
       try { unsubscribeRuns?.(); } catch {}
       unsubscribeRuns = null;
     };
-  }, [circleId]);
+  }, [circleId, committedAuthAuthority, isOfficeAuthorityCurrent]);
 
   // Map building run nodes to roster agents by both display name and canonical
   // subject identity. Display-name matching remains the fallback; subject keys
@@ -1199,7 +1188,10 @@ export default function OfficeTab({
   const [statusHistory, setStatusHistory] = useState<Array<OfficeAgent[]>>([]);
   const [enrichedAgents, setEnrichedAgents] = useState<OfficeAgent[]>([]);
   const [agentIdentities, setAgentIdentities] = useState<Map<string, AgentIdentity>>(new Map());
+  const [agentUsageProfiles, setAgentUsageProfiles] = useState<Map<string, OfficeAgentUsageProfile>>(new Map());
   const agentIdentityRefreshGenerationRef = useRef(0);
+  const agentUsageProfileAdoptionGenerationRef = useRef(0);
+  const agentUsageSyncInFlightRef = useRef(false);
   const enrichedAgentsRef = useRef<OfficeAgent[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [agentNames, setAgentNames] = useState<Record<string, string>>({});
@@ -3978,6 +3970,7 @@ export default function OfficeTab({
         costTotal: dbAgent.estimated_cost_total || 0,
         costWeek: 0,
         tokensUsed: dbAgent.token_usage_total || 0,
+        tokensTotal: dbAgent.token_usage_total || 0,
         inputTokens: 0,
         outputTokens: 0,
         cachedTokens: 0,
@@ -4008,10 +4001,14 @@ export default function OfficeTab({
       });
       if (dbMatch && !agent.spirit && dbMatch.spirit) agent.spirit = dbMatch.spirit;
       Object.assign(agent, applyDurableOfficeAgentCost(agent, dbMatch));
+      Object.assign(
+        agent,
+        applyOfficeAgentLifetimeUsage(agent, agentUsageProfiles.get(agent.sessionKey)),
+      );
     }
 
     return projected;
-  }, [connectedConns, currentUserId, mergedCircleAgents, ownDbCostRows, sessionsTick]);
+  }, [agentUsageProfiles, connectedConns, currentUserId, mergedCircleAgents, ownDbCostRows, sessionsTick]);
 
   // Apply custom names
   const allAgents = useMemo(() =>
@@ -4093,6 +4090,29 @@ export default function OfficeTab({
     }
   }, [captureOfficeAuthority, isOfficeAuthorityCurrent]);
 
+  const refreshAgentUsageProfiles = useCallback(async () => {
+    const refreshGeneration = agentUsageProfileAdoptionGenerationRef.current + 1;
+    agentUsageProfileAdoptionGenerationRef.current = refreshGeneration;
+    const requestedAuthority = captureOfficeAuthority();
+    if (!requestedAuthority) return false;
+    const result = await loadOfficeAgentUsageProfilesExact(
+      requestedAuthority,
+      isOfficeAuthorityCurrent,
+    );
+    if (
+      refreshGeneration !== agentUsageProfileAdoptionGenerationRef.current
+      || !isOfficeAuthorityCurrent(requestedAuthority)
+      || !result.ok
+    ) return false;
+    setAgentUsageProfiles(result.profiles);
+    return true;
+  }, [captureOfficeAuthority, isOfficeAuthorityCurrent]);
+
+  useEffect(() => {
+    setAgentUsageProfiles(new Map());
+    void refreshAgentUsageProfiles();
+  }, [committedAuthScopeKey, refreshAgentUsageProfiles]);
+
   useEffect(() => {
     const requestedAuthority = committedAuthAuthority;
     if (
@@ -4143,8 +4163,10 @@ export default function OfficeTab({
     agent.messagesProcessed || 0,
     agent.turns || 0,
     agent.costToday || 0,
+    agent.costTotal || 0,
     agent.costWeek || 0,
     agent.tokensUsed || 0,
+    agent.tokensTotal || 0,
     agent.inputTokens || 0,
     agent.outputTokens || 0,
   ])), [userAgents]);
@@ -4648,7 +4670,10 @@ export default function OfficeTab({
     if (userAgents.length === 0 || !circleId || !requestedScope || !storageScope) return;
 
     const syncAll = async () => {
-      if (!isDocumentVisible()) return;
+      if (!isDocumentVisible() || agentUsageSyncInFlightRef.current) return;
+      const requestedAuthority = captureOfficeAuthority();
+      if (!requestedAuthority) return;
+      agentUsageSyncInFlightRef.current = true;
       try {
         // 1. Save local snapshot
         if (layoutSaveScopeRef.current !== requestedScope) return;
@@ -4660,16 +4685,47 @@ export default function OfficeTab({
         if (layoutSaveScopeRef.current !== requestedScope) return;
         // 2. Sync tokens to DB
         const agents = enrichedAgentsRef.current;
+        const syncedProfiles: OfficeAgentUsageProfile[] = [];
+        let publishedAgentChanged = false;
         for (const agent of agents) {
+          if (!isOfficeAuthorityCurrent(requestedAuthority)) return;
           if (agent.tokensUsed <= 0 && agent.messagesProcessed <= 0) continue;
           if (agent.connectionId === 'db-agent') continue;
-          await syncAgentTokenSnapshot(
-            circleId, agent.name, agent.inputTokens, agent.outputTokens,
-            agent.cachedTokens, agent.turns || agent.messagesProcessed,
-            agent.sessionCostToday ?? agent.costToday, agent.model, agent.sessionKey || agent.id,
-          );
+          const result = await syncAgentTokenSnapshot({
+            authority: requestedAuthority,
+            isCurrent: isOfficeAuthorityCurrent,
+            agentName: agent.name,
+            providerType: agent.providerType,
+            inputTokens: agent.inputTokens,
+            outputTokens: agent.outputTokens,
+            cachedTokens: agent.cachedTokens,
+            messageCount: agent.turns || agent.messagesProcessed,
+            estimatedCost: agent.sessionCostToday ?? agent.costToday,
+            model: agent.model,
+            snapshotKey: agent.sessionKey || agent.id,
+            observedAt: agent.lastActive,
+          });
+          if (result.ok) {
+            syncedProfiles.push(result.profile);
+            publishedAgentChanged ||= result.officeAgentUpdated;
+          }
         }
-      } catch {}
+        if (!isOfficeAuthorityCurrent(requestedAuthority)) return;
+        if (syncedProfiles.length > 0) {
+          agentUsageProfileAdoptionGenerationRef.current += 1;
+          setAgentUsageProfiles((current) => {
+            const next = new Map(current);
+            for (const profile of syncedProfiles) next.set(profile.sessionKey, profile);
+            return next;
+          });
+        }
+        if (publishedAgentChanged) scheduleCircleOfficeRefresh();
+      } catch {
+        // A failed passive sync must not replace the last verified lifetime
+        // snapshot with zero. The next interval/visibility event can retry.
+      } finally {
+        agentUsageSyncInFlightRef.current = false;
+      }
     };
     syncAll();
     const interval = setInterval(syncAll, 30000);
@@ -4685,7 +4741,15 @@ export default function OfficeTab({
       clearInterval(interval);
       removeVisibilityListener?.();
     };
-  }, [circleId, floorLayoutScope, officeSessionStorageScope, userAgents.length > 0]);
+  }, [
+    captureOfficeAuthority,
+    circleId,
+    floorLayoutScope,
+    isOfficeAuthorityCurrent,
+    officeSessionStorageScope,
+    scheduleCircleOfficeRefresh,
+    userAgents.length > 0,
+  ]);
 
   // Push agent stats to parent using the merged live + cached view
   useEffect(() => {
@@ -4694,9 +4758,10 @@ export default function OfficeTab({
         agentCount: userAgents.length,
         sessionCount: userAgents.filter(a => a.status === 'active' || a.status === 'building').length,
         costToday: userAgents.reduce((s, a) => s + a.costToday, 0),
+        costTotal: userAgents.reduce((s, a) => s + a.costTotal, 0),
         costWeek: userAgents.reduce((s, a) => s + a.costWeek, 0),
         tokens: userAgents.reduce((s, a) => s + a.tokensUsed, 0),
-        tokensTotal: userAgents.reduce((s, a) => s + a.tokensUsed, 0),
+        tokensTotal: userAgents.reduce((s, a) => s + (a.tokensTotal ?? a.tokensUsed), 0),
         messagesTotal: userAgents.reduce((s, a) => s + a.messagesProcessed, 0),
         messagesToday: userAgents.reduce((s, a) => s + a.turns, 0),
         inputTokens: userAgents.reduce((s, a) => s + a.inputTokens, 0),
@@ -4988,10 +5053,11 @@ export default function OfficeTab({
       placeOfficeAddon(type);
       return;
     }
+    // Arming a catalog item is not yet usage. Recording recency here caused
+    // the selected card to be re-sorted under the pointer before placement.
     setSelectedFurnitureId(null);
     setPlacingType((current) => current === type ? null : type);
-    rememberOfficeAddonType(type);
-  }, [isDesktop, placeOfficeAddon, rememberOfficeAddonType, setPlacingType, setSelectedFurnitureId]);
+  }, [isDesktop, placeOfficeAddon, setPlacingType, setSelectedFurnitureId]);
 
   const handleFloorPress = (x: number, y: number) => {
     if (!editMode) return;
@@ -7926,8 +7992,7 @@ export default function OfficeTab({
                         connections={connections}
                         pendingApprovals={pendingApprovals}
                         budgetAlerts={budgetAlerts}
-                        periodCosts={periodCosts}
-                        runningCost={runningCost}
+                        periodCosts={opsDurableSpendPeriods ? periodCosts : undefined}
                       />
                     ) : (
                       <View style={styles.desktopWidgetPlaceholder}>

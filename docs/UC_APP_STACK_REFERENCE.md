@@ -1,7 +1,7 @@
 # The Underground Circle - App Stack Reference
 
 > Current app map for agents before writing code.
-> Last reviewed: 2026-08-20
+> Last reviewed: 2026-08-21
 
 `AGENTS.md` and `docs/AGENTS_ROADMAP.md` own agent workflow and runtime
 ownership. This file maps the app.
@@ -17,6 +17,13 @@ ownership. This file maps the app.
 | AI/runtime | BlackSwan/OpenSwan, Claude Code/Codex bridges, Browserbase Computer Use |
 | Provider routing | `llm-proxy`, `swanbot-ai`, provider marketplace, BYOK keys |
 | Local services | app 8081, OpenSwan proxy 18790, Claude bridge 7778 |
+
+Hosted backend state as of 2026-08-21: reviewed §§39/40/42/50/51 and the
+generated-image migration are applied/catalog-verified; Realtime reports
+`private_only: true`; and all 20 changed Edge Functions are ACTIVE with their
+reviewed authentication modes. Authenticated multi-account/provider,
+revocation, contention, private Storage, and full browser canaries remain
+separate requirements rather than being inferred from catalog state.
 
 ## Do-Not-Break Patterns
 
@@ -65,14 +72,24 @@ Current live backend baseline after remediation:
   recent reauthentication for password updates.
 
 Do not overstate this baseline. Email auto-confirm is still enabled, custom
-SMTP and CAPTCHA are absent, task-image objects remain publicly readable by
-URL, the newly installed Office authority still lacks authenticated
+SMTP and CAPTCHA are absent, the newly installed tenant and Office authority
+still lacks authenticated
 contention/account-switch/provider-dispatch canaries, and bridge pairing is not
 yet device-bound. The migration ledger is drifted, so apply only one
 reviewed idempotent migration at a time rather than using a broad database push.
 At the review cutoff, login/OAuth/logout and strict-header frontend changes were
 source/build evidence pending a production frontend deployment and live flow
 verification.
+
+The current checkout and hosted database contain the tenant-isolation
+convergence applied 2026-08-21. `src/lib/safeProfiles.ts` routes shared profile reads through the
+wallet-redacted, current-shared-Circle projection, while
+`src/lib/{taskImageStorage,circleImageStorage}.ts` owns private object-path and
+signed-URL client handling. §§39/40/42/50 were applied individually and their
+catalog receipts passed; the Supabase Management API independently reports
+Realtime `private_only: true`. Authenticated creator/member/nonmember,
+membership-revocation, private-thread, and Storage canaries remain required
+before treating catalog state as complete end-to-end behavioral proof.
 
 ## Main Surfaces
 
@@ -119,7 +136,7 @@ cross-surface focus requests continue to override the default.
 | OpenSwan session runtime, exact resume, multi-action completion, and terminal truth | `src/lib/openswanSessionRuntime.ts`, `src/lib/openswanSessionRuntimeAdapters.ts`, `src/lib/openSwanMultiActionCompletionCore.ts`, `src/lib/toolLoopResume.ts`, `src/lib/openswanTaskPlanner.ts`, `src/lib/openswanToolRuntime.ts`, `src/lib/agentRunSystem.ts`, `src/lib/chatLaneOutcome.ts`, `src/lib/chatOutcomeSignals.ts`, `src/lib/persistedChatMetadata.ts`, `src/lib/roomMessageMetadata.ts`, `src/lib/roomChatService.ts`, `src/screens/circles/tabs/ChatTab.tsx`, `scripts/openswan-{terminal-outcome-contract,multi-action-completion-core,multi-action-report-tool,multi-action-artifact-evidence,multi-action-provider-causality,multi-action-read-evidence,multi-action-terminal-wiring,multi-action-semantic-evidence,resume-locator}-smoketest.ts`, `scripts/{agent-run-metadata-merge-cas,chat-multi-action-routing-invariants,room-chat-multi-action-persistence,room-message-reload-pagination}-smoketest.ts` |
 | Room document context, reviewed edits, and GitHub submission | `src/screens/circles/tabs/RoomsTab.tsx`, `src/lib/roomChatFileContext.ts`, `src/lib/roomChatService.ts`, `src/lib/openswanToolRuntime.ts`, `src/lib/builderGithubSave.ts`, `src/lib/github.ts`, `src/lib/githubChatCommands.ts`, `src/screens/circles/tabs/chat/BuilderGithubSaveModal.tsx`, `scripts/{room-chat-file-context,room-chat-minimal-ui,room-github-submit}-smoketest.ts` |
 | Owner-private Office agent → OpenSwan session binding | `src/lib/officeAgentSessionBindingCore.ts`, `src/lib/officeAgentSessionBinding.ts`, `src/lib/agentAutoConnect.ts`, `src/lib/agentAutoConnectState.ts`, `src/lib/agentInvocation.ts`, `src/screens/circles/tabs/OfficeTab.tsx`, `src/screens/circles/tabs/office/AgentGatewayPanels.tsx`, `supabase/migrations/{20260807170000_office_agent_session_bindings,20260818120000_office_agent_session_binding_cas}.sql`, `docs/RUN_THIS_SQL.sql` §§36/49, `scripts/office-agent-session-binding-{core,wiring,sql}-smoketest.ts`, `scripts/office-agent-session-binding-cas-sql-behavior-smoketest.sh` |
-| Office dashboard truth, stable cost semantics, exact private-state lifecycle, per-circle layout, and complete floor presets | `src/lib/officeDashboardPersistence.ts`, `src/lib/officeLayoutLocalCache.ts`, `src/lib/officeLayoutSaveReceiptCore.ts`, `src/lib/officePreferenceWriteQueueCore.ts`, `src/lib/officeFloorPresetCore.ts`, `src/lib/chatAttentionQueue.ts`, `src/lib/runHistoryFilterCore.ts`, `src/lib/officeAgents.ts`, `src/lib/agentIdentity.ts`, `src/lib/agentPresence.ts`, `src/lib/agentHeartbeat.ts`, `src/lib/sessionCache.ts`, `src/lib/sessionTags.ts`, `src/lib/claudeUsage.ts`, `src/components/chat/RunHistoryDrawer.tsx`, `src/components/office/OfficeOpsBoardCards.tsx`, `src/screens/circles/tabs/OfficeTab.tsx`, `src/screens/circles/tabs/office/OfficeSections.tsx`, `src/screens/circles/tabs/office/AgentRunsPanel.tsx`, `src/screens/circles/tabs/office/AgentActivityPanel.tsx`, `src/screens/circles/tabs/office/Whiteboard.tsx`, `supabase/migrations/20260811120000_office_dashboard_state_and_floor_presets.sql`, `supabase/migrations/20260813140000_office_layout_exact_save_receipt.sql`, `supabase/migrations/20260813220000_office_user_preferences.sql`, `supabase/migrations/20260817130000_agent_identity_primary_rpc.sql`, `docs/RUN_THIS_SQL.sql` §§37/45/47, `scripts/office-layout-local-cache-smoketest.ts`, `scripts/office-layout-save-receipt-core-smoketest.ts`, `scripts/office-user-preferences-sql-parity-smoketest.ts`, `scripts/office-private-runtime-wiring-smoketest.ts`, `scripts/agent-identity-exact-authority-smoketest.ts`, `scripts/agent-identity-cross-realm-cache-ordering-smoketest.ts`, `scripts/agent-identity-primary-rpc-sql-smoketest.ts`, `scripts/agent-identity-primary-rpc-sql-behavior-smoketest.sh` |
+| Office dashboard truth, stable cost semantics, exact private-state lifecycle, per-circle layout, and complete floor presets | `src/lib/{officeDashboardPersistence,officeLayoutLocalCache,officeLayoutSaveReceiptCore,officePreferenceWriteQueueCore,officeFloorPresetCore,chatAttentionQueue,runHistoryFilterCore,officeAgents,agentIdentity,agentPresence,agentHeartbeat,sessionCache,sessionTags,claudeUsage,officeTerminal}.ts`, `src/components/{OfficeAnalyticsPanel}.tsx`, `src/components/chat/RunHistoryDrawer.tsx`, `src/components/office/OfficeOpsBoardCards.tsx`, `src/screens/profile/ProfileScreen.tsx`, `src/screens/circles/tabs/{OfficeTab,BackpackTab,ProfileTab}.tsx`, `src/screens/circles/tabs/office/{OfficeSections,AgentRunsPanel,AgentActivityPanel,Whiteboard}.tsx`, `supabase/migrations/{20260811120000_office_dashboard_state_and_floor_presets,20260813140000_office_layout_exact_save_receipt,20260813220000_office_user_preferences,20260817130000_agent_identity_primary_rpc,20260821150000_office_agent_lifetime_usage}.sql`, `docs/RUN_THIS_SQL.sql` §§37/45/47/51, `scripts/{office-layout-local-cache,office-layout-save-receipt-core,office-user-preferences-sql-parity,office-private-runtime-wiring,agent-identity-exact-authority,agent-identity-cross-realm-cache-ordering,agent-identity-primary-rpc-sql,office-cost-stability,office-agent-lifetime-usage-sql}-smoketest.ts`, `scripts/{agent-identity-primary-rpc-sql-behavior,office-agent-lifetime-usage-sql-behavior}-smoketest.sh` |
 | Office addon catalog, data truth, reversible floor editor, and OAuth credential control | `src/lib/officeConfig.ts`, `src/lib/officeAddonExperienceCore.ts`, `src/lib/officeValidation.ts`, `src/lib/animationHelpers.ts`, `src/lib/oauthConnect.ts`, `src/lib/officeTerminal.ts`, `src/screens/circles/tabs/OfficeTab.tsx`, `src/screens/circles/tabs/office/OfficeSections.tsx`, `src/screens/circles/tabs/office/OfficeFloor.tsx`, `src/screens/circles/tabs/office/InteractiveFurniture.tsx`, `src/screens/circles/tabs/office/AgentPanelShell.tsx`, `src/screens/circles/tabs/office/officeFloorLayout.ts`, `src/components/OfficeTerminal.tsx`, `src/components/PhoneMessenger.tsx`, `src/components/office/ConnectAllBridgesPanel.tsx`, `src/components/office/OfficeBridgeDiagPanel.tsx`, `src/components/office/OfficeBridgeReadinessStrip.tsx`, `src/components/office/StatusPicker.tsx`, `src/components/office/WorldClockBar.tsx`, `supabase/functions/email-calendar-oauth/index.ts`, `supabase/migrations/20260813190000_atomic_oauth_credential_store.sql`, `docs/RUN_THIS_SQL.sql` §42, `scripts/office-addon-registry-smoketest.ts`, `scripts/office-addon-experience-core-smoketest.ts`, `scripts/office-addon-ui-wiring-smoketest.ts`, `scripts/office-validation-smoketest.ts`, `scripts/oauth-popup-boundary-smoketest.ts`, `scripts/oauth-credential-control-sql-smoketest.ts`, `scripts/oauth-credential-control-sql-behavior-smoketest.sh`, `scripts/office-terminal-broadcast-authority-smoketest.ts`, `scripts/office-authenticated-local-e2e.mjs` |
 | Personal Figma OAuth and server-only file projection | `src/lib/oauthConnect.ts`, `src/lib/oauthCallbackRelay.ts`, `src/lib/figmaBuilder.ts`, `src/screens/circles/tabs/office/CustomizePanel.tsx`, `supabase/functions/figma-oauth/index.ts`, `supabase/migrations/20260813200000_figma_oauth_credential_control.sql`, `docs/RUN_THIS_SQL.sql` §43, `scripts/figma-oauth-boundary-smoketest.ts`, `scripts/figma-oauth-credential-control-sql-smoketest.ts`, `scripts/figma-oauth-credential-control-sql-behavior-smoketest.sh` |
 | Agent runtime subject identity | `src/lib/agentRuntimeSubject.ts`, `src/lib/agentIdentityKey.ts`, `src/lib/agentIdentity.ts`, `src/lib/agentInvocation.ts`, `src/lib/agentRuntime.ts`, `src/lib/swanbotV2BatchRuntimeCore.ts` |
@@ -352,9 +369,9 @@ docs/
    is generated separately from a trusted local enum. Figma Bearer tokens and
    raw provider bodies remain server-side. Source, Deno, 117-assertion focused
    boundary, 68-assertion SQL/parity, and disposable PostgreSQL behavior proof
-   are current. Migrations `20260813190000` and `20260813200000` are not
-   applied, the live `figma-oauth` endpoint currently returns 404, and Edge
-   deployment/secrets plus real Figma connect, refresh, disconnect, and
+   are current. Shared credential owner §42 is applied/catalog-verified;
+   migration `20260813200000` remains unapplied, the live `figma-oauth`
+   endpoint remains absent, and Figma Edge deployment/secrets plus real connect, refresh, disconnect, and
    private-file reads remain pending.
 11. Local and server snapshots cross one allowlisted layout sanitizer before
    render. Unknown addon types and malformed rows are dropped; dimensions,
@@ -461,7 +478,21 @@ docs/
    dependent brief cannot be produced, connected-agent dispatch sends nothing
    and reports the bounded blocker instead of fabricating a description.
    Image-free turns do not create the analyzer request and preserve the
-   original text prompt byte-for-byte. As of 2026-08-07, selected-agent,
+   original text prompt byte-for-byte.
+
+   Outbound text-to-image generation is a separate private durable Chat path.
+   `src/lib/generatedChatImages.ts` and `ChatArtifacts` bind natural requests,
+   `/imagine`, and supported image-only selections to one caller-owned source
+   message and one private durable receipt. The `image-generate` Edge owner
+   revalidates exact thread visibility before returning a short signed URL;
+   transcript metadata never carries bytes, provider URLs, storage paths, or
+   signed URLs. Migration `20260820120000_chat_generated_images.sql` is
+   applied/catalog-verified and `image-generate` v8 is ACTIVE as of 2026-08-21.
+   Authenticated visibility/revocation and provider-key canaries,
+   concurrency/fault tests, and a live generation remain pending; catalog state
+   is not end-to-end behavior proof.
+
+   As of 2026-08-07, selected-agent,
    assigned-agent, multi-agent, and dedicated OpenSwan-session handoffs return
    one bounded receipt with status `accepted`, `drafted`, `failed`, or `unknown`. The
    receipt bounds actor, provider, session, and message fields, keeps
@@ -890,17 +921,24 @@ accepted connected-agent handoffs remain separately visible under
 `ACCEPTED HANDOFFS` with `COMPLETION UNVERIFIED`; they do not increase the
 Active count.
 
-Office cost presentation has one meaning per field. A bridge-reported cost is
-the cumulative meter for that exact session and remains available for snapshot
-delta sync; it cannot hydrate `costToday`. The daily and lifetime figures shown
-on an agent come from one exact durable `circle_office_agents` row. Exact
-name/DB identity wins, a provider fallback is admitted only when the provider
-has one live agent and one owned DB row, and ambiguous rows receive no aggregate
-instead of whichever row loaded last. Identity history may enrich lifetime cost
-only. The token card and whiteboard use durable rolling 24h/7d/30d usage reads,
-retain their last snapshot across transient login-time failures, and label the
-windows explicitly rather than assigning a session's entire lifetime to its
-last-active date.
+Office cost presentation has one meaning per field. A bridge-reported token or
+cost value is the cumulative meter for that exact live session and remains
+available for delta sync; it cannot hydrate `costToday` or masquerade as an
+all-time total. One exact durable `circle_office_agents` row owns daily and
+peer-visible published totals. The owner-private, FORCE-RLS
+applied `office_agent_usage_profiles` §51 ledger owns lifetime tokens,
+messages, sessions, and estimated cost for every exact owner/session, including
+unpublished agents. Its authenticated-only RPC serializes observations,
+converts counter growth or reset into monotonic deltas, and optionally projects
+the same delta to exactly one published row; ambiguous public rows fail closed.
+Office Agent detail, Analytics **My Agents**, and Profile read the same
+count-complete owner ledger with captured bearer authority, preserve the live
+session meter separately, and render unavailable rather than a false zero when
+the ledger cannot be verified. Identity history is only a no-double-count
+backfill baseline. The token card and whiteboard use durable rolling 24h/7d/30d
+usage reads, retain their last snapshot across transient login-time failures,
+and label the windows explicitly rather than assigning a session's entire
+lifetime to its last-active date.
 The main Office dashboard does not repeat that telemetry in a running-cost/reset
 header strip and does not mount the personal presence/status-note/timer picker;
 those controls no longer compete with the workspace and operational surfaces.
@@ -2634,6 +2672,26 @@ This is disposable validation, not production application.
   The old §36 set/clear functions no longer have authenticated or service-role
   execute authority. Remote authenticated two-tab contention, account/circle
   switching, and exact provider dispatch remain pending.
+- `20260820120000_chat_generated_images.sql` was **applied and catalog-verified
+  2026-08-21**; `image-generate` v8 is ACTIVE. Source, Edge-contract, and
+  disposable PostgreSQL behavior checks cover its service-owned receipt and
+  private-bucket contract. Run authenticated visibility/revocation,
+  provider-key, concurrency/fault, and live generation canaries before relying
+  on durable generated images.
+- `20260821120000_tenant_isolation_convergence.sql` (§50) was **applied and
+  catalog-verified 2026-08-21** after §§39/40/42. Every readiness flag returned
+  true and the Management API reports Realtime `private_only: true`. Run authenticated
+  creator/member/nonmember, membership-revocation, private-thread, Office
+  Realtime, and signed-URL/upload/delete canaries before relying on it.
+- `20260821150000_office_agent_lifetime_usage.sql` (§51) was **applied and
+  catalog-verified 2026-08-21**. Static/parity and disposable PostgreSQL proof cover owner-only
+  reads, denied direct writes, observation-fenced reset-aware monotonic deltas,
+  exact replay, delayed-lower observation rejection, no-double-count legacy
+  baselines, unpublished-agent persistence, optional one-row public projection,
+  nonmember denial, and account isolation. Live catalog checks prove the table,
+  FORCE-RLS, owner policy, denied browser DML, and authenticated sync RPC; 373
+  owner/session profiles were seeded. Run authenticated
+  live replay/reset, unpublished-agent, account-switch, reload, and UI checks.
 - Use `NOTIFY pgrst, 'reload schema';` after schema changes when relevant.
 
 ## Validation

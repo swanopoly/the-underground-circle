@@ -65,6 +65,8 @@ ${deleteReceiptGate}
 ${rowHelper}
 const terminalHistoryCache = new Map();
 const terminalResponsesCache = new Map();
+const terminalExactHistoryCache = new Map();
+const terminalExactResponsesCache = new Map();
 ${exactDelete}
 ;(globalThis as any).__terminalMutation = {
   normalizeTerminalExactAuthority,

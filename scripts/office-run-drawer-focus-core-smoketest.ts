@@ -98,13 +98,13 @@ function main(): void {
 
   // ── Group 5: exact first-page miss handling in the React drawer ───────────
   const exactFocusStart = drawerSource.indexOf('if (shouldApplyInitial) {');
-  const exactFocusEnd = drawerSource.indexOf('\n      setRuns(nextRuns);', exactFocusStart);
+  const exactFocusEnd = drawerSource.indexOf('\n        setRuns(nextRuns);', exactFocusStart);
   const exactFocusBlock = exactFocusStart >= 0 && exactFocusEnd > exactFocusStart
     ? drawerSource.slice(exactFocusStart, exactFocusEnd)
     : '';
   assert(drawerSource.includes('getRun,'), '(5) drawer imports canonical getRun');
   assert(
-    exactFocusBlock.includes('await getRun(requestedInitialRunId)'),
+    exactFocusBlock.includes('await getRun(requestedInitialRunId, strictReadOptions)'),
     '(5) first-page miss fetches the exact requested id',
   );
   assert(
@@ -128,7 +128,7 @@ function main(): void {
     '(5) unavailable exact id renders bounded user-facing copy',
   );
   assert(
-    drawerSource.includes('setSelectedRunId((current) => current || nextRuns[0]?.id || null);'),
+    /setSelectedRunId\(\(current\) => \([\s\S]{0,180}current && nextRuns\.some\(\(run\) => run\.id === current\)[\s\S]{0,120}: nextRuns\[0\]\?\.id \|\| null/.test(drawerSource),
     '(5) no-ref callers preserve legacy first-run selection',
   );
 

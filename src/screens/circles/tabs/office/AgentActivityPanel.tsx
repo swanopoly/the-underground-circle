@@ -34,8 +34,8 @@ export default function AgentActivityPanel({ agent, statusColor, statusLabel }: 
   }, [agent.id, agent.sessionKey, agent.connectionId]);
 
   return (
-    <View nativeID="section-agent-activity-detail" style={{ paddingHorizontal: 12, gap: 16, paddingBottom: 16 }}>
-      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 12 }}>
+    <View nativeID="section-agent-activity-detail" style={{ gap: 16, paddingBottom: 16 }}>
+      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 12 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 }}>
           <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: statusColor }} />
           <Text style={{ color: statusColor, fontSize: 13, fontWeight: '700', fontFamily: MONO }}>{statusLabel.toUpperCase()}</Text>
@@ -75,7 +75,7 @@ export default function AgentActivityPanel({ agent, statusColor, statusLabel }: 
       </View>
 
       {(agent.lastUserMessage || agent.lastAssistantText) && (
-        <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 12 }}>
+        <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 12 }}>
           <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 10 }}>LATEST EXCHANGE</Text>
           {agent.lastUserMessage ? (
             <View style={{ marginBottom: agent.lastAssistantText ? 12 : 0 }}>
@@ -92,10 +92,10 @@ export default function AgentActivityPanel({ agent, statusColor, statusLabel }: 
         </View>
       )}
 
-      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 12 }}>
+      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 12 }}>
         <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 8 }}>TOKEN AND COST TELEMETRY</Text>
         {agent.tokensUsed > 0 && (
-          <View style={{ height: 8, borderRadius: 2, backgroundColor: '#1a1a28', flexDirection: 'row', overflow: 'hidden', marginBottom: 10 }}>
+          <View style={{ height: 8, borderRadius: 6, backgroundColor: '#1a1a28', flexDirection: 'row', overflow: 'hidden', marginBottom: 10 }}>
             <View style={{ flex: agent.cachedTokens || 0, backgroundColor: '#f59e0b' }} />
             <View style={{ flex: Math.max(0, agent.inputTokens - (agent.cachedTokens || 0)) || 1, backgroundColor: '#6366f1' }} />
             <View style={{ flex: agent.outputTokens || 1, backgroundColor: '#22c55e' }} />
@@ -103,11 +103,13 @@ export default function AgentActivityPanel({ agent, statusColor, statusLabel }: 
         )}
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
           {[
-            { label: 'TOTAL TOKENS', value: formatTokens(agent.tokensUsed) },
+            { label: 'LIFETIME TOKENS', value: formatTokens(agent.tokensTotal ?? agent.tokensUsed) },
+            { label: 'SESSION TOKENS', value: formatTokens(agent.tokensUsed) },
             { label: 'INPUT', value: formatTokens(agent.inputTokens) },
             { label: 'OUTPUT', value: formatTokens(agent.outputTokens) },
             { label: 'CACHED', value: formatTokens(agent.cachedTokens) },
             { label: 'COST TODAY', value: `$${agent.costToday.toFixed(4)}` },
+            { label: 'LIFETIME COST', value: `$${agent.costTotal.toFixed(4)}` },
             { label: 'COST / TURN', value: agent.turns > 0 ? `$${((agent.sessionCostToday ?? agent.costToday) / agent.turns).toFixed(4)}` : '—' },
           ].map(metric => (
             <View key={metric.label} style={{ width: '31%' }}>
@@ -119,7 +121,7 @@ export default function AgentActivityPanel({ agent, statusColor, statusLabel }: 
       </View>
 
       {liveExecutionEvidence && ((agent.recentToolCalls?.length || 0) > 0 || agent.recentActions.length > 0) && (
-        <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 12 }}>
+        <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 12 }}>
           <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 10 }}>TOOL EXECUTION</Text>
           {(agent.recentToolCalls?.length || 0) > 0 ? (
             [...(agent.recentToolCalls || [])].reverse().map((toolCall, index) => (
@@ -149,7 +151,7 @@ export default function AgentActivityPanel({ agent, statusColor, statusLabel }: 
       )}
 
       {liveExecutionEvidence && (agent.activeFiles?.length || 0) > 0 && (
-        <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 12 }}>
+        <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 12 }}>
           <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 10 }}>ACTIVE FILES</Text>
           {agent.activeFiles!.map((file, index) => (
             <View key={`${file}-${index}`} style={{ paddingVertical: 6, borderBottomWidth: index < agent.activeFiles!.length - 1 ? 1 : 0, borderBottomColor: '#151520' }}>
@@ -173,7 +175,7 @@ export default function AgentActivityPanel({ agent, statusColor, statusLabel }: 
         <Text style={{ color: '#8b949e', fontSize: 16 }}>{inspectOpen ? '−' : '+'}</Text>
       </Pressable>
 
-      {inspectOpen ? <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 12 }}>
+      {inspectOpen ? <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 12 }}>
         <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 10 }}>SESSION CONTEXT</Text>
         {sessionInfo.map((row, index) => (
           <View key={row.label} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 6, borderBottomWidth: index < sessionInfo.length - 1 ? 1 : 0, borderBottomColor: '#151520' }}>
@@ -183,7 +185,7 @@ export default function AgentActivityPanel({ agent, statusColor, statusLabel }: 
         ))}
       </View> : null}
 
-      {inspectOpen ? <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 12 }}>
+      {inspectOpen ? <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 12 }}>
         <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, marginBottom: 10 }}>
           MESSAGE LOG {agent.recentMessages.length > 0 ? `(${agent.recentMessages.length})` : ''}
         </Text>
@@ -191,7 +193,7 @@ export default function AgentActivityPanel({ agent, statusColor, statusLabel }: 
           [...agent.recentMessages].reverse().map((msg, index) => (
             <View key={`${msg.role}-${msg.timestamp || index}`} style={{ marginBottom: 10, paddingBottom: 10, borderBottomWidth: index < agent.recentMessages.length - 1 ? 1 : 0, borderBottomColor: '#151520' }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: msg.role === 'assistant' ? statusColor : '#606075' }} />
+                <View style={{ width: 6, height: 6, borderRadius: 6, backgroundColor: msg.role === 'assistant' ? statusColor : '#606075' }} />
                 <Text style={{ color: msg.role === 'assistant' ? statusColor : '#9ca3af', fontSize: 11, fontWeight: '800', fontFamily: MONO, letterSpacing: 1 }}>
                   {msg.role.toUpperCase()}
                 </Text>

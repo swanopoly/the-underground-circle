@@ -7,6 +7,8 @@
 
 import { supabase } from './supabase';
 import { deleteLocalSecret, readLocalSecret, writeLocalSecret } from './localSecrets';
+import { safeGetUserId } from './authSession';
+import { storage } from './storage';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -53,16 +55,65 @@ export interface GitHubFileContent {
 
 // ─── Token Storage ────────────────────────────────────────────────────────────
 
+const GITHUB_PAT_SCOPE_INDEX_PREFIX = '@github_pat_scopes_v2:';
+
+function githubPatSecretId(userId: string, circleId: string): string {
+  return `${encodeURIComponent(userId)}:${encodeURIComponent(circleId)}`;
+}
+
+async function rememberGithubPatCircle(userId: string, circleId: string): Promise<void> {
+  const key = `${GITHUB_PAT_SCOPE_INDEX_PREFIX}${encodeURIComponent(userId)}`;
+  let circles: string[] = [];
+  try {
+    const raw = await storage.getItem(key);
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (Array.isArray(parsed)) circles = parsed.filter((value): value is string => typeof value === 'string');
+  } catch {}
+  const next = [...new Set([...circles, circleId])].slice(-200);
+  await storage.setItem(key, JSON.stringify(next));
+}
+
 export async function getStoredToken(circleId: string): Promise<string | null> {
-  return (await readLocalSecret('github_pat', circleId)) || null;
+  const userId = await safeGetUserId();
+  if (!userId || !circleId) return null;
+  // Never import the historical Circle-only secret: another account on the
+  // same browser/device may have created it. Retire it fail-closed instead.
+  await deleteLocalSecret('github_pat', circleId);
+  return (await readLocalSecret('github_pat_v2', githubPatSecretId(userId, circleId))) || null;
 }
 
 export async function storeToken(circleId: string, token: string): Promise<void> {
-  await writeLocalSecret('github_pat', circleId, token);
+  const userId = await safeGetUserId();
+  if (!userId || !circleId) throw new Error('An authenticated user and Circle are required.');
+  await deleteLocalSecret('github_pat', circleId);
+  await writeLocalSecret('github_pat_v2', githubPatSecretId(userId, circleId), token);
+  await rememberGithubPatCircle(userId, circleId);
 }
 
 export async function removeToken(circleId: string): Promise<void> {
+  const userId = await safeGetUserId();
   await deleteLocalSecret('github_pat', circleId);
+  if (userId && circleId) {
+    await deleteLocalSecret('github_pat_v2', githubPatSecretId(userId, circleId));
+  }
+}
+
+/** Remove this account's device-local GitHub PATs before account replacement. */
+export async function clearLocalGitHubTokensForLogout(userId: string | null | undefined): Promise<number> {
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) return 0;
+  const key = `${GITHUB_PAT_SCOPE_INDEX_PREFIX}${encodeURIComponent(normalizedUserId)}`;
+  let circles: string[] = [];
+  try {
+    const raw = await storage.getItem(key);
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (Array.isArray(parsed)) circles = parsed.filter((value): value is string => typeof value === 'string');
+  } catch {}
+  await Promise.all(circles.map((circleId) => (
+    deleteLocalSecret('github_pat_v2', githubPatSecretId(normalizedUserId, circleId))
+  )));
+  await storage.removeItem(key);
+  return circles.length;
 }
 
 // ─── API Helpers ──────────────────────────────────────────────────────────────

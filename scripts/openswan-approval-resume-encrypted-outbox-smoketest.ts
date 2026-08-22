@@ -351,9 +351,11 @@ async function main(): Promise<void> {
   check(logoutSource.includes('clearOpenSwanApprovalResumeOutboxForLogout'), 'central logout clears approval device custody');
   check(logoutSource.indexOf('closeOpenSwanApprovalResumeOutboxAuthorityForLogout();')
     < logoutSource.indexOf('const cleanupPromise = clearLocalAuthResidualAuthority'), 'direct logout closes exact-call authority synchronously before async cleanup');
+  check(appSource.includes('const queueAccountCleanup = (userId: string | null): Promise<void> => {')
+    && appSource.includes('clearLocalAuthResidualAuthority(userId),'), 'account cleanup queue retains the canonical residual-authority cleanup');
   check(appSource.includes("} else if (event === 'SIGNED_OUT') {")
     && appSource.indexOf('closeOpenSwanApprovalResumeOutboxAuthorityForLogout();', appSource.indexOf("} else if (event === 'SIGNED_OUT') {"))
-      < appSource.indexOf('clearLocalAuthResidualAuthority(signedOutUserId)', appSource.indexOf("} else if (event === 'SIGNED_OUT') {")), 'remote/cross-tab SIGNED_OUT closes authority before cleanup');
+      < appSource.indexOf('queueAccountCleanup(signedOutUserId)', appSource.indexOf("} else if (event === 'SIGNED_OUT') {")), 'remote/cross-tab SIGNED_OUT closes authority before serialized cleanup');
   check(appSource.includes('const opensNewApprovalAuthority = activeUserId !== validatedSession.user.id;')
     && appSource.includes('if (opensNewApprovalAuthority) {'), 'validated token refresh for the same user does not rotate the authority epoch');
   check(authoritySource.includes('lease.sourceUserMessageId === input.sourceUserMessageId'), 'process claim exact-matches source message');

@@ -182,7 +182,7 @@ export async function executeRecordingCommand(
     }
 
     case 'stop': {
-      const r = stopRecording({ description: rest || undefined });
+      const r = stopRecording({ userId: ctx.userId, circleId: ctx.circleId, description: rest || undefined });
       if (!r.ok) return { message: `Recording error: ${r.error}`, localOnly: true };
       return {
         message: `Saved recording **${r.recording.name}** — ${r.recording.steps.length} steps, ${(r.recording.durationMs / 1000).toFixed(1)}s. `
@@ -192,7 +192,7 @@ export async function executeRecordingCommand(
     }
 
     case 'status': {
-      const active = getActiveSession();
+      const active = getActiveSession(ctx);
       if (!active) return { message: 'No recording in progress. `/record start <name>` to begin.', localOnly: true };
       const sec = Math.max(0, Math.floor((Date.now() - active.startedAt) / 1000));
       const last = active.steps[active.steps.length - 1];
@@ -209,12 +209,12 @@ export async function executeRecordingCommand(
     }
 
     case 'abort': {
-      const r = abortRecording();
+      const r = abortRecording(ctx);
       return { message: `Aborted recording (discarded ${r.discardedSteps} steps).`, localOnly: true };
     }
 
     case 'list': {
-      const rows = listRecordings({ circleId: ctx.circleId });
+      const rows = listRecordings(ctx);
       if (rows.length === 0) {
         return { message: 'No saved recordings yet for this circle. `/record start <name>` to capture one.', localOnly: true };
       }
@@ -229,7 +229,7 @@ export async function executeRecordingCommand(
 
     case 'delete': {
       if (!rest) return { message: 'Usage: `/record delete <name>`', localOnly: true };
-      const ok = deleteRecording(rest);
+      const ok = deleteRecording(rest, ctx);
       return {
         message: ok ? `Deleted recording **${rest}**.` : `No recording named **${rest}**.`,
         localOnly: true,
@@ -244,7 +244,7 @@ export async function executeRecordingCommand(
 // ─── /replay dispatcher ────────────────────────────────────────────
 
 async function doReplay(name: string, ctx: RecordingCommandContext): Promise<RecordingCommandOutcome> {
-  const recording = getRecording(name);
+  const recording = getRecording(name, ctx);
   if (!recording) {
     return { message: `No recording named **${name}**. Run \`/record list\` to see saved ones.`, localOnly: true };
   }

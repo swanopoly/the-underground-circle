@@ -40,12 +40,20 @@ import {
   type OpenSwanSubAgent,
   type OpenSwanWebSearchResult,
 } from '../../../../lib/openswanService';
+import {
+  getSubagentCapability,
+  listSubagentCapabilities,
+  type SubagentRole,
+} from '../../../../lib/subagentCapabilities';
 import { MONO, formatRelativeTime } from './AgentPanelShared';
 import { cronJobControlSnapshotMatches } from './agentCronControlCore';
 import type {
   AgentPanelRuntimeConnectionFence,
   AgentPanelRuntimeConnectionSnapshot,
 } from './AgentPanelTabs';
+
+const OFFICE_SUBAGENT_SPECIALTIES = listSubagentCapabilities();
+const DEFAULT_OFFICE_SUBAGENT_ROLE: SubagentRole = 'coder';
 
 type PanelOpenSwanConfig = OpenSwanConfig & { connection: AgentConnection };
 
@@ -206,6 +214,7 @@ export function OpenSwanFrontendPanel({
   const [error, setError] = useState<string | null>(null);
   const [taskInput, setTaskInput] = useState('');
   const [spawnInput, setSpawnInput] = useState('');
+  const [spawnRole, setSpawnRole] = useState<SubagentRole>(DEFAULT_OFFICE_SUBAGENT_ROLE);
   const [memoryQuery, setMemoryQuery] = useState('');
   const [memoryResult, setMemoryResult] = useState('');
   const [memoryResultQuery, setMemoryResultQuery] = useState('');
@@ -725,6 +734,8 @@ export function OpenSwanFrontendPanel({
   );
   const subagentCount = subagents.length || sessions.filter((session) => session.kind === 'subagent').length;
   const enabledJobs = jobs.filter((job) => job.enabled).length;
+  const selectedSpawnSpecialty = getSubagentCapability(spawnRole)
+    || OFFICE_SUBAGENT_SPECIALTIES[0];
   const laneCapabilityLabel = (status: AdvancedLaneStatus, readyLabel: string) => {
     if (status === 'ready') return readyLabel;
     if (status === 'loading') return 'Checking';
@@ -765,7 +776,7 @@ export function OpenSwanFrontendPanel({
       accessibilityLabel={label}
       accessibilityState={{ disabled: actionDisabled, busy: actionState === loadingKey }}
       style={[
-        { minHeight: 44, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 3, borderWidth: 1, borderColor, backgroundColor: color + '12', opacity: actionDisabled ? 0.45 : 1, alignItems: 'center', justifyContent: 'center' },
+        { minHeight: 44, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6, borderWidth: 1, borderColor, backgroundColor: color + '12', opacity: actionDisabled ? 0.45 : 1, alignItems: 'center', justifyContent: 'center' },
         Platform.OS === 'web' && { cursor: actionDisabled ? 'not-allowed' : 'pointer' } as any,
       ]}
     >
@@ -777,10 +788,10 @@ export function OpenSwanFrontendPanel({
   };
 
   return (
-    <View style={{ paddingHorizontal: 12, gap: 16, paddingBottom: 16 }} nativeID="section-openswan-frontend">
-      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: accentColor + '35', borderRadius: 4, padding: 12 }}>
+    <View style={{ gap: 16, paddingBottom: 16 }} nativeID="section-openswan-frontend">
+      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: accentColor + '35', borderRadius: 6, padding: 12 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-          <View style={{ width: 24, height: 24, borderRadius: 3, backgroundColor: accentColor + '18', borderWidth: 1, borderColor: accentColor + '35', alignItems: 'center', justifyContent: 'center' }}>
+          <View style={{ width: 24, height: 24, borderRadius: 6, backgroundColor: accentColor + '18', borderWidth: 1, borderColor: accentColor + '35', alignItems: 'center', justifyContent: 'center' }}>
             <Text style={{ color: accentColor, fontSize: 14, fontWeight: '800', fontFamily: MONO }}>OS</Text>
           </View>
           <View style={{ flex: 1 }}>
@@ -797,7 +808,7 @@ export function OpenSwanFrontendPanel({
             accessibilityRole="button"
             accessibilityLabel="Refresh exact OpenSwan session evidence"
             accessibilityState={{ disabled: loading || refreshing || actionState !== null, busy: loading || refreshing }}
-            style={[{ minHeight: 44, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 3, borderWidth: 1, borderColor: accentColor + '40', backgroundColor: accentColor + '12', opacity: loading || refreshing || actionState !== null ? 0.5 : 1, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: loading || refreshing || actionState !== null ? 'default' : 'pointer' } as any]}
+            style={[{ minHeight: 44, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6, borderWidth: 1, borderColor: accentColor + '40', backgroundColor: accentColor + '12', opacity: loading || refreshing || actionState !== null ? 0.5 : 1, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: loading || refreshing || actionState !== null ? 'default' : 'pointer' } as any]}
           >
             <Text style={{ color: accentColor, fontSize: 12, fontWeight: '700', fontFamily: MONO }}>{refreshing ? 'SYNC..' : 'REFRESH'}</Text>
           </Pressable>
@@ -812,7 +823,7 @@ export function OpenSwanFrontendPanel({
             { label: 'Cron Jobs', value: advancedLaneState.jobs === 'ready' ? String(jobs.length) : '—', verified: advancedLaneState.jobs === 'ready' },
             { label: 'Enabled', value: advancedLaneState.jobs === 'ready' ? String(enabledJobs) : '—', verified: advancedLaneState.jobs === 'ready' },
           ].map((item) => (
-            <View key={item.label} style={{ width: '18.5%', minWidth: 94, backgroundColor: '#111118', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 12 }}>
+            <View key={item.label} style={{ width: '18.5%', minWidth: 94, backgroundColor: '#111118', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 12 }}>
               <Text style={{ color: '#606070', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{item.label.toUpperCase()}</Text>
               <Text style={{ color: item.verified ? '#e0e0e8' : '#f59e0b', fontSize: 16, fontWeight: '800', fontFamily: MONO, marginTop: 2 }}>{item.value}</Text>
             </View>
@@ -836,7 +847,7 @@ export function OpenSwanFrontendPanel({
         </Text>
       </View>
 
-      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: activeSession ? accentColor + '45' : '#1a1a28', borderRadius: 4, padding: 12, gap: 7 }}>
+      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: activeSession ? accentColor + '45' : '#1a1a28', borderRadius: 6, padding: 12, gap: 7 }}>
         <Text style={{ color: '#f0f0f5', fontSize: 12, fontWeight: '800', letterSpacing: 0.8, fontFamily: MONO }}>CONTINUE WITH THIS AGENT IN CHAT</Text>
         <Text style={{ color: '#808090', fontSize: 11, lineHeight: 16, fontFamily: MONO }}>
           Chat owns the durable message, approval, run, proof, and recovery trail. This panel selects the exact agent and carries your draft without sending it.
@@ -849,7 +860,7 @@ export function OpenSwanFrontendPanel({
             placeholder="What should this agent do?"
             placeholderTextColor="#606075"
             multiline
-            style={{ flex: 1, minHeight: 42, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, paddingHorizontal: 9, paddingVertical: 8, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+            style={{ flex: 1, minHeight: 42, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, paddingHorizontal: 9, paddingVertical: 8, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
           />
           <ActionButton
             label="OPEN CHAT"
@@ -871,7 +882,7 @@ export function OpenSwanFrontendPanel({
         accessibilityLabel={advancedOpen ? 'Hide advanced OpenSwan runtime controls' : 'Show advanced OpenSwan runtime controls'}
         accessibilityState={{ expanded: advancedOpen }}
         style={({ hovered, pressed }: any) => [
-          { minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: advancedOpen ? accentColor + '10' : '#0a0a10', borderWidth: 1, borderColor: advancedOpen ? accentColor + '45' : '#1a1a28', borderRadius: 4, paddingHorizontal: 12, paddingVertical: 9 },
+          { minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: advancedOpen ? accentColor + '10' : '#0a0a10', borderWidth: 1, borderColor: advancedOpen ? accentColor + '45' : '#1a1a28', borderRadius: 6, paddingHorizontal: 12, paddingVertical: 9 },
           hovered && { borderColor: accentColor + '65' },
           pressed && { opacity: 0.85 },
           Platform.OS === 'web' && { cursor: 'pointer' } as any,
@@ -888,7 +899,7 @@ export function OpenSwanFrontendPanel({
 
       {advancedOpen ? <>
       {!isBlackSwanRuntime ? (
-        <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 4, padding: 12, gap: 9 }}>
+        <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 12, gap: 9 }}>
           <Text style={{ color: '#f0f0f5', fontSize: 12, fontWeight: '800', letterSpacing: 1, fontFamily: MONO }}>
             OFFICE SESSION BINDING
           </Text>
@@ -905,13 +916,13 @@ export function OpenSwanFrontendPanel({
               <ActivityIndicator accessibilityRole="progressbar" accessibilityLabel="Loading published Office agent bindings" size="small" color={accentColor} />
             </View>
           ) : bindingLoadState === 'error' ? (
-            <View accessibilityRole="alert" style={{ gap: 8, borderWidth: 1, borderColor: '#ef444440', backgroundColor: '#ef444410', borderRadius: 3, padding: 9 }}>
+            <View accessibilityRole="alert" style={{ gap: 8, borderWidth: 1, borderColor: '#ef444440', backgroundColor: '#ef444410', borderRadius: 6, padding: 9 }}>
               <Text style={{ color: '#f0a09b', fontSize: 11, lineHeight: 16, fontFamily: MONO }}>{bindingLoadError}</Text>
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Retry loading published Office agent bindings"
                 onPress={() => { void refreshPublishedBindings(); }}
-                style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 10, borderWidth: 1, borderColor: '#ef444450', borderRadius: 3, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 10, borderWidth: 1, borderColor: '#ef444450', borderRadius: 6, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
               >
                 <Text style={{ color: '#f0a09b', fontSize: 10, fontWeight: '800', fontFamily: MONO }}>RETRY</Text>
               </Pressable>
@@ -931,7 +942,7 @@ export function OpenSwanFrontendPanel({
               && binding.sessionKey === agent.sessionKey,
             );
             return (
-              <View key={officeAgent.id} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#111118', borderWidth: 1, borderColor: boundHere ? accentColor + '55' : '#1a1a28', borderRadius: 3, padding: 9 }}>
+              <View key={officeAgent.id} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#111118', borderWidth: 1, borderColor: boundHere ? accentColor + '55' : '#1a1a28', borderRadius: 6, padding: 9 }}>
                 <View style={{ flex: 1 }}>
                   <Text style={{ color: '#e0e0e8', fontSize: 12, fontWeight: '700', fontFamily: MONO }} numberOfLines={1}>
                     {officeAgent.name}
@@ -950,7 +961,7 @@ export function OpenSwanFrontendPanel({
                     else void bindDisplayedSession(officeAgent);
                   }}
                   style={[
-                    { minHeight: 44, paddingHorizontal: 9, paddingVertical: 6, borderRadius: 3, borderWidth: 1, borderColor: boundHere ? '#ef444455' : accentColor + '55', opacity: bindingAction !== null || (!boundHere && !exactSessionCanBind) ? 0.45 : 1, justifyContent: 'center' },
+                    { minHeight: 44, paddingHorizontal: 9, paddingVertical: 6, borderRadius: 6, borderWidth: 1, borderColor: boundHere ? '#ef444455' : accentColor + '55', opacity: bindingAction !== null || (!boundHere && !exactSessionCanBind) ? 0.45 : 1, justifyContent: 'center' },
                     Platform.OS === 'web' && { cursor: 'pointer' } as any,
                   ]}
                 >
@@ -972,7 +983,7 @@ export function OpenSwanFrontendPanel({
 
       <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
         {readyFeatures.map((card) => (
-          <View key={card.label} style={{ width: '48%', backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 9 }}>
+          <View key={card.label} style={{ width: '48%', backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 9 }}>
             <Text style={{ color: '#808090', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{card.label.toUpperCase()}</Text>
             <Text style={{ color: card.color, fontSize: 14, fontWeight: '700', fontFamily: MONO, marginTop: 3 }}>{card.value}</Text>
             <Text style={{ color: '#909098', fontSize: 11, fontFamily: MONO, marginTop: 3, lineHeight: 16 }}>{card.note}</Text>
@@ -980,13 +991,13 @@ export function OpenSwanFrontendPanel({
         ))}
       </View>
 
-      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 4, padding: 12, gap: 10 }}>
+      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 12, gap: 10 }}>
         <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>SESSION COCKPIT</Text>
         {loading ? (
           <ActivityIndicator accessibilityRole="progressbar" accessibilityLabel="Loading exact OpenSwan session" size="small" color={accentColor} />
         ) : activeSession ? (
           <>
-            <View style={{ backgroundColor: '#111118', borderWidth: 1, borderColor: accentColor + '30', borderRadius: 3, padding: 12 }}>
+            <View style={{ backgroundColor: '#111118', borderWidth: 1, borderColor: accentColor + '30', borderRadius: 6, padding: 12 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                 <Text style={{ color: accentColor, fontSize: 13, fontWeight: '700', fontFamily: MONO }}>{activeSession.kind || 'session'}</Text>
                 <Text style={{ color: '#a0a0b0', fontSize: 13, fontFamily: MONO, flex: 1 }} numberOfLines={1}>{activeSession.sessionKey}</Text>
@@ -1001,7 +1012,7 @@ export function OpenSwanFrontendPanel({
             </View>
 
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
-              <View style={{ width: '48%', backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 10 }}>
+              <View style={{ width: '48%', backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 10 }}>
                 <Text style={{ color: '#909098', fontSize: 11, fontWeight: '700', fontFamily: MONO, marginBottom: 8 }}>SESSION STATUS</Text>
                 {advancedLaneState.sessionStatus === 'loading' ? (
                   <Text style={{ color: '#38bdf8', fontSize: 11, fontFamily: MONO }}>Checking exact session status…</Text>
@@ -1022,7 +1033,7 @@ export function OpenSwanFrontendPanel({
                 )}
               </View>
 
-              <View style={{ width: '48%', backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 10 }}>
+              <View style={{ width: '48%', backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 10 }}>
                 <Text style={{ color: '#909098', fontSize: 11, fontWeight: '700', fontFamily: MONO, marginBottom: 8 }}>AVAILABLE RUNTIME AGENTS</Text>
                 {advancedLaneState.runtimeAgents === 'loading' ? (
                   <Text style={{ color: '#38bdf8', fontSize: 11, fontFamily: MONO }}>Checking runtime agent inventory…</Text>
@@ -1044,7 +1055,7 @@ export function OpenSwanFrontendPanel({
               </View>
             </View>
 
-            <View style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 10 }}>
+            <View style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 10 }}>
               <Text style={{ color: '#909098', fontSize: 11, fontWeight: '700', fontFamily: MONO, marginBottom: 8 }}>SESSION HISTORY</Text>
               {advancedLaneState.sessionHistory === 'loading' ? (
                 <Text style={{ color: '#38bdf8', fontSize: 11, fontFamily: MONO }}>Checking exact session history…</Text>
@@ -1071,11 +1082,36 @@ export function OpenSwanFrontendPanel({
         )}
       </View>
 
-      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 4, padding: 12, gap: 10 }}>
+      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 12, gap: 10 }}>
         <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>CONNECTED-AGENT TOOLS</Text>
         <View style={{ gap: 10 }}>
-          <View style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 10, gap: 6 }}>
+          <View style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 10, gap: 6 }}>
             <Text style={{ color: '#808090', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>SPAWN SUBAGENT</Text>
+            <Text style={{ color: '#606075', fontSize: 10, lineHeight: 14, fontFamily: MONO }}>Choose the exact specialty. Chat will launch it with this SOUL and linked skill bundle.</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, paddingVertical: 2, paddingRight: 8 }}>
+              {OFFICE_SUBAGENT_SPECIALTIES.map(specialty => {
+                const selected = spawnRole === specialty.role;
+                return (
+                  <Pressable
+                    key={specialty.role}
+                    onPress={() => setSpawnRole(specialty.role)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${specialty.displayName} specialty. SOUL ${specialty.spiritId}. Skill bundle ${specialty.skillBundleId}.`}
+                    accessibilityState={{ selected }}
+                    style={[
+                      { minHeight: 44, minWidth: 116, justifyContent: 'center', paddingHorizontal: 9, paddingVertical: 6, borderRadius: 6, borderWidth: 1, borderColor: selected ? '#a855f7' : '#242435', backgroundColor: selected ? '#a855f718' : '#090911' },
+                      Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                    ]}
+                  >
+                    <Text style={{ color: selected ? '#e9d5ff' : '#a0a0ad', fontSize: 10, fontWeight: '800', fontFamily: MONO }}>{specialty.displayName.toUpperCase()}</Text>
+                    <Text style={{ color: selected ? '#c4b5fd' : '#606075', fontSize: 8, fontFamily: MONO, marginTop: 2 }} numberOfLines={1}>SOUL {specialty.spiritId}</Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+            <Text style={{ color: '#c4b5fd', fontSize: 9, lineHeight: 13, fontFamily: MONO }} numberOfLines={2}>
+              SOUL {selectedSpawnSpecialty.spiritId} · SKILL {selectedSpawnSpecialty.skillBundleId}
+            </Text>
             <View style={{ flexDirection: 'row', gap: 6 }}>
               <TextInput
                 value={spawnInput}
@@ -1083,7 +1119,7 @@ export function OpenSwanFrontendPanel({
                 accessibilityLabel="Subagent task draft for Chat"
                 placeholder="delegate a background task..."
                 placeholderTextColor="#606075"
-                style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+                style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
               />
               <ActionButton
                 label="OPEN CHAT"
@@ -1093,7 +1129,9 @@ export function OpenSwanFrontendPanel({
                 disabled={!onOpenInChat || !spawnInput.trim()}
                 onPress={() => {
                   if (!onOpenInChat || !spawnInput.trim()) return;
-                  onOpenInChat(`Delegate this to a subagent: ${spawnInput.trim()}`);
+                  onOpenInChat(
+                    `[specialty:${selectedSpawnSpecialty.role}] Launch a ${selectedSpawnSpecialty.displayName} specialist subagent with SOUL ${selectedSpawnSpecialty.spiritId} and skill bundle ${selectedSpawnSpecialty.skillBundleId}. Task: ${spawnInput.trim()}`,
+                  );
                 }}
               />
             </View>
@@ -1101,9 +1139,9 @@ export function OpenSwanFrontendPanel({
         </View>
       </View>
 
-      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 4, padding: 12, gap: 10 }}>
+      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 12, gap: 10 }}>
         <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>RUNTIME SEARCH</Text>
-        <View style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 10, gap: 6 }}>
+        <View style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 10, gap: 6 }}>
           <Text style={{ color: '#808090', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>MEMORY SEARCH</Text>
           <View style={{ flexDirection: 'row', gap: 6 }}>
             <TextInput
@@ -1112,7 +1150,7 @@ export function OpenSwanFrontendPanel({
               accessibilityLabel="Runtime memory search query"
               placeholder="search runtime memory..."
               placeholderTextColor="#606075"
-              style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+              style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
             />
             <ActionButton
               label="SEARCH"
@@ -1164,7 +1202,7 @@ export function OpenSwanFrontendPanel({
           ) : null}
         </View>
 
-        <View style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 10, gap: 6 }}>
+        <View style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 10, gap: 6 }}>
           <Text style={{ color: '#808090', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>WEB SEARCH</Text>
           <View style={{ flexDirection: 'row', gap: 6 }}>
             <TextInput
@@ -1173,7 +1211,7 @@ export function OpenSwanFrontendPanel({
               accessibilityLabel="Runtime web search query"
               placeholder="research a topic..."
               placeholderTextColor="#606075"
-              style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
+              style={{ flex: 1, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
             />
             <ActionButton
               label="WEB"
@@ -1238,7 +1276,7 @@ export function OpenSwanFrontendPanel({
         </View>
       </View>
 
-      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 4, padding: 12, gap: 8 }}>
+      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 12, gap: 8 }}>
         <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>SUBAGENTS + AUTOMATIONS</Text>
         <View style={{ flexDirection: 'row', gap: 8 }}>
           <View style={{ flex: 1, gap: 4 }}>
@@ -1250,7 +1288,7 @@ export function OpenSwanFrontendPanel({
             ) : subagents.length === 0 ? (
               <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, fontStyle: 'italic' }}>No subagents reported.</Text>
             ) : subagents.slice(0, 4).map((subagent) => (
-              <View key={subagent.id} style={{ backgroundColor: '#111118', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
+              <View key={subagent.id} style={{ backgroundColor: '#111118', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 10 }}>
                 <Text style={{ color: '#f0f0f5', fontSize: 11, fontWeight: '700', fontFamily: MONO }} numberOfLines={1}>{subagent.name || subagent.id}</Text>
                 <Text style={{ color: '#909098', fontSize: 10, fontFamily: MONO }} numberOfLines={1}>{subagent.model || subagent.status || 'unknown'}</Text>
                 {subagent.task ? <Text style={{ color: '#808090', fontSize: 10, fontFamily: MONO, marginTop: 2 }} numberOfLines={2}>{subagent.task}</Text> : null}
@@ -1269,9 +1307,9 @@ export function OpenSwanFrontendPanel({
             ) : jobs.length === 0 ? (
               <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, fontStyle: 'italic' }}>No cron jobs configured.</Text>
             ) : jobs.slice(0, 4).map((job) => (
-              <View key={job.id} style={{ backgroundColor: '#111118', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10 }}>
+              <View key={job.id} style={{ backgroundColor: '#111118', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 10 }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                  <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: job.enabled ? '#22c55e' : '#3a3a4e' }} />
+                  <View style={{ width: 7, height: 7, borderRadius: 6, backgroundColor: job.enabled ? '#22c55e' : '#3a3a4e' }} />
                   <Text style={{ color: '#f0f0f5', fontSize: 11, fontWeight: '700', fontFamily: MONO, flex: 1 }} numberOfLines={1}>{job.name || job.id}</Text>
                   <Text style={{ color: '#707080', fontSize: 9, fontWeight: '700', fontFamily: MONO }}>MANAGE IN CRON JOBS</Text>
                 </View>
@@ -1282,7 +1320,7 @@ export function OpenSwanFrontendPanel({
         </View>
       </View>
 
-      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 3, padding: 10, gap: 8 }}>
+      <View style={{ backgroundColor: '#0a0a10', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 10, gap: 8 }}>
         <Text style={{ color: '#707086', fontSize: 11, fontFamily: MONO, lineHeight: 17 }}>
           OpenSwan exposes live session evidence, runtime inventory, memory retrieval, web research, and scheduled execution here. New task and delegation drafts continue in Chat so one canonical run and recovery trail owns execution.
         </Text>
@@ -1713,30 +1751,30 @@ export function CronJobsPanel({
   return (
     <View style={{ gap: 8 }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-        <View style={{ width: 20, height: 20, borderRadius: 2, backgroundColor: '#f59e0b15', borderWidth: 1, borderColor: '#f59e0b30', justifyContent: 'center', alignItems: 'center' }}>
+        <View style={{ width: 20, height: 20, borderRadius: 6, backgroundColor: '#f59e0b15', borderWidth: 1, borderColor: '#f59e0b30', justifyContent: 'center', alignItems: 'center' }}>
           <Text style={{ color: '#f59e0b', fontSize: 12, fontWeight: '800', fontFamily: MONO }}>C</Text>
         </View>
         <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>CONNECTION CRON JOBS</Text>
         <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO }}>({cronCapability === 'unsupported' ? 'N/A' : visibleJobs.length})</Text>
-        <Pressable accessibilityRole="button" accessibilityLabel="Refresh cron jobs" accessibilityState={{ disabled: loading || actionLoading !== null, busy: loading }} disabled={loading || actionLoading !== null} onPress={refresh} style={[{ marginLeft: 'auto', minHeight: 44, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#2a2a3e', backgroundColor: '#1a1a28', opacity: loading || actionLoading !== null ? 0.5 : 1, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: loading || actionLoading !== null ? 'default' : 'pointer' } as any]}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Refresh cron jobs" accessibilityState={{ disabled: loading || actionLoading !== null, busy: loading }} disabled={loading || actionLoading !== null} onPress={refresh} style={[{ marginLeft: 'auto', minHeight: 44, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6, borderWidth: 1, borderColor: '#2a2a3e', backgroundColor: '#1a1a28', opacity: loading || actionLoading !== null ? 0.5 : 1, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: loading || actionLoading !== null ? 'default' : 'pointer' } as any]}>
           <Text style={{ color: '#909098', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{loading ? '..' : 'REFRESH'}</Text>
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel={showCreate ? 'Cancel new connection cron job' : 'Create a connection cron job'} accessibilityState={{ disabled: actionLoading !== null || mutationsUnavailable, expanded: showCreate }} disabled={actionLoading !== null || mutationsUnavailable} onPress={() => setShowCreate(!showCreate)} style={[{ minHeight: 44, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 2, borderWidth: 1, borderColor: '#22c55e30', backgroundColor: '#22c55e10', opacity: actionLoading !== null || mutationsUnavailable ? 0.5 : 1, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: actionLoading !== null || mutationsUnavailable ? 'default' : 'pointer' } as any]}>
+        <Pressable accessibilityRole="button" accessibilityLabel={showCreate ? 'Cancel new connection cron job' : 'Create a connection cron job'} accessibilityState={{ disabled: actionLoading !== null || mutationsUnavailable, expanded: showCreate }} disabled={actionLoading !== null || mutationsUnavailable} onPress={() => setShowCreate(!showCreate)} style={[{ minHeight: 44, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6, borderWidth: 1, borderColor: '#22c55e30', backgroundColor: '#22c55e10', opacity: actionLoading !== null || mutationsUnavailable ? 0.5 : 1, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: actionLoading !== null || mutationsUnavailable ? 'default' : 'pointer' } as any]}>
           <Text style={{ color: '#22c55e', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{showCreate ? 'CANCEL' : '+ NEW'}</Text>
         </Pressable>
       </View>
 
-      <View style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 10, gap: 6 }}>
+      <View style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 10, gap: 6 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-          <View style={{ backgroundColor: visibleConnection?.status === 'connected' ? '#22c55e15' : '#1a1a28', borderWidth: 1, borderColor: visibleConnection?.status === 'connected' ? '#22c55e35' : '#2a2a3e', borderRadius: 2, paddingHorizontal: 10, paddingVertical: 6 }}>
+          <View style={{ backgroundColor: visibleConnection?.status === 'connected' ? '#22c55e15' : '#1a1a28', borderWidth: 1, borderColor: visibleConnection?.status === 'connected' ? '#22c55e35' : '#2a2a3e', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 6 }}>
             <Text style={{ color: visibleConnection?.status === 'connected' ? '#22c55e' : '#606075', fontSize: 11, fontFamily: MONO }}>
               {visibleConnection?.status === 'connected' ? 'OPENSWAN CONNECTION VERIFIED' : 'OPENSWAN CONNECTION UNVERIFIED'}
             </Text>
           </View>
-          <View style={{ backgroundColor: '#6366f110', borderWidth: 1, borderColor: '#6366f125', borderRadius: 2, paddingHorizontal: 10, paddingVertical: 6 }}>
+          <View style={{ backgroundColor: '#6366f110', borderWidth: 1, borderColor: '#6366f125', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 6 }}>
             <Text style={{ color: '#6366f1', fontSize: 11, fontFamily: MONO }}>CONNECTION-LEVEL JOBS</Text>
           </View>
-          <View style={{ backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff14', borderRadius: 2, paddingHorizontal: 10, paddingVertical: 6 }}>
+          <View style={{ backgroundColor: '#ffffff08', borderWidth: 1, borderColor: '#ffffff14', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 6 }}>
             <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>
               {cronCapability === 'unsupported' ? 'SCHEDULES NOT EXPOSED' : `${visibleJobs.length} JOBS`}
             </Text>
@@ -1751,7 +1789,7 @@ export function CronJobsPanel({
       </View>
 
       {loadError ? (
-        <View accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ backgroundColor: '#ef444410', borderWidth: 1, borderColor: '#ef444440', borderRadius: 2, padding: 10, gap: 8 }}>
+        <View accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ backgroundColor: '#ef444410', borderWidth: 1, borderColor: '#ef444440', borderRadius: 6, padding: 10, gap: 8 }}>
           <Text style={{ color: '#f0a09b', fontSize: 12, fontFamily: MONO, lineHeight: 18 }}>{loadError}</Text>
           {hasVerifiedSnapshot && lastRefreshedAt ? (
             <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>
@@ -1764,7 +1802,7 @@ export function CronJobsPanel({
             accessibilityState={{ disabled: loading || actionLoading !== null, busy: loading }}
             disabled={loading || actionLoading !== null}
             onPress={() => { void refresh(); }}
-            style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 12, borderRadius: 2, borderWidth: 1, borderColor: '#ef444450', justifyContent: 'center', opacity: loading || actionLoading !== null ? 0.5 : 1 }, Platform.OS === 'web' && { cursor: loading || actionLoading !== null ? 'default' : 'pointer' } as any]}
+            style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 12, borderRadius: 6, borderWidth: 1, borderColor: '#ef444450', justifyContent: 'center', opacity: loading || actionLoading !== null ? 0.5 : 1 }, Platform.OS === 'web' && { cursor: loading || actionLoading !== null ? 'default' : 'pointer' } as any]}
           >
             <Text style={{ color: '#f0a09b', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{loading ? 'RETRYING…' : 'RETRY'}</Text>
           </Pressable>
@@ -1776,7 +1814,7 @@ export function CronJobsPanel({
           accessibilityLabel="Schedule capability status"
           accessibilityLiveRegion="polite"
           {...(Platform.OS === 'web' ? ({ role: 'status' } as any) : {})}
-          style={{ backgroundColor: '#f59e0b0d', borderWidth: 1, borderColor: '#f59e0b30', borderRadius: 2, padding: 10, gap: 8 }}
+          style={{ backgroundColor: '#f59e0b0d', borderWidth: 1, borderColor: '#f59e0b30', borderRadius: 6, padding: 10, gap: 8 }}
         >
           <Text style={{ color: '#d6a84c', fontSize: 12, fontFamily: MONO, lineHeight: 18 }}>
             This verified OpenSwan runtime does not expose connection-level schedules. No job inventory was claimed, and schedule controls remain disabled.
@@ -1787,7 +1825,7 @@ export function CronJobsPanel({
             accessibilityState={{ disabled: loading || actionLoading !== null, busy: loading }}
             disabled={loading || actionLoading !== null}
             onPress={() => { void refresh(); }}
-            style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 12, borderRadius: 2, borderWidth: 1, borderColor: '#f59e0b40', justifyContent: 'center', opacity: loading || actionLoading !== null ? 0.5 : 1 }, Platform.OS === 'web' && { cursor: loading || actionLoading !== null ? 'default' : 'pointer' } as any]}
+            style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 12, borderRadius: 6, borderWidth: 1, borderColor: '#f59e0b40', justifyContent: 'center', opacity: loading || actionLoading !== null ? 0.5 : 1 }, Platform.OS === 'web' && { cursor: loading || actionLoading !== null ? 'default' : 'pointer' } as any]}
           >
             <Text style={{ color: '#d6a84c', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{loading ? 'CHECKING…' : 'RECHECK'}</Text>
           </Pressable>
@@ -1802,25 +1840,25 @@ export function CronJobsPanel({
       )}
 
       {showCreate && (
-        <View style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#22c55e25', borderRadius: 2, padding: 10, gap: 6 }}>
+        <View style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: '#22c55e25', borderRadius: 6, padding: 10, gap: 6 }}>
           <Text style={{ color: '#22c55e', fontSize: 12, fontWeight: '700', fontFamily: MONO, letterSpacing: 0.5 }}>NEW CRON JOB</Text>
-          <TextInput accessibilityLabel="Cron job name" value={newJob.name} onChangeText={v => setNewJob(p => ({ ...p, name: v }))} placeholder="Job name (e.g. daily-digest)" placeholderTextColor="#606075" style={{ minHeight: 44, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 5, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any} />
+          <TextInput accessibilityLabel="Cron job name" value={newJob.name} onChangeText={v => setNewJob(p => ({ ...p, name: v }))} placeholder="Job name (e.g. daily-digest)" placeholderTextColor="#606075" style={{ minHeight: 44, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 5, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any} />
           <View style={{ gap: 4 }}>
             <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>SCHEDULE</Text>
-            <TextInput accessibilityLabel="Cron schedule" value={newJob.schedule} onChangeText={v => setNewJob(p => ({ ...p, schedule: v }))} placeholder="Cron expression (e.g. 0 9 * * *)" placeholderTextColor="#606075" style={{ minHeight: 44, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 5, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any} />
+            <TextInput accessibilityLabel="Cron schedule" value={newJob.schedule} onChangeText={v => setNewJob(p => ({ ...p, schedule: v }))} placeholder="Cron expression (e.g. 0 9 * * *)" placeholderTextColor="#606075" style={{ minHeight: 44, color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 5, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any} />
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 4 }}>
               {schedulePresets.map(preset => (
-                <Pressable key={preset.cron} accessibilityRole="button" accessibilityLabel={`Use ${preset.label} schedule`} accessibilityState={{ selected: newJob.schedule === preset.cron }} onPress={() => setNewJob(prev => ({ ...prev, schedule: preset.cron }))} style={[{ minHeight: 44, backgroundColor: newJob.schedule === preset.cron ? '#f59e0b15' : '#1a1a28', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 2, borderWidth: 1, borderColor: newJob.schedule === preset.cron ? '#f59e0b30' : '#2a2a3e', justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                <Pressable key={preset.cron} accessibilityRole="button" accessibilityLabel={`Use ${preset.label} schedule`} accessibilityState={{ selected: newJob.schedule === preset.cron }} onPress={() => setNewJob(prev => ({ ...prev, schedule: preset.cron }))} style={[{ minHeight: 44, backgroundColor: newJob.schedule === preset.cron ? '#f59e0b15' : '#1a1a28', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6, borderWidth: 1, borderColor: newJob.schedule === preset.cron ? '#f59e0b30' : '#2a2a3e', justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
                   <Text style={{ color: newJob.schedule === preset.cron ? '#f59e0b' : '#606075', fontSize: 11, fontFamily: MONO }}>{preset.label}</Text>
                 </Pressable>
               ))}
             </ScrollView>
           </View>
-          <TextInput accessibilityLabel="Cron task prompt" value={newJob.task} onChangeText={v => setNewJob(p => ({ ...p, task: v }))} placeholder="Task prompt (what should the agent do?)" placeholderTextColor="#606075" multiline numberOfLines={3} style={{ color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, paddingHorizontal: 8, paddingVertical: 5, minHeight: 60, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any} />
+          <TextInput accessibilityLabel="Cron task prompt" value={newJob.task} onChangeText={v => setNewJob(p => ({ ...p, task: v }))} placeholder="Task prompt (what should the agent do?)" placeholderTextColor="#606075" multiline numberOfLines={3} style={{ color: '#f0f0f5', fontSize: 13, fontFamily: MONO, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 5, minHeight: 60, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any} />
           <View style={{ flexDirection: 'row', gap: 4 }}>
             <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, paddingTop: 4 }}>SESSION:</Text>
             {['isolated', 'main'].map(target => (
-              <Pressable key={target} accessibilityRole="button" accessibilityLabel={`Use ${target} session target`} accessibilityState={{ selected: newJob.sessionTarget === target }} onPress={() => setNewJob(p => ({ ...p, sessionTarget: target }))} style={[{ minHeight: 44, backgroundColor: newJob.sessionTarget === target ? '#6366f115' : '#1a1a28', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 2, borderWidth: 1, borderColor: newJob.sessionTarget === target ? '#6366f130' : '#2a2a3e', justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+              <Pressable key={target} accessibilityRole="button" accessibilityLabel={`Use ${target} session target`} accessibilityState={{ selected: newJob.sessionTarget === target }} onPress={() => setNewJob(p => ({ ...p, sessionTarget: target }))} style={[{ minHeight: 44, backgroundColor: newJob.sessionTarget === target ? '#6366f115' : '#1a1a28', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6, borderWidth: 1, borderColor: newJob.sessionTarget === target ? '#6366f130' : '#2a2a3e', justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
                 <Text style={{ color: newJob.sessionTarget === target ? '#6366f1' : '#606075', fontSize: 11, fontFamily: MONO }}>{target.toUpperCase()}</Text>
               </Pressable>
             ))}
@@ -1828,7 +1866,7 @@ export function CronJobsPanel({
           <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO, lineHeight: 17 }}>
             Isolated starts a fresh runtime context. Main targets the connection&apos;s main OpenSwan session. Ambiguous current-session targeting is not supported here.
           </Text>
-          <Pressable accessibilityRole="button" accessibilityLabel="Create connection cron job" accessibilityState={{ disabled: !newJobInputComplete || actionLoading !== null || mutationsUnavailable, busy: actionLoading === 'create' }} onPress={handleCreate} disabled={!newJobInputComplete || actionLoading !== null || mutationsUnavailable} style={[{ minHeight: 44, backgroundColor: '#22c55e15', borderWidth: 1, borderColor: '#22c55e40', borderRadius: 2, paddingVertical: 6, alignItems: 'center', justifyContent: 'center', opacity: !newJobInputComplete || actionLoading !== null || mutationsUnavailable ? 0.5 : 1 }, Platform.OS === 'web' && { cursor: !newJobInputComplete || actionLoading !== null || mutationsUnavailable ? 'default' : 'pointer' } as any]}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Create connection cron job" accessibilityState={{ disabled: !newJobInputComplete || actionLoading !== null || mutationsUnavailable, busy: actionLoading === 'create' }} onPress={handleCreate} disabled={!newJobInputComplete || actionLoading !== null || mutationsUnavailable} style={[{ minHeight: 44, backgroundColor: '#22c55e15', borderWidth: 1, borderColor: '#22c55e40', borderRadius: 6, paddingVertical: 6, alignItems: 'center', justifyContent: 'center', opacity: !newJobInputComplete || actionLoading !== null || mutationsUnavailable ? 0.5 : 1 }, Platform.OS === 'web' && { cursor: !newJobInputComplete || actionLoading !== null || mutationsUnavailable ? 'default' : 'pointer' } as any]}>
             <Text style={{ color: '#22c55e', fontSize: 13, fontWeight: '700', fontFamily: MONO }}>{actionLoading === 'create' ? 'CREATING...' : 'CREATE JOB'}</Text>
           </Pressable>
         </View>
@@ -1843,17 +1881,17 @@ export function CronJobsPanel({
           visibleJobs.map(job => {
             const isEnabled = job.enabled;
             return (
-              <View key={job.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: isEnabled ? '#f59e0b20' : '#1a1a28', borderRadius: 2, padding: 10, marginBottom: 8 }}>
+              <View key={job.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: isEnabled ? '#f59e0b20' : '#1a1a28', borderRadius: 6, padding: 10, marginBottom: 8 }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8 }}>
-                  <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: isEnabled ? '#22c55e' : '#606075' }} />
+                  <View style={{ width: 8, height: 8, borderRadius: 6, backgroundColor: isEnabled ? '#22c55e' : '#606075' }} />
                   <Text style={{ color: '#f0f0f5', fontSize: 14, fontWeight: '700', fontFamily: MONO, flex: 1 }} numberOfLines={1}>{job.name || job.id.slice(0, 8)}</Text>
                   <Text style={{ color: isEnabled ? '#22c55e' : '#606075', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{isEnabled ? 'ENABLED' : 'DISABLED'}</Text>
                 </View>
                 <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginBottom: 10 }}>
-                  {job.schedule && <View style={{ backgroundColor: '#f59e0b10', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 2, borderWidth: 1, borderColor: '#f59e0b25' }}><Text style={{ color: '#f59e0b', fontSize: 11, fontFamily: MONO }}>{formatCronSchedule(job.schedule)}</Text></View>}
-                  {job.sessionTarget && <View style={{ backgroundColor: '#6366f110', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 2, borderWidth: 1, borderColor: '#6366f125' }}><Text style={{ color: '#6366f1', fontSize: 11, fontFamily: MONO }}>{job.sessionTarget}</Text></View>}
-                  {job.timezone && <View style={{ backgroundColor: '#14b8a610', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 2, borderWidth: 1, borderColor: '#14b8a625' }}><Text style={{ color: '#14b8a6', fontSize: 11, fontFamily: MONO }}>{job.timezone}</Text></View>}
-                  {job.status && <View style={{ backgroundColor: '#a855f710', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 2, borderWidth: 1, borderColor: '#a855f725' }}><Text style={{ color: '#a855f7', fontSize: 11, fontFamily: MONO }}>{job.status}</Text></View>}
+                  {job.schedule && <View style={{ backgroundColor: '#f59e0b10', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 6, borderWidth: 1, borderColor: '#f59e0b25' }}><Text style={{ color: '#f59e0b', fontSize: 11, fontFamily: MONO }}>{formatCronSchedule(job.schedule)}</Text></View>}
+                  {job.sessionTarget && <View style={{ backgroundColor: '#6366f110', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 6, borderWidth: 1, borderColor: '#6366f125' }}><Text style={{ color: '#6366f1', fontSize: 11, fontFamily: MONO }}>{job.sessionTarget}</Text></View>}
+                  {job.timezone && <View style={{ backgroundColor: '#14b8a610', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 6, borderWidth: 1, borderColor: '#14b8a625' }}><Text style={{ color: '#14b8a6', fontSize: 11, fontFamily: MONO }}>{job.timezone}</Text></View>}
+                  {job.status && <View style={{ backgroundColor: '#a855f710', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 6, borderWidth: 1, borderColor: '#a855f725' }}><Text style={{ color: '#a855f7', fontSize: 11, fontFamily: MONO }}>{job.status}</Text></View>}
                   <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>ID: {job.id.slice(0, 8)}</Text>
                 </View>
                 <View style={{ flexDirection: 'row', gap: 12, marginBottom: 10 }}>
@@ -1863,9 +1901,9 @@ export function CronJobsPanel({
                 </View>
                 {job.payload && <Text style={{ color: '#909098', fontSize: 11, fontFamily: MONO, marginBottom: 10 }} numberOfLines={2}>{job.payload.slice(0, 120)}</Text>}
                 <View style={{ flexDirection: 'row', gap: 4 }}>
-                  <Pressable accessibilityRole="button" accessibilityLabel={`Run ${job.name || job.id} now`} accessibilityState={{ disabled: actionLoading !== null || mutationsUnavailable, busy: actionLoading === `run-${job.id}` }} disabled={actionLoading !== null || mutationsUnavailable} onPress={() => handleAction('run', job.id, undefined, job.name)} style={[{ minHeight: 44, paddingHorizontal: 8, paddingVertical: 5, borderRadius: 2, borderWidth: 1, borderColor: '#22c55e30', backgroundColor: '#22c55e08', opacity: actionLoading !== null || mutationsUnavailable ? 0.5 : 1, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: actionLoading !== null || mutationsUnavailable ? 'default' : 'pointer' } as any]}><Text style={{ color: '#22c55e', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{actionLoading === `run-${job.id}` ? '..' : 'RUN NOW'}</Text></Pressable>
-                  <Pressable accessibilityRole="button" accessibilityLabel={`${isEnabled ? 'Disable' : 'Enable'} ${job.name || job.id}`} accessibilityState={{ disabled: actionLoading !== null || mutationsUnavailable, busy: actionLoading === `update-${job.id}` }} disabled={actionLoading !== null || mutationsUnavailable} onPress={() => handleAction('update', job.id, { enabled: !isEnabled }, job.name)} style={[{ minHeight: 44, paddingHorizontal: 8, paddingVertical: 5, borderRadius: 2, borderWidth: 1, borderColor: '#f59e0b30', backgroundColor: '#f59e0b08', opacity: actionLoading !== null || mutationsUnavailable ? 0.5 : 1, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: actionLoading !== null || mutationsUnavailable ? 'default' : 'pointer' } as any]}><Text style={{ color: '#f59e0b', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{actionLoading === `update-${job.id}` ? '..' : isEnabled ? 'DISABLE' : 'ENABLE'}</Text></Pressable>
-                  <Pressable accessibilityRole="button" accessibilityLabel={`Delete ${job.name || job.id}`} accessibilityState={{ disabled: actionLoading !== null || mutationsUnavailable, busy: actionLoading === `remove-${job.id}` }} disabled={actionLoading !== null || mutationsUnavailable} onPress={() => handleAction('remove', job.id, undefined, job.name)} style={[{ minHeight: 44, paddingHorizontal: 8, paddingVertical: 5, borderRadius: 2, borderWidth: 1, borderColor: '#ef444430', backgroundColor: '#ef444408', opacity: actionLoading !== null || mutationsUnavailable ? 0.5 : 1, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: actionLoading !== null || mutationsUnavailable ? 'default' : 'pointer' } as any]}><Text style={{ color: '#ef4444', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{actionLoading === `remove-${job.id}` ? '..' : 'DELETE'}</Text></Pressable>
+                  <Pressable accessibilityRole="button" accessibilityLabel={`Run ${job.name || job.id} now`} accessibilityState={{ disabled: actionLoading !== null || mutationsUnavailable, busy: actionLoading === `run-${job.id}` }} disabled={actionLoading !== null || mutationsUnavailable} onPress={() => handleAction('run', job.id, undefined, job.name)} style={[{ minHeight: 44, paddingHorizontal: 8, paddingVertical: 5, borderRadius: 6, borderWidth: 1, borderColor: '#22c55e30', backgroundColor: '#22c55e08', opacity: actionLoading !== null || mutationsUnavailable ? 0.5 : 1, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: actionLoading !== null || mutationsUnavailable ? 'default' : 'pointer' } as any]}><Text style={{ color: '#22c55e', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{actionLoading === `run-${job.id}` ? '..' : 'RUN NOW'}</Text></Pressable>
+                  <Pressable accessibilityRole="button" accessibilityLabel={`${isEnabled ? 'Disable' : 'Enable'} ${job.name || job.id}`} accessibilityState={{ disabled: actionLoading !== null || mutationsUnavailable, busy: actionLoading === `update-${job.id}` }} disabled={actionLoading !== null || mutationsUnavailable} onPress={() => handleAction('update', job.id, { enabled: !isEnabled }, job.name)} style={[{ minHeight: 44, paddingHorizontal: 8, paddingVertical: 5, borderRadius: 6, borderWidth: 1, borderColor: '#f59e0b30', backgroundColor: '#f59e0b08', opacity: actionLoading !== null || mutationsUnavailable ? 0.5 : 1, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: actionLoading !== null || mutationsUnavailable ? 'default' : 'pointer' } as any]}><Text style={{ color: '#f59e0b', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{actionLoading === `update-${job.id}` ? '..' : isEnabled ? 'DISABLE' : 'ENABLE'}</Text></Pressable>
+                  <Pressable accessibilityRole="button" accessibilityLabel={`Delete ${job.name || job.id}`} accessibilityState={{ disabled: actionLoading !== null || mutationsUnavailable, busy: actionLoading === `remove-${job.id}` }} disabled={actionLoading !== null || mutationsUnavailable} onPress={() => handleAction('remove', job.id, undefined, job.name)} style={[{ minHeight: 44, paddingHorizontal: 8, paddingVertical: 5, borderRadius: 6, borderWidth: 1, borderColor: '#ef444430', backgroundColor: '#ef444408', opacity: actionLoading !== null || mutationsUnavailable ? 0.5 : 1, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: actionLoading !== null || mutationsUnavailable ? 'default' : 'pointer' } as any]}><Text style={{ color: '#ef4444', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{actionLoading === `remove-${job.id}` ? '..' : 'DELETE'}</Text></Pressable>
                 </View>
               </View>
             );

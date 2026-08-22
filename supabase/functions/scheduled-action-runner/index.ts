@@ -608,6 +608,30 @@ interface RunSummary {
   skipped: number;
 }
 
+type ScheduledActionDispatchAuthority =
+  | { ok: true }
+  | { ok: false; unavailable: boolean };
+
+async function verifyScheduledActionDispatchAuthority(
+  supabase: SupabaseEdgeClient,
+  action: ScheduledAction,
+): Promise<ScheduledActionDispatchAuthority> {
+  // A personal outbox action has no Circle authority to revoke. Circle-bound
+  // work, however, must not keep spending the user's credential or writing
+  // shared state after that exact membership is removed.
+  if (!action.circle_id) return { ok: true };
+  const { data, error } = await supabase
+    .from('circle_members')
+    .select('user_id')
+    .eq('circle_id', action.circle_id)
+    .eq('user_id', action.user_id)
+    .maybeSingle();
+  if (error) return { ok: false, unavailable: true };
+  return data
+    ? { ok: true }
+    : { ok: false, unavailable: false };
+}
+
 async function runOnce(supabase: SupabaseEdgeClient): Promise<RunSummary> {
   // Lookup plus a guarded pending -> running write is an atomic queue claim.
   // Every later state write is also bound to the winner's opaque claim token.
@@ -710,6 +734,27 @@ async function runOnce(supabase: SupabaseEdgeClient): Promise<RunSummary> {
         sealedAction,
         claimToken,
         'approval_not_consumed',
+      );
+      failed++;
+      continue;
+    }
+
+    // The approval and queue row prove prior intent, not current Circle
+    // authority. Re-check immediately before the irreversible dispatch flag
+    // and executor call so a departed account cannot make the service role
+    // decrypt/spend its credential or write into its former Circle.
+    const dispatchAuthority = await verifyScheduledActionDispatchAuthority(
+      supabase,
+      sealedAction,
+    );
+    if (!dispatchAuthority.ok) {
+      await markClaimedAsPredispatchFailed(
+        supabase,
+        sealedAction,
+        claimToken,
+        dispatchAuthority.unavailable
+          ? 'circle_authority_unavailable'
+          : 'circle_authority_revoked',
       );
       failed++;
       continue;
@@ -1063,6 +1108,8 @@ const SAFE_FAILURE_CODES = new Set([
   'approval_scope_mismatch',
   'approval_consumed',
   'approval_not_consumed',
+  'circle_authority_revoked',
+  'circle_authority_unavailable',
   'dispatch_boundary_not_persisted',
 ]);
 

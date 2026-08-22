@@ -1,12 +1,12 @@
 # Smoke runner (`scripts/run-smokes.mjs`)
 
-`npm run smoke:all` is one `&&` chain of every `smoke:*` script. It is the
-project gate and its semantics are unchanged — but the first failing suite
-aborts the chain, so every suite after it silently never runs and nothing says
-so. That masking is how a real backoff bug survived for weeks.
+`npm run smoke:all` uses `scripts/run-smokes.mjs` to discover every registered
+`smoke:*` suite, run the whole set with bounded concurrency, and report every
+failure. This replaces the former hand-maintained `&&` chain, which stopped at
+the first failure and repeatedly drifted behind package registration.
 
-`scripts/run-smokes.mjs` is the additive answer: run everything, report the
-whole picture. Plain Node ESM — no tsx, no typecheck, no build step.
+The runner is plain Node ESM — no tsx, no typecheck, no build step. Register a
+new suite once in `package.json`; the full sweep picks it up automatically.
 
 ```bash
 node scripts/run-smokes.mjs                      # run every registered suite
@@ -42,11 +42,13 @@ runner also reports the drift itself:
 
 - `scripts/*-smoketest.*` files with **no** `smoke:*` entry (they never run),
 - `smoke:*` entries pointing at a **missing** file,
-- registered suites **absent from the `smoke:all` chain** (invisible today,
-  since the chain aborts long before anyone counts it).
+- registered suites **absent from `smoke:all`** if someone restores a legacy
+  static chain instead of the discovery runner.
 
-`smoke:all` aggregates and any script that invokes this runner are skipped
-automatically (detected by shape, not by name), so they never recurse.
+Pure `smoke:*` aggregates and any script that invokes this runner are skipped
+automatically, so they never recurse. Hybrid scripts that run prerequisites
+and their own `*-smoketest` file remain discoverable suites; the full sweep
+flattens their already-scheduled smoke prerequisites so each test runs once.
 
 ## Notes
 

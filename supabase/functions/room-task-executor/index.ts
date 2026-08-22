@@ -550,11 +550,12 @@ Deno.serve(async (req: Request) => {
 
     // Also mark original room_messages task entry if it exists
     const { data: originalTask } = await supabase.from('room_messages')
-      .select('metadata').eq('id', taskId).maybeSingle();
+      .select('metadata').eq('id', taskId).eq('room_id', roomId).maybeSingle();
     if (originalTask) {
       await supabase.from('room_messages')
         .update({ metadata: { ...originalTask.metadata, status: 'done' } })
-        .eq('id', taskId);
+        .eq('id', taskId)
+        .eq('room_id', roomId);
     }
 
     authorizedTaskId = null;

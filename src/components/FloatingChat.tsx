@@ -34,6 +34,7 @@ import { shapePersistedChatMessage } from '../lib/chatMessageShape';
 import { getCircleDefaultThread } from '../lib/circleChatThreads';
 import { loadThreadMessages, persistChatMessage } from '../lib/chatService';
 import { persistMainChatBotMessageWithRetry } from '../lib/chatAgentService';
+import { loadSafeCircleProfiles } from '../lib/safeProfiles';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -124,17 +125,20 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
   }, [circleId]);
 
   useEffect(() => {
+    setAgentName(MAIN_CHAT_AGENT_NAME);
+    setAgentAvatarUri(null);
+    if (!currentUserId) return;
     let cancelled = false;
-    loadChatAgentName(circleId).then((savedName) => {
+    loadChatAgentName({ userId: currentUserId, circleId }).then((savedName) => {
       if (!cancelled) setAgentName(savedName);
     }).catch(() => {});
-    loadChatAgentAvatar(circleId).then((savedAvatar) => {
+    loadChatAgentAvatar({ userId: currentUserId, circleId }).then((savedAvatar) => {
       if (!cancelled) setAgentAvatarUri(savedAvatar);
     }).catch(() => {
       if (!cancelled) setAgentAvatarUri(null);
     });
     return () => { cancelled = true; };
-  }, [circleId]);
+  }, [circleId, currentUserId]);
 
   useEffect(() => {
     agentNameRef.current = agentName;
@@ -207,11 +211,8 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
 
         // Resolve sender name
         if (!newMsg.is_bot) {
-          supabase.from('profiles')
-            .select('display_name, username')
-            .eq('id', newMsg.user_id)
-            .single()
-            .then(({ data }) => {
+          loadSafeCircleProfiles({ circleId, userIds: [newMsg.user_id] })
+            .then(([data]) => {
               if (data) {
                 setMessages(prev => prev.map(m =>
                   m.id === msg.id ? { ...m, userName: data.display_name || data.username || 'Unknown' } : m

@@ -127,7 +127,7 @@ export default function ComputerUseConsole({
     setTask(initialTask || '');
     setNeedsInputTemplate(null);
     setTemplateQuery('');
-    setSavedTemplates(loadSavedTemplates());
+    setSavedTemplates(loadSavedTemplates(userId));
     setRecipeStatus('idle');
     setRecipeMessage('');
     setScheduleDraft('');
@@ -139,7 +139,7 @@ export default function ComputerUseConsole({
       setStickyScopes(active);
       setStickyHistory(history);
     });
-  }, [visible, initialTask]);
+  }, [visible, initialTask, userId]);
 
   // L2: when a completed task is on screen, look up the recipe-name health
   // from device-stored run outcomes (skillLifecycle). Failing/stale recipes
@@ -948,8 +948,8 @@ export default function ComputerUseConsole({
                   </Pressable>
                   <Pressable
                     onPress={() => {
-                      deleteSavedTemplate(s.id);
-                      setSavedTemplates(loadSavedTemplates());
+                      deleteSavedTemplate(s.id, userId);
+                      setSavedTemplates(loadSavedTemplates(userId));
                     }}
                     style={styles.savedDeleteBtn}
                   >

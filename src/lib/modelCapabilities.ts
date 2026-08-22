@@ -15,9 +15,10 @@ const MODEL_CAPABILITIES: Record<string, ModelCapability[]> = {
   'flux-schnell':        ['image_gen'],
   'flux-dev':            ['image_gen'],
   'stable-diffusion-xl': ['image_gen'],
+  'gpt-image-2':         ['image_gen'],
 
   // Multimodal (text + image understanding + generation)
-  'gpt-4o':                     ['text', 'code', 'image_understand', 'image_gen', 'webpage_gen'],
+  'gpt-4o':                     ['text', 'code', 'image_understand', 'webpage_gen'],
   'gpt-5.6-sol':                ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
   'gpt-5.6-terra':              ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
   'gpt-5.6-luna':               ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
@@ -25,7 +26,7 @@ const MODEL_CAPABILITIES: Record<string, ModelCapability[]> = {
   'gpt-4.1-mini':               ['text', 'code', 'image_understand', 'webpage_gen'],
   'gemini-3.6-flash':           ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
   'gemini-3.5-flash-lite':      ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
-  'gemini-2.5-flash-preview':   ['text', 'code', 'image_understand', 'image_gen', 'webpage_gen'],
+  'gemini-2.5-flash-preview':   ['text', 'code', 'image_understand', 'webpage_gen'],
   'gemini-3.5-flash':           ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
   'gemini-3.1-pro-preview':     ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
   'gemini-3.1-flash-lite':      ['text', 'code', 'image_understand', 'webpage_gen'],
@@ -248,6 +249,7 @@ const MODEL_CAPABILITY_FLAGS: Record<string, ModelCapabilityFlags> = {
   'flux-schnell':        IMAGE_ONLY_FLAGS,
   'flux-dev':            IMAGE_ONLY_FLAGS,
   'stable-diffusion-xl': IMAGE_ONLY_FLAGS,
+  'gpt-image-2':         IMAGE_ONLY_FLAGS,
 
   // BlackSwan-v5 (app-trained Qwen; P8) — now registered DELIBERATELY with
   // the same fail-closed tool/vision posture the unknown-default gave it by
@@ -335,7 +337,7 @@ const MODEL_CAPABILITY_FLAGS: Record<string, ModelCapabilityFlags> = {
  *  provider variants). Ordered: first match wins; image-only families are
  *  checked before chat families. Anything unmatched stays fail-closed. */
 const FAMILY_FLAG_PATTERNS: Array<{ pattern: RegExp; flags: ModelCapabilityFlags }> = [
-  { pattern: /(^|[-_/.])(flux|sdxl|dall-e|dalle)([-_/.\d]|$)|stable-diffusion|(^|[-_/.])imagen([-_/.\d]|$)/, flags: IMAGE_ONLY_FLAGS },
+  { pattern: /(^|[-_/.])(flux|sdxl|dall-e|dalle|gpt-image)([-_/.\d]|$)|stable-diffusion|(^|[-_/.])imagen([-_/.\d]|$)/, flags: IMAGE_ONLY_FLAGS },
   { pattern: /^claude-sonnet\b/,                 flags: CLAUDE_SONNET_FLAGS },
   { pattern: /^claude-(opus|fable)\b/,           flags: CLAUDE_CHAT_FLAGS },
   { pattern: /^claude-haiku\b/,                  flags: CLAUDE_FAST_FLAGS },
@@ -424,14 +426,37 @@ const AUDIO_PATTERNS = [
   /\b(say this|read this|speak this)\b/i,
 ];
 
+/**
+ * Split image-only picker prompts without hijacking ordinary questions.
+ * Explicit image commands/imperatives and descriptive noun phrases generate;
+ * questions and text/code tasks fall through to Chat's normal text-model
+ * fallback. This is intentionally pure so Chat can decide before any catalog
+ * or provider request starts.
+ */
+export function shouldRouteSelectedImageModelPrompt(message: string, modelId: string): boolean {
+  if (!getModelCapabilityFlags(modelId).imageOnly) return false;
+  const trimmed = message.trim();
+  if (!trimmed) return false;
+  const lower = trimmed.toLowerCase();
+  if (/^\/(?:imagine|image)\b/.test(lower)) return true;
+  if (IMAGE_PATTERNS.some((pattern) => pattern.test(trimmed))) return true;
+
+  const endsWithQuestion = /\?\s*$/.test(trimmed);
+  const startsConversationalOrTextTask = /^(?:what|why|how|when|where|who|can|could|do|does|is|are|explain|summarize|translate|help|tell|write|fix|debug|refactor|review|implement)\b/.test(lower);
+  const explicitTextOrCodeCommand = /^\/(?:code|build-page)\b/.test(lower);
+  const codeRepairTask = /\b(?:fix|debug)\b[^.?!]{0,60}\b(?:code|bug|error|test|function|script)\b/.test(lower);
+  return !(endsWithQuestion || startsConversationalOrTextTask || explicitTextOrCodeCommand || codeRepairTask);
+}
+
 export function detectIntent(message: string, modelId: string): UserIntent {
   // If an image-capable model is selected (especially image-only), assume image intent
   const caps = getModelCapabilities(modelId);
   const isImageModel = caps.includes('image_gen');
   const isImageOnlyModel = isImageModel && caps.length === 1;
 
-  // Image-only model: every message is an image prompt
-  if (isImageOnlyModel) return 'image_gen';
+  // An image-only picker turns descriptive prompts into images, while a
+  // question/text task remains eligible for Chat's text-model fallback.
+  if (isImageOnlyModel && shouldRouteSelectedImageModelPrompt(message, modelId)) return 'image_gen';
 
   // Image-capable model + message mentions anything image-related
   if (isImageModel && IMAGE_PATTERNS.some(p => p.test(message))) return 'image_gen';
@@ -481,67 +506,6 @@ export interface CapabilityResult {
   }>;
 }
 
-// ── Image Generation via HF Inference API ───────────────────────────────────
-
-async function generateImageHF(prompt: string, model: string): Promise<{ url: string } | null> {
-  const hfModelMap: Record<string, string> = {
-    'flux-schnell': 'black-forest-labs/FLUX.1-schnell',
-    'flux-dev': 'black-forest-labs/FLUX.1-dev',
-    'stable-diffusion-xl': 'stabilityai/stable-diffusion-xl-base-1.0',
-  };
-
-  const hfModel = hfModelMap[model];
-  if (!hfModel) return null;
-
-  try {
-    console.log(`[ImageGen] Calling HF model: ${hfModel} with prompt: "${prompt.slice(0, 80)}"`);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout
-    const resp = await fetch(`https://api-inference.huggingface.co/models/${hfModel}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ inputs: prompt }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-
-    if (!resp.ok) {
-      console.warn(`[ImageGen] HF returned ${resp.status} for ${hfModel}`);
-      // 503 = model loading, try waiting and retrying once
-      if (resp.status === 503) {
-        const body = await resp.json().catch(() => ({}));
-        const wait = (body as any)?.estimated_time || 10;
-        console.log(`[ImageGen] Model loading, waiting ${Math.min(wait, 20)}s...`);
-        await new Promise(r => setTimeout(r, Math.min(wait, 20) * 1000));
-        const retry = await fetch(`https://api-inference.huggingface.co/models/${hfModel}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ inputs: prompt }),
-          signal: AbortSignal.timeout(30000),
-        });
-        if (retry.ok) {
-          const blob = await retry.blob();
-          return { url: URL.createObjectURL(blob) };
-        }
-      }
-      return null;
-    }
-
-    // HF returns binary image data
-    const contentType = resp.headers.get('content-type') || '';
-    if (contentType.startsWith('image/')) {
-      const blob = await resp.blob();
-      return { url: URL.createObjectURL(blob) };
-    }
-    // Sometimes HF returns JSON error even with 200
-    console.warn('[ImageGen] HF returned non-image content type:', contentType);
-    return null;
-  } catch (e) {
-    console.warn('[ImageGen] HF error:', e);
-    return null;
-  }
-}
-
 // ── Webpage Generation via server-side Google AI BYOK ──────────────────────
 
 async function generateWebpage(prompt: string): Promise<string | null> {
@@ -586,39 +550,13 @@ export async function routeByCapability(
 
   // ── Image Generation ──────────────────────────────────────────────────────
   if (intent === 'image_gen') {
-    const imagePrompt = message
-      .replace(/^(generate|create|make|draw|paint|design|render|show me|imagine)\s*/i, '')
-      .replace(/\b(an?|the)\s+(image|picture|photo|illustration|artwork)\s*(of|for|with|showing)?\s*/i, '')
-      .trim() || message;
-
-    // Try HF first for dedicated image models
-    const attemptedImageBackends: string[] = [];
-    if (['flux-schnell', 'flux-dev', 'stable-diffusion-xl'].includes(effectiveModel)) {
-      attemptedImageBackends.push(effectiveModel);
-      const hfResult = await generateImageHF(imagePrompt, effectiveModel);
-      if (hfResult) {
-        return {
-          handled: true,
-          response: `Generated with ${effectiveModel}`,
-          artifacts: [{
-            kind: 'image',
-            title: imagePrompt.slice(0, 60),
-            url: hfResult.url,
-            metadata: { model: effectiveModel, prompt: imagePrompt },
-          }],
-        };
-      }
-    }
-
-    // All image gen APIs failed — return handled:false so the caller's
-    // normal tiered path recovers with the user's selected model instead of
-    // rendering a dead-end "temporarily unavailable" bubble. The notice tells
-    // the user WHY no image is coming (backend names only, never keys) with a
-    // plain next action.
-    const fallbackNotice = attemptedImageBackends.length > 0
-      ? `Image generation didn't work just now (${attemptedImageBackends.join(' and ')} failed), so I'll answer in text instead. Try again in a minute, or pick a different image model.`
-      : `Image generation isn't set up for this model, so I'll answer in text instead. Pick a supported image model or use OpenSwan's image-generation tool.`;
-    return { handled: false, response: '', fallbackNotice };
+    // Chat owns image generation through generatedChatImages, where exact
+    // persisted request identity, server-side credentials, bounded response
+    // validation, and durable storage are enforced. This legacy capability
+    // router must stay network-free so it cannot create browser blobs/data
+    // URLs or duplicate a provider request.
+    void effectiveModel;
+    return { handled: false, response: '' };
   }
 
   // ── Webpage Generation ────────────────────────────────────────────────────

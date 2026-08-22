@@ -12,7 +12,8 @@
  */
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { supabase } from '../lib/supabase';
+import { getSupabaseClientForAccessToken, supabase } from '../lib/supabase';
+import { useAuth } from './useAuth';
 import { DEFAULT_AGENT, type OfficeAgent } from '../lib/officeAgents';
 import { loadSessionTags, type SessionTag } from '../lib/sessionTags';
 import { PROVIDER_META, type ProviderType } from '../lib/connectionManager';
@@ -260,12 +261,13 @@ async function loadTerminalResponseHistory({
   historyStart: string;
   historyEnd: string;
 }): Promise<TerminalResponseRow[]> {
+  const exactClient = getSupabaseClientForAccessToken(accessToken);
   const rawRows: unknown[] = [];
   let expectedCount: number | null = null;
   let offset = 0;
 
   while (expectedCount === null || offset < expectedCount) {
-    const { data, error, count } = await supabase
+    const { data, error, count } = await exactClient
       .from('office_terminal_responses')
       .select(TERMINAL_RESPONSE_SELECT, { count: 'exact' })
       .eq('circle_id', circleId)
@@ -353,12 +355,11 @@ function backpackLoadErrorMessage(error: unknown): string {
 // ─── Hook ─────────────────────────────────────────────────────────────────
 
 export function useBackpackData(circleId: string): BackpackData {
+  const { session: authSession, user: authUser, loading: authLoading } = useAuth();
   const [snapshot, setSnapshot] = useState<BackpackSnapshot>(EMPTY_SNAPSHOT);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [authRevision, setAuthRevision] = useState(0);
-
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadFenceRef = useRef(createBackpackLoadFence());
   const hasSnapshotRef = useRef(false);
@@ -368,12 +369,20 @@ export function useBackpackData(circleId: string): BackpackData {
   const errorCircleIdRef = useRef('');
 
   const loadData = useCallback(async () => {
+    if (authLoading) {
+      setLoading(true);
+      setRefreshing(false);
+      return;
+    }
     const normalizedCircleId = circleId.trim();
     const ticket = loadFenceRef.current.begin(normalizedCircleId);
     const scopeChanged = snapshotCircleIdRef.current !== normalizedCircleId;
-    const hasCurrentSnapshot = hasSnapshotRef.current && !scopeChanged;
+    const requestedUserId = authUser?.id || '';
+    const userChanged = Boolean(snapshotUserIdRef.current)
+      && snapshotUserIdRef.current !== requestedUserId;
+    const hasCurrentSnapshot = hasSnapshotRef.current && !scopeChanged && !userChanged;
 
-    if (scopeChanged) {
+    if (scopeChanged || userChanged) {
       hasSnapshotRef.current = false;
       snapshotUserIdRef.current = '';
       setSnapshot(EMPTY_SNAPSHOT);
@@ -386,22 +395,18 @@ export function useBackpackData(circleId: string): BackpackData {
     try {
       if (!normalizedCircleId) throw new Error('Choose a circle before opening the Backpack.');
 
-      const { data: authData, error: authError } = await supabase.auth.getSession();
-      if (authError) throw new Error('Your Backpack session could not be verified. Sign in again and retry.');
-      const session = authData.session;
-      if (!session?.user?.id || !session.access_token) {
+      if (
+        !authUser?.id
+        || !authSession?.access_token
+        || authSession.user.id !== authUser.id
+      ) {
         throw new Error('Sign in to load this private Backpack.');
       }
-      const user = session.user;
+      const user = authUser;
+      const accessToken = authSession.access_token;
       loadingUserIdRef.current = user.id;
-      const exactScope = { userId: user.id, accessToken: session.access_token };
-
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('display_name, username')
-        .eq('id', user.id)
-        .setHeader('Authorization', `Bearer ${session.access_token}`)
-        .maybeSingle();
+      const exactScope = { userId: user.id, accessToken };
+      const exactClient = getSupabaseClientForAccessToken(accessToken);
 
       const now = new Date();
       const historyEnd = now.toISOString();
@@ -416,17 +421,32 @@ export function useBackpackData(circleId: string): BackpackData {
       const monthStartIso = monthStart.toISOString();
       const historyStartIso = historyStart.toISOString();
 
-      const [tags, budgetResult, circleAgentsResult, allResponses] = await Promise.all([
+      // All independent bootstrap reads start together. The previous sequence
+      // waited for auth, then profile, then the main snapshot, then trades —
+      // four network phases before the Backpack could appear.
+      const [profileResult, tags, budgetResult, circleAgentsResult, allResponses, featuredResult] = await Promise.all([
+        exactClient
+          .from('profiles')
+          .select('display_name, username')
+          .eq('id', user.id)
+          .maybeSingle(),
         loadSessionTags({ userId: user.id, circleId: normalizedCircleId }),
         loadOfficeUserPreferences(normalizedCircleId, exactScope),
         loadCircleOfficeAgents(normalizedCircleId, exactScope),
         loadTerminalResponseHistory({
           circleId: normalizedCircleId,
-          accessToken: session.access_token,
+          accessToken,
           historyStart: historyStartIso,
           historyEnd,
         }),
+        exactClient
+          .from('featured_trades')
+          .select('*', { count: 'exact', head: true })
+          .eq('user_id', user.id)
+          .eq('status', 'active')
+          .gt('expires_at', historyEnd),
       ]);
+      const profile = profileResult.data;
 
       if (circleAgentsResult.error) {
         throw new Error('Agent status could not be loaded. Check your circle access and retry.');
@@ -496,13 +516,6 @@ export function useBackpackData(circleId: string): BackpackData {
       const weekTokens = weekResponses.reduce((sum, row) => sum + (row.token_count || 0), 0);
       const monthTokens = monthResponses.reduce((sum, row) => sum + (row.token_count || 0), 0);
 
-      const featuredResult = await supabase
-        .from('featured_trades')
-        .select('*', { count: 'exact', head: true })
-        .eq('user_id', user.id)
-        .eq('status', 'active')
-        .gt('expires_at', now.toISOString())
-        .setHeader('Authorization', `Bearer ${session.access_token}`);
       const featuredTradeCount = featuredResult.error ? 0 : featuredResult.count || 0;
 
       const recent = allResponses.slice(-8).reverse().map((row) => ({
@@ -550,31 +563,7 @@ export function useBackpackData(circleId: string): BackpackData {
         setRefreshing(false);
       }
     }
-  }, [authRevision, circleId]);
-
-  useEffect(() => {
-    const { data: authListener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      const nextUserId = nextSession?.user?.id || '';
-      const loadedUserChanged = Boolean(snapshotUserIdRef.current)
-        && snapshotUserIdRef.current !== nextUserId;
-      const inFlightUserChanged = Boolean(loadingUserIdRef.current)
-        && loadingUserIdRef.current !== nextUserId;
-      if (!loadedUserChanged && !inFlightUserChanged) return;
-
-      loadFenceRef.current.retire();
-      hasSnapshotRef.current = false;
-      snapshotCircleIdRef.current = '';
-      snapshotUserIdRef.current = '';
-      loadingUserIdRef.current = nextUserId;
-      errorCircleIdRef.current = '';
-      setSnapshot(EMPTY_SNAPSHOT);
-      setError(null);
-      setLoading(true);
-      setRefreshing(false);
-      setAuthRevision(revision => revision + 1);
-    });
-    return () => authListener.subscription.unsubscribe();
-  }, []);
+  }, [authLoading, authSession?.access_token, authUser?.id, circleId]);
 
   useEffect(() => {
     void loadData();
@@ -609,7 +598,9 @@ export function useBackpackData(circleId: string): BackpackData {
   }, [circleId, loadData]);
 
   const normalizedCircleId = circleId.trim();
-  const snapshotIsVisible = snapshot.scopeCircleId === normalizedCircleId;
+  const snapshotIsVisible = snapshot.scopeCircleId === normalizedCircleId
+    && Boolean(authUser?.id)
+    && snapshot.currentUserId === authUser?.id;
   const visibleSnapshot = snapshotIsVisible ? snapshot : EMPTY_SNAPSHOT;
   const visibleError = errorCircleIdRef.current === normalizedCircleId ? error : null;
   const displayAgents = visibleSnapshot.enrichedAgents;

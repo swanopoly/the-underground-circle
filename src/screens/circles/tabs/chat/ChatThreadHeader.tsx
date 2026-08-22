@@ -21,6 +21,7 @@ import {
 } from '../../../../lib/circleChatThreads';
 import type { SessionCodingProfile, SessionDelegationMode } from '../../../../lib/chatSessionProfile';
 import { supabase } from '../../../../lib/supabase';
+import { loadSafeCircleProfiles } from '../../../../lib/safeProfiles';
 import OpenSwanServiceMenu from './OpenSwanServiceMenu';
 import SkillAdminPanel from './SkillAdminPanel';
 import { soulKeyForProfile } from '../../../../lib/serviceProfileSouls';
@@ -120,7 +121,7 @@ export default function ChatThreadHeader({
     setThread(null);
     setMembers([]);
     let cancelled = false;
-    Promise.all([getThread(threadId), listThreadMembers(threadId)])
+    Promise.all([getThread(threadId), listThreadMembers(threadId, circleId)])
       .then(([t, ms]) => {
         if (cancelled) return;
         setThread(t);
@@ -128,7 +129,7 @@ export default function ChatThreadHeader({
       })
       .catch(err => console.warn('[ChatThreadHeader] load failed:', err));
     return () => { cancelled = true; };
-  }, [threadId, refreshToken]);
+  }, [circleId, threadId, refreshToken]);
 
   const servicePanels = (
     <>
@@ -428,7 +429,7 @@ export default function ChatThreadHeader({
           members={members}
           onClose={() => setShowInvite(false)}
           onMembersChanged={async () => {
-            try { setMembers(await listThreadMembers(thread.id)); } catch {}
+            try { setMembers(await listThreadMembers(thread.id, circleId)); } catch {}
             finally { onThreadUpdated?.(); }
           }}
         />
@@ -460,12 +461,14 @@ function InviteToThreadModal({
       try {
         const { data } = await supabase
           .from('circle_members')
-          .select('user:profiles(id, display_name, username)')
+          .select('user_id')
           .eq('circle_id', circleId);
         if (cancelled) return;
-        const opts: CircleMemberOption[] = (data || [])
-          .map((r: any) => r.user)
-          .filter(Boolean);
+        const opts: CircleMemberOption[] = await loadSafeCircleProfiles({
+          circleId,
+          userIds: (data || []).map((row: any) => row.user_id),
+        });
+        if (cancelled) return;
         setCircleMembers(opts);
       } catch (err) {
         console.warn('[InviteToThreadModal] members load failed:', err);

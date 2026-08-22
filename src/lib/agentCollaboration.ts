@@ -677,6 +677,13 @@ export function getCoordinationRequests(agentId: string): CoordinationRequest[] 
   return coordinationRequests.filter(r => r.to === agentId && r.status === 'pending');
 }
 
+/** Retire content-bearing compatibility state before another account mounts.
+ * Durable Circle tasks/messages remain in Supabase and are not touched. */
+export function clearAgentCollaborationSessionState(): void {
+  activeConversations.clear();
+  coordinationRequests = [];
+}
+
 // ─── Advanced Messaging with Context ──────────────────────
 
 export interface MessageContext {

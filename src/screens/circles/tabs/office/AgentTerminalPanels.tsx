@@ -199,9 +199,9 @@ export function AgentRemoteShell({ onRunCommand }: { onRunCommand: (cmd: string)
   }, [outputHeight, stopOutputResize]);
 
   return (
-    <View style={{ paddingHorizontal: 8, marginBottom: 8 }} nativeID="section-agent-remote-shell">
+    <View style={{ marginBottom: 8 }} nativeID="section-agent-remote-shell">
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 6 }}>
-        <View style={{ width: 18, height: 18, borderRadius: 2, backgroundColor: '#22c55e15', borderWidth: 1, borderColor: '#22c55e30', justifyContent: 'center', alignItems: 'center' }}>
+        <View style={{ width: 18, height: 18, borderRadius: 6, backgroundColor: '#22c55e15', borderWidth: 1, borderColor: '#22c55e30', justifyContent: 'center', alignItems: 'center' }}>
           <Text style={{ color: '#22c55e', fontSize: 12, fontWeight: '800', fontFamily: MONO }}>$</Text>
         </View>
         <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>REMOTE SHELL</Text>
@@ -217,8 +217,8 @@ export function AgentRemoteShell({ onRunCommand }: { onRunCommand: (cmd: string)
             accessibilityLabel={`Run read-only diagnostic: ${command.label}`}
             accessibilityState={{ disabled: cmdRunning, busy: cmdRunning }}
             style={[
-              { minHeight: 44, backgroundColor: '#0a0a10', borderRadius: 2, borderWidth: 1, borderColor: '#1a1a28', paddingHorizontal: 8, paddingVertical: 6, justifyContent: 'center', opacity: cmdRunning ? 0.5 : 1 },
-              Platform.OS === 'web' && { cursor: 'pointer' } as any,
+              { minHeight: 44, backgroundColor: '#0a0a10', borderRadius: 6, borderWidth: 1, borderColor: '#1a1a28', paddingHorizontal: 8, paddingVertical: 6, justifyContent: 'center', opacity: cmdRunning ? 0.5 : 1 },
+              Platform.OS === 'web' && { cursor: cmdRunning ? 'default' : 'pointer' } as any,
             ]}
           >
             <Text style={{ color: '#808090', fontSize: 13, fontFamily: MONO }}>
@@ -228,7 +228,7 @@ export function AgentRemoteShell({ onRunCommand }: { onRunCommand: (cmd: string)
         ))}
       </ScrollView>
 
-      <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#05050a', borderRadius: 2, borderWidth: 1, borderColor: '#1a1a28', paddingHorizontal: 8, gap: 6, marginBottom: 8 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#05050a', borderRadius: 6, borderWidth: 1, borderColor: '#1a1a28', paddingHorizontal: 8, gap: 6, marginBottom: 8 }}>
         <Text style={{ color: '#22c55e', fontSize: 16, fontWeight: '800', fontFamily: MONO }}>$</Text>
         <TextInput
           style={{ flex: 1, color: '#e8e8f8', fontSize: 12, fontFamily: MONO, paddingVertical: 8, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}) } as any}
@@ -248,20 +248,29 @@ export function AgentRemoteShell({ onRunCommand }: { onRunCommand: (cmd: string)
           accessibilityLabel="Read-only Claude bridge diagnostic command"
         />
         <Pressable
-          style={[{ minHeight: 44, backgroundColor: '#22c55e', borderRadius: 2, paddingHorizontal: 10, paddingVertical: 5, justifyContent: 'center', opacity: cmdRunning ? 0.55 : 1 }, Platform.OS === 'web' && { cursor: cmdRunning ? 'default' : 'pointer' } as any]}
+          style={[{ minHeight: 44, backgroundColor: '#22c55e', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 5, justifyContent: 'center', opacity: cmdRunning || !cmdInput.trim() ? 0.55 : 1 }, Platform.OS === 'web' && { cursor: cmdRunning || !cmdInput.trim() ? 'default' : 'pointer' } as any]}
           onPress={() => cmdInput.trim() && runCmd(cmdInput.trim())}
-          disabled={cmdRunning}
+          disabled={cmdRunning || !cmdInput.trim()}
           accessibilityRole="button"
           accessibilityLabel="Run read-only Claude bridge diagnostic"
-          accessibilityState={{ disabled: cmdRunning, busy: cmdRunning }}
+          accessibilityState={{ disabled: cmdRunning || !cmdInput.trim(), busy: cmdRunning }}
         >
           <Text style={{ color: '#050508', fontSize: 13, fontWeight: '800', fontFamily: MONO }}>{cmdRunning ? '..' : 'RUN'}</Text>
         </Pressable>
       </View>
 
-      <ScrollView ref={scrollRef} style={{ height: outputHeight, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 2, padding: 12 }} nestedScrollEnabled showsVerticalScrollIndicator>
+      <ScrollView ref={scrollRef} style={{ height: outputHeight, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a28', borderRadius: 6, padding: 12 }} nestedScrollEnabled showsVerticalScrollIndicator>
         {!cmdOutput && !cmdRunning && <Text style={{ color: '#808090', fontSize: 14, fontFamily: MONO, fontStyle: 'italic' }}>Run a command to see output...</Text>}
-        {cmdRunning && <ActivityIndicator size="small" color="#22c55e" style={{ marginBottom: 8 }} />}
+        {cmdRunning && (
+          <ActivityIndicator
+            accessibilityRole="progressbar"
+            accessibilityLabel="Running read-only diagnostic"
+            accessibilityLiveRegion="polite"
+            size="small"
+            color="#22c55e"
+            style={{ marginBottom: 8 }}
+          />
+        )}
         {cmdOutput ? (
           <Text
             style={{
@@ -279,7 +288,7 @@ export function AgentRemoteShell({ onRunCommand }: { onRunCommand: (cmd: string)
       </ScrollView>
 
       {Platform.OS === 'web' && (
-        <View onPointerDown={handleResizeStart as any} style={{ height: 6, backgroundColor: '#1a1a28', borderRadius: 2, marginVertical: 2, alignItems: 'center' as any, justifyContent: 'center' as any, ...(Platform.OS === 'web' ? { cursor: 'ns-resize' } as any : {}) }}>
+        <View onPointerDown={handleResizeStart as any} style={{ height: 6, backgroundColor: '#1a1a28', borderRadius: 6, marginVertical: 2, alignItems: 'center' as any, justifyContent: 'center' as any, ...(Platform.OS === 'web' ? { cursor: 'ns-resize' } as any : {}) }}>
           <View style={{ width: 30, height: 2, backgroundColor: '#2a2a3e', borderRadius: 1 }} />
         </View>
       )}
@@ -531,7 +540,7 @@ export function AgentTerminalProfilePanel({
     backgroundColor: '#05050a',
     borderWidth: 1,
     borderColor: '#1a1a28',
-    borderRadius: 2,
+    borderRadius: 6,
     color: '#e8e8f8',
     fontSize: 12,
     fontFamily: MONO,
@@ -541,9 +550,9 @@ export function AgentTerminalProfilePanel({
   } as any;
 
   return (
-    <View style={{ paddingHorizontal: 8, marginBottom: 12 }} nativeID="section-agent-terminal-profile">
+    <View style={{ marginBottom: 12 }} nativeID="section-agent-terminal-profile">
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 6 }}>
-        <View style={{ width: 18, height: 18, borderRadius: 2, backgroundColor: '#38bdf815', borderWidth: 1, borderColor: '#38bdf830', justifyContent: 'center', alignItems: 'center' }}>
+        <View style={{ width: 18, height: 18, borderRadius: 6, backgroundColor: '#38bdf815', borderWidth: 1, borderColor: '#38bdf830', justifyContent: 'center', alignItems: 'center' }}>
           <Text style={{ color: '#38bdf8', fontSize: 11, fontWeight: '800', fontFamily: MONO }}>#</Text>
         </View>
         <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>OFFICE TERMINAL PROFILE</Text>
@@ -559,17 +568,22 @@ export function AgentTerminalProfilePanel({
 
         {profileLoadState === 'loading' ? (
           <View accessibilityLiveRegion="polite" style={{ minHeight: 120, alignItems: 'center', justifyContent: 'center', gap: 10 }}>
-            <ActivityIndicator size="small" color="#38bdf8" />
+            <ActivityIndicator
+              accessibilityRole="progressbar"
+              accessibilityLabel="Loading verified terminal profile"
+              size="small"
+              color="#38bdf8"
+            />
             <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>Loading verified terminal profile…</Text>
           </View>
         ) : profileLoadState === 'locked' ? (
-          <View accessibilityRole="alert" style={{ padding: 10, gap: 6, borderWidth: 1, borderColor: '#f59e0b45', backgroundColor: '#2a1a0618', borderRadius: 3 }}>
+          <View accessibilityRole="alert" style={{ padding: 10, gap: 6, borderWidth: 1, borderColor: '#f59e0b45', backgroundColor: '#2a1a0618', borderRadius: 6 }}>
             <Text style={{ color: '#fbbf24', fontSize: 11, lineHeight: 17, fontFamily: MONO }}>
               Terminal profile settings are locked until this Office session has exact identity authority.
             </Text>
           </View>
         ) : profileLoadState === 'refresh-needed' ? (
-          <View accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ padding: 10, gap: 8, borderWidth: 1, borderColor: '#f59e0b55', backgroundColor: '#2a1a06', borderRadius: 3 }}>
+          <View accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ padding: 10, gap: 8, borderWidth: 1, borderColor: '#f59e0b55', backgroundColor: '#2a1a06', borderRadius: 6 }}>
             <Text style={{ color: '#fbbf24', fontSize: 11, lineHeight: 17, fontFamily: MONO }}>
               The terminal profile was saved on the server, but this view could not refresh. Reload the profile; do not save it again.
             </Text>
@@ -577,13 +591,13 @@ export function AgentTerminalProfilePanel({
               accessibilityRole="button"
               accessibilityLabel="Reload terminal profile after server save"
               onPress={() => setProfileReloadGeneration(value => value + 1)}
-              style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 12, borderWidth: 1, borderColor: '#f59e0b66', borderRadius: 3, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+              style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 12, borderWidth: 1, borderColor: '#f59e0b66', borderRadius: 6, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
             >
               <Text style={{ color: '#fbbf24', fontSize: 11, fontWeight: '800', fontFamily: MONO }}>RELOAD PROFILE</Text>
             </Pressable>
           </View>
         ) : profileLoadState === 'outcome-unknown' ? (
-          <View accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ padding: 10, gap: 8, borderWidth: 1, borderColor: '#f59e0b55', backgroundColor: '#2a1a06', borderRadius: 3 }}>
+          <View accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ padding: 10, gap: 8, borderWidth: 1, borderColor: '#f59e0b55', backgroundColor: '#2a1a06', borderRadius: 6 }}>
             <Text style={{ color: '#fbbf24', fontSize: 11, lineHeight: 17, fontFamily: MONO }}>
               The terminal-profile outcome could not be verified. Reload the profile before retrying or continuing to Chat.
             </Text>
@@ -591,13 +605,13 @@ export function AgentTerminalProfilePanel({
               accessibilityRole="button"
               accessibilityLabel="Reload terminal profile after unknown outcome"
               onPress={() => setProfileReloadGeneration(value => value + 1)}
-              style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 12, borderWidth: 1, borderColor: '#f59e0b66', borderRadius: 3, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+              style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 12, borderWidth: 1, borderColor: '#f59e0b66', borderRadius: 6, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
             >
               <Text style={{ color: '#fbbf24', fontSize: 11, fontWeight: '800', fontFamily: MONO }}>RELOAD PROFILE</Text>
             </Pressable>
           </View>
         ) : profileLoadState === 'error' ? (
-          <View accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ padding: 10, gap: 8, borderWidth: 1, borderColor: '#ef444455', backgroundColor: '#2a0b0b', borderRadius: 3 }}>
+          <View accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ padding: 10, gap: 8, borderWidth: 1, borderColor: '#ef444455', backgroundColor: '#2a0b0b', borderRadius: 6 }}>
             <Text style={{ color: '#fca5a5', fontSize: 11, lineHeight: 17, fontFamily: MONO }}>
               The terminal profile could not be verified. Saved settings are hidden and editing remains disabled.
             </Text>
@@ -605,7 +619,7 @@ export function AgentTerminalProfilePanel({
               accessibilityRole="button"
               accessibilityLabel="Retry loading exact terminal profile"
               onPress={() => setProfileReloadGeneration(value => value + 1)}
-              style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 12, borderWidth: 1, borderColor: '#ef444466', borderRadius: 3, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+              style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 12, borderWidth: 1, borderColor: '#ef444466', borderRadius: 6, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
             >
               <Text style={{ color: '#fca5a5', fontSize: 11, fontWeight: '800', fontFamily: MONO }}>RETRY</Text>
             </Pressable>
@@ -653,7 +667,7 @@ export function AgentTerminalProfilePanel({
                 accessibilityLabel={`Use ${modeLabel(mode)} terminal launch mode`}
                 accessibilityState={{ selected: active }}
                 style={[
-                  { minHeight: 44, borderRadius: 2, borderWidth: 1, borderColor: active ? '#38bdf8' : '#1a1a28', backgroundColor: active ? '#38bdf8' : '#080812', paddingHorizontal: 10, paddingVertical: 7, justifyContent: 'center' },
+                  { minHeight: 44, borderRadius: 6, borderWidth: 1, borderColor: active ? '#38bdf8' : '#1a1a28', backgroundColor: active ? '#38bdf8' : '#080812', paddingHorizontal: 10, paddingVertical: 7, justifyContent: 'center' },
                   Platform.OS === 'web' && { cursor: 'pointer' } as any,
                 ]}
               >
@@ -670,9 +684,9 @@ export function AgentTerminalProfilePanel({
             accessibilityRole="button"
             accessibilityLabel="Save terminal profile"
             accessibilityState={{ disabled: saving || !exactIdentityAuthority, busy: saving }}
-            style={[{ minHeight: 44, backgroundColor: '#22c55e', borderRadius: 2, paddingHorizontal: 12, paddingVertical: 8, justifyContent: 'center', opacity: saving || !exactIdentityAuthority ? 0.55 : 1 }, Platform.OS === 'web' && { cursor: exactIdentityAuthority ? 'pointer' : 'not-allowed' } as any]}
+            style={[{ minHeight: 44, backgroundColor: '#22c55e', borderRadius: 6, paddingHorizontal: 12, paddingVertical: 8, justifyContent: 'center', opacity: saving || !exactIdentityAuthority ? 0.55 : 1 }, Platform.OS === 'web' && { cursor: exactIdentityAuthority ? 'pointer' : 'not-allowed' } as any]}
           >
-            <Text style={{ color: '#050508', fontSize: 12, fontWeight: '900', fontFamily: MONO }}>{saving ? 'SAVING...' : 'SAVE PROFILE'}</Text>
+            <Text style={{ color: '#050508', fontSize: 12, fontWeight: '700', fontFamily: MONO }}>{saving ? 'SAVING...' : 'SAVE PROFILE'}</Text>
           </Pressable>
           <Pressable
             onPress={continueLaunchInChat}
@@ -680,9 +694,9 @@ export function AgentTerminalProfilePanel({
             accessibilityRole="button"
             accessibilityLabel={`Continue ${agent.name} terminal launch in Chat`}
             accessibilityState={{ disabled: continuingInChat || !provider || !exactIdentityAuthority || !onOpenInChat, busy: continuingInChat }}
-            style={[{ minHeight: 44, backgroundColor: provider ? '#38bdf8' : '#252536', borderRadius: 2, paddingHorizontal: 12, paddingVertical: 8, justifyContent: 'center', opacity: continuingInChat ? 0.55 : 1 }, Platform.OS === 'web' && { cursor: provider && onOpenInChat ? 'pointer' : 'not-allowed' } as any]}
+            style={[{ minHeight: 44, backgroundColor: provider ? '#38bdf8' : '#252536', borderRadius: 6, paddingHorizontal: 12, paddingVertical: 8, justifyContent: 'center', opacity: continuingInChat ? 0.55 : 1 }, Platform.OS === 'web' && { cursor: provider && onOpenInChat ? 'pointer' : 'not-allowed' } as any]}
           >
-            <Text style={{ color: '#050508', fontSize: 12, fontWeight: '900', fontFamily: MONO }}>{continuingInChat ? 'OPENING CHAT...' : 'CONTINUE LAUNCH IN CHAT'}</Text>
+            <Text style={{ color: '#050508', fontSize: 12, fontWeight: '700', fontFamily: MONO }}>{continuingInChat ? 'OPENING CHAT...' : 'CONTINUE LAUNCH IN CHAT'}</Text>
           </Pressable>
         </View>
 
@@ -728,15 +742,15 @@ export function AgentQuickTerminal({
   };
 
   return (
-    <View style={{ paddingHorizontal: 8, paddingBottom: 12, gap: 8 }} nativeID="section-agent-quick-terminal">
+    <View style={{ paddingBottom: 12, gap: 8 }} nativeID="section-agent-quick-terminal">
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 6 }}>
-        <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#8b5cf6' }} />
+        <View style={{ width: 8, height: 8, borderRadius: 6, backgroundColor: '#8b5cf6' }} />
         <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>CONTINUE WITH {agentName.toUpperCase()} IN CHAT</Text>
       </View>
       <Text style={{ color: '#707086', fontSize: 11, lineHeight: 17, fontFamily: MONO }}>
         Chat owns the durable message, approvals, run, proof, and recovery trail. This carries your draft to the exact agent and never sends automatically.
       </Text>
-      <View style={{ flexDirection: 'row', alignItems: 'flex-end' as any, backgroundColor: '#08081a', borderRadius: 2, borderWidth: 1, borderColor: '#1e1e3a', paddingHorizontal: 8, paddingVertical: 6, gap: 6 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'flex-end' as any, backgroundColor: '#08081a', borderRadius: 6, borderWidth: 1, borderColor: '#1e1e3a', paddingHorizontal: 8, paddingVertical: 6, gap: 6 }}>
         <Text style={{ color: '#8b5cf6', fontSize: 16, fontWeight: '800', fontFamily: MONO, paddingBottom: 4 }}>{'>'}</Text>
         <TextInput
           style={{ flex: 1, color: '#e8e8f8', fontSize: 12, fontFamily: MONO, minHeight: 36, maxHeight: 100, paddingVertical: 6, ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}) } as any}
@@ -757,7 +771,7 @@ export function AgentQuickTerminal({
           accessibilityRole="button"
           accessibilityLabel={`Open Chat with ${agentName}`}
           accessibilityState={{ disabled: !input.trim() || !exactIdentityAuthority || !onOpenInChat }}
-          style={{ minHeight: 44, backgroundColor: '#8b5cf6', borderRadius: 2, paddingHorizontal: 10, paddingVertical: 6, justifyContent: 'center', opacity: !input.trim() || !exactIdentityAuthority || !onOpenInChat ? 0.4 : 1 }}
+          style={{ minHeight: 44, backgroundColor: '#8b5cf6', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 6, justifyContent: 'center', opacity: !input.trim() || !exactIdentityAuthority || !onOpenInChat ? 0.4 : 1 }}
         >
           <Text style={{ color: '#fff', fontSize: 12, fontWeight: '800', fontFamily: MONO }}>OPEN CHAT</Text>
         </Pressable>

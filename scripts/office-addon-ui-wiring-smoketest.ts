@@ -103,6 +103,14 @@ assert(
     && officeTab.includes('onToggleCatalogFavorite={toggleOfficeAddonFavorite}'),
   'catalog personalization is loaded, persisted, and wired into the visible catalog',
 );
+const placeOfficeAddonSource = section(officeTab, 'const placeOfficeAddon = useCallback', 'const handleCatalogItemPress = useCallback');
+const catalogItemPressSource = section(officeTab, 'const handleCatalogItemPress = useCallback', 'const handleFloorPress =');
+assert(
+  placeOfficeAddonSource.includes('rememberOfficeAddonType(type)')
+    && !catalogItemPressSource.includes('rememberOfficeAddonType(type)')
+    && officeSections.includes("recentTypes: catalogScope === 'recent' ? recentOfficeAddonTypes : []"),
+  'catalog selection keeps item positions stable, with recency applied only after placement and inside the explicit Recent view',
+);
 assert(
   officeTab.includes('`${OFFICE_ADDON_PREFERENCES_STORAGE_KEY}:${userId}:${circleId}`')
     && officeTab.includes('if (!scope) return')
@@ -111,9 +119,10 @@ assert(
 );
 assert(
   officeSections.includes("event.stopPropagation?.()")
-    && officeSections.includes("width: 30, height: 30")
+    && officeSections.includes("hitSlop={4}")
+    && officeSections.includes("width: 24, height: 24")
     && officeSections.includes("viewItem.favorite ? '★' : '☆'"),
-  'favorite action is an isolated, accessible target rather than triggering item placement',
+  'favorite action is a compact, isolated target with expanded touch reach rather than triggering item placement',
 );
 
 // Mobile edit mode must render the actual floor instead of trapping users in
@@ -232,6 +241,9 @@ assert(
     && officeSections.includes('testID={`office-catalog-item-${item.type}`}')
     && officeSections.includes('testID={`office-catalog-favorite-${item.type}`}')
     && officeSections.includes('testID={`office-catalog-scope-${option.value}`}')
+    && officeSections.includes('testID={`office-catalog-status-${option.value}`}')
+    && officeSections.includes('testID={`office-catalog-category-${catKey}`}')
+    && officeSections.includes('testID="office-catalog-filter-rail"')
     && officeSections.includes('testID="office-editor-open"')
     && officeSections.includes('testID="office-catalog-ready"')
     && officeFloor.includes('testID="office-floor-canvas"')
@@ -305,6 +317,35 @@ assert(
     && !floorControlRail.includes('minHeight: 36'),
   'floor actions share compact aligned styles without stale padding or legacy sizing',
 );
+const compactEditorStyles = section(officeTabStyles, 'editToolbar: {', 'floorChipWrap:');
+const compactCatalogSource = section(
+  officeSections,
+  'testID="office-catalog-ready"',
+  'testID="office-compact-placed-items"',
+);
+assert(
+  /editActionBtn:\s*\{[\s\S]*?minHeight:\s*28/.test(compactEditorStyles)
+    && /editCatTab:\s*\{[\s\S]*?height:\s*28/.test(compactEditorStyles)
+    && /editItemSlot:\s*\{\s*width:\s*72,\s*height:\s*68/.test(compactEditorStyles)
+    && /editItem:\s*\{[\s\S]*?width:\s*72,\s*height:\s*68/.test(compactEditorStyles)
+    && /editScrollArrow:\s*\{[\s\S]*?width:\s*20,\s*height:\s*64/.test(compactEditorStyles),
+  'Office editor actions, filter chips, catalog items, and scroll affordances share the compact sizing contract',
+);
+assert(
+  officeSections.includes("style={{ flex: 1, minWidth: 160, height: 32")
+    && officeSections.includes("style={[styles.editItem, { width: 132, height: 64")
+    && officeSections.includes("['DUPLICATE', 'DUP', onDuplicateSelected]")
+    && officeSections.includes("['SEND BACK', 'BACK', () => onMoveSelectedLayer('back')]")
+    && !compactCatalogSource.includes('minHeight: 36')
+    && !compactCatalogSource.includes('height: 88'),
+  'search, room kits, item tiles, and inspector labels stay dense without stale large catalog controls',
+);
+assert(
+  officeSections.includes('contentContainerStyle={styles.editFilterRail}')
+    && (compactCatalogSource.match(/<ScrollView/g) || []).length === 2
+    && officeSections.includes('hitSlop={{ top: 6, bottom: 6, left: 0, right: 0 }}'),
+  'scope, status, and category selectors share one compact horizontal rail while retaining usable touch reach',
+);
 assert(
   (officeTab.match(/constrainOfficeFurnitureGeometry\(\{/g) || []).length >= 7
     && officeFloor.includes("from '../../../../lib/officeValidation'")
@@ -342,16 +383,17 @@ assert(
 assert(
   officeSections.includes("testID=\"office-compact-editor-panels\"")
     && officeSections.includes("testID: 'office-compact-editor-tray'")
-    && officeSections.includes('style: { maxHeight: 180 }')
+    && officeSections.includes('style: { maxHeight: 156 }')
     && officeSections.includes("current === panel ? null : panel"),
   'compact Catalog, Kits, and Items controls use a bounded, independently collapsible tray so the floor retains space',
 );
 assert(
   officeSections.includes('testID="office-compact-placed-items"')
     && officeSections.includes('testID={`office-compact-placed-item-${item.id}`}')
-    && officeSections.includes('minHeight: 44')
+    && officeSections.includes('minHeight: 32')
+    && officeSections.includes('hitSlop={{ top: 6, bottom: 6, left: 0, right: 0 }}')
     && officeTab.includes('onSelectFurniture={(id: string) => setSelectedFurnitureId(id)}'),
-  'compact users can select tiny or reloaded items through a semantic 44px placed-item control',
+  'compact users can select tiny or reloaded items through a visually dense control with expanded touch reach',
 );
 assert(
   officeTab.includes('!isDesktop && editMode && { minHeight: 360 }')

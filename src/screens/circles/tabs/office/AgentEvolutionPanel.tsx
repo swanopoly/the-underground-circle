@@ -103,13 +103,14 @@ export default function AgentEvolutionPanel({
 
   if (loading) {
     return (
-      <View style={{ padding: 24, alignItems: 'center' }}>
+      <View accessibilityLiveRegion="polite" style={{ padding: 24, alignItems: 'center', gap: 10 }}>
         <ActivityIndicator
           accessibilityRole="progressbar"
           accessibilityLabel="Loading verified agent progression and streak"
           size="small"
           color={accentColor}
         />
+        <Text style={{ color: '#8b949e', fontSize: 12 }}>Loading verified progression…</Text>
       </View>
     );
   }

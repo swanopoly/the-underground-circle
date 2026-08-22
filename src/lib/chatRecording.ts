@@ -60,6 +60,34 @@ export interface ActiveSession {
   steps: RecordedStep[];
 }
 
+export interface RecordingOwnerScope {
+  userId: string;
+  circleId: string;
+}
+
+function normalizeRecordingScope(scope: RecordingOwnerScope | null | undefined): RecordingOwnerScope | null {
+  const userId = typeof scope?.userId === 'string' ? scope.userId.trim().toLowerCase() : '';
+  const circleId = typeof scope?.circleId === 'string' ? scope.circleId.trim().toLowerCase() : '';
+  if (!userId || !circleId || userId.length > 200 || circleId.length > 200) return null;
+  return { userId, circleId };
+}
+
+function recordingMatchesScope(
+  recording: Pick<Recording, 'userId' | 'circleId'> | Pick<ActiveSession, 'userId' | 'circleId'> | null | undefined,
+  scope: RecordingOwnerScope | null | undefined,
+): boolean {
+  const normalized = normalizeRecordingScope(scope);
+  return !!normalized
+    && typeof recording?.userId === 'string'
+    && typeof recording?.circleId === 'string'
+    && recording.userId.trim().toLowerCase() === normalized.userId
+    && recording.circleId.trim().toLowerCase() === normalized.circleId;
+}
+
+function recordingStoreKey(scope: RecordingOwnerScope, slug: string): string {
+  return `${encodeURIComponent(scope.userId)}:${encodeURIComponent(scope.circleId)}:${slug}`;
+}
+
 /**
  * Format an elapsed-seconds value for the RecordingBadge + similar
  * read-outs. Pure — no locale / timezone / DateTime dependencies so
@@ -139,6 +167,8 @@ export function startRecording(args: {
   circleId: string;
   userId: string;
 }): { ok: true; session: ActiveSession } | { ok: false; error: string } {
+  const scope = normalizeRecordingScope(args);
+  if (!scope) return { ok: false, error: 'signed-in user and Circle are required' };
   const slug = slugifyRecordingName(args.name);
   if (!slug) return { ok: false, error: 'name required (alphanumerics + dashes)' };
   if (readActive()) {
@@ -146,8 +176,8 @@ export function startRecording(args: {
   }
   const session: ActiveSession = {
     name: slug,
-    circleId: args.circleId,
-    userId: args.userId,
+    circleId: scope.circleId,
+    userId: scope.userId,
     startedAt: Date.now(),
     steps: [],
   };
@@ -155,9 +185,9 @@ export function startRecording(args: {
   return { ok: true, session };
 }
 
-export function appendStep(step: RecordedStep): void {
+export function appendStep(step: RecordedStep, scope: RecordingOwnerScope): void {
   const active = readActive();
-  if (!active) return;
+  if (!active || !recordingMatchesScope(active, scope)) return;
   // Cap at 200 steps per recording; beyond that it's unlikely to be
   // useful and localStorage has finite quota.
   if (active.steps.length >= 200) return;
@@ -165,13 +195,28 @@ export function appendStep(step: RecordedStep): void {
   writeActive(active);
 }
 
-export function getActiveSession(): ActiveSession | null {
-  return readActive();
+export function getActiveSession(scope: RecordingOwnerScope): ActiveSession | null {
+  const active = readActive();
+  return recordingMatchesScope(active, scope) ? active : null;
 }
 
-export function stopRecording(opts: { description?: string } = {}): { ok: true; recording: Recording } | { ok: false; error: string } {
+/** Read-only badge helper. It still requires the exact signed-in owner and
+ * never exposes another local account's active task text or recording name. */
+export function getActiveSessionForUser(userId: string | null | undefined): ActiveSession | null {
+  const normalizedUserId = typeof userId === 'string' ? userId.trim().toLowerCase() : '';
   const active = readActive();
-  if (!active) return { ok: false, error: 'no recording in progress' };
+  return normalizedUserId
+    && active?.userId?.trim().toLowerCase() === normalizedUserId
+    ? active
+    : null;
+}
+
+export function stopRecording(opts: RecordingOwnerScope & { description?: string }): { ok: true; recording: Recording } | { ok: false; error: string } {
+  const active = readActive();
+  const scope = normalizeRecordingScope(opts);
+  if (!scope || !active || !recordingMatchesScope(active, scope)) {
+    return { ok: false, error: 'no recording in progress' };
+  }
   if (active.steps.length === 0) {
     writeActive(null);
     return { ok: false, error: 'recording had zero steps — discarded' };
@@ -186,14 +231,15 @@ export function stopRecording(opts: { description?: string } = {}): { ok: true; 
     steps: active.steps,
   };
   const store = readStore();
-  store[active.name] = recording;
+  store[recordingStoreKey(scope, active.name)] = recording;
   writeStore(store);
   writeActive(null);
   return { ok: true, recording };
 }
 
-export function abortRecording(): { ok: true; discardedSteps: number } {
+export function abortRecording(scope: RecordingOwnerScope): { ok: true; discardedSteps: number } {
   const active = readActive();
+  if (!active || !recordingMatchesScope(active, scope)) return { ok: true, discardedSteps: 0 };
   writeActive(null);
   return { ok: true, discardedSteps: active?.steps.length ?? 0 };
 }
@@ -229,24 +275,41 @@ export function clearRecordingStateForLogout(userId?: string | null): {
 
 // ─── Library reads ──────────────────────────────────────────────────
 
-export function listRecordings(filter?: { circleId?: string }): Recording[] {
+export function listRecordings(scope: RecordingOwnerScope): Recording[] {
+  const normalized = normalizeRecordingScope(scope);
+  if (!normalized) return [];
   const store = readStore();
-  let rows = Object.values(store);
-  if (filter?.circleId) rows = rows.filter((r) => r.circleId === filter.circleId);
+  const rows = Object.values(store).filter((recording) => recordingMatchesScope(recording, normalized));
   rows.sort((a, b) => b.createdAt - a.createdAt);
   return rows;
 }
 
-export function getRecording(name: string): Recording | null {
-  const store = readStore();
-  return store[slugifyRecordingName(name)] || null;
-}
-
-export function deleteRecording(name: string): boolean {
+export function getRecording(name: string, scope: RecordingOwnerScope): Recording | null {
+  const normalized = normalizeRecordingScope(scope);
+  if (!normalized) return null;
   const store = readStore();
   const slug = slugifyRecordingName(name);
-  if (!store[slug]) return false;
-  delete store[slug];
+  const exact = store[recordingStoreKey(normalized, slug)];
+  if (recordingMatchesScope(exact, normalized)) return exact;
+  // Pre-v2 stores used only the slug as their object key. Accept such a row
+  // only when its embedded owner and Circle match exactly.
+  const legacy = store[slug];
+  return recordingMatchesScope(legacy, normalized) ? legacy : null;
+}
+
+export function deleteRecording(name: string, scope: RecordingOwnerScope): boolean {
+  const normalized = normalizeRecordingScope(scope);
+  if (!normalized) return false;
+  const store = readStore();
+  const slug = slugifyRecordingName(name);
+  const exactKey = recordingStoreKey(normalized, slug);
+  if (recordingMatchesScope(store[exactKey], normalized)) {
+    delete store[exactKey];
+  } else if (recordingMatchesScope(store[slug], normalized)) {
+    delete store[slug];
+  } else {
+    return false;
+  }
   writeStore(store);
   return true;
 }

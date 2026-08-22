@@ -379,10 +379,20 @@ assert(Boolean(files.pkg.scripts['smoke:direct-image-conversion-runtime']), 'pac
 assert(Boolean(files.pkg.scripts['smoke:desktop-task-ai-need']), 'package script: smoke:desktop-task-ai-need');
 assert(Boolean(files.pkg.scripts['smoke:computer-use-backend']), 'package script: smoke:computer-use-backend');
 assert(Boolean(files.pkg.scripts['build:input-helper']), 'package script: build:input-helper');
-assert(files.pkg.scripts['smoke:all'].includes('smoke:direct-local-file-runtime'), 'smoke:all includes direct local file runtime');
-assert(files.pkg.scripts['smoke:all'].includes('smoke:direct-image-conversion-runtime'), 'smoke:all includes direct image conversion runtime');
-assert(files.pkg.scripts['smoke:all'].includes('smoke:desktop-task-ai-need'), 'smoke:all includes desktop task AI-need smoke');
-assert(files.pkg.scripts['smoke:all'].includes('smoke:computer-grant-gate'), 'smoke:all includes computer grant gate smoke');
+const smokeAllUsesDiscovery = files.pkg.scripts['smoke:all'].includes('scripts/run-smokes.mjs');
+for (const [smokeName, label] of [
+  ['smoke:direct-local-file-runtime', 'direct local file runtime'],
+  ['smoke:direct-image-conversion-runtime', 'direct image conversion runtime'],
+  ['smoke:desktop-task-ai-need', 'desktop task AI-need smoke'],
+  ['smoke:computer-grant-gate', 'computer grant gate smoke'],
+]) {
+  assert(
+    smokeAllUsesDiscovery
+      ? Boolean(files.pkg.scripts[smokeName])
+      : files.pkg.scripts['smoke:all'].includes(smokeName),
+    `smoke:all discovers ${label}`,
+  );
+}
 assert(files.bridge.includes('ensureInputHelper();'), 'bridge boot auto-builds input helper');
 assert(
   !files.computerUse.includes('localBrowserOpenUrl')
@@ -447,8 +457,8 @@ assert(files.chatTab.includes('Recovery could not start automatically. Try again
 assert(files.chatTab.includes('sanitizeVisibleComputerTaskMessage') && files.chatRecoveryDisplayCore.includes('I could not finish that app or file action. Technical details were saved for recovery.'), 'ChatTab: computer-task output has a customer-safe raw-error sanitizer');
 assert(files.chatTab.includes('rawWarnings: rawOutcomeWarnings') && files.chatTab.includes('visibleWarnings: outcomeWarnings'), 'ChatTab: raw computer-task warnings are separated from visible warnings');
 assert(files.chatTab.includes('I could not finish the page build stream. Try again in a moment.') && !files.chatTab.includes('Build-page stream failed: ${msg}'), 'ChatTab: build-page stream failures hide raw stream errors');
-assert(files.chatTab.includes('I could not clear this thread. Try again in a moment.') && !files.chatTab.includes('Could not clear this thread: ${error.message}'), 'ChatTab: clear-thread failures hide raw Supabase errors');
-assert(files.chatTab.includes('I could not connect the wallet. Check the wallet popup and try again.') && files.chatTab.includes('I could not finish the transaction. Check your wallet and try again.') && !files.chatTab.includes('Wallet connection failed: ${e.message}') && !files.chatTab.includes('Transaction failed: ${result.error}'), 'ChatTab: wallet failures use customer-safe copy');
+assert(files.chatTab.includes('Your messages were not deleted. Check access and try again.') && !files.chatTab.includes('Could not clear this thread: ${error.message}'), 'ChatTab: clear-thread failures hide raw Supabase errors');
+assert(files.chatTab.includes('The wallet operation did not complete. Check the wallet popup and try again.') && files.chatTab.includes('The transaction was not completed. Check the wallet notice and try again.') && !files.chatTab.includes('Wallet connection failed: ${e.message}') && !files.chatTab.includes('Transaction failed: ${result.error}'), 'ChatTab: wallet failures use customer-safe copy');
 assert(files.chatTab.includes('did not upload cleanly. Remove it or upload it again') && !files.chatTab.includes('did not upload cleanly: ${failed.error}'), 'ChatTab: attachment upload failures hide raw upload errors');
 assert(files.chatTab.includes('I could not spawn those agents. Check the bridge connection and try again.') && !files.chatTab.includes('Agent spawn failed: ${result.message}'), 'ChatTab: agent-spawn failures hide raw bridge errors');
 assert(files.chatTab.includes('I could not record that confirmation. Try again in a moment.') && !files.chatTab.includes('Confirmation could not be recorded: ${err'), 'ChatTab: confirmation failures hide raw errors');
@@ -674,11 +684,11 @@ const localAwarenessBlock = files.chatTab.slice(
   files.chatTab.indexOf('// ─── Send Crypto'),
 );
 const computerTaskBranch = files.chatTab.slice(
-  files.chatTab.indexOf("if (plan.execution.kind === 'run_computer_task') {"),
-  files.chatTab.indexOf("if (plan.execution.kind === 'run_openswan') {"),
+  files.chatTab.indexOf("if (!providerFreeTurn && plan.execution.kind === 'run_computer_task') {"),
+  files.chatTab.indexOf("if (!providerFreeTurn && plan.execution.kind === 'run_openswan'"),
 );
 const openSwanBranch = files.chatTab.slice(
-  files.chatTab.indexOf("if (plan.execution.kind === 'run_openswan') {"),
+  files.chatTab.indexOf("if (!providerFreeTurn && plan.execution.kind === 'run_openswan'"),
   files.chatTab.indexOf('// R7 — apply handler state requests'),
 );
 assert(

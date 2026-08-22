@@ -5,10 +5,14 @@
  */
 
 import { storage } from './storage';
+import {
+  chatPersonalCircleStorageKey,
+  type ChatPersonalStorageScope,
+} from './chatSessionStatePersistence';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const PROFILE_KEY = '@chat_user_profile';
+const LEGACY_OWNERLESS_PROFILE_KEY = '@chat_user_profile';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -99,9 +103,14 @@ function detectTopics(message: string): string[] {
 
 // ─── Load Profile ────────────────────────────────────────────────────────────
 
-export async function loadUserProfile(): Promise<UserChatProfile> {
+export async function loadUserProfile(scope: ChatPersonalStorageScope): Promise<UserChatProfile> {
+  const profileKey = chatPersonalCircleStorageKey('user_profile', scope);
+  if (!profileKey) return defaultProfile();
   try {
-    const raw = await storage.getItem(PROFILE_KEY);
+    // Ownerless learned topics/tone cannot be attributed to this account.
+    // Retire the legacy copy without importing it into the exact lane.
+    await storage.removeItem(LEGACY_OWNERLESS_PROFILE_KEY).catch(() => {});
+    const raw = await storage.getItem(profileKey);
     if (raw) {
       const parsed = JSON.parse(raw);
       // Merge with defaults to handle new fields added over time
@@ -115,10 +124,15 @@ export async function loadUserProfile(): Promise<UserChatProfile> {
 
 // ─── Save Profile ────────────────────────────────────────────────────────────
 
-export async function saveUserProfile(profile: UserChatProfile): Promise<void> {
+export async function saveUserProfile(
+  profile: UserChatProfile,
+  scope: ChatPersonalStorageScope,
+): Promise<void> {
+  const profileKey = chatPersonalCircleStorageKey('user_profile', scope);
+  if (!profileKey) return;
   try {
     profile.updatedAt = new Date().toISOString();
-    await storage.setItem(PROFILE_KEY, JSON.stringify(profile));
+    await storage.setItem(profileKey, JSON.stringify(profile));
   } catch (err) {
     console.warn('[userChatProfile] Failed to save profile:', err);
   }

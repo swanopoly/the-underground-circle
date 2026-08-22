@@ -731,14 +731,20 @@ function GenericIntegrationManager({
               } else {
                 modelKeyMessage = ` Circle integration saved, but encrypted key database sync failed: ${error.message}`;
               }
-            } else if (modelProviderChatReady) {
-              modelKeyMessage = provider === 'brave'
-                ? ' API key also saved to your encrypted key vault for chat web search and research tools.'
-                : ' API key also saved to your encrypted model key vault for chat and agents.';
-            } else if (userApiProvider === 'replicate') {
-              modelKeyMessage = ' API token also saved to your encrypted model key vault for image and model tools.';
             } else {
-              modelKeyMessage = ' API key also saved to your encrypted model key vault; direct chat routing for this provider still needs backend routing.';
+              // Chat/Rooms may stay mounted while Marketplace is open. Retire
+              // their exact account catalogs immediately after this direct
+              // key-vault write so Auto sees the new provider without reload.
+              notifyUserApiKeyChanges();
+              if (modelProviderChatReady) {
+                modelKeyMessage = provider === 'brave'
+                  ? ' API key also saved to your encrypted key vault for chat web search and research tools.'
+                  : ' API key also saved to your encrypted model key vault for chat and agents.';
+              } else if (userApiProvider === 'replicate') {
+                modelKeyMessage = ' API token also saved to your encrypted model key vault for image and model tools.';
+              } else {
+                modelKeyMessage = ' API key also saved to your encrypted model key vault; direct chat routing for this provider still needs backend routing.';
+              }
             }
           } else if (definition.requiredSecretKeys.length > 0) {
             modelKeyMessage = ' Add the API key above to save it for chat, agents, and automations.';

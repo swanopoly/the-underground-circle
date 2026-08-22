@@ -445,6 +445,30 @@ enabled = true
 verify_jwt = false
 entrypoint = "./functions/google-oauth/index.ts"
 
+[functions.slack-oauth]
+# Slack redirects to the callback without an app JWT. POST initiation verifies
+# the bearer inside the function, while the callback is bound to a stored,
+# expiring OAuth state and rechecks tenant authority before the write.
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/slack-oauth/index.ts"
+
+[functions.teams-auth]
+# Azure redirects to the callback without an app JWT. POST initiation verifies
+# the bearer inside the function, while the callback is bound to server-stored
+# OAuth state and rechecks tenant authority before the connection write.
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/teams-auth/index.ts"
+
+[functions.teams-webhook]
+# Microsoft webhook requests do not carry a Supabase JWT. User-initiated sends
+# authenticate inside the function; inbound command execution remains disabled
+# until Bot Framework signatures are verified.
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/teams-webhook/index.ts"
+
 [functions.email-calendar-oauth]
 # OAuth providers redirect to /callback without an app JWT, so the gateway
 # must pass the request through. The function authenticates every POST action

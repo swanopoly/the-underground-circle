@@ -281,11 +281,11 @@ async function main(): Promise<void> {
     const basePlan = chat.indexOf('const basePreflightAutomationForTurn =');
     const binder = chat.indexOf('bindChatAttachmentActionContract(basePreflightAutomationForTurn');
     const authoritativeGate = chat.indexOf('const preflightHasAuthoritativeMultiActionContract =', binder);
-    const modelReadiness = chat.indexOf('// A curated shelf is discovery', authoritativeGate);
+    const nextPreflightDecision = chat.indexOf('const preflightAutomationProposal =', authoritativeGate);
     assert(basePlan >= 0);
     assert(binder > basePlan);
     assert(authoritativeGate > binder);
-    assert(modelReadiness > authoritativeGate);
+    assert(nextPreflightDecision > authoritativeGate);
     const binderCall = chat.slice(binder, authoritativeGate);
     assert.match(binderCall, /message:\s*content/);
     assert.match(binderCall, /hasCurrentTurnAttachment:\s*hasPendingAttachments/);
@@ -314,7 +314,7 @@ async function main(): Promise<void> {
       '// Trigger Agent AI',
       'model capability route',
     );
-    const guardIndex = capability.indexOf('!hasAuthoritativeMultiActionContract');
+    const guardIndex = capability.indexOf('!preservesIntactMultiIntentTurn');
     const promptIndex = capability.indexOf('buildAttachmentPromptContext(currentAttachments)');
     const dispatchIndex = capability.indexOf('routeByCapability(');
     assert(guardIndex >= 0, 'capability condition checks the bound authoritative contract');
@@ -346,7 +346,7 @@ async function main(): Promise<void> {
 
     const terminalTransport = sourceSection(
       chat,
-      'const terminalTransport = chooseChatTerminalTransport({',
+      'const resolveTerminalTransportForModel = (model: string) => chooseChatTerminalTransport({',
       '// AI-first telemetry',
       'terminal transport decision',
     );

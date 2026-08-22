@@ -6,10 +6,10 @@
  *   1. Non-imperative text that merely mentions "photo"/"logo"/"imagine"
  *      no longer hijacks the turn into image generation — it stays 'text'.
  *   2. Explicit imperative image asks and slash-command-style prefixes
- *      still detect as image intent; image-only models keep image intent.
- *   3. A failed image-generation path (HF down, no Gemini key) returns
- *      handled:false so the ChatTab caller falls through to the normal
- *      tiered path with the user's selected model — no dead-end bubble.
+ *      still detect as image intent; image-only descriptive prompts generate
+ *      while questions remain eligible for Chat's text fallback.
+ *   3. The legacy capability router never performs image network/blob I/O;
+ *      Chat's persisted-message-bound generated-image client owns that lane.
  *   4. Plain text / placeholder intents return handled:false without any
  *      network calls.
  *
@@ -43,6 +43,7 @@ async function main() {
     getModelCapabilities,
     normalizeModelId,
     getModelCapabilityFlags,
+    shouldRouteSelectedImageModelPrompt,
     UNKNOWN_MODEL_CAPABILITY_FLAGS,
   } = await import('../src/lib/modelCapabilities');
 
@@ -84,14 +85,18 @@ async function main() {
     pass('imperative and slash-command image asks still detect as image_gen');
   }
 
-  // ── 4. Image-only model: every message stays an image prompt ─────────────
+  // ── 4. Image-only picker: descriptions generate, questions use text ──────
   {
     assert.deepEqual(getModelCapabilities('flux-schnell'), ['image_gen']);
     assert.equal(detectIntent('a red fox in fresh snow', 'flux-schnell'), 'image_gen');
-    pass('image-only model keeps image intent for any message');
+    assert.equal(shouldRouteSelectedImageModelPrompt('a red fox in fresh snow', 'flux-schnell'), true);
+    assert.equal(shouldRouteSelectedImageModelPrompt('what makes a good image prompt?', 'flux-schnell'), false);
+    assert.equal(detectIntent('what makes a good image prompt?', 'flux-schnell'), 'text');
+    assert.equal(shouldRouteSelectedImageModelPrompt('a red fox', 'gpt-5.5'), false);
+    pass('image-only picker routes descriptions to images and questions to text fallback');
   }
 
-  // ── 5. Failed HF call → handled:false (caller recovers normally) ─────────
+  // ── 5. Legacy image capability lane is network/blob free ────────────────
   {
     const realFetch = globalThis.fetch;
     let fetchCalls = 0;
@@ -107,18 +112,11 @@ async function main() {
     }) as typeof fetch;
     try {
       const result = await routeByCapability('generate an image of a swan', 'flux-schnell');
-      assert.equal(result.handled, false, 'total image-gen failure must return handled:false');
-      assert.equal(result.artifacts, undefined, 'no artifacts on failure');
-      assert.ok(fetchCalls >= 1, 'HF path was actually attempted');
-      // P14 gap #4: the failure must be visible, naming the backend tried,
-      // with a plain next action — and never leaking key material.
-      assert.ok(result.fallbackNotice && result.fallbackNotice.includes('flux-schnell'),
-        'fallbackNotice names the attempted backend');
-      assert.ok(/text instead/i.test(result.fallbackNotice || ''),
-        'fallbackNotice explains the text fallback');
-      assert.ok(!/key=|bearer|token/i.test(result.fallbackNotice || ''),
-        'fallbackNotice never contains key material');
-      pass('failed HF image call returns handled:false + visible fallbackNotice');
+      assert.equal(result.handled, false, 'legacy image lane declines so canonical Chat routing owns it');
+      assert.equal(result.artifacts, undefined, 'legacy lane creates no transient artifacts');
+      assert.equal(fetchCalls, 0, 'legacy image lane performs no browser network request');
+      assert.equal(result.fallbackNotice, undefined, 'canonical routing owns user-facing generator errors');
+      pass('legacy image lane declines with zero browser network/blob I/O');
     } finally {
       globalThis.fetch = realFetch;
     }
@@ -212,7 +210,7 @@ async function main() {
 
   // ── 10. Image-generation models: imageOnly + no tool loop ────────────────
   {
-    for (const id of ['flux-schnell', 'flux-dev', 'stable-diffusion-xl']) {
+    for (const id of ['gpt-image-2', 'flux-schnell', 'flux-dev', 'stable-diffusion-xl']) {
       const f = getModelCapabilityFlags(id);
       assert.equal(f.imageOnly, true, `${id} is imageOnly`);
       assert.equal(f.toolUse, false, `${id} has no tool use`);
@@ -222,7 +220,10 @@ async function main() {
     const prefixed = getModelCapabilityFlags('huggingface/black-forest-labs/FLUX.1-schnell');
     assert.equal(prefixed.imageOnly, true);
     assert.equal(prefixed.toolUse, false);
-    pass('flux/sdxl-style image models are imageOnly:true + toolUse:false');
+    assert.deepEqual(getModelCapabilities('gpt-image-2'), ['image_gen']);
+    assert.equal(getModelCapabilities('gpt-4o').includes('image_gen'), false, 'plain GPT chat does not claim direct image output');
+    assert.equal(getModelCapabilities('gemini-2.5-flash-preview').includes('image_gen'), false, 'plain Gemini chat does not claim direct image output');
+    pass('exact image generators are imageOnly; plain text models invoke the separate tool');
   }
 
   // ── 11. computerUse only for Sonnet-capable Claude; tool chat models ─────

@@ -18,9 +18,9 @@ import {
   Pressable,
   ScrollView,
   Platform,
-  useWindowDimensions,
 } from 'react-native';
 import { useBackpackData } from '../../../hooks/useBackpackData';
+import { useExactCircleAuthority } from '../../../hooks/useAuth';
 import { GRID } from '../../../lib/pixelDesign';
 import {
   BACKPACK_COMPARTMENTS,
@@ -85,10 +85,7 @@ function BackpackLoadFailure({ message, onRetry }: { message: string; onRetry: (
 }
 
 type FocusablePressable = { focus?: () => void };
-type SummaryMetricId = 'spend' | 'agents' | 'tokens' | 'health';
-type ReturnFocusOrigin =
-  | { kind: 'pocket'; key: BackpackCompartmentKey }
-  | { kind: 'metric'; id: SummaryMetricId };
+type ReturnFocusOrigin = { kind: 'pocket'; key: BackpackCompartmentKey };
 
 interface Props {
   circleId: string;
@@ -98,17 +95,16 @@ interface Props {
 
 export default function BackpackTab({ circleId, accentColor = '#6366f1', onOpenOffice }: Props) {
   const data = useBackpackData(circleId);
+  const { exactAuthority, isExactAuthorityCurrent } = useExactCircleAuthority(circleId);
   const [activeCompartment, setActiveCompartment] = useState<BackpackCompartmentKey | null>(null);
   const returnFocusOrigin = useRef<ReturnFocusOrigin | null>(null);
   const backButtonRef = useRef<FocusablePressable | null>(null);
-  const summaryMetricRefs = useRef<Partial<Record<SummaryMetricId, FocusablePressable | null>>>({});
-  const { width } = useWindowDimensions();
-  const isDesktop = width > 768;
 
   const openCompartment = (
     key: BackpackCompartmentKey,
     origin: ReturnFocusOrigin = { kind: 'pocket', key },
   ) => {
+    if (data.loading) return;
     returnFocusOrigin.current = origin;
     setActiveCompartment(key);
   };
@@ -124,10 +120,7 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1', onOpenO
     const frame = requestAnimationFrame(() => {
       if (activeCompartment) {
         backButtonRef.current?.focus?.();
-        return;
       }
-      const origin = returnFocusOrigin.current;
-      if (origin?.kind === 'metric') summaryMetricRefs.current[origin.id]?.focus?.();
     });
     return () => cancelAnimationFrame(frame);
   }, [activeCompartment]);
@@ -264,6 +257,8 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1', onOpenO
               circleId={circleId}
               userId={data.currentUserId}
               agents={data.mergedCircleAgents}
+              exactAgentUsageAuthority={exactAuthority}
+              isExactAgentUsageAuthorityCurrent={isExactAuthorityCurrent}
             />
           )}
           {activeCompartment === 'canvas' && (
@@ -307,10 +302,6 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1', onOpenO
   }
 
   // ─── Overview — The open backpack ──────────────────────────────
-  if (data.loading) {
-    return <LoadingScreen />;
-  }
-
   if (data.error && !data.lastRefreshed) {
     return (
       <BackpackLoadFailure
@@ -320,93 +311,6 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1', onOpenO
     );
   }
 
-  // Compute quick stats
-  const activeAgents = data.enrichedAgents.filter(a => a.status === 'active').length;
-  const healthyAgents = data.enrichedAgents.filter(
-    a => a.status === 'active' || a.status === 'idle',
-  ).length;
-  const healthPct = data.enrichedAgents.length > 0
-    ? Math.round((healthyAgents / data.enrichedAgents.length) * 100)
-    : null;
-  // Format tokens
-  const fmtTokens = (n: number) => n >= 1_000_000 ? `${(n/1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n/1000).toFixed(1)}K` : String(n);
-  const summaryMetrics: Array<{
-    id: SummaryMetricId;
-    label: string;
-    value: string;
-    detail: string;
-    color: string;
-    target: BackpackCompartmentKey;
-  }> = [
-    {
-      id: 'spend',
-      label: 'Estimated spend today',
-      value: `~$${data.periodCosts.today.toFixed(2)}`,
-      detail: `~$${data.periodCosts.week.toFixed(2)} across 7 days`,
-      color: '#f59e0b',
-      target: 'cost',
-    },
-    {
-      id: 'agents',
-      label: 'Agents',
-      value: String(data.agentCount),
-      detail: `${activeAgents} active`,
-      color: '#6366f1',
-      target: 'farm',
-    },
-    {
-      id: 'tokens',
-      label: 'Tokens today',
-      value: fmtTokens(data.totalTokensToday),
-      detail: `${data.totalMessagesToday} terminal responses`,
-      color: '#3b82f6',
-      target: 'traces',
-    },
-    {
-      id: 'health',
-      label: 'Agents available',
-      value: healthPct == null ? '—' : `${healthPct}%`,
-      detail: healthPct == null
-        ? 'No verified agent data'
-        : `${healthyAgents}/${data.enrichedAgents.length} active or idle`,
-      color: healthPct == null
-        ? '#64748b'
-        : healthPct >= 90 ? '#22c55e' : healthPct >= 70 ? '#f59e0b' : '#ef4444',
-      target: 'farm',
-    },
-  ];
-
-  const summaryBar = (
-    <View style={[styles.summaryBar, !isDesktop && styles.summaryBarCompact]}>
-      {summaryMetrics.map(metric => (
-        <Pressable
-          key={metric.id}
-          ref={(node) => {
-            summaryMetricRefs.current[metric.id] = node as unknown as FocusablePressable | null;
-          }}
-          accessibilityRole="button"
-          accessibilityLabel={`Open ${metric.label} details`}
-          accessibilityHint={`Open the ${BACKPACK_COMPARTMENTS.find(item => item.key === metric.target)?.label || 'related'} compartment`}
-          onPress={() => openCompartment(metric.target, { kind: 'metric', id: metric.id })}
-          style={({ hovered, pressed, focused }: any) => [
-            styles.summaryMetric,
-            !isDesktop && styles.summaryMetricCompact,
-            hovered && Platform.OS === 'web' ? styles.summaryMetricHover : null,
-            focused ? styles.summaryMetricFocused : null,
-            pressed ? styles.summaryMetricPressed : null,
-          ]}
-        >
-          <View style={styles.summaryMetricLabelRow}>
-            <View style={[styles.summaryMetricDot, { backgroundColor: metric.color }]} />
-            <Text style={styles.summaryMetricLabel}>{metric.label}</Text>
-          </View>
-          <Text style={styles.summaryMetricValue}>{metric.value}</Text>
-          <Text style={styles.summaryMetricDetail}>{metric.detail}</Text>
-        </Pressable>
-      ))}
-    </View>
-  );
-
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.scrollContent}>
       {/* ─── Backpack overview ─── */}
@@ -415,29 +319,21 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1', onOpenO
           <Text style={styles.headerEyebrow}>PRIVATE WORKSPACE</Text>
           <Text style={styles.headerTitle} accessibilityRole="header">Backpack</Text>
           <Text style={styles.headerSubtitle}>
-            {data.lastRefreshed
+            {data.loading
+              ? 'Opening your tools while the verified circle snapshot loads…'
+              : data.lastRefreshed
               ? `Your circle snapshot, updated ${new Date(data.lastRefreshed).toLocaleTimeString()}`
               : 'Your digital brain, activity, and tools in one place.'}
           </Text>
         </View>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Refresh Backpack data"
-          accessibilityState={{ busy: data.refreshing, disabled: data.refreshing }}
-          disabled={data.refreshing}
-          onPress={data.refresh}
-          style={({ hovered, pressed, focused }: any) => [
-            styles.refreshBtn,
-            data.refreshing && styles.refreshBtnDisabled,
-            hovered && Platform.OS === 'web' ? styles.refreshBtnHover : null,
-            focused ? styles.refreshBtnFocused : null,
-            pressed ? styles.refreshBtnPressed : null,
-          ]}
-        >
-          <Text style={styles.refreshIcon}>↻</Text>
-          <Text style={styles.refreshText}>{data.refreshing ? 'Refreshing' : 'Refresh'}</Text>
-        </Pressable>
       </View>
+
+      {data.loading ? (
+        <View style={styles.loadingNotice} accessibilityRole="progressbar" accessibilityLabel="Loading verified Backpack data">
+          <View style={styles.loadingNoticeDot} />
+          <Text style={styles.loadingNoticeText}>Loading your verified activity snapshot. The Backpack is ready to explore as soon as it settles.</Text>
+        </View>
+      ) : null}
 
       {data.error && data.lastRefreshed ? (
         <View style={styles.staleBanner} accessibilityRole="alert">
@@ -446,20 +342,6 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1', onOpenO
           <Text style={styles.staleMeta}>Showing the snapshot from {new Date(data.lastRefreshed).toLocaleTimeString()}.</Text>
         </View>
       ) : null}
-
-      {data.budgetConfigNotice ? (
-        <View style={styles.partialNotice} accessibilityRole="alert">
-          <View style={styles.partialNoticeMark}>
-            <Text style={styles.partialNoticeMarkText}>!</Text>
-          </View>
-          <View style={styles.partialNoticeCopy}>
-            <Text style={styles.partialNoticeTitle}>Budget alerts unavailable</Text>
-            <Text style={styles.partialNoticeText}>{data.budgetConfigNotice}</Text>
-          </View>
-        </View>
-      ) : null}
-
-      {isDesktop ? summaryBar : null}
 
       {data.budgetAlerts.length > 0 && (
         <View
@@ -479,10 +361,11 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1', onOpenO
       <InteractiveBackpack2D
         onOpenCompartment={(key) => openCompartment(key, { kind: 'pocket', key })}
         restoreFocusKey={returnFocusOrigin.current?.kind === 'pocket' ? returnFocusOrigin.current.key : null}
-        stats={getAllCompartmentStats(data)}
+        stats={data.loading
+          ? Object.fromEntries(BACKPACK_COMPARTMENTS.map(item => [item.key, { miniStat: 'Loading data…', hasActivity: false }]))
+          : getAllCompartmentStats(data)}
+        disabled={data.loading}
       />
-
-      {!isDesktop ? summaryBar : null}
 
       <View style={styles.secondaryGrid}>
         {data.recentActivity.length > 0 && (
@@ -576,81 +459,27 @@ const styles = StyleSheet.create({
     letterSpacing: -1,
   },
   headerSubtitle: { color: '#8b96b0', fontSize: 13, lineHeight: 19, marginTop: 5 },
-  refreshBtn: {
+  loadingNotice: {
     minHeight: 44,
-    borderRadius: 11,
-    backgroundColor: '#10141e',
-    borderWidth: 1,
-    borderColor: '#2a3346',
-    paddingHorizontal: 15,
-    flexDirection: 'row',
-    gap: 7,
-    justifyContent: 'center',
-    alignItems: 'center',
-    ...(Platform.OS === 'web' ? {
-      cursor: 'pointer',
-      transition: 'background-color 0.16s ease, border-color 0.16s ease',
-    } as any : {}),
-  },
-  refreshBtnHover: { backgroundColor: '#161c2b', borderColor: '#3d4a68' },
-  refreshBtnFocused: {
-    ...Platform.select({ web: { outlineStyle: 'none', boxShadow: '0 0 0 3px rgba(99,102,241,0.5)' } as any, default: {} }),
-  },
-  refreshBtnDisabled: { opacity: 0.58 },
-  refreshBtnPressed: { opacity: 0.78, backgroundColor: '#1b2233' },
-  refreshIcon: { color: '#9aa6c4', fontSize: 15 },
-  refreshText: { color: '#dde3f0', fontSize: 12, fontWeight: '700', letterSpacing: 0.2 },
-
-  // Circle snapshot
-  summaryBar: {
     marginHorizontal: GRID.lg,
-    marginBottom: 18,
-    padding: 5,
-    flexDirection: 'row',
-    gap: 5,
-    borderWidth: 1,
-    borderColor: '#232c3f',
-    borderRadius: 18,
-    backgroundColor: '#0b0f18',
-    ...Platform.select({
-      web: { boxShadow: 'inset 0 1px 0 rgba(164,178,222,0.07)' } as any,
-      default: {},
-    }),
-  },
-  summaryBarCompact: { flexWrap: 'wrap' },
-  summaryMetric: {
-    flex: 1,
-    minWidth: 120,
-    borderRadius: 13,
+    marginBottom: 14,
     paddingHorizontal: 14,
-    paddingVertical: 13,
-    gap: 3,
-    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'background-color 0.16s ease' } as any : {}),
+    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+    borderWidth: 1,
+    borderColor: '#30395a',
+    borderRadius: 12,
+    backgroundColor: '#111625',
   },
-  summaryMetricCompact: { flexBasis: '46%' },
-  summaryMetricHover: { backgroundColor: '#131927' },
-  summaryMetricFocused: {
-    ...Platform.select({ web: { outlineStyle: 'none', boxShadow: 'inset 0 0 0 2px rgba(99,102,241,0.6)' } as any, default: {} }),
+  loadingNoticeDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: '#818cf8',
   },
-  summaryMetricPressed: { backgroundColor: '#171e2f', opacity: 0.88 },
-  summaryMetricLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 7 },
-  summaryMetricDot: { width: 6, height: 6, borderRadius: 2 },
-  summaryMetricLabel: {
-    color: '#8791ad',
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 0.7,
-    textTransform: 'uppercase',
-  },
-  summaryMetricValue: {
-    color: '#f2f4fa',
-    fontSize: 24,
-    lineHeight: 29,
-    fontWeight: '800',
-    letterSpacing: -0.5,
-    fontVariant: ['tabular-nums'],
-  },
-  summaryMetricDetail: { color: '#66718e', fontSize: 10, lineHeight: 15 },
+  loadingNoticeText: { flex: 1, color: '#a8b1c7', fontSize: 11, lineHeight: 16 },
 
   sectionLabel: {
     color: '#e8ecf5',
@@ -701,35 +530,6 @@ const styles = StyleSheet.create({
   staleDot: { width: 7, height: 7, borderRadius: 999, backgroundColor: '#f59e0b' },
   staleText: { flexShrink: 1, color: '#e8d6ae', fontSize: 11, lineHeight: 16 },
   staleMeta: { color: '#927f5a', fontSize: 10, lineHeight: 15 },
-  partialNotice: {
-    maxWidth: 900,
-    width: 'auto',
-    alignSelf: 'center',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    marginHorizontal: GRID.lg,
-    marginBottom: GRID.lg,
-    paddingHorizontal: 13,
-    paddingVertical: 11,
-    borderWidth: 1,
-    borderColor: '#f59e0b3d',
-    borderRadius: 11,
-    backgroundColor: '#f59e0b0d',
-  },
-  partialNoticeMark: {
-    width: 24,
-    height: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: '#f59e0b55',
-    borderRadius: 8,
-  },
-  partialNoticeMarkText: { color: '#fbbf24', fontSize: 12, fontWeight: '800' },
-  partialNoticeCopy: { flex: 1, minWidth: 0 },
-  partialNoticeTitle: { color: '#e8d6ae', fontSize: 11, fontWeight: '700', marginBottom: 2 },
-  partialNoticeText: { color: '#927f5a', fontSize: 10, lineHeight: 15 },
   backRow: {
     minHeight: 54,
     flexDirection: 'row',

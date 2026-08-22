@@ -70,7 +70,14 @@ const BASE_SCOPES = [
 function jsonResponse(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    headers: {
+      ...corsHeaders,
+      "Content-Type": "application/json",
+      // `action=token` returns a short-lived bearer token to its exact owner.
+      // Never retain that response across account switches or browser history.
+      "Cache-Control": "no-store",
+      "Pragma": "no-cache",
+    },
   });
 }
 

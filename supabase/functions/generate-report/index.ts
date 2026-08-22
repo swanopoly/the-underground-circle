@@ -7,6 +7,31 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+const REPORT_SIGNED_URL_TTL_SECONDS = 60 * 60;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function reportJson(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      ...corsHeaders,
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      "Pragma": "no-cache",
+    },
+  });
+}
+
+function requestedCircleIds(metadata: unknown): string[] | null {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return [];
+  const value = (metadata as Record<string, unknown>).circle_ids;
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > 100) return null;
+  const ids = value.map((id) => typeof id === "string" ? id.trim().toLowerCase() : "");
+  if (ids.some((id) => !UUID_PATTERN.test(id))) return null;
+  return [...new Set(ids)];
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -22,8 +47,9 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabase = createClient(
-      Deno.env.get("SUPABASE_URL")!,
+      supabaseUrl,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
@@ -33,14 +59,15 @@ Deno.serve(async (req: Request) => {
     // caller (cron) or an authenticated user who is a member of the target org.
     // Without this, anyone could POST a reportId + orgId and receive another
     // org's data.
-    if (!isServiceRoleRequest(req)) {
+    const serviceRoleCaller = isServiceRoleRequest(req);
+    let authUserId: string | null = null;
+    let callerSupabase: ReturnType<typeof createClient> | null = null;
+    if (!serviceRoleCaller) {
       const authUser = await getAuthenticatedUser(req);
       if (!authUser) {
-        return new Response(
-          JSON.stringify({ error: "Authentication required", code: "unauthenticated" }),
-          { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+        return reportJson({ error: "Authentication required", code: "unauthenticated" }, 401);
       }
+      authUserId = authUser.id;
       const { data: membership } = await supabase
         .from("org_members")
         .select("user_id")
@@ -48,11 +75,17 @@ Deno.serve(async (req: Request) => {
         .eq("user_id", authUser.id)
         .maybeSingle();
       if (!membership) {
-        return new Response(
-          JSON.stringify({ error: "Not authorized for this organization", code: "forbidden" }),
-          { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+        return reportJson({ error: "Not authorized for this organization", code: "forbidden" }, 403);
       }
+      const authorization = req.headers.get("Authorization") || req.headers.get("authorization") || "";
+      const anonKey = Deno.env.get("SUPABASE_ANON_KEY") || "";
+      if (!authorization || !anonKey) {
+        return reportJson({ error: "Report authorization is unavailable", code: "authority_unavailable" }, 503);
+      }
+      callerSupabase = createClient(supabaseUrl, anonKey, {
+        global: { headers: { Authorization: authorization } },
+        auth: { persistSession: false },
+      });
     }
 
     // Get report details
@@ -64,32 +97,94 @@ Deno.serve(async (req: Request) => {
       .single();
 
     if (!report) {
-      return new Response(
-        JSON.stringify({ error: "Report not found" }),
-        { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return reportJson({ error: "Report not found" }, 404);
+    }
+    if (!serviceRoleCaller && report.created_by !== authUserId) {
+      return reportJson({ error: "Report not found or not owned by caller", code: "forbidden" }, 403);
     }
 
-    // Mark as generating
-    await supabase
-      .from("reports")
-      .update({ status: "generating" })
-      .eq("id", reportId);
-
     // Gather data based on report type
-    const circleIds = report.metadata?.circle_ids;
+    const configuredCircleIds = requestedCircleIds(report.metadata);
+    if (configuredCircleIds === null) {
+      return reportJson({ error: "Report Circle selection is invalid", code: "validation" }, 400);
+    }
+    let circleIds = configuredCircleIds;
     let reportData: Record<string, any> = {};
 
+    if (!serviceRoleCaller) {
+      const { data: memberRows, error: memberError } = await supabase
+        .from("circle_members")
+        .select("circle_id")
+        .eq("user_id", authUserId!);
+      if (memberError) {
+        return reportJson({ error: "Report Circle access could not be verified", code: "authority_unavailable" }, 503);
+      }
+      const authorizedIds = new Set(
+        (memberRows || [])
+          .map((row: { circle_id?: unknown }) => typeof row.circle_id === "string" ? row.circle_id : null)
+          .filter((id: string | null): id is string => Boolean(id)),
+      );
+      if (circleIds.length > 0 && circleIds.some((id) => !authorizedIds.has(id))) {
+        return reportJson({ error: "A selected Circle is not available to this account", code: "forbidden" }, 403);
+      }
+      if (circleIds.length === 0) circleIds = [...authorizedIds];
+      if (authorizedIds.size === 0) {
+        return reportJson({ error: "Join a Circle before generating a report", code: "forbidden" }, 403);
+      }
+    }
+
     // Get org circles
-    const circleQuery = supabase
+    const reportDataClient = callerSupabase || supabase;
+    const circleQuery = reportDataClient
       .from("circles")
       .select("id, name, member_count")
       .eq("org_id", orgId);
-    if (circleIds?.length) circleQuery.in("id", circleIds);
-    const { data: circles } = await circleQuery;
+    if (circleIds.length) circleQuery.in("id", circleIds);
+    const { data: circles, error: circlesError } = await circleQuery;
+    if (circlesError) {
+      return reportJson({ error: "Report Circle access could not be verified", code: "authority_unavailable" }, 503);
+    }
+    if (!serviceRoleCaller) {
+      const visibleIds = new Set((circles || []).map((circle: { id: string }) => circle.id));
+      if (configuredCircleIds.length > 0 && circleIds.some((id) => !visibleIds.has(id))) {
+        return reportJson({ error: "A selected Circle is not available to this account", code: "forbidden" }, 403);
+      }
+      if (configuredCircleIds.length === 0) circleIds = [...visibleIds];
+      if (circleIds.length === 0) {
+        return reportJson({ error: "Join a Circle in this organization before generating a report", code: "forbidden" }, 403);
+      }
+      const metadata = report.metadata && typeof report.metadata === "object" && !Array.isArray(report.metadata)
+        ? report.metadata
+        : {};
+      const { data: metadataReceipt, error: metadataError } = await supabase
+        .from("reports")
+        .update({ metadata: { ...metadata, circle_ids: circleIds } })
+        .eq("id", reportId)
+        .eq("org_id", orgId)
+        .eq("created_by", authUserId!)
+        .select("id")
+        .maybeSingle();
+      if (metadataError || !metadataReceipt) {
+        return reportJson({ error: "Report scope could not be sealed", code: "authority_unavailable" }, 503);
+      }
+    }
+
+    // Mutate the report only after every caller/report/Circle relationship has
+    // been verified. A rejected request must leave no cross-tenant side effect.
+    const { data: generatingReceipt, error: generatingError } = await supabase
+      .from("reports")
+      .update({ status: "generating" })
+      .eq("id", reportId)
+      .eq("org_id", orgId)
+      .eq("created_by", report.created_by)
+      .select("id")
+      .maybeSingle();
+    if (generatingError || !generatingReceipt) {
+      return reportJson({ error: "Report generation could not be reserved", code: "authority_unavailable" }, 503);
+    }
 
     if (report.report_type === "analytics" || report.report_type === "comprehensive") {
-      const { data: analytics } = await supabase
+      const { data: analytics } = await reportDataClient
         .from("circle_analytics_daily")
         .select("*")
         .in("circle_id", (circles || []).map(c => c.id))
@@ -101,16 +196,25 @@ Deno.serve(async (req: Request) => {
     }
 
     if (report.report_type === "goals" || report.report_type === "comprehensive") {
-      const { data: goals } = await supabase
+      // Org membership alone is not enough authority for Circle-owned goals.
+      // Keep the aggregate pinned to the exact Circle set already verified
+      // above, including for the service-role execution path.
+      const selectedCircleIds = (circles || []).map((circle: { id: string }) => circle.id);
+      const { data: goals, error: goalsError } = await reportDataClient
         .from("org_goals")
         .select("*")
-        .eq("org_id", orgId);
+        .eq("org_id", orgId)
+        .in("circle_id", selectedCircleIds);
+
+      if (goalsError) {
+        return reportJson({ error: "Report goal access could not be verified", code: "authority_unavailable" }, 503);
+      }
 
       reportData.goals = goals || [];
     }
 
     if (report.report_type === "engagement" || report.report_type === "comprehensive") {
-      const { data: checkIns } = await supabase
+      const { data: checkIns } = await reportDataClient
         .from("check_ins")
         .select("user_id, circle_id, created_at")
         .in("circle_id", (circles || []).map(c => c.id))
@@ -133,7 +237,10 @@ Deno.serve(async (req: Request) => {
 
     // Store in Supabase Storage
     const ext = report.format === "csv" ? "csv" : "html";
-    const filePath = `reports/${orgId}/${fileName}.${ext}`;
+    // Include the immutable report id. The old date/type-only path allowed two
+    // members generating different Circle subsets for the same dates to
+    // overwrite one another and made both report rows point at the last bytes.
+    const filePath = `reports/${orgId}/${reportId}/${fileName}.${ext}`;
 
     const { error: uploadError } = await supabase.storage
       .from("reports")
@@ -146,12 +253,11 @@ Deno.serve(async (req: Request) => {
       await supabase
         .from("reports")
         .update({ status: "failed" })
-        .eq("id", reportId);
+        .eq("id", reportId)
+        .eq("org_id", orgId)
+        .eq("created_by", report.created_by);
 
-      return new Response(
-        JSON.stringify({ error: uploadError.message }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return reportJson({ error: "Report storage failed", code: "storage_unavailable" }, 500);
     }
 
     // Get a time-limited SIGNED URL. The `reports` bucket MUST be private — a
@@ -159,14 +265,16 @@ Deno.serve(async (req: Request) => {
     // path (reports/{orgId}/{type}_{dates}). Signed URLs scope + expire access.
     const { data: urlData, error: signErr } = await supabase.storage
       .from("reports")
-      .createSignedUrl(filePath, 60 * 60 * 24 * 7); // 7 days
+      .createSignedUrl(filePath, REPORT_SIGNED_URL_TTL_SECONDS);
 
     if (signErr || !urlData?.signedUrl) {
-      await supabase.from("reports").update({ status: "failed" }).eq("id", reportId);
-      return new Response(
-        JSON.stringify({ error: signErr?.message || "could not sign report URL" }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      await supabase
+        .from("reports")
+        .update({ status: "failed" })
+        .eq("id", reportId)
+        .eq("org_id", orgId)
+        .eq("created_by", report.created_by);
+      return reportJson({ error: "Report signing failed", code: "signing_unavailable" }, 500);
     }
     const fileUrl = urlData.signedUrl;
 
@@ -177,18 +285,16 @@ Deno.serve(async (req: Request) => {
         status: "ready",
         file_url: fileUrl,
       })
-      .eq("id", reportId);
+      .eq("id", reportId)
+      .eq("org_id", orgId)
+      .eq("created_by", report.created_by);
 
-    return new Response(
-      JSON.stringify({ success: true, url: fileUrl }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    return reportJson({ success: true, url: fileUrl });
   } catch (error: any) {
-    console.error("Report generation error:", error);
-    return new Response(
-      JSON.stringify({ error: error.message }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    console.error("[generate-report] Report generation failed", {
+      name: error instanceof Error ? error.name : typeof error,
+    });
+    return reportJson({ error: "Report generation failed", code: "internal" }, 500);
   }
 });
 

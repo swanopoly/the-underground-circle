@@ -1245,7 +1245,7 @@ const GENERIC_NON_APP_TARGETS = new Set([
 ]);
 
 const BROWSER_APP_IDS = new Set(['chrome', 'safari']);
-const LOCAL_FILE_APP_IDS = new Set(['finder', 'preview', 'textedit']);
+const LOCAL_FILE_APP_IDS = new Set(['finder', 'google-drive', 'preview', 'textedit']);
 const LOCAL_FILE_APP_NAMES = new Set(['finder', 'preview', 'apple preview', 'textedit', 'text edit']);
 const BROWSER_APP_NAMES = new Set([
   'arc', 'arc browser', 'brave', 'brave browser', 'chrome', 'chromium', 'comet browser',
@@ -1260,6 +1260,7 @@ const SHORT_NATIVE_APP_NAMES = new Set(['mpv', 'obs', 'r', 'vlc', 'zed']);
 const EXPLICIT_WEB_TARGET_RE = /\b(?:https?:\/\/|www\.)\S+|(?<!@)\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)*\.(?:com|org|net|io|app|dev|ai|co|us|gov|edu)(?:\/\S*)?/i;
 const BROWSERBASE_DATA_SIDE_EFFECT_RE = /\b(?:authenticate|authorize|buy|checkout|delete|download|edit|export|fill|grant|log\s*in|login|order|pay|post|publish|purchase|remove|save|send|sign\s*in|submit|update|upload)\b/i;
 const NAMED_APP_MUTATION_RE = /\b(?:accept|add|adjust|animate|apply|authenticate|authorize|build|cancel|change|charge|choose|click|close|color|colour|complete|configure|confirm|connect|continue|copy|create|crop|delete|design|disconnect|dismiss|download|draw|edit|email|encode|enter|erase|export|fill|generate|grant|import|insert|invite|link|log\s*in|login|make|maximize|minimize|model|move|mute|overwrite|package|paint|paste|pause|play|post|press|print|publish|put|record|remove|rename|render|replace|resize|resume|retouch|run|save|select|send|set|sign\s*in|split|stop|submit|sync|toggle|trim|turn|type|unmute|update|upload|wipe|write)\b/i;
+const NAMED_APP_FILENAME_ALIAS_RE = /\bcall\s+(?:it|this|that)\s+["'`]?[A-Za-z0-9][A-Za-z0-9._@()+-]{0,127}\.[A-Za-z0-9]{1,12}\b/i;
 
 function cleanNamedAppCandidate(value: string): string {
   return String(value || '')
@@ -1333,7 +1334,9 @@ function detectExplicitNamedAppAction(
     : text;
   const intent = strictLifecycle
     ? 'launch_or_read'
-    : NAMED_APP_MUTATION_RE.test(actionScope) ? 'mutation' : 'launch_or_read';
+    : NAMED_APP_MUTATION_RE.test(actionScope) || NAMED_APP_FILENAME_ALIAS_RE.test(actionScope)
+      ? 'mutation'
+      : 'launch_or_read';
   // A strict launch-only request names the installed native product even when
   // that product is a browser. URL/navigation/follow-up work still routes to
   // browser automation; web-only products can never enter native lifecycle.

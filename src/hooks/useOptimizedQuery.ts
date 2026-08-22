@@ -5,6 +5,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
+import { indexSafeProfiles, loadSafeCircleProfiles, type SafeProfile } from '../lib/safeProfiles';
 
 export interface QueryOptions {
   pageSize?: number;
@@ -138,6 +139,30 @@ export function useOptimizedQuery<T>(
   };
 }
 
+function useCircleProfileHydration<T extends { user_id: string }>(
+  circleId: string,
+  base: QueryResult<T>,
+): QueryResult<T & { user: SafeProfile | null }> {
+  const [hydrated, setHydrated] = useState<Array<T & { user: SafeProfile | null }>>([]);
+  const [hydrating, setHydrating] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setHydrating(true);
+    loadSafeCircleProfiles({ circleId, userIds: base.data.map(row => row.user_id) })
+      .then(rows => {
+        if (cancelled) return;
+        const profileById = indexSafeProfiles(rows);
+        setHydrated(base.data.map(row => ({ ...row, user: profileById.get(row.user_id) || null })));
+      })
+      .catch(() => { if (!cancelled) setHydrated([]); })
+      .finally(() => { if (!cancelled) setHydrating(false); });
+    return () => { cancelled = true; };
+  }, [base.data, circleId]);
+
+  return { ...base, data: hydrated, loading: base.loading || hydrating };
+}
+
 // Specialized hook for user's circles
 export function useUserCircles() {
   const [userId, setUserId] = useState<string | null>(null);
@@ -169,24 +194,26 @@ export function useUserCircles() {
 
 // Specialized hook for circle check-ins
 export function useCircleCheckIns(circleId: string) {
-  return useOptimizedQuery(
+  const base = useOptimizedQuery<{ user_id: string }>(
     'check_ins',
-    '*, user:profiles(username, display_name)',
+    '*',
     (query) => query
       .eq('circle_id', circleId)
       .order('created_at', { ascending: false }),
     { pageSize: 30, realtime: true }
   );
+  return useCircleProfileHydration(circleId, base);
 }
 
 // Specialized hook for circle members
 export function useCircleMembers(circleId: string) {
-  return useOptimizedQuery(
+  const base = useOptimizedQuery<{ user_id: string }>(
     'circle_members',
-    '*, user:profiles(username, display_name, avatar_url)',
+    '*',
     (query) => query
       .eq('circle_id', circleId)
       .order('joined_at', { ascending: true }),
     { pageSize: 100, realtime: true }
   );
+  return useCircleProfileHydration(circleId, base);
 }

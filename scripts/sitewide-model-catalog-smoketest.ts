@@ -116,7 +116,11 @@ assert(!proxy.includes('MODEL_LIST_ENDPOINTS[provider] = body'), 'callers cannot
 assert(openRouterRankings.includes('RETIRED_POPULAR_MODEL_IDS') && openRouterRankings.includes('isAllowedPopularModelId(candidate.id)'), 'live OpenRouter rankings cannot reintroduce known retired model ids');
 assert(openRouterRankings.includes('part === "x-ai"') && openRouterRankings.includes('part.startsWith("grok-")'), 'live OpenRouter rankings preserve the project vendor exclusion before returning models');
 
-assert(catalogs.includes('const cacheKey = userId ? `${userId}:${provider}`'), 'client live-catalog cache is scoped to authenticated user and provider');
+assert(
+  catalogs.includes("const cacheKey = [authority.userId, authority.circleId || '', provider]")
+    && catalogs.includes('.map(part => encodeURIComponent(part))'),
+  'client live-catalog cache is scoped to exact authenticated user, circle, and provider',
+);
 assert(catalogs.includes('invalidateProviderModelCatalog();'), 'credential changes clear live model catalogs');
 assert(catalogs.includes("action: 'list_models'"), 'client loads provider models through the canonical proxy action');
 assert(pickerRegistry.includes('activeUserApiProviders') && pickerRegistry.includes('loadConnectedProviderCatalogs'), 'picker loads live catalogs only from connected user providers');

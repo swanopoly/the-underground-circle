@@ -2,7 +2,7 @@
  * StatusPicker.tsx — Compact work status selector for the Office toolbar
  *
  * Shows 5 status pills in a horizontal row with optional note and timer presets.
- * Persists to profiles.user_status JSONB and broadcasts via Supabase Realtime.
+ * Persists to the exact user's private profile row.
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
@@ -50,7 +50,7 @@ const DEFAULT_STATUS: UserStatus = { mode: 'available', note: null, expiresAt: n
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function StatusPicker({ userId, circleId, accentColor }: Props) {
+export default function StatusPicker({ userId, accentColor }: Props) {
   const [status, setStatus] = useState<UserStatus>(DEFAULT_STATUS);
   const [expanded, setExpanded] = useState(false);
   const [noteText, setNoteText] = useState('');
@@ -100,7 +100,7 @@ export default function StatusPicker({ userId, circleId, accentColor }: Props) {
     }, Math.min(remaining, 2_147_483_647));
   }, []);
 
-  // ─── Persist + broadcast ──────────────────────────────────────────────────
+  // ─── Persist ──────────────────────────────────────────────────────────────
   const saveStatus = useCallback(async (newStatus: UserStatus) => {
     setStatus(newStatus);
     setNoteText(newStatus.note || '');
@@ -120,19 +120,7 @@ export default function StatusPicker({ userId, circleId, accentColor }: Props) {
       setSaveError('Presence was not saved. Check your connection and try again.');
     }
 
-    // Broadcast to circle
-    try {
-      const channel = supabase.channel(`circle:${circleId}`);
-      await channel.send({
-        type: 'broadcast',
-        event: 'status_update',
-        payload: { userId, status: newStatus },
-      });
-      supabase.removeChannel(channel);
-    } catch {
-      // Best effort
-    }
-  }, [userId, circleId, scheduleExpiry]);
+  }, [userId, scheduleExpiry]);
   // Expiry timers always call the latest callback, including the current
   // user/circle identity after a navigation change.
   saveStatusRef.current = saveStatus;

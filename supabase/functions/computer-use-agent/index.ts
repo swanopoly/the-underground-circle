@@ -740,10 +740,10 @@ Deno.serve(async (req: Request) => {
   }
 
   // Cross-circle IDOR guard: the reads below are keyed on body.circleId via the
-  // service-role client (RLS bypassed). A verified caller must be a MEMBER of
-  // that circle. The scheduled service-role path (trusted internal caller) is
-  // exempt. Service-role + explicit (circle_id, user_id) equality checks the
-  // VERIFIED user's own membership and avoids the circle_members RLS recursion.
+  // service-role client (RLS bypassed). Both interactive users and the user
+  // named by a trusted scheduled call must still be a CURRENT member of that
+  // exact Circle. The schedule is prior intent, not permanent authority to
+  // decrypt or spend a departed creator's personal Anthropic key.
   const isScheduledServiceCall = Boolean(scheduledBy) && isServiceRoleRequest(req);
   const policyResult = validateComputerUsePolicyEnvelope(body.policy, isScheduledServiceCall);
   if (!policyResult.ok) {
@@ -756,16 +756,31 @@ Deno.serve(async (req: Request) => {
     );
   }
   const executionPolicy = policyResult.policy;
-  if (!isScheduledServiceCall && supabase && body.circleId) {
-    const { data: membership } = await supabase
+  if (isScheduledServiceCall && !body.circleId) {
+    return new Response(
+      JSON.stringify({ error: "Scheduled Computer Use requires an exact Circle", code: "scheduled_circle_required" }),
+      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+  if (body.circleId) {
+    const { data: membership, error: membershipError } = await supabase
       .from("circle_members")
       .select("circle_id")
       .eq("circle_id", body.circleId)
       .eq("user_id", userId)
       .maybeSingle();
+    if (membershipError) {
+      return new Response(
+        JSON.stringify({ error: "Circle access could not be verified", code: "circle_authority_unavailable" }),
+        { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
     if (!membership) {
       return new Response(
-        JSON.stringify({ error: "Not a member of this circle", code: "forbidden" }),
+        JSON.stringify({
+          error: "Not a current member of this Circle",
+          code: isScheduledServiceCall ? "circle_authority_revoked" : "forbidden",
+        }),
         { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }

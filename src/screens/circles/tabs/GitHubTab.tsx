@@ -105,7 +105,7 @@ export default function GitHubTab({ circleId }: { circleId: string }) {
       // Check for existing connections
       const { data: conns } = await supabase
         .from('circle_github_connections')
-        .select('*')
+        .select('id, circle_id, owner, repo, full_name, default_branch, webhook_id, events_enabled, notify_chat, notify_activity, is_active, last_event_at, event_count, created_at')
         .eq('circle_id', circleId)
         .eq('is_active', true)
         .order('created_at', { ascending: false });

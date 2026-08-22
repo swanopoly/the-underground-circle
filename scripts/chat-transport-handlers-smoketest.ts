@@ -510,12 +510,14 @@ async function main() {
         if (dispatchedPlan.intent.kind !== 'conversational_action') return { handled: false };
         const result = await executeDetectedConversationalIntent(dispatchedPlan.intent.intent, {
           circleId: 'c1',
+          threadId: 't1',
+          sourceMessageId: 'm1',
           userId: 'u1',
           fullMessage: imagePrompt,
-          model: 'hf-test-model',
+          requestedModel: 'flux-schnell',
           executeHfCommand: async (input, commandCtx) => {
             seenCommand = input;
-            seenModel = commandCtx.model;
+            seenModel = commandCtx.requestedModel;
             return {
               success: true,
               message: '**Generated image:** _Generate an image of a neon swan_',
@@ -543,7 +545,7 @@ async function main() {
     const outcome = await dispatchChatAutomationPlan(imagePlan, { handlers, ctx });
     assertEqual(outcome.status, 'completed', 'R8 image path: executor handled the detected intent');
     assertEqual(seenCommand, '/imagine Generate an image of a neon swan', 'R8 image path: routed through HF /imagine');
-    assertEqual(seenModel, 'hf-test-model', 'R8 image path: selected model forwarded to HF executor');
+    assertEqual(seenModel, 'flux-schnell', 'R8 image path: requested image model forwarded to the canonical executor');
     assertEqual(outcome.data?.artifactCount, 1, 'R8 image path: image artifact count returned');
     assertEqual(__conversationalRouterDiagnostics.detectCalls, 0, 'R8 image path: detectConversationalIntent NOT called');
   }

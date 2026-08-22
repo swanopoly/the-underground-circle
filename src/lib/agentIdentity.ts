@@ -441,7 +441,7 @@ export function applyIdentityToAgent(agent: OfficeAgent, identity?: AgentIdentit
     // field: doing so made a logout/login replace today's server total with an
     // arbitrary cached all-time maximum.
     costTotal: Math.max(agent.costTotal, identity.totalCostAllTime),
-    tokensUsed: Math.max(agent.tokensUsed, identity.totalTokensAllTime),
+    tokensTotal: Math.max(agent.tokensTotal || 0, agent.tokensUsed, identity.totalTokensAllTime),
     messagesProcessed: Math.max(agent.messagesProcessed, identity.totalMessages),
     spirit: identity.spiritId || agent.spirit,
   };
@@ -2292,13 +2292,14 @@ export async function recordAgentActivity(agent: OfficeAgent): Promise<void> {
     agent.sessionCostToday || 0,
     agent.costToday || 0,
   );
+  const lifetimeTokens = Math.max(agent.tokensTotal || 0, agent.tokensUsed);
   
   if (existing) {
     // Update existing identity with cumulative data
     identities.set(sessionKey, {
       ...existing,
       totalCostAllTime: Math.max(existing.totalCostAllTime, lifetimeCost),
-      totalTokensAllTime: Math.max(existing.totalTokensAllTime, agent.tokensUsed),
+      totalTokensAllTime: Math.max(existing.totalTokensAllTime, lifetimeTokens),
       totalMessages: Math.max(existing.totalMessages, agent.messagesProcessed),
       mostUsedModel: agent.model,
       boundModel: agent.model || existing.boundModel,
@@ -2309,7 +2310,7 @@ export async function recordAgentActivity(agent: OfficeAgent): Promise<void> {
     identities.set(sessionKey, {
       sessionKey,
       totalCostAllTime: lifetimeCost,
-      totalTokensAllTime: agent.tokensUsed,
+      totalTokensAllTime: lifetimeTokens,
       totalSessionsAllTime: 1,
       firstSeen: Date.now(),
       lastSeen: Date.now(),
@@ -2347,12 +2348,13 @@ export async function recordAgentActivityExact(
     agent.sessionCostToday || 0,
     agent.costToday || 0,
   );
+  const lifetimeTokens = Math.max(agent.tokensTotal || 0, agent.tokensUsed);
   const now = Date.now();
   const nextIdentity: AgentIdentity = existing
     ? {
       ...existing,
       totalCostAllTime: Math.max(existing.totalCostAllTime, lifetimeCost),
-      totalTokensAllTime: Math.max(existing.totalTokensAllTime, agent.tokensUsed),
+      totalTokensAllTime: Math.max(existing.totalTokensAllTime, lifetimeTokens),
       totalMessages: Math.max(existing.totalMessages, agent.messagesProcessed),
       mostUsedModel: agent.model,
       boundAiProvider: existing.boundAiProvider || agent.providerType,
@@ -2362,7 +2364,7 @@ export async function recordAgentActivityExact(
     : {
       sessionKey,
       totalCostAllTime: lifetimeCost,
-      totalTokensAllTime: agent.tokensUsed,
+      totalTokensAllTime: lifetimeTokens,
       totalSessionsAllTime: 1,
       firstSeen: now,
       lastSeen: now,

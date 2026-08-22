@@ -205,10 +205,10 @@ assert.match(
   /data\.error && data\.lastRefreshed[\s\S]*?styles\.staleBanner[\s\S]*?accessibilityRole="alert"/,
   'a failed refresh must keep the previous snapshot and identify it as stale',
 );
-assert.match(
+assert.doesNotMatch(
   backpackSource,
-  /accessibilityState=\{\{ busy: data\.refreshing, disabled: data\.refreshing \}\}/,
-  'refresh must expose its busy and disabled state',
+  /Refresh Backpack data|styles\.refreshBtn|summaryMetric|summaryBar|Estimated spend today|Tokens today|Agents available/,
+  'the compact overview must omit the manual refresh control and duplicate summary metrics',
 );
 assert.match(
   backpackSource,
@@ -247,22 +247,6 @@ assert.match(
 );
 assert.match(
   backpackSource,
-  /summaryMetricRefs\.current\[origin\.id\]\?\.focus\?\.\(\)/,
-  'summary metrics must regain focus after their focused dashboard closes',
-);
-assert.match(
-  backpackSource,
-  /const healthPct = data\.enrichedAgents\.length > 0[\s\S]*?: null;/,
-  'an empty agent read must produce unknown health instead of a perfect score',
-);
-assert.match(
-  backpackSource,
-  /value: healthPct == null \? '—' : `\$\{healthPct\}%`[\s\S]*?'No verified agent data'/,
-  'the empty health summary must disclose that no verified agent data exists',
-);
-
-assert.match(
-  backpackSource,
   /<CostDashboard[\s\S]*?costAuthority="estimated"/,
   'Backpack must identify its token-derived cost totals as estimates',
 );
@@ -281,10 +265,15 @@ assert.doesNotMatch(
   /loadBudgetConfig\(/,
   'Backpack must not read the retired device-local budget path that has no matching writer',
 );
+assert.doesNotMatch(
+  backpackSource,
+  /data\.budgetConfigNotice|Budget alerts unavailable|Private per-circle Office preferences/,
+  'the overview must omit the unavailable-budget configuration notice',
+);
 assert.match(
   backpackSource,
-  /data\.budgetConfigNotice[\s\S]*?Budget alerts unavailable/,
-  'a canonical budget preference failure must be visible instead of looking like disabled alerts',
+  /data\.budgetAlerts\.length > 0[\s\S]*?accessibilityRole="alert"[\s\S]*?data\.budgetAlerts\[0\]\.message/,
+  'real budget alerts must remain visible after removing the unavailable-configuration notice',
 );
 
 for (const receiptContract of [
@@ -372,8 +361,8 @@ assert.match(
 
 assert.match(
   traceSource,
-  /if \(responsesError\) throw responsesError;[\s\S]*?if \(messagesError\) throw messagesError;[\s\S]*?if \(profilesError\) throw profilesError;/,
-  'Traces must surface response, message, and profile read failures',
+  /if \(responsesError\) throw responsesError;[\s\S]*?if \(messagesError\) throw messagesError;[\s\S]*?await loadSafeCircleProfiles\(\{ circleId, userIds: senderIds \}\)/,
+  'Traces must surface response and message failures and use the strict safe-profile reader',
 );
 assert.match(
   traceSource,
@@ -500,6 +489,16 @@ assert.match(
   backpack2dSource,
   /onLayout=\{handleStageLayout\}/,
   'the Backpack must measure its own rendered container instead of relying only on the window',
+);
+assert.match(
+  backpack2dSource,
+  /stage:\s*\{[\s\S]*?maxWidth:\s*720,[\s\S]*?paddingTop:\s*38,[\s\S]*?paddingBottom:\s*18/,
+  'the Backpack stage must use the smaller desktop footprint',
+);
+assert.match(
+  backpack2dSource,
+  /packAssembly:\s*\{[\s\S]*?width:\s*'74%'[\s\S]*?pocket:\s*\{[\s\S]*?minHeight:\s*52[\s\S]*?lidPocket:\s*\{[\s\S]*?minHeight:\s*88/,
+  'the pack body and pockets must use the compact internal sizing contract',
 );
 for (const tinyStyle of [
   'stageTiny',

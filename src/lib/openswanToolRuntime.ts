@@ -1,4 +1,5 @@
 import { getSupabaseClientForAccessToken, supabase } from './supabase';
+import { indexSafeProfiles, loadSafeCircleProfiles } from './safeProfiles';
 import { semanticSearchMemories } from './memoryEmbeddings';
 import { summarizeDiagnostics } from './verificationDiagnosticsCore';
 import { applyToolSearchRelevanceFloor } from './toolSearchRelevanceCore';
@@ -6194,7 +6195,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     surfaces: ['main_chat', 'room_chat', 'task_run'],
     description:
       'Opens one exact durably linked current-turn attachment through a path-free, one-shot desktop capability. ' +
-      'The runtime checks exact byte identity, requires a solo approval, dispatches once, and accepts completion only from fresh frontmost-app proof. Open only; editing is unsupported.',
+      'Use when the user explicitly asks to open or preview that attachment in a local app. The runtime checks exact byte identity, requires a solo approval, dispatches once, and accepts completion only from fresh frontmost-app proof. Open only; editing is unsupported.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -8441,9 +8442,11 @@ function describeDesktopFailure(error?: string, code?: string): string {
  * fence. Structural metadata (counts, truncation trailers, headers) stays
  * OUTSIDE the fence so the model can still trust it.
  */
-// P15 — last a11y snapshot per app (bounded ≤8 apps × ≤400 summary nodes) so
+// P15 — last a11y snapshot per user+app (bounded ≤8 entries × ≤400 summary nodes) so
 // consecutive desktop.read_a11y_tree calls report a structured +/-/~ delta.
-// Keyed by app name because the Mac's app state is physically global.
+// Labels and values can contain personal document/window content, so a bare
+// app-name key would expose a previous account's removed/changed labels in the
+// next account's first diff even though the fresh read itself is authorized.
 const lastA11ySnapshotByApp = new Map<string, import('./a11yTreeDiff').A11ySummaryNode[]>();
 
 export function fenceUntrustedObservationText(text: string): string {
@@ -16387,12 +16390,22 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
     case 'list_circle_members': {
       const { data } = await supabase
         .from('circle_members')
-        .select('user:profiles(display_name, username)')
+        .select('user_id')
         .eq('circle_id', context.circleId);
+      const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+        circleId: context.circleId,
+        userIds: (data || []).map((row: any) => row.user_id),
+        client: context.exactCircleAuthority?.accessToken
+          ? getSupabaseClientForAccessToken(context.exactCircleAuthority.accessToken)
+          : supabase,
+      }));
       const resultsText = !data || data.length === 0
         ? 'No members found.'
         : (data as any[])
-            .map((row, index) => `${index + 1}. ${row.user?.display_name || row.user?.username || 'Unknown'}`)
+            .map((row, index) => {
+              const profile = profileById.get(row.user_id);
+              return `${index + 1}. ${profile?.display_name || profile?.username || 'Unknown'}`;
+            })
             .join('\n');
       return {
         ok: true,
@@ -16719,7 +16732,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         const limit = Math.min(Number((args as any).limit) || 12, 30);
         const { data, error } = await supabase
           .from('messages')
-          .select('id, content, created_at, user:profiles(display_name, username)')
+          .select('id, user_id, content, created_at')
           .eq('circle_id', context.circleId)
           .order('created_at', { ascending: false })
           .limit(limit);
@@ -16727,7 +16740,14 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         if (!data || data.length === 0) return { ok: true, resultsText: 'No recent messages found.' } as any;
         // T10: concise (default) == legacy 180-char excerpts; detailed allows 600 chars per message.
         const excerptCap = resolveResponseFormat((args as any).response_format) === 'detailed' ? 600 : 180;
-        const lines = (data as any[]).map((row, index) => `${index + 1}. ${(row.user?.display_name || row.user?.username || 'Unknown')}: ${String(row.content || '').replace(/\s+/g, ' ').slice(0, excerptCap)}`);
+        const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+          circleId: context.circleId,
+          userIds: data.map((row: any) => row.user_id),
+        }));
+        const lines = (data as any[]).map((row, index) => {
+          const profile = profileById.get(row.user_id);
+          return `${index + 1}. ${profile?.display_name || profile?.username || 'Unknown'}: ${String(row.content || '').replace(/\s+/g, ' ').slice(0, excerptCap)}`;
+        });
         return { ok: true, resultsText: lines.join('\n') } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
@@ -18549,14 +18569,21 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         const since = (args as any).since || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
         const { data, error } = await supabase
           .from('check_ins')
-          .select('id, content, created_at, user:profiles(display_name, username)')
+          .select('id, user_id, content, created_at')
           .eq('circle_id', context.circleId)
           .gte('created_at', since)
           .order('created_at', { ascending: false })
           .limit(limit);
         if (error) return { ok: false, resultsText: error.message } as any;
         if (!data || data.length === 0) return { ok: true, resultsText: 'No recent check-ins found.' } as any;
-        const lines = (data as any[]).map((row, index) => `${index + 1}. ${(row.user?.display_name || row.user?.username || 'Unknown')}: ${String(row.content || '').replace(/\s+/g, ' ').slice(0, 200)}`);
+        const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+          circleId: context.circleId,
+          userIds: data.map((row: any) => row.user_id),
+        }));
+        const lines = (data as any[]).map((row, index) => {
+          const profile = profileById.get(row.user_id);
+          return `${index + 1}. ${profile?.display_name || profile?.username || 'Unknown'}: ${String(row.content || '').replace(/\s+/g, ' ').slice(0, 200)}`;
+        });
         // Check-in names + text are member-authored — fence before returning to the model.
         return { ok: true, resultsText: fenceUntrustedObservationText(lines.join('\n')) } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
@@ -20967,9 +20994,10 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         const { buildAppScreenNextStep, describeAppScreenNextStepForModel } = await import('./appScreenNextStep');
         const summary = d.tree ? snapshotA11ySummary(d.tree as any) : [];
         const appKey = String(d.app || a.appName || 'frontmost').trim().toLowerCase();
-        const prev = lastA11ySnapshotByApp.get(appKey);
+        const snapshotKey = `${String(context.userId || '').trim().toLowerCase()}::${appKey}`;
+        const prev = lastA11ySnapshotByApp.get(snapshotKey);
         if (summary.length > 0) {
-          lastA11ySnapshotByApp.set(appKey, summary);
+          lastA11ySnapshotByApp.set(snapshotKey, summary);
           if (lastA11ySnapshotByApp.size > 8) {
             const oldest = lastA11ySnapshotByApp.keys().next().value;
             if (oldest !== undefined) lastA11ySnapshotByApp.delete(oldest);
@@ -21538,9 +21566,10 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         try {
           const { snapshotA11ySummary, diffA11ySummaries, describeA11yDiffForModel } = await import('./a11yTreeDiff');
           const appKey = String(r.data?.app || a.appName || 'frontmost').trim().toLowerCase();
+          const snapshotKey = `${String(context.userId || '').trim().toLowerCase()}::${appKey}`;
           const summary = snapshotA11ySummary(r.data?.tree as any);
-          const prev = lastA11ySnapshotByApp.get(appKey);
-          lastA11ySnapshotByApp.set(appKey, summary);
+          const prev = lastA11ySnapshotByApp.get(snapshotKey);
+          lastA11ySnapshotByApp.set(snapshotKey, summary);
           if (lastA11ySnapshotByApp.size > 8) {
             const oldest = lastA11ySnapshotByApp.keys().next().value;
             if (oldest !== undefined) lastA11ySnapshotByApp.delete(oldest);

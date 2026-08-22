@@ -14,6 +14,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { supabase } from '../../../lib/supabase';
+import { loadSafeCircleProfiles } from '../../../lib/safeProfiles';
 import { showConfirm } from '../../../lib/alert';
 import {
   useMissionDetail,
@@ -882,13 +883,17 @@ function MissionDetail({ missionId, circleId, accentColor, onBack, favorites, on
     (async () => {
       const { data } = await supabase
         .from('circle_members')
-        .select('user_id, profiles(display_name, username)')
+        .select('user_id')
         .eq('circle_id', circleId);
       if (data) {
-        setMembers(data.map((m: any) => ({
-          user_id: m.user_id,
-          display_name: m.profiles?.display_name || m.profiles?.username || 'Unknown',
-          username: m.profiles?.username || '',
+        const profiles = await loadSafeCircleProfiles({
+          circleId,
+          userIds: data.map((member: any) => member.user_id),
+        });
+        setMembers(profiles.map(profile => ({
+          user_id: profile.id,
+          display_name: profile.display_name || profile.username || 'Unknown',
+          username: profile.username || '',
         })));
       }
     })().catch(() => {});
@@ -1209,6 +1214,7 @@ function MissionDetail({ missionId, circleId, accentColor, onBack, favorites, on
         {/* Notion-style page history */}
         {showHistory && (
           <MissionHistoryPanel
+            circleId={circleId}
             missionId={missionId}
             accentColor={accentColor}
             onClose={() => setShowHistory(false)}

@@ -6,7 +6,7 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { supabase } from './supabase';
+import { getSupabaseClientForAccessToken, supabase } from './supabase';
 import { getStrictLocalAiModeMessage, shouldBlockExternalAiProvider } from './privacyMode';
 import {
   LLMProxyInvocationError,
@@ -14,7 +14,7 @@ import {
   readLLMProxyInvokeError,
 } from './llmProxyErrorCore';
 import { resolvePlainChatModelRoute } from './crossProviderRouter';
-import { safeGetUserForAccessToken } from './authSession';
+import { getFreshAccessToken, safeGetUserForAccessToken } from './authSession';
 import type {
   ProviderModelCatalogFailureCode,
   ProviderModelCatalogStatus,
@@ -131,6 +131,23 @@ export interface ProviderModelCatalogSnapshot {
   fetchedAt: string | null;
   failureCode?: ProviderModelCatalogFailureCode;
 }
+
+/**
+ * Exact account/circle authority for one catalog hydration. The bearer is
+ * captured once and every subsequent key, integration, and Edge read uses a
+ * client pinned to it, so an auth change cannot relabel another account's
+ * response as belonging to the original request.
+ */
+export type ProviderModelCatalogExactAuthority = Readonly<{
+  userId: string;
+  circleId: string | null;
+  accessToken: string;
+}>;
+
+export type ProviderModelCatalogLoadOptions = Readonly<{
+  force?: boolean;
+  authority?: ProviderModelCatalogExactAuthority;
+}>;
 
 export interface LLMProxyResponse {
   response: string;
@@ -375,6 +392,59 @@ const MAX_EXACT_ACCESS_TOKEN_LENGTH = 16_384;
 const MAX_PROVIDER_API_KEY_LENGTH = 64 * 1024;
 const MAX_PROVIDER_ENDPOINT_LENGTH = 2_048;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const capturedProviderModelCatalogAuthorities = new WeakSet<object>();
+
+function normalizeProviderModelCatalogCircleId(
+  input: string | null | undefined,
+): string | null | undefined {
+  if (input === null || input === undefined) return null;
+  const circleId = input.trim();
+  if (!circleId) return null;
+  if (circleId.length > MAX_EXACT_SCOPE_PART_LENGTH) return undefined;
+  return circleId;
+}
+
+function normalizeProviderModelCatalogAuthority(
+  input: ProviderModelCatalogExactAuthority | null | undefined,
+): ProviderModelCatalogExactAuthority | null {
+  const userId = typeof input?.userId === 'string' ? input.userId.trim() : '';
+  const circleId = normalizeProviderModelCatalogCircleId(input?.circleId);
+  const accessToken = typeof input?.accessToken === 'string' ? input.accessToken.trim() : '';
+  if (
+    !userId
+    || userId.length > MAX_EXACT_SCOPE_PART_LENGTH
+    || circleId === undefined
+    || !accessToken
+    || accessToken.length > MAX_EXACT_ACCESS_TOKEN_LENGTH
+  ) return null;
+  return Object.freeze({ userId, circleId, accessToken });
+}
+
+/** Capture and server-verify one bearer before a Marketplace catalog load. */
+export async function captureProviderModelCatalogAuthority(
+  circleId?: string | null,
+): Promise<ProviderModelCatalogExactAuthority | null> {
+  const normalizedCircleId = normalizeProviderModelCatalogCircleId(circleId);
+  if (normalizedCircleId === undefined) return null;
+  const accessToken = await getFreshAccessToken();
+  if (!accessToken || accessToken.length > MAX_EXACT_ACCESS_TOKEN_LENGTH) return null;
+  const { value: verifiedUser } = await safeGetUserForAccessToken(accessToken);
+  if (!verifiedUser?.id) return null;
+  const authority = normalizeProviderModelCatalogAuthority({
+    userId: verifiedUser.id,
+    circleId: normalizedCircleId,
+    accessToken,
+  });
+  if (authority) capturedProviderModelCatalogAuthorities.add(authority);
+  return authority;
+}
+
+function resolveCapturedProviderModelCatalogAuthority(
+  input: ProviderModelCatalogExactAuthority | null | undefined,
+): ProviderModelCatalogExactAuthority | null {
+  if (!input || !capturedProviderModelCatalogAuthorities.has(input)) return null;
+  return normalizeProviderModelCatalogAuthority(input);
+}
 
 function normalizeProviderKeysExactAuthority(
   input: ProviderKeysExactAuthority | null | undefined,
@@ -520,19 +590,58 @@ export async function storeApiKey(
   return { id: data };
 }
 
-export async function listApiKeys(): Promise<ProviderKey[]> {
-  const { data, error } = await supabase.rpc('list_user_api_keys');
-  if (error || !data) return [];
+/**
+ * Load provider-key metadata without converting an authority/read failure into
+ * a verified empty account. Catalog owners use this strict form so Chat can
+ * retry or fail visibly instead of silently dropping connected Marketplace
+ * providers from Auto routing.
+ */
+export async function listApiKeysStrict(
+  capturedAuthority?: ProviderModelCatalogExactAuthority,
+): Promise<ProviderKey[]> {
+  const authority = capturedAuthority
+    ? resolveCapturedProviderModelCatalogAuthority(capturedAuthority)
+    : null;
+  if (capturedAuthority && !authority) {
+    throw new Error('Connected model credential inventory authority is invalid.');
+  }
+  const exactClient = authority
+    ? getSupabaseClientForAccessToken(authority.accessToken)
+    : supabase;
+  const { data, error } = await exactClient.rpc('list_user_api_keys');
+  if (error || !Array.isArray(data) || data.length > 100) {
+    throw new Error('Connected model credential inventory is unavailable.');
+  }
 
-  return data.map((row: any) => ({
-    id: row.id,
-    provider: row.provider as LLMProvider,
-    label: row.label,
-    endpoint: row.endpoint,
-    isActive: row.is_active,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  }));
+  const keys: ProviderKey[] = [];
+  for (const row of data) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) {
+      throw new Error('Connected model credential inventory is invalid.');
+    }
+    const value = row as Record<string, unknown>;
+    if (typeof value.provider !== 'string' || !value.provider.trim()) {
+      throw new Error('Connected model credential inventory is invalid.');
+    }
+    const rawProvider = value.provider.trim();
+    const provider = rawProvider === 'hugging_face'
+      ? 'huggingface'
+      : rawProvider === 'z_ai'
+        ? 'zai'
+        : rawProvider;
+    // The shared vault also stores non-model Marketplace credentials (for
+    // example search/browser providers). They are valid rows, but are outside
+    // the Chat model catalog and must neither authorize nor block Auto.
+    if (!isKnownProvider(provider)) continue;
+    const parsed = parseProviderKeyRow({ ...value, provider });
+    if (!parsed) throw new Error('Connected model credential inventory is invalid.');
+    keys.push(parsed);
+  }
+  return keys;
+}
+
+/** Legacy fail-soft projection for optional, non-authoritative consumers. */
+export async function listApiKeys(): Promise<ProviderKey[]> {
+  return listApiKeysStrict().catch(() => []);
 }
 
 export async function deleteApiKey(keyId: string): Promise<{ error?: string }> {
@@ -1019,7 +1128,7 @@ export function createProviderModelCatalogFallback(
 export async function loadProviderModelCatalogSnapshot(
   provider: LLMProvider,
   circleId?: string | null,
-  options: { force?: boolean } = {},
+  options: ProviderModelCatalogLoadOptions = {},
 ): Promise<ProviderModelCatalogSnapshot> {
   if (!LIVE_MODEL_CATALOG_PROVIDERS.has(provider)) {
     return {
@@ -1031,19 +1140,26 @@ export async function loadProviderModelCatalogSnapshot(
     };
   }
 
-  let userId = '';
-  try {
-    const { data: sessionData } = await supabase.auth.getSession();
-    userId = sessionData.session?.user?.id || '';
-  } catch {
-    return createProviderModelCatalogFallback(provider, 'auth_unavailable');
+  const requestedCircleId = normalizeProviderModelCatalogCircleId(circleId);
+  if (requestedCircleId === undefined) {
+    return createProviderModelCatalogFallback(provider, 'forbidden');
   }
-  if (!userId) return createProviderModelCatalogFallback(provider, 'auth_unavailable');
+  const authority = options.authority
+    ? resolveCapturedProviderModelCatalogAuthority(options.authority)
+    : await captureProviderModelCatalogAuthority(requestedCircleId);
+  if (!authority) return createProviderModelCatalogFallback(provider, 'auth_unavailable');
+  if (authority.circleId !== requestedCircleId) {
+    return createProviderModelCatalogFallback(provider, 'forbidden');
+  }
+  const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
 
-  // Never reuse one signed-in user's account catalog for another user in the
-  // same long-lived web/native runtime. Anonymous/auth-loading calls stay
-  // uncached and the hosted proxy will fail closed if no JWT is available.
-  const cacheKey = userId ? `${userId}:${provider}` : '';
+  // Catalog evidence is scoped to both the exact signed-in subject and the
+  // circle whose membership the Edge function checked. Encoding each scope
+  // part prevents delimiter collisions without putting the bearer in memory
+  // keys or response objects.
+  const cacheKey = [authority.userId, authority.circleId || '', provider]
+    .map(part => encodeURIComponent(part))
+    .join(':');
   const now = Date.now();
   const cached = cacheKey ? providerModelCatalogCache.get(cacheKey) : undefined;
   if (!options.force && cached && now < cached.expiresAt) {
@@ -1071,11 +1187,11 @@ export async function loadProviderModelCatalogSnapshot(
 
   let snapshot: ProviderModelCatalogSnapshot;
   try {
-    const { data, error } = await supabase.functions.invoke('llm-proxy', {
+    const { data, error } = await exactClient.functions.invoke('llm-proxy', {
       body: {
         action: 'list_models',
         provider,
-        ...(circleId ? { circleId } : {}),
+        ...(authority.circleId ? { circleId: authority.circleId } : {}),
       },
     });
     if (error) {
@@ -1129,7 +1245,7 @@ export async function loadProviderModelCatalogSnapshot(
 export async function listAvailableProviderModels(
   provider: LLMProvider,
   circleId?: string | null,
-  options: { force?: boolean } = {},
+  options: ProviderModelCatalogLoadOptions = {},
 ): Promise<ProviderModel[]> {
   const snapshot = await loadProviderModelCatalogSnapshot(provider, circleId, options);
   return snapshot.models;
@@ -1142,11 +1258,12 @@ export function invalidateProviderModelCatalog(provider?: LLMProvider): void {
     providerModelCatalogRequestGeneration.clear();
     return;
   }
+  const encodedProviderSuffix = `:${encodeURIComponent(provider)}`;
   for (const key of providerModelCatalogCache.keys()) {
-    if (key.endsWith(`:${provider}`)) providerModelCatalogCache.delete(key);
+    if (key.endsWith(encodedProviderSuffix)) providerModelCatalogCache.delete(key);
   }
   for (const key of providerModelCatalogRequestGeneration.keys()) {
-    if (key.endsWith(`:${provider}`)) providerModelCatalogRequestGeneration.delete(key);
+    if (key.endsWith(encodedProviderSuffix)) providerModelCatalogRequestGeneration.delete(key);
   }
 }
 

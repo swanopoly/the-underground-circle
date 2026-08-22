@@ -6,6 +6,7 @@
  */
 
 import { supabase } from './supabase';
+import { indexSafeProfiles, loadSafeCircleProfiles } from './safeProfiles';
 import { getFreshAccessToken, safeGetUser } from './authSession';
 import { wrapUntrusted } from './untrustedContent';
 import { annotateUntrustedHeading } from './untrustedScanAnnotate';
@@ -2278,14 +2279,17 @@ async function executeClientToolCalls(
       // tool flow — recording is a best-effort observer.
       try {
         const rec = await import('./chatRecording');
-        if (rec.isRecordable(call.name) && rec.getActiveSession()) {
+        const recordingScope = context
+          ? { userId: context.userId, circleId: context.circleId }
+          : null;
+        if (recordingScope && rec.isRecordable(call.name) && rec.getActiveSession(recordingScope)) {
           const target = extractA11yTarget(call, result);
           rec.appendStep(rec.buildStep({
             tool: call.name,
             input: (call.input || {}) as Record<string, unknown>,
             result: { ok: result.ok, data: result.data, error: result.error },
             a11yTarget: target,
-          }));
+          }), recordingScope);
         }
       } catch { /* observer failures must never break tool flow */ }
       return {
@@ -4475,6 +4479,7 @@ async function callSwanBotAI(
           message,
           circleId,
           userId,
+          ...(clientLoopContext?.threadId ? { threadId: clientLoopContext.threadId } : {}),
           discordContext,
           wikiContext,
           conversationMessages,
@@ -4807,7 +4812,10 @@ async function buildSystemPromptAsync(
   if (loadProfile) addContextTask(async () => {
     try {
       const { loadUserProfile, generateProfileContext } = await import('./userChatProfile');
-      const profile = await withTimeout(loadUserProfile());
+      const profile = await withTimeout(loadUserProfile({
+        userId: context.userId,
+        circleId: context.circleId,
+      }));
       const profileCtx = profile ? generateProfileContext(profile) : null;
       if (profileCtx) sections.push({ key: 'user_chat_profile', body: profileCtx });
     } catch (e) { console.warn('[SwanBot] Profile load failed:', e); }
@@ -5084,6 +5092,7 @@ async function buildSystemPromptAsync(
     try {
       const resourcesBlock = await withTimeout(import('./connectedResourcesRuntime').then(({ buildConnectedResourcesContextBlock }) => buildConnectedResourcesContextBlock({
         circleId: context.circleId,
+        userId: context.userId,
         connectedProviders: context.connectedProviders,
       })));
       if (resourcesBlock) sections.push({ key: 'connected_resources', body: resourcesBlock });
@@ -5368,9 +5377,9 @@ async function getUserProfile(userId: string) {
 async function getCircleMembers(circleId: string) {
   const { data } = await supabase
     .from('circle_members')
-    .select('user:profiles(id, username, display_name, current_streak, longest_streak)')
+    .select('user_id')
     .eq('circle_id', circleId);
-  return (data || []).map((d: any) => d.user).filter(Boolean);
+  return loadSafeCircleProfiles({ circleId, userIds: (data || []).map((row: any) => row.user_id) });
 }
 
 async function getUserTasks(circleId: string, userId: string) {
@@ -5389,10 +5398,14 @@ async function getTodayCheckIns(circleId: string) {
   const today = new Date().toISOString().split('T')[0];
   const { data } = await supabase
     .from('check_ins')
-    .select('*, user:profiles(username, display_name)')
+    .select('*')
     .eq('circle_id', circleId)
     .gte('created_at', today);
-  return data || [];
+  const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+    circleId,
+    userIds: (data || []).map((row: any) => row.user_id),
+  }));
+  return (data || []).map((row: any) => ({ ...row, user: profileById.get(row.user_id) || null }));
 }
 
 async function getCircleContextData(ctx: SwanBotContext): Promise<CircleContextData> {
@@ -6765,6 +6778,7 @@ export async function executeToolUseLoop(opts: {
           message: opts.userMessage,
           circleId: opts.circleId,
           userId: opts.userId,
+          ...(opts.threadId ? { threadId: opts.threadId } : {}),
           model: loopModel,
           tools: anthropicTools,
           tool_messages: messages.length > 1 ? messages : undefined,
@@ -7300,6 +7314,7 @@ export async function executeToolUseLoop(opts: {
           message: opts.userMessage,
           circleId: opts.circleId,
           userId: opts.userId,
+          ...(opts.threadId ? { threadId: opts.threadId } : {}),
           // `loopModel`, not `opts.model`: after a visible BlackSwan failover
           // the finalization must not re-hit the dead BlackSwan route.
           model: loopModel,

@@ -1,6 +1,6 @@
 import type { AuthError } from '@supabase/supabase-js';
 import { supabase } from './supabase';
-import { removeStorageKeysByPrefix } from './storage';
+import { removeStorageKeysByPrefix, storage } from './storage';
 import { closeOpenSwanApprovalResumeOutboxAuthorityForLogout } from './openSwanApprovalResumeOutbox';
 
 export type AuthSignOutScope = 'global' | 'local' | 'others';
@@ -22,6 +22,7 @@ const AUTH_SESSION_STORAGE_PREFIXES = [
   'uc_chat_active_thread::',
   'uc_circle_cache_',
   'uc_circles_cache_v1:',
+  'uc_last_profile_circle',
   '@office_conversation_log',
   '@office_session_cache',
   '@office_session_cache_v2:',
@@ -43,6 +44,29 @@ const AUTH_SESSION_STORAGE_PREFIXES = [
   '@office_floors',
   '@office_floors_updated_at',
   '@office_current_floor',
+  '@local_secret:github_pat:',
+  '@local_secret:github_pat_v2:',
+  '@github_pat_scopes_v2:',
+  '@office_tasks',
+  '@office_task_updates',
+  '@office_tasks_archive',
+  '@office_task_updates_archive',
+  '@office_tasks_migration',
+  '@office_projects',
+  '@office_projects_archive',
+  '@office_projects_migration',
+  'uc_compacted_context_',
+  'uc_build_convo_v1:',
+  'uc_omnibar_query_',
+] as const;
+
+const OWNERLESS_EXACT_STORAGE_KEYS = [
+  '@agent_identity_store',
+  '@office_agent_names',
+  '@office_budget_config',
+  '@custom_hf_models',
+  'uc_saved_cu_templates_v1',
+  'uc_indesign_recovery_memory_v1',
 ] as const;
 
 async function resolveCurrentUserId(timeoutMs = 500): Promise<string | null> {
@@ -93,6 +117,10 @@ export async function clearLocalAuthResidualAuthority(
       const { clearRecordingStateForLogout } = await import('./chatRecording');
       clearRecordingStateForLogout(userId);
     }),
+    attempt('profile-circle-context', async () => {
+      const { clearLastProfileCircleForLogout } = await import('./profileNavigation');
+      clearLastProfileCircleForLogout();
+    }),
     attempt('standing-computer-grants', async () => {
       const { revokeAllActiveStickyAllowScopes } = await import('./computerGrantGateStore');
       await revokeAllActiveStickyAllowScopes(userId);
@@ -101,8 +129,19 @@ export async function clearLocalAuthResidualAuthority(
       const { clearLocalAgentConnectionsForLogout } = await import('./connectionManager');
       await clearLocalAgentConnectionsForLogout();
     }),
+    attempt('agent-collaboration-session', async () => {
+      const { clearAgentCollaborationSessionState } = await import('./agentCollaboration');
+      clearAgentCollaborationSessionState();
+    }),
+    attempt('github-personal-access-tokens', async () => {
+      const { clearLocalGitHubTokensForLogout } = await import('./github');
+      await clearLocalGitHubTokensForLogout(userId);
+    }),
     attempt('session-storage', async () => {
       await removeStorageKeysByPrefix(AUTH_SESSION_STORAGE_PREFIXES);
+    }),
+    attempt('ownerless-content-storage', async () => {
+      await Promise.all(OWNERLESS_EXACT_STORAGE_KEYS.map((key) => storage.removeItem(key)));
     }),
     attempt('desktop-file-grant', async () => {
       const { clearLocalFileSessionGrant } = await import('./desktopBridge');

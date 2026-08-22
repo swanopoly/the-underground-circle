@@ -8,6 +8,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   buildModelCatalogReadinessProfile,
+  isProviderModelCatalogAuthorityFailure,
+  isStableProviderCredentialFailure,
   projectProviderCatalogModels,
   resolveModelSelectionReadiness,
   type ModelSelectionCatalogGroup,
@@ -109,6 +111,33 @@ assert(
   !rejectedCredential.connected && rejectedCredential.state === 'not_connected',
   'a provider-rejected saved key cannot make curated rows look ready',
   rejectedCredential,
+);
+const unavailableAuthority = buildModelCatalogReadinessProfile({
+  connected: true,
+  snapshotStatus: 'fallback',
+  selectableModelCount: 4,
+  failureCode: 'forbidden',
+});
+assert(
+  !unavailableAuthority.connected
+    && unavailableAuthority.state === 'not_connected'
+    && unavailableAuthority.label === 'Access check required',
+  'circle/account denial retires readiness without blaming the provider key',
+  unavailableAuthority,
+);
+assert(
+  isProviderModelCatalogAuthorityFailure('auth_unavailable')
+    && isProviderModelCatalogAuthorityFailure('unauthenticated')
+    && isProviderModelCatalogAuthorityFailure('forbidden')
+    && !isProviderModelCatalogAuthorityFailure('provider_credential_rejected'),
+  'auth and circle-scope failures have a dedicated catalog authority class',
+);
+assert(
+  isStableProviderCredentialFailure('provider_credential_rejected')
+    && isStableProviderCredentialFailure('credential_unreadable')
+    && !isStableProviderCredentialFailure('unauthenticated')
+    && !isStableProviderCredentialFailure('forbidden'),
+  'provider credential recovery never absorbs account or circle authority failures',
 );
 const billingUnavailable = buildModelCatalogReadinessProfile({
   connected: true,
@@ -739,12 +768,14 @@ assert(
 
 const providers = source('src/lib/llmProviders.ts');
 const registry = source('src/lib/integrations/modelProviderRegistry.ts');
+const circleIntegrationSource = source('src/lib/circleIntegrations.ts');
 const chat = source('src/screens/circles/tabs/ChatTab.tsx');
 const rooms = source('src/screens/circles/tabs/RoomsTab.tsx');
 const roomChatService = source('src/lib/roomChatService.ts');
 const spawn = source('src/screens/circles/tabs/chat/SpawnAgentsModal.tsx');
 const office = source('src/components/OfficeTerminal.tsx');
 const marketplace = source('src/components/marketplace/LlmProviderMarketplace.tsx');
+const integrations = source('src/screens/circles/tabs/IntegrationsTab.tsx');
 const proxy = source('supabase/functions/llm-proxy/index.ts');
 const roadmap = source('docs/AGENTS_ROADMAP.md');
 
@@ -762,14 +793,60 @@ const catalogCapabilityGate = providers.indexOf('if (!(await llmProxySupportsMod
 const catalogProxyInvoke = providers.indexOf("action: 'list_models'");
 assert(catalogCapabilityGate >= 0 && catalogCapabilityGate < catalogProxyInvoke, 'missing deployed catalog capability falls back before a non-2xx proxy request');
 assert(proxy.includes('capabilities: ["chat", "list_models", "openai-embed"]'), 'llm-proxy GET health advertises its supported request shapes');
-assert(providers.includes('const cacheKey = userId ? `${userId}:${provider}`'), 'snapshot cache remains scoped to exact user and provider');
-assert(providers.includes("if (!userId) return createProviderModelCatalogFallback(provider, 'auth_unavailable')"), 'catalog discovery avoids unauthenticated Edge traffic while session hydration is incomplete');
+assert(
+  providers.includes("const cacheKey = [authority.userId, authority.circleId || '', provider]")
+    && providers.includes('.map(part => encodeURIComponent(part))'),
+  'snapshot cache remains scoped to exact user, circle, and provider',
+);
+assert(
+  providers.includes('captureProviderModelCatalogAuthority')
+    && providers.includes('getFreshAccessToken()')
+    && providers.includes('safeGetUserForAccessToken(accessToken)')
+    && providers.includes('capturedProviderModelCatalogAuthorities'),
+  'catalog discovery captures and verifies one non-forgeable account/circle authority before provider reads',
+);
+assert(
+  providers.includes('getSupabaseClientForAccessToken(authority.accessToken)')
+    && providers.includes("exactClient.functions.invoke('llm-proxy'")
+    && providers.includes("circleId: authority.circleId"),
+  'catalog snapshots invoke the proxy through the captured bearer and exact circle instead of mutable global auth',
+);
 assert(providers.includes("details.code || 'request_failed'"), 'safe proxy error codes survive into readiness without raw provider prose');
 assert(providers.includes('const snapshot = await loadProviderModelCatalogSnapshot'), 'legacy array callers delegate to the canonical snapshot owner');
 assert(providers.includes('subscribeUserApiKeyChanges(() => { void refresh(); })'), 'all useUserApiKeys consumers refresh after same-runtime credential changes');
 assert(providers.includes('sequence !== refreshSequenceRef.current'), 'slower stale key reads cannot overwrite a newer credential refresh');
+assert(
+  providers.includes('export async function listApiKeysStrict(')
+    && providers.includes("throw new Error('Connected model credential inventory is unavailable.')")
+    && providers.includes("rawProvider === 'hugging_face'")
+    && providers.includes("rawProvider === 'z_ai'")
+    && providers.includes('if (!isKnownProvider(provider)) continue;')
+    && providers.includes('const parsed = parseProviderKeyRow({ ...value, provider });'),
+  'authoritative catalog callers distinguish key-inventory failure from empty, normalize legacy model aliases, and ignore valid non-model vault rows',
+);
 
 assert(registry.includes('projectProviderCatalogModels'), 'all shared selector groups use exact verified projection');
+assert(
+  registry.includes('captureProviderModelCatalogAuthority(exactCircleId)')
+    && registry.includes('listApiKeysStrict(catalogAuthority)')
+    && registry.includes('listCircleIntegrationsExact({')
+    && registry.includes('{ force, authority }')
+    && !registry.includes('await listApiKeys().catch(() => [])'),
+  'the shared Auto catalog pins key, circle-integration, and provider reads to one captured authority',
+);
+assert(
+  circleIntegrationSource.includes('export async function listCircleIntegrationsExact')
+    && circleIntegrationSource.includes(".from('circle_members')")
+    && circleIntegrationSource.includes(".eq('user_id', authority.userId)")
+    && circleIntegrationSource.includes('getSupabaseClientForAccessToken(authority.accessToken)')
+    && circleIntegrationSource.includes("throw new Error('This signed-in account is not a member of this circle.')"),
+  'an empty exact circle integration list is accepted only after pinned membership proof',
+);
+assert(
+  registry.includes('isProviderModelCatalogAuthorityFailure(snapshot.failureCode)')
+    && registry.includes('Connected model catalog account or circle authority is unavailable.'),
+  'catalog auth or circle-scope failures fail the shared registry instead of masquerading as a bad provider key',
+);
 assert(registry.includes('loadProviderCatalogWithTimeout') && registry.includes('clearTimeout(timeoutId)'), 'bounded parallel catalog hydration clears completed timeout handles');
 assert(registry.includes("catalogStatus: catalogReadiness.state"), 'selector groups carry readiness state instead of inferring it from connection');
 assert(registry.includes('const availability = optionAvailability(profile)') && registry.includes('availability,'), 'selector options carry account-listed versus fallback provenance');
@@ -932,6 +1009,22 @@ assert(marketplace.includes('loadProviderModelCatalogSnapshot'), 'Marketplace ch
 assert(marketplace.includes('projectProviderCatalogModels'), 'Marketplace count uses exact verified projection or explicit curated fallback');
 assert(marketplace.includes('connect to check this account'), 'disconnected Marketplace cards call their rows curated instead of available');
 assert(!marketplace.includes("model{modelCount === 1 ? '' : 's'} available"), 'Marketplace no longer labels every curated model as account-available');
+const genericKeySyncStart = integrations.indexOf("const { error } = await supabase.rpc('store_user_api_key'");
+const genericKeySyncEnd = integrations.indexOf('} else if (definition.requiredSecretKeys.length > 0)', genericKeySyncStart);
+const genericKeySync = genericKeySyncStart >= 0 && genericKeySyncEnd > genericKeySyncStart
+  ? integrations.slice(genericKeySyncStart, genericKeySyncEnd)
+  : '';
+assert(
+  genericKeySync.includes('notifyUserApiKeyChanges();'),
+  'a successful generic Marketplace model-key sync immediately refreshes an already-mounted Chat Auto catalog',
+);
+assert(
+  circleIntegrationSource.includes('MODEL_CATALOG_INTEGRATION_PROVIDERS')
+    && circleIntegrationSource.includes('notifyModelCatalogIntegrationChange(opts.provider);')
+    && circleIntegrationSource.includes("import('./llmProviders')")
+    && circleIntegrationSource.includes('notifyUserApiKeyChanges())'),
+  'a successful circle model integration save invalidates mounted selector catalogs without a page reload',
+);
 assert(roadmap.includes('modelCatalogReadinessCore.ts'), 'roadmap ownership includes the readiness core');
 
 if (failed > 0) {

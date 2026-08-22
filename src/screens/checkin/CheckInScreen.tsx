@@ -10,6 +10,7 @@ import {
   RefreshControl,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
+import { indexSafeProfiles, loadSafeCircleProfiles } from '../../lib/safeProfiles';
 import { safeGetUser } from '../../lib/authSession';
 import MentionPicker, { detectMentionQuery, insertMention } from '../../components/MentionPicker';
 import MentionText from '../../components/MentionText';
@@ -224,7 +225,7 @@ export default function CheckInScreen({ route, navigation }: any) {
     try {
       const { data, error } = await supabase
         .from('check_ins')
-        .select('*, user:profiles(username, display_name)')
+        .select('*')
         .eq('circle_id', circleId)
         .order('created_at', { ascending: false })
         .limit(50);
@@ -235,7 +236,11 @@ export default function CheckInScreen({ route, navigation }: any) {
         return;
       }
 
-      setCheckIns(data || []);
+      const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+        circleId,
+        userIds: (data || []).map((row: any) => row.user_id),
+      }));
+      setCheckIns((data || []).map((row: any) => ({ ...row, user: profileById.get(row.user_id) || null })));
 
       const { value: user, error: userError } = await safeGetUser();
       if (userError) {

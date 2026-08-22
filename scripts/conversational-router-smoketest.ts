@@ -62,6 +62,8 @@ function buildContext(fullMessage: string, spies: {
 }): ConversationalIntentContext {
   return {
     circleId: 'c1',
+    threadId: 't1',
+    sourceMessageId: 'm1',
     userId: 'u1',
     userName: 'Smoke',
     fullMessage,
@@ -175,6 +177,19 @@ async function main(): Promise<void> {
     const result = await executeConversationalIntent(intent, buildContext(message, spies));
     assertEqual(result?.handled, true, '(c) image generation handled on the legacy path');
     assertEqual(spies.hfCommands[0], `/imagine ${message}`, '(c) routed through the /imagine HF command');
+  }
+  {
+    const message = 'generate an image of a sunset';
+    const spies = { publish: { calls: 0 }, wpCommands: [] as string[], hfCommands: [] as string[] };
+    const context = buildContext(message, spies);
+    delete context.sourceMessageId;
+    const result = await executeDetectedConversationalIntent(
+      { type: 'generate_image', prompt: message },
+      context,
+    );
+    assertEqual(result?.handled, true, '(c1) missing persisted image source fails closed with a handled explanation');
+    assertEqual(spies.hfCommands.length, 0, '(c1) missing persisted image source never calls the image executor');
+    assert(/saved Chat message|not sent/i.test(result?.message || ''), '(c1) failure explains that no provider request started');
   }
   {
     const intent = detectConversationalIntent('draw a picture of a dragon');

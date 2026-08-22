@@ -17,6 +17,8 @@ import {
 } from '../../../../lib/builderImages';
 
 interface Props {
+  userId: string | null | undefined;
+  circleId: string | null | undefined;
   threadId: string | null | undefined;
   visible: boolean;
   onClose: () => void;
@@ -25,27 +27,30 @@ interface Props {
 
 const ROLES: ImageRole[] = ['hero', 'feature', 'logo', 'background', 'avatar', 'product', 'gallery', 'other'];
 
-export default function BuilderImagesEditor({ threadId, visible, onClose, onChanged }: Props) {
+export default function BuilderImagesEditor({ userId, circleId, threadId, visible, onClose, onChanged }: Props) {
   const [images, setImages] = useState<BuilderImage[]>([]);
   const [urlDraft, setUrlDraft] = useState('');
   const [roleDraft, setRoleDraft] = useState<ImageRole>('hero');
   const [altDraft, setAltDraft] = useState('');
 
   useEffect(() => {
-    if (!visible || !threadId) return;
+    setImages([]);
+    setUrlDraft('');
+    setAltDraft('');
+    if (!visible || !userId || !circleId || !threadId) return;
     let cancelled = false;
-    loadBuilderImages(threadId)
+    loadBuilderImages({ userId, circleId, threadId })
       .then(imgs => { if (!cancelled) setImages(imgs); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [visible, threadId]);
+  }, [circleId, threadId, userId, visible]);
 
-  if (!threadId) return null;
+  if (!userId || !circleId || !threadId) return null;
 
   const commitAdd = async () => {
     const url = urlDraft.trim();
     if (!url) return;
-    const next = await addBuilderImage(threadId, { url, role: roleDraft, alt: altDraft });
+    const next = await addBuilderImage({ userId, circleId, threadId }, { url, role: roleDraft, alt: altDraft });
     setImages(next);
     onChanged?.(next);
     setUrlDraft('');
@@ -53,13 +58,13 @@ export default function BuilderImagesEditor({ threadId, visible, onClose, onChan
   };
 
   const commitRemove = async (id: string) => {
-    const next = await removeBuilderImage(threadId, id);
+    const next = await removeBuilderImage({ userId, circleId, threadId }, id);
     setImages(next);
     onChanged?.(next);
   };
 
   const commitRoleChange = async (id: string, role: ImageRole) => {
-    const next = await updateBuilderImage(threadId, id, { role });
+    const next = await updateBuilderImage({ userId, circleId, threadId }, id, { role });
     setImages(next);
     onChanged?.(next);
   };

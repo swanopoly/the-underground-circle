@@ -423,11 +423,12 @@ async function resolveSecondBrainTarget(opts: {
     return { target: null };
   }
 
-  if (!opts.isServiceRole) {
-    const member = await assertCircleMember(opts.supabase, circleId, userId);
-    if (!member) {
-      return { target: null, error: errResponse(403, "not_circle_member", "You are not a member of this circle.") };
-    }
+  // Service-role cron may name a target user, but that durable configuration
+  // is not permanent Circle authority. Re-prove the exact current membership
+  // for both manual and autonomous runs before creating private/shared memory.
+  const member = await assertCircleMember(opts.supabase, circleId, userId);
+  if (!member) {
+    return { target: null, error: errResponse(403, "not_circle_member", "The target account is not a current member of this Circle.") };
   }
 
   return { target: { circleId, userId, visibility } };

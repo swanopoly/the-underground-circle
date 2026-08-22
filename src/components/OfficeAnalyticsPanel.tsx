@@ -13,6 +13,13 @@ import {
 import { supabase } from '../lib/supabase';
 import { subscribeWithReconnect } from '../lib/subscribeWithReconnect';
 import { CircleOfficeAgent } from '../lib/circleOffice';
+import { loadSafeCircleProfiles } from '../lib/safeProfiles';
+import { summarizeOfficeAgentLifetimeUsage } from '../lib/officeAgents';
+import {
+  loadOfficeAgentUsageProfilesExact,
+  type TerminalAuthorityCurrentGuard,
+  type TerminalExactAuthority,
+} from '../lib/officeTerminal';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -20,6 +27,8 @@ interface Props {
   circleId: string;
   userId: string;
   agents: CircleOfficeAgent[];
+  exactAgentUsageAuthority: TerminalExactAuthority | null;
+  isExactAgentUsageAuthorityCurrent: TerminalAuthorityCurrentGuard;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -169,6 +178,14 @@ interface AnalyticsSnapshot {
   userUsage: UserUsage[];
 }
 
+interface OwnerLifetimeUsageSnapshot {
+  scopeUserId: string;
+  status: 'loading' | 'ready' | 'unavailable';
+  tokens: number;
+  messages: number;
+  cost: number;
+}
+
 interface AnalyticsResponseRow {
   id: string;
   latency_ms: number | null;
@@ -274,18 +291,8 @@ async function loadAllMessageRows(
   return rows;
 }
 
-async function loadProfiles(senderIds: string[]): Promise<AnalyticsProfileRow[]> {
-  const rows: AnalyticsProfileRow[] = [];
-  for (const senderIdChunk of chunkValues(senderIds, ANALYTICS_FILTER_CHUNK_SIZE)) {
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('id, display_name, username')
-      .in('id', senderIdChunk)
-      .order('id', { ascending: true });
-    if (error) throw error;
-    rows.push(...((data ?? []) as AnalyticsProfileRow[]));
-  }
-  return rows;
+async function loadProfiles(circleId: string, senderIds: string[]): Promise<AnalyticsProfileRow[]> {
+  return (await loadSafeCircleProfiles({ circleId, userIds: senderIds })) as AnalyticsProfileRow[];
 }
 
 async function loadResponseUsageRows(
@@ -330,7 +337,13 @@ const EMPTY_ANALYTICS: AnalyticsSnapshot = {
 
 type Scope = 'all' | 'mine';
 
-export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAgents }: Props) {
+export default function OfficeAnalyticsPanel({
+  circleId,
+  userId,
+  agents: propAgents,
+  exactAgentUsageAuthority,
+  isExactAgentUsageAuthorityCurrent,
+}: Props) {
   const [scope, setScope] = useState<Scope>('all');
   const [focusedControl, setFocusedControl] = useState<'all' | 'mine' | 'refresh' | null>(null);
   const [agents, setAgents] = useState<CircleOfficeAgent[]>(propAgents);
@@ -341,11 +354,80 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
   const [analyticsStale, setAnalyticsStale] = useState(false);
   const [hasAnalyticsSnapshot, setHasAnalyticsSnapshot] = useState(false);
   const [analyticsUpdatedAt, setAnalyticsUpdatedAt] = useState<Date | null>(null);
+  const [ownerLifetimeUsage, setOwnerLifetimeUsage] = useState<OwnerLifetimeUsageSnapshot>({
+    scopeUserId: '',
+    status: 'loading',
+    tokens: 0,
+    messages: 0,
+    cost: 0,
+  });
   const analyticsGenerationRef = useRef(0);
+  const ownerLifetimeGenerationRef = useRef(0);
   const analyticsScopeRef = useRef<string | null>(null);
   const realtimeGenerationRef = useRef(0);
   const usageRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const currentAnalyticsScope = `${circleId}:${userId}`;
+
+  const loadOwnerLifetimeUsage = useCallback(async () => {
+    const generation = ownerLifetimeGenerationRef.current + 1;
+    ownerLifetimeGenerationRef.current = generation;
+    const requestedAuthority = exactAgentUsageAuthority;
+    if (
+      !requestedAuthority
+      || requestedAuthority.userId !== userId
+      || requestedAuthority.circleId !== circleId
+      || !isExactAgentUsageAuthorityCurrent(requestedAuthority)
+    ) {
+      setOwnerLifetimeUsage({
+        scopeUserId: userId,
+        status: 'unavailable',
+        tokens: 0,
+        messages: 0,
+        cost: 0,
+      });
+      return;
+    }
+    setOwnerLifetimeUsage({
+      scopeUserId: requestedAuthority.userId,
+      status: 'loading',
+      tokens: 0,
+      messages: 0,
+      cost: 0,
+    });
+    const result = await loadOfficeAgentUsageProfilesExact(
+      requestedAuthority,
+      isExactAgentUsageAuthorityCurrent,
+    );
+    if (
+      generation !== ownerLifetimeGenerationRef.current
+      || !isExactAgentUsageAuthorityCurrent(requestedAuthority)
+    ) return;
+    if (!result.ok) {
+      setOwnerLifetimeUsage({
+        scopeUserId: requestedAuthority.userId,
+        status: 'unavailable',
+        tokens: 0,
+        messages: 0,
+        cost: 0,
+      });
+      return;
+    }
+    const { tokens, messages, cost } = summarizeOfficeAgentLifetimeUsage(
+      result.profiles.values(),
+    );
+    setOwnerLifetimeUsage({
+      scopeUserId: requestedAuthority.userId,
+      status: 'ready',
+      tokens,
+      messages,
+      cost,
+    });
+  }, [
+    circleId,
+    exactAgentUsageAuthority,
+    isExactAgentUsageAuthorityCurrent,
+    userId,
+  ]);
 
   // Keep local state in sync with prop changes (parent's realtime updates)
   useEffect(() => {
@@ -461,7 +543,7 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
 
       if (messageRows.length > 0) {
         const senderIds = [...new Set(messageRows.map(m => m.sender_id).filter((id): id is string => Boolean(id)))];
-        const profiles = senderIds.length > 0 ? await loadProfiles(senderIds) : [];
+        const profiles = senderIds.length > 0 ? await loadProfiles(circleId, senderIds) : [];
         const profileMap = new Map(profiles.map(p => [p.id, p]));
 
         const msgIds = messageRows.map(m => m.id);
@@ -540,6 +622,13 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
   }, [loadResponseAnalytics]);
 
   useEffect(() => {
+    void loadOwnerLifetimeUsage();
+    return () => {
+      ownerLifetimeGenerationRef.current += 1;
+    };
+  }, [loadOwnerLifetimeUsage]);
+
+  useEffect(() => {
     const scheduleRefresh = () => {
       if (usageRefreshTimerRef.current) clearTimeout(usageRefreshTimerRef.current);
       usageRefreshTimerRef.current = setTimeout(() => {
@@ -588,12 +677,30 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
 
   // Compute stats
   const totalTokensToday    = filtered.reduce((s, a) => s + (a.token_usage_today   ?? 0), 0);
-  const totalTokensAllTime  = filtered.reduce((s, a) => s + (a.token_usage_total   ?? 0), 0);
+  const publicTokensAllTime = filtered.reduce((s, a) => s + (a.token_usage_total ?? 0), 0);
   const totalMessagesToday  = filtered.reduce((s, a) => s + (a.message_count_today ?? 0), 0);
-  const totalMessagesAllTime = filtered.reduce((s, a) => s + (a.message_count_total ?? 0), 0);
+  const publicMessagesAllTime = filtered.reduce((s, a) => s + (a.message_count_total ?? 0), 0);
   // Use DB-stored estimated cost (model-aware) instead of flat-rate guess
   const totalCostToday      = filtered.reduce((s, a) => s + (a.estimated_cost_today ?? 0), 0);
-  const totalCostAllTime    = filtered.reduce((s, a) => s + (a.estimated_cost_total ?? 0), 0);
+  const publicCostAllTime = filtered.reduce((s, a) => s + (a.estimated_cost_total ?? 0), 0);
+  const ownerLifetimeIsCurrent = ownerLifetimeUsage.scopeUserId === userId
+    && ownerLifetimeUsage.status === 'ready';
+  const totalTokensAllTime = scope === 'mine'
+    ? (ownerLifetimeIsCurrent ? ownerLifetimeUsage.tokens : null)
+    : publicTokensAllTime;
+  const totalMessagesAllTime = scope === 'mine'
+    ? (ownerLifetimeIsCurrent ? ownerLifetimeUsage.messages : null)
+    : publicMessagesAllTime;
+  const totalCostAllTime = scope === 'mine'
+    ? (ownerLifetimeIsCurrent ? ownerLifetimeUsage.cost : null)
+    : publicCostAllTime;
+  const lifetimeSubtext = scope === 'mine'
+    ? ownerLifetimeUsage.status === 'loading'
+      ? 'Loading owner-private lifetime ledger'
+      : ownerLifetimeIsCurrent
+        ? `$${ownerLifetimeUsage.cost.toFixed(2)} across every saved session`
+        : 'Owner-private lifetime ledger unavailable'
+    : `$${publicCostAllTime.toFixed(2)} across published Circle agents`;
   // Granular token breakdown
   const inputTokensToday    = filtered.reduce((s, a) => s + (a.input_tokens_today  ?? 0), 0);
   const outputTokensToday   = filtered.reduce((s, a) => s + (a.output_tokens_today ?? 0), 0);
@@ -682,15 +789,15 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
         <View style={styles.statsGrid}>
           <StatCard
             icon="◎"
-            value={fmtTokens(totalTokensAllTime)}
-            label="Total Tokens (All Time)"
+            value={totalTokensAllTime === null ? '—' : fmtTokens(totalTokensAllTime)}
+            label={scope === 'mine' ? 'My Agent Tokens (Lifetime)' : 'Published Tokens (All Time)'}
             valueColor="#f59e0b"
-            sub={`$${totalCostAllTime.toFixed(2)} est. cost`}
+            sub={lifetimeSubtext}
           />
           <StatCard
             icon="📨"
-            value={fmtTokens(totalMessagesAllTime)}
-            label="Total Messages (All Time)"
+            value={totalMessagesAllTime === null ? '—' : fmtTokens(totalMessagesAllTime)}
+            label={scope === 'mine' ? 'My Agent Messages (Lifetime)' : 'Published Messages (All Time)'}
             valueColor="#8b5cf6"
           />
         </View>
@@ -790,7 +897,10 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
             accessibilityLabel={analyticsError ? 'Retry circle analytics' : 'Refresh circle analytics'}
             accessibilityState={{ disabled: analyticsLoading, busy: analyticsLoading }}
             disabled={analyticsLoading}
-            onPress={() => { void loadResponseAnalytics(); }}
+            onPress={() => {
+              void loadResponseAnalytics();
+              void loadOwnerLifetimeUsage();
+            }}
             onFocus={() => setFocusedControl('refresh')}
             onBlur={() => setFocusedControl(null)}
             style={({ pressed }) => [

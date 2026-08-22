@@ -65,6 +65,7 @@ function resetStore() {
 }
 
 async function main() {
+  const scope = { circleId: 'c1', userId: 'u1' } as const;
   // ─── Slug ───────────────────────────────────────────────────────
   assert(slugifyRecordingName('Open Zoom') === 'open-zoom', 'slug: words');
   assert(slugifyRecordingName('  Close the deal!  ') === 'close-the-deal', 'slug: trim + strip !');
@@ -84,7 +85,7 @@ async function main() {
   {
     const r = startRecording({ name: 'Open Zoom', circleId: 'c1', userId: 'u1' });
     assert(r.ok, 'start: happy path');
-    const active = getActiveSession()!;
+    const active = getActiveSession(scope)!;
     assert(active.name === 'open-zoom', 'start: slug assigned');
     assert(active.steps.length === 0, 'start: empty steps');
 
@@ -98,21 +99,21 @@ async function main() {
     tool: 'desktop.launch_app',
     input: { appName: 'zoom.us' },
     result: { ok: true, data: { appName: 'zoom.us' } },
-  }));
+  }), scope);
   appendStep(buildStep({
     tool: 'desktop.click_element',
     input: { pid: 1234, path: '0.0.1.0.10' },
     result: { ok: true, data: { method: 'ax_press' } },
     a11yTarget: { role: 'AXMenuItem', label: 'Join meeting...', app: 'zoom.us' },
-  }));
+  }), scope);
   appendStep(buildStep({
     tool: 'desktop.type_text',
     input: { text: 'hello' },
     result: { ok: true, data: { chars: 5 } },
-  }));
+  }), scope);
 
   {
-    const active = getActiveSession()!;
+    const active = getActiveSession(scope)!;
     assert(active.steps.length === 3, 'append: 3 steps captured');
     const click = active.steps[1];
     assert(click.outcome.target?.label === 'Join meeting...', 'append: semantic target captured');
@@ -123,58 +124,58 @@ async function main() {
 
   // Stop saves
   {
-    const r = stopRecording({ description: 'Open Zoom + join a meeting' });
+    const r = stopRecording({ ...scope, description: 'Open Zoom + join a meeting' });
     assert(r.ok, 'stop: saves the recording');
     assert((r as any).recording.steps.length === 3, 'stop: 3 steps persisted');
-    assert(!getActiveSession(), 'stop: active session cleared');
+    assert(!getActiveSession(scope), 'stop: active session cleared');
   }
 
   // ─── List / get / delete ────────────────────────────────────────
   {
-    const rows = listRecordings({ circleId: 'c1' });
+    const rows = listRecordings(scope);
     assert(rows.length === 1, 'list: 1 recording saved');
     assert(rows[0].name === 'open-zoom', 'list: correct name');
 
     // Filter by wrong circle — empty
-    assert(listRecordings({ circleId: 'other' }).length === 0, 'list: circle filter works');
+    assert(listRecordings({ ...scope, circleId: 'other' }).length === 0, 'list: circle filter works');
 
-    const r = getRecording('Open Zoom');
+    const r = getRecording('Open Zoom', scope);
     assert(!!r, 'get: accepts pretty name (slug lookup)');
     assert(r!.description.startsWith('Open Zoom'), 'get: description persisted');
 
     // Delete
-    assert(deleteRecording('open-zoom'), 'delete: removes recording');
-    assert(listRecordings({ circleId: 'c1' }).length === 0, 'delete: list now empty');
-    assert(!deleteRecording('nope'), 'delete: unknown name returns false');
+    assert(deleteRecording('open-zoom', scope), 'delete: removes recording');
+    assert(listRecordings(scope).length === 0, 'delete: list now empty');
+    assert(!deleteRecording('nope', scope), 'delete: unknown name returns false');
   }
 
   // ─── Stop with no steps discards ────────────────────────────────
   resetStore();
   startRecording({ name: 'empty', circleId: 'c1', userId: 'u1' });
   {
-    const r = stopRecording();
+    const r = stopRecording(scope);
     assert(!r.ok, 'stop: zero-step recording rejected');
-    assert(!getActiveSession(), 'stop: session cleared even when discarded');
+    assert(!getActiveSession(scope), 'stop: session cleared even when discarded');
   }
 
   // ─── Abort discards ─────────────────────────────────────────────
   startRecording({ name: 'abort-me', circleId: 'c1', userId: 'u1' });
-  appendStep(buildStep({ tool: 'desktop.launch_app', input: { appName: 'X' }, result: { ok: true } }));
+  appendStep(buildStep({ tool: 'desktop.launch_app', input: { appName: 'X' }, result: { ok: true } }), scope);
   {
-    const r = abortRecording();
+    const r = abortRecording(scope);
     assert(r.ok && r.discardedSteps === 1, 'abort: discarded 1 step');
-    assert(!getActiveSession(), 'abort: session cleared');
+    assert(!getActiveSession(scope), 'abort: session cleared');
   }
 
   // ─── Failed steps excluded from replay plan ────────────────────
   resetStore();
   startRecording({ name: 'flaky', circleId: 'c1', userId: 'u1' });
-  appendStep(buildStep({ tool: 'desktop.launch_app', input: { appName: 'X' }, result: { ok: true } }));
-  appendStep(buildStep({ tool: 'desktop.type_text', input: { text: 'hi' }, result: { ok: false, error: 'bridge offline' } }));
-  appendStep(buildStep({ tool: 'desktop.press_keys', input: { combo: 'Return' }, result: { ok: true } }));
-  stopRecording({ description: 'flaky' });
+  appendStep(buildStep({ tool: 'desktop.launch_app', input: { appName: 'X' }, result: { ok: true } }), scope);
+  appendStep(buildStep({ tool: 'desktop.type_text', input: { text: 'hi' }, result: { ok: false, error: 'bridge offline' } }), scope);
+  appendStep(buildStep({ tool: 'desktop.press_keys', input: { combo: 'Return' }, result: { ok: true } }), scope);
+  stopRecording({ ...scope, description: 'flaky' });
   {
-    const r = getRecording('flaky')!;
+    const r = getRecording('flaky', scope)!;
     const plan = planReplay(r);
     assert(plan.length === 2, 'plan: drops failed step');
     assert(plan[0].tool === 'desktop.launch_app', 'plan: first step');
@@ -218,13 +219,13 @@ async function main() {
     tool: 'browser.dom_snapshot',
     input: { maxNodes: 50 },
     result: { ok: true },
-  }));
+  }), scope);
   appendStep(buildStep({
     tool: 'browser.fill_field',
     input: { name: 'Draft', text: 'must not run' },
     result: { ok: true },
-  }));
-  stopRecording({ description: 'read then mutate' });
+  }), scope);
+  stopRecording({ ...scope, description: 'read then mutate' });
   {
     const fired: Array<{ tool: string; input: Record<string, unknown> }> = [];
     const outcome = await executeRecordingCommand('/replay mixed replay', {
@@ -276,8 +277,8 @@ async function main() {
     input: { pid: 1234, path: '0.0.1' },
     result: { ok: true },
     a11yTarget: { role: 'AXButton', label: 'Continue', app: 'Example' },
-  }));
-  stopRecording({ description: 'semantic mutation' });
+  }), scope);
+  stopRecording({ ...scope, description: 'semantic mutation' });
   {
     const fired: string[] = [];
     const outcome = await executeRecordingCommand('/replay semantic replay', {
@@ -304,8 +305,8 @@ async function main() {
     tool: 'desktop.future_mutation',
     input: { arbitrary: true },
     result: { ok: true },
-  }));
-  stopRecording({ description: 'future unknown desktop mutation' });
+  }), scope);
+  stopRecording({ ...scope, description: 'future unknown desktop mutation' });
   {
     let fireCount = 0;
     const outcome = await executeRecordingCommand('/replay future mutation', {
@@ -329,13 +330,13 @@ async function main() {
     tool: 'desktop.window_state',
     input: {},
     result: { ok: true },
-  }));
+  }), scope);
   appendStep(buildStep({
     tool: 'browser.dom_snapshot',
     input: { maxNodes: 25 },
     result: { ok: true },
-  }));
-  stopRecording({ description: 'observations only' });
+  }), scope);
+  stopRecording({ ...scope, description: 'observations only' });
   {
     const fired: string[] = [];
     const outcome = await executeRecordingCommand('/replay read only', {
@@ -377,9 +378,9 @@ async function main() {
   resetStore();
   startRecording({ name: 'long', circleId: 'c1', userId: 'u1' });
   for (let i = 0; i < 250; i += 1) {
-    appendStep(buildStep({ tool: 'desktop.type_text', input: { text: 'x' }, result: { ok: true } }));
+    appendStep(buildStep({ tool: 'desktop.type_text', input: { text: 'x' }, result: { ok: true } }), scope);
   }
-  assert(getActiveSession()!.steps.length === 200, 'append: caps at 200 steps');
+  assert(getActiveSession(scope)!.steps.length === 200, 'append: caps at 200 steps');
 
   // ─── formatElapsedSec ──────────────────────────────────────────
   assert(formatElapsedSec(0) === '0s', 'elapsed: zero');

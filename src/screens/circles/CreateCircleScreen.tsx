@@ -68,7 +68,7 @@ export default function CreateCircleScreen({ route, navigation }: any) {
         tags: [],
         ...(orgId ? { org_id: orgId } : {}),
       })
-      .select()
+      .select('id, name, invite_code')
       .single();
 
     if (createError) {

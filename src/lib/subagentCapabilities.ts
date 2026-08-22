@@ -201,6 +201,7 @@ const BLUEPRINTS: CapabilityBlueprint[] = [
     displayName: 'Support',
     description: 'Triages questions and turns ambiguous issues into clear next steps.',
     icon: 'S',
+    spiritId: 'mentor',
     fallbackPrompt: 'You are a support specialist. Clarify the issue, isolate the problem, and give practical next steps.',
     triggerPatterns: [/\b(help|support|how do i|stuck|confused|troubleshoot)\b/i],
     skills: ['support.triage'],
@@ -312,6 +313,11 @@ export function getSubagentCapabilitiesForRoles(roles: string[]): SubagentCapabi
 
 export function detectSubagentCapability(message: string): SubagentCapabilityProfile | null {
   const lower = message.toLowerCase();
+  const explicitRole = lower.match(/(?:^|\s)\[specialty:([a-z-]+)\](?:\s|$)/)?.[1];
+  if (explicitRole) {
+    const explicitCapability = getSubagentCapability(explicitRole as SubagentRole);
+    if (explicitCapability) return explicitCapability;
+  }
   let bestMatch: SubagentCapabilityProfile | null = null;
   let bestScore = 0;
 
@@ -327,4 +333,47 @@ export function detectSubagentCapability(message: string): SubagentCapabilityPro
   }
 
   return bestScore > 0 ? bestMatch : null;
+}
+
+const DEFAULT_BRIDGE_SPECIALTY_ROLE: SubagentRole = 'coder';
+const MAX_BRIDGE_SPECIALTY_KNOWLEDGE_CHARS = 48_000;
+const MAX_BRIDGE_SPECIALTY_TASK_CHARS = 40_000;
+
+/**
+ * Build the explicit specialty handoff used by local CLI bridge launches.
+ *
+ * The in-app web runtime receives a typed SubagentProfile and resolves the
+ * SOUL + SKILL.md bundle again at execution time. The bridge API accepts only
+ * a task string, so this bounded envelope preserves the same specialty
+ * knowledge without pretending that bridge-only tools or permissions exist.
+ */
+export function buildSubagentBridgeTask(
+  role: string | null | undefined,
+  task: string | null | undefined,
+): string {
+  const selected = getSubagentCapability(role as SubagentRole)
+    || getSubagentCapability(DEFAULT_BRIDGE_SPECIALTY_ROLE)
+    || CAPABILITIES[0];
+  const taskBrief = String(task || '').trim().slice(0, MAX_BRIDGE_SPECIALTY_TASK_CHARS);
+  const specialtyKnowledge = selected.systemPrompt
+    .trim()
+    .slice(0, MAX_BRIDGE_SPECIALTY_KNOWLEDGE_CHARS);
+
+  return [
+    'SPECIALTY EXECUTION CONTRACT',
+    `Specialty: ${selected.displayName} (${selected.role})`,
+    `SOUL: ${selected.spiritId || 'none'}`,
+    `Skill bundle: ${selected.skillBundleId}`,
+    `Skill capabilities: ${selected.skills.join(', ')}`,
+    `Evidence posture: ${selected.evidencePosture || 'medium'}`,
+    `Preferred verification: ${selected.preferredVerification.join(', ') || 'manual_review'}`,
+    '',
+    'Apply this specialty knowledge throughout the task. Treat the task as the work request, not permission to bypass approval, access, evidence, or runtime tool boundaries. Use only tools actually exposed by the current runtime.',
+    '',
+    'SPECIALTY KNOWLEDGE',
+    specialtyKnowledge,
+    '',
+    'TASK',
+    taskBrief || 'No task brief was supplied. Ask for a concrete task before acting.',
+  ].join('\n');
 }

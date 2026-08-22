@@ -250,8 +250,8 @@ assert.doesNotMatch(
 );
 assert.match(
   agentGatewayPanels,
-  /onOpenInChat\(`Delegate this to a subagent: \$\{spawnInput\.trim\(\)\}`\)/,
-  'the advanced delegation draft also hands off to canonical Chat',
+  /onOpenInChat\(\s*`\[specialty:\$\{selectedSpawnSpecialty\.role\}\] Launch a \$\{selectedSpawnSpecialty\.displayName\} specialist subagent with SOUL \$\{selectedSpawnSpecialty\.spiritId\} and skill bundle \$\{selectedSpawnSpecialty\.skillBundleId\}\. Task: \$\{spawnInput\.trim\(\)\}`,?\s*\)/,
+  'the advanced delegation draft hands the exact specialty, SOUL, skill, and task to canonical Chat',
 );
 const runtimeSearchAction = section(
   agentGatewayPanels,

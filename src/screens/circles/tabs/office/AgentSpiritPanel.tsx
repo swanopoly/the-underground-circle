@@ -7,10 +7,11 @@ import { SessionTag, type OfficeSessionStorageScope } from '../../../../lib/sess
 import { getTemplatesByCategory, detectTemplate } from '../../../../lib/soulTemplates';
 import { AGENT_SPIRITS, SPIRIT_CATEGORIES, getSpiritById, type AgentSpirit } from '../../../../lib/agentSpirits';
 import {
-  buildSpiritCareerArtifact,
-  buildSpiritRoleReadinessChecklist,
-  getSpiritCareerProfile,
-} from '../../../../lib/spiritCareerProfiles';
+  buildSoulBlueprint,
+  buildSoulEvaluationDraft,
+  SOUL_EVALUATION_SCENARIOS,
+  type SoulEvaluationScenarioId,
+} from '../../../../lib/agentSpiritPromptCore';
 import {
   buildSpiritOperationsArtifact,
   getSpiritOperationsProfile,
@@ -69,6 +70,8 @@ type WordPressReadiness = {
   label?: string | null;
 };
 
+type SoulCatalogCategory = 'all' | AgentSpirit['category'];
+
 // One absolute budget owns auth verification plus every sequential Spirit
 // snapshot query. A stalled tab, auth request, or PostgREST socket must yield a
 // retryable error state instead of pinning the entire lazy route on a spinner.
@@ -123,6 +126,11 @@ export default function AgentSpiritPanel({
   const [spiritSnapshotState, setSpiritSnapshotState] = useState<'loading' | 'ready' | 'error'>('loading');
   const [spiritSnapshotReload, setSpiritSnapshotReload] = useState(0);
   const [showSpirits, setShowSpirits] = useState(true);
+  const [showSoulLab, setShowSoulLab] = useState(false);
+  const [showSoulLibrary, setShowSoulLibrary] = useState(false);
+  const [selectedSoulTestScenario, setSelectedSoulTestScenario] = useState<SoulEvaluationScenarioId>('ambiguity');
+  const [spiritSearch, setSpiritSearch] = useState('');
+  const [spiritCategory, setSpiritCategory] = useState<SoulCatalogCategory>('all');
   const [editingSpirit, setEditingSpirit] = useState(false);
   const [customPrompt, setCustomPrompt] = useState('');
   const [customKnobs, setCustomKnobs] = useState({
@@ -144,8 +152,6 @@ export default function AgentSpiritPanel({
   const [spiritAssignmentBusy, setSpiritAssignmentBusy] = useState(false);
   const [spiritAssignmentStatus, setSpiritAssignmentStatus] = useState('');
   const [dbAgentLink, setDbAgentLink] = useState<{ agentKey: string; dbAgentId: string } | null>(null);
-  const [roleArtifact, setRoleArtifact] = useState<{ title: string; content: string } | null>(null);
-  const [roleActionStatus, setRoleActionStatus] = useState('');
   const [opsArtifact, setOpsArtifact] = useState<{ title: string; content: string } | null>(null);
   const [opsActionStatus, setOpsActionStatus] = useState('');
   const [wordpressRead, setWordpressRead] = useState<SpiritReadState<WordPressReadiness>>({ status: 'idle', value: null, error: null });
@@ -222,6 +228,15 @@ export default function AgentSpiritPanel({
     };
     return customSpirit;
   }, [currentSpirit, customProfiles]);
+  const filteredSpirits = useMemo(() => {
+    const query = spiritSearch.trim().toLowerCase();
+    return AGENT_SPIRITS.filter(spirit => {
+      if (spiritCategory !== 'all' && spirit.category !== spiritCategory) return false;
+      if (!query) return true;
+      return [spirit.name, spirit.tagline, spirit.skillBundle]
+        .some(value => value.toLowerCase().includes(query));
+    });
+  }, [spiritCategory, spiritSearch]);
   const executionTruth = resolveOfficeAgentExecutionTruth(agent);
   const activityCopy = executionTruth.state === 'warning'
     ? `Runtime status warning: ${executionTruth.statusWarning}. Refresh the connection before assigning new work.`
@@ -230,9 +245,6 @@ export default function AgentSpiritPanel({
       : executionTruth.state === 'connected'
         ? 'Agent is connected and standing by. No current execution is verified.'
         : 'Agent is offline or unavailable. Reconnect it before assigning new work.';
-  const currentSpiritProfile = currentSpirit && !currentSpirit.startsWith('custom::')
-    ? getSpiritCareerProfile(currentSpirit)
-    : null;
   const currentOperationsProfile = currentSpirit && !currentSpirit.startsWith('custom::')
     ? getSpiritOperationsProfile(currentSpirit)
     : null;
@@ -243,8 +255,6 @@ export default function AgentSpiritPanel({
   const ownershipReadiness = integrationReadiness
     ? classifyCircleOwnershipReadiness(integrationReadiness)
     : null;
-  const roleChecklist = buildSpiritRoleReadinessChecklist(currentSpiritProfile?.spiritId || null);
-
   const ensureDbAgent = useCallback(async (): Promise<string | null> => {
     if (dbAgentId) return dbAgentId;
     const authority = exactIdentityAuthority;
@@ -364,10 +374,13 @@ export default function AgentSpiritPanel({
     setCurrentSpirit(null);
     setEditingSpirit(false);
     setShowSoul(false);
+    setShowSoulLab(false);
+    setShowSoulLibrary(false);
+    setSelectedSoulTestScenario('ambiguity');
+    setSpiritSearch('');
+    setSpiritCategory('all');
     setSoulSaving(false);
     setSoulStatus('');
-    setRoleArtifact(null);
-    setRoleActionStatus('');
     setOpsArtifact(null);
     setOpsActionStatus('');
     setSoulText('');
@@ -391,8 +404,6 @@ export default function AgentSpiritPanel({
   }, [agent.id, capturedIdentityScope, identityRequestKey]);
 
   useEffect(() => {
-    setRoleArtifact(null);
-    setRoleActionStatus('');
     setOpsArtifact(null);
     setOpsActionStatus('');
   }, [currentSpirit]);
@@ -618,30 +629,6 @@ export default function AgentSpiritPanel({
     }
   };
 
-  const handleGenerateRoleArtifact = async (kind: 'resume' | 'interview' | 'portfolio' | 'drill' | 'work_sample') => {
-    const artifact = buildSpiritCareerArtifact(kind, currentSpiritProfile?.spiritId || null);
-    setRoleArtifact(artifact);
-    setRoleActionStatus(artifact ? `${artifact.title} generated` : 'No role profile available');
-    setTimeout(() => setRoleActionStatus(''), 2500);
-  };
-
-  const handleSaveRoleArtifact = async () => {
-    const authority = exactIdentityAuthority;
-    const capturedRequestKey = identityRequestKey;
-    if (!circleId || !roleArtifact || !authority || !capturedRequestKey) return;
-    if (!isIdentityRequestCurrent(capturedRequestKey)) return;
-    if (!onOpenInChat) {
-      setRoleActionStatus('Continue in Chat to save this artifact with the agent conversation and run lineage.');
-      return;
-    }
-    onOpenInChat([
-      'Review this role-readiness artifact and save it as durable Spirit memory only after returning an exact memory receipt.',
-      '',
-      roleArtifact.title,
-      roleArtifact.content,
-    ].join('\n').slice(0, 3_500));
-  };
-
   const handleGenerateOpsArtifact = async (kind: 'ops_plan' | 'access_checklist' | 'sop') => {
     const artifact = buildSpiritOperationsArtifact(kind, currentOperationsProfile?.spiritId || null);
     setOpsArtifact(artifact);
@@ -787,7 +774,7 @@ export default function AgentSpiritPanel({
       {showSpirits && (
         <View style={styles.spiritPicker}>
           <Text style={styles.spiritHint}>
-            Assign a specialty that shapes how {agent.name} thinks, responds, and what it knows.
+            Assign a specialty that shapes how {agent.name} approaches work, communicates, handles evidence, and escalates.
           </Text>
           {(spiritAssignmentBusy || spiritAssignmentStatus) ? (
             <Text
@@ -819,6 +806,21 @@ export default function AgentSpiritPanel({
               riskTier: s.riskTier, escalationTrigger: s.escalationTrigger, skillBundle: s.skillBundle,
             };
             const prompt = editingSpirit ? customPrompt : s.systemPromptPrefix;
+            const soulBlueprint = buildSoulBlueprint({
+              purpose: s.tagline,
+              systemPrompt: prompt,
+              skillBundle: knobs.skillBundle,
+              escalationTrigger: knobs.escalationTrigger,
+              actionPosture: knobs.actionPosture,
+              evidencePosture: knobs.evidencePosture,
+              communicationDensity: knobs.communicationDensity,
+              skepticism: knobs.skepticism,
+              riskTier: knobs.riskTier,
+            });
+            const selectedScenario = SOUL_EVALUATION_SCENARIOS.find(
+              scenario => scenario.id === selectedSoulTestScenario,
+            ) || SOUL_EVALUATION_SCENARIOS[0];
+            const soulTestDisabled = !onOpenInChat || editingSpirit;
 
             const KnobPicker = ({ label, value, options, colors }: { label: string; value: string; options: string[]; colors?: Record<string, string> }) => (
               <View style={styles.spiritKnob}>
@@ -832,7 +834,7 @@ export default function AgentSpiritPanel({
                         accessibilityLabel={`${label.toLowerCase()} ${opt.replace(/-/g, ' ')}`}
                         accessibilityState={{ selected: value === opt }}
                         onPress={() => setCustomKnobs(prev => ({ ...prev, [label === 'ACTION' ? 'actionPosture' : label === 'EVIDENCE' ? 'evidencePosture' : label === 'COMMUNICATION' ? 'communicationDensity' : label === 'SKEPTICISM' ? 'skepticism' : 'riskTier']: opt }))}
-                        style={[{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 8, paddingVertical: 6, borderRadius: 4, borderWidth: 1, borderColor: value === opt ? (colors?.[opt] || '#6366f1') + '60' : '#1e1e3a', backgroundColor: value === opt ? (colors?.[opt] || '#6366f1') + '15' : 'transparent' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+                        style={[{ minHeight: 44, justifyContent: 'center', paddingHorizontal: 8, paddingVertical: 6, borderRadius: 6, borderWidth: 1, borderColor: value === opt ? (colors?.[opt] || '#6366f1') + '60' : '#1e1e3a', backgroundColor: value === opt ? (colors?.[opt] || '#6366f1') + '15' : 'transparent' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
                         <Text style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: '700', color: value === opt ? (colors?.[opt] || '#6366f1') : '#555' }}>{opt.replace(/-/g, ' ').toUpperCase()}</Text>
                       </Pressable>
                     ))}
@@ -947,73 +949,131 @@ export default function AgentSpiritPanel({
                   </View>
                 )}
 
-                {currentSpiritProfile && (
-                  <View style={styles.roleReadinessSection}>
-                    <Text style={styles.roleReadinessTitle}>ROLE READINESS</Text>
-                    <Text style={styles.roleReadinessRole}>{currentSpiritProfile.seniorRoleTitle}</Text>
-                    <Text style={styles.roleReadinessSummary}>{currentSpiritProfile.marketSummary}</Text>
-
-                    <View style={styles.roleChipRow}>
-                      {currentSpiritProfile.tags.slice(0, 4).map(tag => (
-                        <View key={tag} style={styles.roleChip}>
-                          <Text style={styles.roleChipText}>{tag}</Text>
-                        </View>
-                      ))}
+                <View testID="agent-soul-lab" style={styles.soulLab}>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`${showSoulLab ? 'Hide' : 'Show'} Soul Lab`}
+                    accessibilityState={{ expanded: showSoulLab }}
+                    onPress={() => setShowSoulLab(value => !value)}
+                    style={({ pressed }) => [
+                      styles.soulLabHeader,
+                      pressed && styles.soulPressed,
+                      Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
+                    ]}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text accessibilityRole="header" style={styles.soulLabTitle}>
+                        {showSoulLab ? '▼' : '▶'} SOUL LAB
+                      </Text>
+                      <Text style={styles.soulLabSubtitle}>Understand the contract, then test it without taking action.</Text>
                     </View>
+                    <Text style={styles.soulLabCount}>{soulBlueprint.completeCount}/{soulBlueprint.checks.length} defined</Text>
+                  </Pressable>
 
-                    <View style={{ gap: 6 }}>
-                      {roleChecklist.map(item => (
-                        <Text key={item} style={styles.roleChecklistItem}>- {item}</Text>
-                      ))}
-                    </View>
+                  {showSoulLab ? (
+                    <View style={styles.soulLabBody}>
+                      <Text style={styles.soulLabNotice}>
+                        Configuration completeness is not a quality score. Use representative scenarios before changing a working Soul.
+                      </Text>
 
-                    <View style={{ marginTop: 10 }}>
-                      <Text style={styles.roleSubheading}>SOURCE LINKS</Text>
-                      {currentSpiritProfile.sourceUrls.slice(0, 3).map(url => (
-                        <Text key={url} selectable style={styles.roleSourceLink}>{url}</Text>
-                      ))}
-                    </View>
-
-                    <View style={styles.roleActionRow}>
-                      <Pressable accessibilityRole="button" accessibilityLabel="Draft a resume artifact in this Spirit" onPress={() => handleGenerateRoleArtifact('resume')} style={[styles.roleActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                        <Text style={styles.roleActionBtnText}>RESUME</Text>
-                      </Pressable>
-                      <Pressable accessibilityRole="button" accessibilityLabel="Draft interview preparation in this Spirit" onPress={() => handleGenerateRoleArtifact('interview')} style={[styles.roleActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                        <Text style={styles.roleActionBtnText}>INTERVIEW</Text>
-                      </Pressable>
-                      <Pressable accessibilityRole="button" accessibilityLabel="Draft a portfolio artifact in this Spirit" onPress={() => handleGenerateRoleArtifact('portfolio')} style={[styles.roleActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                        <Text style={styles.roleActionBtnText}>PORTFOLIO</Text>
-                      </Pressable>
-                      <Pressable accessibilityRole="button" accessibilityLabel="Draft a practice drill in this Spirit" onPress={() => handleGenerateRoleArtifact('drill')} style={[styles.roleActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                        <Text style={styles.roleActionBtnText}>DRILL</Text>
-                      </Pressable>
-                      <Pressable accessibilityRole="button" accessibilityLabel="Draft a work sample in this Spirit" onPress={() => handleGenerateRoleArtifact('work_sample')} style={[styles.roleActionBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                        <Text style={styles.roleActionBtnText}>WORK SAMPLE</Text>
-                      </Pressable>
-                    </View>
-
-                    {roleArtifact ? (
-                      <View style={styles.roleArtifactCard}>
-                        <Text style={styles.roleArtifactTitle}>{roleArtifact.title}</Text>
-                        <View>
-                          <Text selectable style={styles.roleArtifactContent}>{roleArtifact.content}</Text>
-                        </View>
-                        <View style={styles.roleArtifactActionRow}>
-                          <Pressable accessibilityRole="button" accessibilityLabel="Continue in Chat with this role artifact" onPress={handleSaveRoleArtifact} style={[styles.roleSaveBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                            <Text style={styles.roleSaveBtnText}>CONTINUE IN CHAT</Text>
-                          </Pressable>
-                          <Pressable accessibilityRole="button" accessibilityLabel="Dismiss role artifact" onPress={() => setRoleArtifact(null)} style={[styles.roleDismissBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                            <Text style={styles.roleDismissBtnText}>DISMISS</Text>
-                          </Pressable>
-                        </View>
+                      <View style={styles.soulContractGrid}>
+                        {[
+                          ['AUTONOMY', soulBlueprint.autonomy],
+                          ['PROOF', soulBlueprint.evidence],
+                          ['RISK', soulBlueprint.risk],
+                          ['ESCALATION', soulBlueprint.escalation],
+                        ].map(([label, value]) => (
+                          <View key={label} style={styles.soulContractRow}>
+                            <Text style={styles.soulContractLabel}>{label}</Text>
+                            <Text style={styles.soulContractValue}>{value}</Text>
+                          </View>
+                        ))}
                       </View>
-                    ) : null}
 
-                    {roleActionStatus ? (
-                      <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={styles.roleStatus}>{roleActionStatus}</Text>
-                    ) : null}
-                  </View>
-                )}
+                      <View style={styles.soulPromptFootprint}>
+                        <Text style={styles.soulContractLabel}>VISIBLE GUIDANCE FOOTPRINT</Text>
+                        <Text style={styles.soulContractValue}>
+                          {soulBlueprint.promptFootprintLabel} · {soulBlueprint.promptChars.toLocaleString()} characters
+                        </Text>
+                        <Text style={styles.soulLabFinePrint}>{soulBlueprint.promptGuidance}</Text>
+                      </View>
+
+                      <View style={styles.soulCheckRow}>
+                        {soulBlueprint.checks.map(check => (
+                          <View key={check.id} style={[styles.soulCheckChip, check.ready && styles.soulCheckChipReady]}>
+                            <Text style={[styles.soulCheckText, check.ready && styles.soulCheckTextReady]}>
+                              {check.ready ? 'READY' : 'MISSING'} · {check.label}
+                            </Text>
+                          </View>
+                        ))}
+                      </View>
+
+                      <View>
+                        <Text style={styles.soulLabSectionTitle}>NO-ACTION TEST</Text>
+                        <Text style={styles.soulLabFinePrint}>
+                          Choose a scenario. Chat receives a draft only; nothing is sent or executed automatically.
+                        </Text>
+                        <View style={styles.soulScenarioRow}>
+                          {SOUL_EVALUATION_SCENARIOS.map(scenario => {
+                            const selected = scenario.id === selectedSoulTestScenario;
+                            return (
+                              <Pressable
+                                key={scenario.id}
+                                accessibilityRole="button"
+                                accessibilityLabel={`Select ${scenario.label} Soul test`}
+                                accessibilityState={{ selected }}
+                                onPress={() => setSelectedSoulTestScenario(scenario.id)}
+                                style={({ pressed }) => [
+                                  styles.soulScenarioChip,
+                                  selected && styles.soulScenarioChipSelected,
+                                  pressed && styles.soulPressed,
+                                  Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
+                                ]}
+                              >
+                                <Text style={[styles.soulScenarioText, selected && styles.soulScenarioTextSelected]}>
+                                  {scenario.label}
+                                </Text>
+                              </Pressable>
+                            );
+                          })}
+                        </View>
+                        <View style={styles.soulScenarioSummary}>
+                          <Text style={styles.soulScenarioSummaryTitle}>{selectedScenario.summary}</Text>
+                          {selectedScenario.successCriteria.map(criterion => (
+                            <Text key={criterion} style={styles.soulScenarioCriterion}>• {criterion}</Text>
+                          ))}
+                        </View>
+                        {editingSpirit ? (
+                          <Text accessibilityRole="alert" style={styles.soulLabFinePrint}>
+                            Save and assign this draft before testing it. Chat evaluates the persisted assigned Soul.
+                          </Text>
+                        ) : !onOpenInChat ? (
+                          <Text style={styles.soulLabFinePrint}>Chat handoff is unavailable for this agent.</Text>
+                        ) : null}
+                        <Pressable
+                          testID="agent-soul-test-chat"
+                          accessibilityRole="button"
+                          accessibilityLabel="Test assigned Soul in Chat"
+                          accessibilityHint="Prefills a no-action evaluation and does not send or run it"
+                          accessibilityState={{ disabled: soulTestDisabled }}
+                          disabled={soulTestDisabled}
+                          onPress={() => {
+                            const draft = buildSoulEvaluationDraft(selectedSoulTestScenario);
+                            if (draft) onOpenInChat?.(draft);
+                          }}
+                          style={({ pressed }) => [
+                            styles.soulTestButton,
+                            soulTestDisabled && styles.soulDisabled,
+                            pressed && !soulTestDisabled && styles.soulPressed,
+                            Platform.OS === 'web' && ({ cursor: soulTestDisabled ? 'default' : 'pointer' } as any),
+                          ]}
+                        >
+                          <Text style={styles.soulTestButtonText}>PREFILL TEST IN CHAT</Text>
+                        </Pressable>
+                      </View>
+                    </View>
+                  ) : null}
+                </View>
 
                 {currentOperationsProfile && (
                   <View style={styles.opsSection}>
@@ -1059,7 +1119,7 @@ export default function AgentSpiritPanel({
                             accessibilityRole="button"
                             accessibilityLabel="Retry WordPress connection status"
                             onPress={() => setWordpressReloadGeneration(generation => generation + 1)}
-                            style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 12, borderWidth: 1, borderColor: '#ef444455', borderRadius: 4, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                            style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 12, borderWidth: 1, borderColor: '#ef444455', borderRadius: 6, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                           >
                             <Text style={{ color: '#fca5a5', fontSize: 11, fontWeight: '800', fontFamily: 'monospace' }}>RETRY</Text>
                           </Pressable>
@@ -1092,7 +1152,7 @@ export default function AgentSpiritPanel({
                               accessibilityRole="button"
                               accessibilityLabel="Retry integration readiness"
                               onPress={() => setIntegrationReloadGeneration(generation => generation + 1)}
-                              style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 12, borderWidth: 1, borderColor: '#ef444455', borderRadius: 4, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                              style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 12, borderWidth: 1, borderColor: '#ef444455', borderRadius: 6, justifyContent: 'center' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                             >
                               <Text style={{ color: '#fca5a5', fontSize: 11, fontWeight: '800', fontFamily: 'monospace' }}>RETRY</Text>
                             </Pressable>
@@ -1380,58 +1440,150 @@ export default function AgentSpiritPanel({
             </View>
           )}
 
-          {SPIRIT_CATEGORIES.map(cat => (
-            <View key={cat.key}>
-              <Text style={[styles.spiritCatLabel, { color: cat.color }]}>{cat.label}</Text>
-              <View style={styles.spiritGrid}>
-                {AGENT_SPIRITS.filter(s => s.category === cat.key).map(spirit => {
-                  const active = currentSpirit === spirit.id;
-                  return (
+          <View testID="agent-soul-library" style={styles.soulLibraryToolbar}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`${showSoulLibrary ? 'Hide' : 'Browse'} Soul library`}
+              accessibilityState={{ expanded: showSoulLibrary }}
+              onPress={() => setShowSoulLibrary(value => !value)}
+              style={({ pressed }) => [
+                styles.soulLibraryHeadingRow,
+                pressed && styles.soulPressed,
+                Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
+              ]}
+            >
+              <View style={{ flex: 1 }}>
+                <Text accessibilityRole="header" style={styles.soulLibraryTitle}>
+                  {showSoulLibrary ? '▼' : '▶'} SOUL LIBRARY
+                </Text>
+                <Text style={styles.soulLibrarySubtitle}>Browse {AGENT_SPIRITS.length} built-in specialties</Text>
+              </View>
+              <Text accessibilityLiveRegion="polite" style={styles.soulLibraryCount}>
+                {showSoulLibrary ? `${filteredSpirits.length} shown` : 'BROWSE'}
+              </Text>
+            </Pressable>
+            {showSoulLibrary ? (
+              <>
+                <View style={styles.soulSearchRow}>
+                  <TextInput
+                    testID="agent-soul-search"
+                    accessibilityLabel="Search Souls"
+                    value={spiritSearch}
+                    onChangeText={setSpiritSearch}
+                    placeholder="Search role, specialty, or skill"
+                    placeholderTextColor="#596273"
+                    returnKeyType="search"
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    style={styles.soulSearchInput}
+                  />
+                  {spiritSearch ? (
                     <Pressable
-                      key={spirit.id}
-                      disabled={spiritAssignmentBusy}
                       accessibilityRole="button"
-                      accessibilityLabel={`Assign ${spirit.name} Spirit`}
-                      accessibilityState={{ selected: active, disabled: spiritAssignmentBusy, busy: spiritAssignmentBusy }}
-                      onPress={async () => {
-                        const authority = exactIdentityAuthority;
-                        const capturedRequestKey = identityRequestKey;
-                        if (!authority || !capturedRequestKey) return;
-                        const saved = await persistSpiritSelection(spirit.id, spirit.emoji, {
-                          spiritId: spirit.id,
-                          spiritEmoji: spirit.emoji,
-                          customProfileId: null,
-                          customProfileName: null,
-                          isCustomized: true,
-                        });
-                        if (!saved || !isIdentityRequestCurrent(capturedRequestKey)) return;
-                        onAgentIdentityChange?.();
-                        setCurrentSpirit(spirit.id);
-                      }}
-                      style={[
-                        styles.spiritCard,
-                        active && { borderColor: spirit.color + '60', backgroundColor: spirit.color + '10' },
-                        spiritAssignmentBusy && { opacity: 0.45 },
-                        Platform.OS === 'web' && { cursor: spiritAssignmentBusy ? 'default' : 'pointer' } as any,
+                      accessibilityLabel="Clear Soul search"
+                      onPress={() => setSpiritSearch('')}
+                      style={({ pressed }) => [
+                        styles.soulSearchClear,
+                        pressed && styles.soulPressed,
+                        Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
                       ]}
                     >
-                      <View style={{ alignItems: 'center', marginBottom: 10 }}>
-                        {ICON_CATALOG[spirit.id] ? (
-                          <FlatIcon name={spirit.id} size={32} glow={active} />
-                        ) : (
-                          <Text style={styles.spiritEmoji}>{spirit.emoji}</Text>
-                        )}
-                      </View>
-                      <Text style={[styles.spiritName, active && { color: spirit.color }]} numberOfLines={1}>
-                        {spirit.name}
-                      </Text>
-                      <Text style={styles.spiritTagline} numberOfLines={1}>{spirit.tagline}</Text>
+                      <Text style={styles.soulSearchClearText}>CLEAR</Text>
                     </Pressable>
-                  );
-                })}
-              </View>
+                  ) : null}
+                </View>
+                <View style={styles.soulCategoryRow}>
+                  {([{ key: 'all', label: 'All' }, ...SPIRIT_CATEGORIES] as const).map(category => {
+                    const selected = spiritCategory === category.key;
+                    return (
+                      <Pressable
+                        key={category.key}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Show ${category.label} Souls`}
+                        accessibilityState={{ selected }}
+                        onPress={() => setSpiritCategory(category.key)}
+                        style={({ pressed }) => [
+                          styles.soulCategoryChip,
+                          selected && styles.soulCategoryChipSelected,
+                          pressed && styles.soulPressed,
+                          Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
+                        ]}
+                      >
+                        <Text style={[styles.soulCategoryText, selected && styles.soulCategoryTextSelected]}>
+                          {category.label}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </>
+            ) : null}
+          </View>
+
+          {showSoulLibrary ? SPIRIT_CATEGORIES
+            .filter(cat => spiritCategory === 'all' || cat.key === spiritCategory)
+            .map(cat => {
+              const categorySpirits = filteredSpirits.filter(spirit => spirit.category === cat.key);
+              if (categorySpirits.length === 0) return null;
+              return (
+                <View key={cat.key}>
+                  <Text style={[styles.spiritCatLabel, { color: cat.color }]}>{cat.label}</Text>
+                  <View style={styles.spiritGrid}>
+                    {categorySpirits.map(spirit => {
+                      const active = currentSpirit === spirit.id;
+                      return (
+                        <Pressable
+                          key={spirit.id}
+                          disabled={spiritAssignmentBusy}
+                          accessibilityRole="button"
+                          accessibilityLabel={`Assign ${spirit.name} Spirit`}
+                          accessibilityState={{ selected: active, disabled: spiritAssignmentBusy, busy: spiritAssignmentBusy }}
+                          onPress={async () => {
+                            const authority = exactIdentityAuthority;
+                            const capturedRequestKey = identityRequestKey;
+                            if (!authority || !capturedRequestKey) return;
+                            const saved = await persistSpiritSelection(spirit.id, spirit.emoji, {
+                              spiritId: spirit.id,
+                              spiritEmoji: spirit.emoji,
+                              customProfileId: null,
+                              customProfileName: null,
+                              isCustomized: true,
+                            });
+                            if (!saved || !isIdentityRequestCurrent(capturedRequestKey)) return;
+                            onAgentIdentityChange?.();
+                            setCurrentSpirit(spirit.id);
+                          }}
+                          style={[
+                            styles.spiritCard,
+                            active && { borderColor: spirit.color + '60', backgroundColor: spirit.color + '10' },
+                            spiritAssignmentBusy && { opacity: 0.45 },
+                            Platform.OS === 'web' && { cursor: spiritAssignmentBusy ? 'default' : 'pointer' } as any,
+                          ]}
+                        >
+                          <View style={{ alignItems: 'center', marginBottom: 10 }}>
+                            {ICON_CATALOG[spirit.id] ? (
+                              <FlatIcon name={spirit.id} size={32} glow={active} />
+                            ) : (
+                              <Text style={styles.spiritEmoji}>{spirit.emoji}</Text>
+                            )}
+                          </View>
+                          <Text style={[styles.spiritName, active && { color: spirit.color }]} numberOfLines={2}>
+                            {spirit.name}
+                          </Text>
+                          <Text style={styles.spiritTagline} numberOfLines={2}>{spirit.tagline}</Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                </View>
+              );
+            }) : null}
+          {showSoulLibrary && filteredSpirits.length === 0 ? (
+            <View accessibilityLiveRegion="polite" style={styles.soulEmpty}>
+              <Text style={styles.soulEmptyTitle}>No Souls found</Text>
+              <Text style={styles.soulEmptyText}>Try a broader search or choose another category.</Text>
             </View>
-          ))}
+          ) : null}
 
           {circleId && (
             <View style={styles.soulInlineSection}>
@@ -1649,6 +1801,205 @@ const styles = StyleSheet.create({
   spiritEscalationText: {
     color: '#ccc', fontSize: 12, fontFamily: 'monospace', marginTop: 4, lineHeight: 18,
   },
+  soulLab: {
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: '#293351',
+    borderRadius: 12,
+    backgroundColor: '#0a0f1f',
+    overflow: 'hidden',
+  },
+  soulLabHeader: {
+    minHeight: 58,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  soulLabTitle: {
+    color: '#c7d2fe',
+    fontSize: 12,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+    letterSpacing: 1.2,
+  },
+  soulLabSubtitle: {
+    color: '#7c879d',
+    fontSize: 11,
+    lineHeight: 16,
+    marginTop: 2,
+  },
+  soulLabCount: {
+    color: '#a5b4fc',
+    fontSize: 10,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
+  soulLabBody: {
+    padding: 12,
+    paddingTop: 2,
+    gap: 12,
+  },
+  soulLabNotice: {
+    color: '#cbd5e1',
+    fontSize: 11,
+    lineHeight: 17,
+    padding: 10,
+    borderRadius: 8,
+    backgroundColor: '#111827',
+    borderWidth: 1,
+    borderColor: '#273449',
+  },
+  soulContractGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  soulContractRow: {
+    flexBasis: 220,
+    flexGrow: 1,
+    flexShrink: 1,
+    minWidth: 0,
+    padding: 10,
+    borderRadius: 8,
+    backgroundColor: '#090d18',
+    borderWidth: 1,
+    borderColor: '#202a40',
+  },
+  soulContractLabel: {
+    color: '#718096',
+    fontSize: 9,
+    lineHeight: 13,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+    letterSpacing: 0.8,
+  },
+  soulContractValue: {
+    color: '#dbe4f0',
+    fontSize: 11,
+    lineHeight: 17,
+    marginTop: 4,
+  },
+  soulPromptFootprint: {
+    padding: 10,
+    borderRadius: 8,
+    backgroundColor: '#090d18',
+    borderWidth: 1,
+    borderColor: '#202a40',
+  },
+  soulLabFinePrint: {
+    color: '#8490a5',
+    fontSize: 10,
+    lineHeight: 16,
+    marginTop: 4,
+  },
+  soulCheckRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  soulCheckChip: {
+    minHeight: 28,
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#4b5563',
+    backgroundColor: '#161b25',
+  },
+  soulCheckChipReady: {
+    borderColor: '#256d50',
+    backgroundColor: '#0d241b',
+  },
+  soulCheckText: {
+    color: '#9ca3af',
+    fontSize: 9,
+    lineHeight: 12,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+  },
+  soulCheckTextReady: {
+    color: '#6ee7b7',
+  },
+  soulLabSectionTitle: {
+    color: '#c7d2fe',
+    fontSize: 11,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+    letterSpacing: 1,
+  },
+  soulScenarioRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 8,
+  },
+  soulScenarioChip: {
+    minHeight: 44,
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#263047',
+    backgroundColor: '#0b1120',
+  },
+  soulScenarioChipSelected: {
+    borderColor: '#6366f1',
+    backgroundColor: '#292d65',
+  },
+  soulScenarioText: {
+    color: '#8994a7',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  soulScenarioTextSelected: {
+    color: '#eef2ff',
+  },
+  soulScenarioSummary: {
+    marginTop: 8,
+    padding: 10,
+    borderRadius: 8,
+    backgroundColor: '#080c16',
+  },
+  soulScenarioSummaryTitle: {
+    color: '#dbe4f0',
+    fontSize: 11,
+    fontWeight: '700',
+    lineHeight: 16,
+    marginBottom: 5,
+  },
+  soulScenarioCriterion: {
+    color: '#8e9aaf',
+    fontSize: 10,
+    lineHeight: 16,
+  },
+  soulTestButton: {
+    minHeight: 44,
+    marginTop: 10,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#4f46e5',
+    borderWidth: 1,
+    borderColor: '#818cf8',
+  },
+  soulTestButtonText: {
+    color: '#ffffff',
+    fontSize: 10,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+    letterSpacing: 0.8,
+  },
+  soulDisabled: {
+    opacity: 0.4,
+  },
+  soulPressed: {
+    opacity: 0.82,
+  },
   spiritClearBtn: {
     minHeight: 44, justifyContent: 'center', paddingVertical: 6, paddingHorizontal: 14, borderRadius: 8,
     backgroundColor: '#ef444415', borderWidth: 1, borderColor: '#ef444430',
@@ -1664,7 +2015,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row', flexWrap: 'wrap', gap: 10,
   },
   spiritCard: {
-    width: '48%', padding: 12, borderRadius: 10,
+    width: '48%', minHeight: 128, padding: 12, borderRadius: 10,
     borderWidth: 1, borderColor: '#1e1e3a', backgroundColor: '#0a0a0a',
     alignItems: 'center',
   },
@@ -1693,6 +2044,121 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
     textAlign: 'center',
   },
+  soulLibraryToolbar: {
+    marginTop: 6,
+    marginBottom: 4,
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#252c3d',
+    backgroundColor: '#090c13',
+    gap: 8,
+  },
+  soulLibraryHeadingRow: {
+    minHeight: 24,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 8,
+  },
+  soulLibraryTitle: {
+    color: '#d9e0ec',
+    fontSize: 11,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+    letterSpacing: 1.2,
+  },
+  soulLibrarySubtitle: {
+    color: '#7b8799',
+    fontSize: 10,
+    lineHeight: 15,
+    marginTop: 2,
+  },
+  soulLibraryCount: {
+    color: '#7b8799',
+    fontSize: 10,
+    fontFamily: 'monospace',
+  },
+  soulSearchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  soulSearchInput: {
+    flex: 1,
+    minWidth: 0,
+    minHeight: 44,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#30384a',
+    backgroundColor: '#05070c',
+    color: '#e5e7eb',
+    fontSize: 12,
+  },
+  soulSearchClear: {
+    minHeight: 44,
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#30384a',
+  },
+  soulSearchClearText: {
+    color: '#aab3c2',
+    fontSize: 9,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+  },
+  soulCategoryRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  soulCategoryChip: {
+    minHeight: 44,
+    justifyContent: 'center',
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#293145',
+    backgroundColor: '#0b0f17',
+  },
+  soulCategoryChipSelected: {
+    borderColor: '#6366f1',
+    backgroundColor: '#272b59',
+  },
+  soulCategoryText: {
+    color: '#8d98aa',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  soulCategoryTextSelected: {
+    color: '#eef2ff',
+  },
+  soulEmpty: {
+    minHeight: 100,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    padding: 16,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#252c3d',
+    backgroundColor: '#090c13',
+  },
+  soulEmptyTitle: {
+    color: '#d9e0ec',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  soulEmptyText: {
+    color: '#7b8799',
+    fontSize: 11,
+    textAlign: 'center',
+  },
   spiritEmoji: { fontSize: 28, marginBottom: 8 },
   spiritName: {
     color: '#6366f1', fontSize: 12, fontWeight: '800', fontFamily: 'monospace', textAlign: 'center',
@@ -1700,93 +2166,15 @@ const styles = StyleSheet.create({
   spiritTagline: {
     color: '#666', fontSize: 13, fontFamily: 'monospace', lineHeight: 15, marginTop: 2, textAlign: 'center',
   },
-  roleReadinessSection: {
-    marginTop: 14,
-    paddingTop: 14,
-    borderTopWidth: 1,
-    borderTopColor: '#1e1e3a',
-    gap: 10,
-  },
-  roleReadinessTitle: {
-    color: '#38bdf8',
-    fontSize: 12,
-    fontWeight: '800',
-    fontFamily: 'monospace',
-    letterSpacing: 1.5,
-  },
-  roleReadinessRole: {
-    color: '#f8fafc',
-    fontSize: 15,
-    fontWeight: '800',
-    fontFamily: 'monospace',
-  },
-  roleReadinessSummary: {
-    color: '#94a3b8',
-    fontSize: 12,
-    lineHeight: 18,
-    fontFamily: 'monospace',
-  },
   roleChipRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 6,
   },
-  roleChip: {
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    borderRadius: 999,
-    backgroundColor: '#082032',
-    borderWidth: 1,
-    borderColor: '#12324a',
-  },
-  roleChipText: {
-    color: '#7dd3fc',
-    fontSize: 10,
-    fontWeight: '700',
-    fontFamily: 'monospace',
-  },
-  roleChecklistItem: {
-    color: '#cbd5e1',
-    fontSize: 12,
-    lineHeight: 18,
-    fontFamily: 'monospace',
-  },
-  roleSubheading: {
-    color: '#64748b',
-    fontSize: 11,
-    fontWeight: '800',
-    fontFamily: 'monospace',
-    letterSpacing: 1,
-    marginBottom: 4,
-  },
-  roleSourceLink: {
-    color: '#60a5fa',
-    fontSize: 11,
-    lineHeight: 16,
-    fontFamily: 'monospace',
-    marginTop: 2,
-  },
   roleActionRow: {
     flexDirection: 'row',
     gap: 8,
     flexWrap: 'wrap',
-  },
-  roleActionBtn: {
-    minHeight: 44,
-    justifyContent: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    backgroundColor: '#0f172a',
-    borderWidth: 1,
-    borderColor: '#1e3a5f',
-  },
-  roleActionBtnText: {
-    color: '#7dd3fc',
-    fontSize: 11,
-    fontFamily: 'monospace',
-    fontWeight: '800',
-    letterSpacing: 0.8,
   },
   roleArtifactCard: {
     backgroundColor: '#020617',
@@ -1813,23 +2201,6 @@ const styles = StyleSheet.create({
     gap: 8,
     flexWrap: 'wrap',
   },
-  roleSaveBtn: {
-    minHeight: 44,
-    justifyContent: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    backgroundColor: '#082f1a',
-    borderWidth: 1,
-    borderColor: '#166534',
-  },
-  roleSaveBtnText: {
-    color: '#4ade80',
-    fontSize: 11,
-    fontFamily: 'monospace',
-    fontWeight: '800',
-    letterSpacing: 0.7,
-  },
   roleDismissBtn: {
     minHeight: 44,
     justifyContent: 'center',
@@ -1845,11 +2216,6 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontFamily: 'monospace',
     fontWeight: '700',
-  },
-  roleStatus: {
-    color: '#86efac',
-    fontSize: 11,
-    fontFamily: 'monospace',
   },
   opsSection: {
     marginTop: 14,

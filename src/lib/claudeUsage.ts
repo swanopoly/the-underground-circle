@@ -5,6 +5,7 @@
  */
 
 import { supabase } from "./supabase";
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 export interface ClaudeUsageSummary {
   total_cost: number;
@@ -65,8 +66,9 @@ function parseUsageSummary(data: unknown): ClaudeUsageSummary {
 export async function getClaudeUsageSummaryStrict(
   circleId: string | null,
   days: number = 7,
+  client: SupabaseClient = supabase,
 ): Promise<ClaudeUsageSummary> {
-  const { data, error } = await supabase.rpc("get_claude_usage_summary", {
+  const { data, error } = await client.rpc("get_claude_usage_summary", {
     p_circle_id: circleId,
     p_days: days,
   });
@@ -104,8 +106,9 @@ function parseUsageByModel(data: unknown): ClaudeUsageByModel[] {
 export async function getClaudeUsageByModelStrict(
   circleId: string | null,
   days: number = 7,
+  client: SupabaseClient = supabase,
 ): Promise<ClaudeUsageByModel[]> {
-  const { data, error } = await supabase.rpc("get_claude_usage_by_model", {
+  const { data, error } = await client.rpc("get_claude_usage_by_model", {
     p_circle_id: circleId,
     p_days: days,
   });

@@ -118,6 +118,12 @@ export interface CircleCapabilityExactReadAuthority {
   generation: number;
 }
 
+export type CircleIntegrationExactReadAuthority = Readonly<{
+  userId: string;
+  circleId: string;
+  accessToken: string;
+}>;
+
 export type CircleCapabilityPreflight = {
   ok: boolean;
   missingCapabilities: string[];
@@ -145,6 +151,26 @@ function normalizeCircleCapabilityReadAuthority(
     || generation <= 0
   ) return null;
   return { userId, circleId: authorityCircleId, accessToken, generation };
+}
+
+function normalizeCircleIntegrationReadAuthority(
+  circleId: string,
+  authority: CircleIntegrationExactReadAuthority | null | undefined,
+): CircleIntegrationExactReadAuthority | null {
+  const normalizedCircleId = String(circleId || '').trim();
+  const userId = authority?.userId?.trim();
+  const authorityCircleId = authority?.circleId?.trim();
+  const accessToken = authority?.accessToken?.trim();
+  if (
+    !normalizedCircleId
+    || normalizedCircleId.length > 240
+    || !userId
+    || userId.length > 240
+    || authorityCircleId !== normalizedCircleId
+    || !accessToken
+    || accessToken.length > 16_384
+  ) return null;
+  return Object.freeze({ userId, circleId: authorityCircleId, accessToken });
 }
 
 export interface IntegrationDefinition {
@@ -1249,6 +1275,90 @@ export async function listCircleIntegrations(circleId: string): Promise<CircleIn
   return (data || []) as CircleIntegrationRecord[];
 }
 
+/**
+ * Strict Marketplace catalog read for one captured subject and circle. An
+ * empty integration result is accepted only after the same pinned bearer
+ * proves exact membership; database/auth failures never become a verified
+ * circle with no model connections.
+ */
+export async function listCircleIntegrationsExact(opts: {
+  circleId: string;
+  authority: CircleIntegrationExactReadAuthority;
+}): Promise<CircleIntegrationRecord[]> {
+  const authority = normalizeCircleIntegrationReadAuthority(opts.circleId, opts.authority);
+  if (!authority) {
+    throw new Error('Connected circle model integration authority is invalid.');
+  }
+  const { value: verifiedUser } = await safeGetUserForAccessToken(authority.accessToken);
+  if (verifiedUser?.id !== authority.userId) {
+    throw new Error('Connected circle model integration authority could not be verified.');
+  }
+
+  const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+  const [membershipResult, integrationResult] = await Promise.all([
+    exactClient
+      .from('circle_members')
+      .select('circle_id,user_id')
+      .eq('circle_id', authority.circleId)
+      .eq('user_id', authority.userId)
+      .maybeSingle(),
+    exactClient
+      .from('circle_integrations')
+      .select('*')
+      .eq('circle_id', authority.circleId)
+      .eq('is_active', true)
+      .order('created_at', { ascending: false })
+      .limit(101),
+  ]);
+
+  if (membershipResult.error || integrationResult.error) {
+    throw new Error('Connected circle model integration inventory is unavailable.');
+  }
+  const membership = membershipResult.data as { circle_id?: unknown; user_id?: unknown } | null;
+  if (
+    membership?.circle_id !== authority.circleId
+    || membership?.user_id !== authority.userId
+  ) {
+    throw new Error('This signed-in account is not a member of this circle.');
+  }
+  if (!Array.isArray(integrationResult.data) || integrationResult.data.length > 100) {
+    throw new Error('Connected circle model integration inventory is invalid.');
+  }
+
+  const integrations: CircleIntegrationRecord[] = [];
+  for (const row of integrationResult.data) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) {
+      throw new Error('Connected circle model integration inventory is invalid.');
+    }
+    const value = row as Record<string, unknown>;
+    const provider = typeof value.provider === 'string' ? value.provider.trim() : '';
+    const metadataValid = value.metadata === null
+      || value.metadata === undefined
+      || (typeof value.metadata === 'object' && !Array.isArray(value.metadata));
+    const capabilitiesValid = value.capability_flags === null
+      || value.capability_flags === undefined
+      || (Array.isArray(value.capability_flags)
+        && value.capability_flags.length <= 200
+        && value.capability_flags.every(flag => typeof flag === 'string' && flag.length <= 128));
+    if (
+      typeof value.id !== 'string'
+      || value.circle_id !== authority.circleId
+      || !/^[a-z0-9][a-z0-9_-]{0,127}$/.test(provider)
+      || typeof value.label !== 'string'
+      || value.label.length > 240
+      || !['connected', 'degraded', 'disabled', 'planned'].includes(String(value.status))
+      || !['circle', 'room', 'user'].includes(String(value.connection_scope))
+      || value.is_active !== true
+      || !metadataValid
+      || !capabilitiesValid
+    ) {
+      throw new Error('Connected circle model integration inventory is invalid.');
+    }
+    integrations.push({ ...value, provider } as unknown as CircleIntegrationRecord);
+  }
+  return integrations;
+}
+
 export async function getCircleIntegration(
   circleId: string,
   provider: CircleIntegrationProvider,
@@ -2087,6 +2197,36 @@ export async function validateProviderApiKey(
   }
 }
 
+const MODEL_CATALOG_INTEGRATION_PROVIDERS: ReadonlySet<CircleIntegrationProvider> = new Set([
+  'anthropic',
+  'openai',
+  'openai_compatible',
+  'openrouter',
+  'hugging_face',
+  'google_ai',
+  'groq',
+  'mistral_ai',
+  'cohere',
+  'perplexity',
+  'together_ai',
+  'fireworks_ai',
+  'deepseek',
+  'z_ai',
+  'minimax',
+  'ollama',
+  'blackswan',
+]);
+
+function notifyModelCatalogIntegrationChange(provider: CircleIntegrationProvider): void {
+  if (!MODEL_CATALOG_INTEGRATION_PROVIDERS.has(provider)) return;
+  // Keep circle integration ownership independent of the model-key module;
+  // the lazy import avoids a registry cycle while still invalidating an
+  // already-mounted Chat/Rooms catalog after a successful Marketplace save.
+  void import('./llmProviders')
+    .then(({ notifyUserApiKeyChanges }) => notifyUserApiKeyChanges())
+    .catch(() => { /* the saved connection remains durable; next focus retries */ });
+}
+
 export async function connectGenericCircleIntegration(opts: {
   circleId: string;
   provider: CircleIntegrationProvider;
@@ -2159,5 +2299,6 @@ export async function connectGenericCircleIntegration(opts: {
     if (!ok) return null;
   }
 
+  notifyModelCatalogIntegrationChange(opts.provider);
   return integration;
 }

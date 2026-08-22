@@ -4,8 +4,10 @@
  */
 
 import { storage } from './storage';
+import { safeGetUserId } from './authSession';
 
-const STORAGE_KEY = '@custom_hf_models';
+const LEGACY_OWNERLESS_STORAGE_KEY = '@custom_hf_models';
+const STORAGE_KEY_PREFIX = '@custom_hf_models_v2:';
 
 export interface CustomModel {
   id: string;           // HF model ID (e.g., "meta-llama/Llama-4-Scout-17B-16E-Instruct")
@@ -15,28 +17,88 @@ export interface CustomModel {
   icon: string;         // 1-2 char icon
   provider: 'huggingface' | 'ollama' | 'openrouter' | 'custom';
   endpoint?: string;    // Custom API endpoint if not using HF Inference
-  apiKey?: string;      // HF API token (stored locally, never sent to our server)
   addedAt: string;      // ISO date
+}
+
+function normalizeOwnerId(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().toLowerCase();
+  return normalized && normalized.length <= 200 ? normalized : null;
+}
+
+function customModelsStorageKey(userId: string): string {
+  return `${STORAGE_KEY_PREFIX}${encodeURIComponent(userId)}`;
+}
+
+async function resolveOwnerId(userId?: string | null): Promise<string | null> {
+  const captured = normalizeOwnerId(userId);
+  if (captured) return captured;
+  return normalizeOwnerId(await safeGetUserId());
+}
+
+function withoutPersistedSecret(value: unknown): CustomModel | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  const id = typeof candidate.id === 'string' ? candidate.id.trim().slice(0, 300) : '';
+  const label = typeof candidate.label === 'string' ? candidate.label.trim().slice(0, 160) : '';
+  const provider = candidate.provider;
+  if (
+    !id
+    || !label
+    || !['huggingface', 'ollama', 'openrouter', 'custom'].includes(String(provider || ''))
+  ) return null;
+  const endpoint = typeof candidate.endpoint === 'string'
+    ? candidate.endpoint.trim().slice(0, 2_048)
+    : '';
+  return {
+    id,
+    label,
+    desc: typeof candidate.desc === 'string' ? candidate.desc.slice(0, 500) : '',
+    color: typeof candidate.color === 'string' ? candidate.color.slice(0, 40) : '',
+    icon: typeof candidate.icon === 'string' ? candidate.icon.slice(0, 8) : '',
+    provider: provider as CustomModel['provider'],
+    ...(endpoint ? { endpoint } : {}),
+    addedAt: typeof candidate.addedAt === 'string' ? candidate.addedAt.slice(0, 80) : '',
+  };
 }
 
 // Default color palette for custom models
 const CUSTOM_COLORS = ['#f472b6', '#a78bfa', '#67e8f9', '#fbbf24', '#34d399', '#fb923c', '#c084fc', '#38bdf8'];
 
-export async function loadCustomModels(): Promise<CustomModel[]> {
+export async function loadCustomModels(userId?: string | null): Promise<CustomModel[]> {
   try {
-    const raw = await storage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
+    // Ownerless rows may contain historical custom endpoints or API tokens.
+    // They cannot be attributed safely, so never import them into an account.
+    await storage.removeItem(LEGACY_OWNERLESS_STORAGE_KEY);
+    const ownerId = await resolveOwnerId(userId);
+    if (!ownerId) return [];
+    const raw = await storage.getItem(customModelsStorageKey(ownerId));
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed)
+      ? parsed.map(withoutPersistedSecret).filter((model): model is CustomModel => !!model)
+      : [];
   } catch {
     return [];
   }
 }
 
-export async function saveCustomModels(models: CustomModel[]): Promise<void> {
-  await storage.setItem(STORAGE_KEY, JSON.stringify(models));
+export async function saveCustomModels(models: CustomModel[], userId?: string | null): Promise<void> {
+  await storage.removeItem(LEGACY_OWNERLESS_STORAGE_KEY);
+  const ownerId = await resolveOwnerId(userId);
+  if (!ownerId) throw new Error('A signed-in user is required to save custom models.');
+  const safeModels = models
+    .map(withoutPersistedSecret)
+    .filter((model): model is CustomModel => !!model);
+  await storage.setItem(customModelsStorageKey(ownerId), JSON.stringify(safeModels));
 }
 
-export async function addCustomModel(model: Omit<CustomModel, 'addedAt'>): Promise<CustomModel> {
-  const models = await loadCustomModels();
+export async function addCustomModel(
+  model: Omit<CustomModel, 'addedAt'>,
+  userId?: string | null,
+): Promise<CustomModel> {
+  const ownerId = await resolveOwnerId(userId);
+  if (!ownerId) throw new Error('A signed-in user is required to add a custom model.');
+  const models = await loadCustomModels(ownerId);
   const existing = models.find(m => m.id === model.id);
   if (existing) return existing; // Already added
 
@@ -46,13 +108,15 @@ export async function addCustomModel(model: Omit<CustomModel, 'addedAt'>): Promi
     addedAt: new Date().toISOString(),
   };
   models.push(newModel);
-  await saveCustomModels(models);
+  await saveCustomModels(models, ownerId);
   return newModel;
 }
 
-export async function removeCustomModel(modelId: string): Promise<void> {
-  const models = await loadCustomModels();
-  await saveCustomModels(models.filter(m => m.id !== modelId));
+export async function removeCustomModel(modelId: string, userId?: string | null): Promise<void> {
+  const ownerId = await resolveOwnerId(userId);
+  if (!ownerId) return;
+  const models = await loadCustomModels(ownerId);
+  await saveCustomModels(models.filter(m => m.id !== modelId), ownerId);
 }
 
 /**

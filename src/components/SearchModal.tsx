@@ -11,6 +11,7 @@ import { View, Text, TextInput, Pressable, Modal, ScrollView, StyleSheet, Platfo
 import { searchCircleContent, hitToDeeplink, type SearchHit, type SearchKind } from "../lib/search";
 import { ALL_QUICK_ACTIONS, type QuickActionItem } from "../lib/chatActions";
 import { getRecentActions, recordRecentAction, clearRecentActions } from "../lib/recentActions";
+import { useAuth } from "../hooks/useAuth";
 
 interface Props {
   circleId: string;
@@ -46,6 +47,7 @@ function defaultActionSelect(action: QuickActionItem) {
 }
 
 export default function SearchModal({ circleId, visible, onClose, onSelect, onActionSelect }: Props) {
+  const { user } = useAuth();
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [loading, setLoading] = useState(false);
@@ -57,7 +59,10 @@ export default function SearchModal({ circleId, visible, onClose, onSelect, onAc
   // they dismiss ⌘K to check something and come back. Stored per-circle
   // because search is circle-scoped. Cleared by the Clear Recent action
   // alongside the action history.
-  const queryStorageKey = `uc_omnibar_query_${circleId}`;
+  const legacyQueryStorageKey = `uc_omnibar_query_${circleId}`;
+  const queryStorageKey = user?.id
+    ? `uc_omnibar_query_v2:${encodeURIComponent(user.id.toLowerCase())}:${encodeURIComponent(circleId)}`
+    : null;
   const [recentActions, setRecentActions] = useState<QuickActionItem[]>([]);
   useEffect(() => {
     if (!visible) return;
@@ -65,7 +70,12 @@ export default function SearchModal({ circleId, visible, onClose, onSelect, onAc
     // search effect below will re-run based on the new value.
     let saved = "";
     if (typeof window !== "undefined") {
-      try { saved = window.localStorage.getItem(queryStorageKey) || ""; } catch {}
+      try {
+        // A circle-only query can contain personal names or task text. It has
+        // no trustworthy owner, so retire it instead of migrating it.
+        window.localStorage.removeItem(legacyQueryStorageKey);
+        if (queryStorageKey) saved = window.localStorage.getItem(queryStorageKey) || "";
+      } catch {}
     }
     setQuery(saved);
     setHits([]);
@@ -73,12 +83,13 @@ export default function SearchModal({ circleId, visible, onClose, onSelect, onAc
     setRecentActions(getRecentActions());
     const t = setTimeout(() => inputRef.current?.focus(), 50);
     return () => clearTimeout(t);
-  }, [visible, queryStorageKey]);
+  }, [legacyQueryStorageKey, visible, queryStorageKey]);
 
   // Persist every keystroke so quick dismiss+reopen cycles keep context.
   useEffect(() => {
     if (!visible) return;
     if (typeof window === "undefined") return;
+    if (!queryStorageKey) return;
     try { window.localStorage.setItem(queryStorageKey, query); } catch {}
   }, [visible, query, queryStorageKey]);
 

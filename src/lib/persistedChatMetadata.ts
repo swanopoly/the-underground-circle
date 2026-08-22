@@ -20,6 +20,10 @@ import {
 } from './toolLoopResume';
 import type { ResearchDocumentReference } from './researchControl';
 import type { SwanBotStructuredArtifact, SwanBotStructuredResponse } from './swanbot';
+import {
+  projectGeneratedChatImageArtifactForPersistence,
+  readGeneratedChatImageMetadata,
+} from './generatedChatImageArtifactCore';
 import type { WikiArticleReference } from './wikiData';
 import type { AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
 import type { IntentConnective } from './chatMultiIntentCore';
@@ -1768,7 +1772,8 @@ function compactPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
     ),
     usage: metadata.usage,
     commandDecisions: metadata.commandDecisions?.slice(0, 8),
-    artifacts: metadata.artifacts?.slice(0, 8).map((artifact) => {
+    artifacts: metadata.artifacts?.slice(0, 8).map((rawArtifact) => {
+      const artifact = projectGeneratedChatImageArtifactForPersistence(rawArtifact);
       const content = artifact.content ? truncateText(artifact.content, 1200) : artifact.content;
       const isCanonicalActionArtifact = artifact.metadata?.source === 'openswan_action_artifact'
         && typeof artifact.metadata?.canonicalArtifactId === 'string';
@@ -1936,14 +1941,17 @@ function minimalPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
       metadata.openSwanMultiActionCompletion,
     ),
     usage: metadata.usage,
-    artifacts: metadata.artifacts?.slice(0, 4).map((artifact) => ({
-      kind: artifact.kind,
-      title: artifact.title,
-      url: artifact.url,
-      metadata: artifact.metadata?.source === 'openswan_action_artifact'
-        ? { ...artifact.metadata, contentTruncated: !!artifact.content }
-        : artifact.metadata,
-    })),
+    artifacts: metadata.artifacts?.slice(0, 4).map((rawArtifact) => {
+      const artifact = projectGeneratedChatImageArtifactForPersistence(rawArtifact);
+      return {
+        kind: artifact.kind,
+        title: artifact.title,
+        url: artifact.url,
+        metadata: artifact.metadata?.source === 'openswan_action_artifact'
+          ? { ...artifact.metadata, contentTruncated: !!artifact.content }
+          : artifact.metadata,
+      };
+    }),
     wikiRefs: metadata.wikiRefs?.slice(0, 3),
     researchRefs: metadata.researchRefs?.slice(0, 3),
     memoriesUsed: metadata.memoriesUsed?.slice(0, 6),
@@ -2416,6 +2424,7 @@ export function formatPersistedChatBotMessage(
     ? {
         ...metadata,
         ...preserveInertBrowserRootPointers(metadata),
+        artifacts: metadata.artifacts?.map(projectGeneratedChatImageArtifactForPersistence),
         requestAuthorId: boundedLegacyValue(metadata.requestAuthorId, 160) || undefined,
         requestSourceMessageId: boundedLegacyValue(metadata.requestSourceMessageId, 160) || undefined,
         agentSubjectMetadata: compactAgentSubjectMetadata(metadata.agentSubjectMetadata),
@@ -2478,6 +2487,9 @@ export function formatPersistedChatBotMessage(
     if (message.length <= MAX_PERSISTED_BOT_MESSAGE_CHARS) return message;
   }
 
+  const generatedImageArtifacts = normalizedMetadata?.artifacts
+    ?.filter((artifact) => Boolean(readGeneratedChatImageMetadata(artifact)))
+    .slice(0, 8);
   // WI-4/WI-5 last-ditch: nothing above fit with metadata attached, but the
   // findings are the anchor for "book option 2" and must survive. Persist ONLY
   // the findings (+ ids), trimming the visible body if needed to make room, so
@@ -2496,6 +2508,29 @@ export function formatPersistedChatBotMessage(
       computerFindings: findingsOnly,
     };
     const suffix = `${BOT_META_MARKER}${JSON.stringify(findingsMeta)}`;
+    const bodyBudget = MAX_PERSISTED_BOT_MESSAGE_CHARS - suffix.length;
+    if (bodyBudget > 0) {
+      const trimmedBase = base.length <= bodyBudget ? base : truncateText(base, bodyBudget);
+      const message = `${trimmedBase}${suffix}`;
+      if (message.length <= MAX_PERSISTED_BOT_MESSAGE_CHARS) return message;
+    }
+  }
+
+  // Generated media is durable only through its small opaque reference. Once
+  // proof-critical findings have had their existing dedicated fallback, keep
+  // verified image ids/provenance with basic lineage before text-only recovery.
+  // Transient URLs were already stripped from normalizedMetadata above.
+  if (generatedImageArtifacts?.length) {
+    const generatedImagesMeta: PersistedChatBotMetadata = {
+      localMessageId: normalizedMetadata?.localMessageId,
+      runId: normalizedMetadata?.runId,
+      requestId: normalizedMetadata?.requestId,
+      requestAuthorId: normalizedMetadata?.requestAuthorId,
+      requestSourceMessageId: normalizedMetadata?.requestSourceMessageId,
+      source: normalizedMetadata?.source,
+      artifacts: generatedImageArtifacts,
+    };
+    const suffix = `${BOT_META_MARKER}${JSON.stringify(generatedImagesMeta)}`;
     const bodyBudget = MAX_PERSISTED_BOT_MESSAGE_CHARS - suffix.length;
     if (bodyBudget > 0) {
       const trimmedBase = base.length <= bodyBudget ? base : truncateText(base, bodyBudget);

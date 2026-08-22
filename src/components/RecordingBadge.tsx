@@ -12,18 +12,21 @@
  */
 import React, { useCallback, useEffect, useState } from 'react';
 import { View, Text, Pressable, StyleSheet, Platform } from 'react-native';
-import { getActiveSession, formatElapsedSec, type ActiveSession } from '../lib/chatRecording';
+import { getActiveSessionForUser, formatElapsedSec, type ActiveSession } from '../lib/chatRecording';
+import { useAuth } from '../hooks/useAuth';
 
 const POLL_MS = 2_000;
 
 export default function RecordingBadge(): React.ReactElement | null {
-  const [session, setSession] = useState<ActiveSession | null>(() => getActiveSession());
+  const { user } = useAuth();
+  const userId = user?.id || '';
+  const [session, setSession] = useState<ActiveSession | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     const refresh = () => {
       if (cancelled) return;
-      const next = getActiveSession();
+      const next = getActiveSessionForUser(userId);
       // Referential-identity changes would rerender unnecessarily;
       // only set when id/step count changed.
       setSession((prev) => {
@@ -33,6 +36,7 @@ export default function RecordingBadge(): React.ReactElement | null {
         return next;
       });
     };
+    refresh();
     const id = setInterval(refresh, POLL_MS);
     // Also listen for storage events (cross-tab); localStorage on web
     // emits `storage` when another tab writes.
@@ -47,12 +51,12 @@ export default function RecordingBadge(): React.ReactElement | null {
         window.removeEventListener('storage', onStorage);
       }
     };
-  }, []);
+  }, [userId]);
 
   const [showDetail, setShowDetail] = useState(false);
   const toggle = useCallback(() => setShowDetail((v) => !v), []);
 
-  if (!session) return null;
+  if (!session || !userId || session.userId.trim().toLowerCase() !== userId.trim().toLowerCase()) return null;
 
   const elapsedSec = Math.max(0, Math.floor((Date.now() - session.startedAt) / 1000));
   const elapsedLabel = formatElapsedSec(elapsedSec);

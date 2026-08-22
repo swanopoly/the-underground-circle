@@ -166,7 +166,7 @@ export async function getOnThisDay(userId: string): Promise<{ weekAgo: any[]; mo
 
   const { data: weekAgo } = await supabase
     .from('check_ins')
-    .select('*, user:profiles(username, display_name)')
+    .select('*')
     .eq('user_id', userId)
     .gte('created_at', weekAgoDate + 'T00:00:00')
     .lt('created_at', weekAgoDate + 'T23:59:59')
@@ -174,7 +174,7 @@ export async function getOnThisDay(userId: string): Promise<{ weekAgo: any[]; mo
 
   const { data: monthAgo } = await supabase
     .from('check_ins')
-    .select('*, user:profiles(username, display_name)')
+    .select('*')
     .eq('user_id', userId)
     .gte('created_at', monthAgoDate + 'T00:00:00')
     .lt('created_at', monthAgoDate + 'T23:59:59')

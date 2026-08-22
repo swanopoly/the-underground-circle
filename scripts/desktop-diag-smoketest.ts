@@ -209,7 +209,14 @@ function main() {
       const source = readFileSync(file, 'utf8');
       assert(source.includes('X-UC-Desktop-Token'), `cors: ${file} allows desktop token header`);
       assert(source.includes('X-UC-File-Session-Token'), `cors: ${file} allows local file session token header`);
-      assert(source.includes('Access-Control-Allow-Private-Network'), `cors: ${file} allows private-network preflight`);
+      assert(
+        source.includes('Access-Control-Allow-Private-Network')
+          || (
+            source.includes('buildBridgeCorsHeaders')
+            && source.includes('res.__ucCors = buildBridgeCorsHeaders(req, isAllowedPairOrigin, CORS_BASE)')
+          ),
+        `cors: ${file} allows origin-scoped private-network preflight`,
+      );
     }
   }
 

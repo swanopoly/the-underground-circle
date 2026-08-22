@@ -38,6 +38,11 @@ const targetHelpers = sourceSection(
   'function asTerminalRow',
   'function parseTerminalCommandWakeup',
 );
+const exactCacheHelpers = sourceSection(
+  libSource,
+  'function terminalBearerCacheFingerprint',
+  'function mapExactTerminalMessageRow',
+);
 const exactSender = sourceSection(
   libSource,
   'function terminalTargetIdsMatch',
@@ -47,6 +52,7 @@ const compiled = ts.transpileModule(
   `${constants}
 ${targetHelpers}
 ${authorityHelpers}
+${exactCacheHelpers}
 ${exactSender}
 ;(globalThis as any).__terminalExact = {
   normalizeTerminalExactAuthority,
@@ -54,6 +60,7 @@ ${exactSender}
   buildTerminalCommandTargetReceipt,
   buildTerminalCommandDispatchReceipt,
   isTerminalCommandDispatchReceiptCurrent,
+  terminalExactReadScopeKey,
   sendTerminalCommandExact,
 };`.replace(/\bexport\s+/g, ''),
   {
@@ -92,6 +99,21 @@ assert(
 assert(
   core.normalizeTerminalExactAuthority({ ...authorityA, generation: 0 }) === null,
   'non-positive generation fails closed',
+);
+assert(
+  core.terminalExactReadScopeKey(authorityA)
+    !== core.terminalExactReadScopeKey({ ...authorityA, userId: userB }),
+  'same-Circle response/history cache scope differs across users',
+);
+assert(
+  core.terminalExactReadScopeKey(authorityA)
+    !== core.terminalExactReadScopeKey({ ...authorityA, generation: 8 }),
+  'a new authority generation cannot reuse the prior transcript cache',
+);
+assert(
+  core.terminalExactReadScopeKey(authorityA)
+    !== core.terminalExactReadScopeKey({ ...authorityA, accessToken: 'jwt-account-a-refreshed' }),
+  'a changed bearer cannot reuse a cache even if a caller reuses a generation',
 );
 const target = core.buildTerminalCommandTargetReceipt({
   targetAgentId: agentId,
@@ -280,6 +302,54 @@ assert(
   componentSource.includes('terminalMountedRef.current = false;')
     && componentSource.includes('terminalAuthorityRef.current = null;'),
   'unmount synchronously retires the component authority',
+);
+
+console.log('Exact transcript read + Realtime advisory wiring');
+const exactResponseRead = sourceSection(
+  libSource,
+  'export async function loadResponsesForMessagesExact(',
+  'export async function loadResponsesForMessages(',
+);
+const exactHistoryRead = sourceSection(
+  libSource,
+  'export async function loadTerminalHistoryExact(',
+  '// ─── Subscribe to Realtime DB changes on terminal messages',
+);
+for (const [label, section] of [
+  ['response', exactResponseRead],
+  ['history', exactHistoryRead],
+] as const) {
+  assert(section.includes('auth.getUser(authority.accessToken)'), `${label} read verifies the captured bearer subject`);
+  assert(section.includes(".eq('circle_id', authority.circleId)"), `${label} read applies the exact Circle filter`);
+  assert(section.includes(".setHeader('Authorization', `Bearer ${authority.accessToken}`)"), `${label} read binds captured Authorization`);
+  assert(section.includes('terminalAuthorityGuardPasses(authority, isCurrent)') || section.includes('fence.isCurrent()'), `${label} read is generation-fenced`);
+}
+assert(
+  !exactResponseRead.includes('loadResponsesForMessages('),
+  'exact response read never falls back to the mutable-session compatibility read',
+);
+assert(
+  !exactHistoryRead.includes('loadTerminalHistory('),
+  'exact history read never falls back to the circle-only compatibility read',
+);
+const transcriptSection = sourceSection(
+  componentSource,
+  '  const reloadTranscript = useCallback(async (forceRefresh = false) =>',
+  '  // Scroll to bottom on new messages',
+);
+assert(
+  transcriptSection.includes('await loadTerminalHistoryExact(')
+    && transcriptSection.includes('await loadResponsesForMessagesExact('),
+  'authenticated terminal reloads both messages and responses through exact reads',
+);
+assert(
+  transcriptSection.indexOf('if (exactTerminalAuthorityRequired) {')
+    < transcriptSection.indexOf('const raw = payload.new;'),
+  'exact response Realtime payload is rejected before response_text is parsed',
+);
+assert(
+  transcriptSection.includes('void reloadTranscript(true);'),
+  'Realtime wake-ups force a fresh exact catalog read instead of reusing pre-event cache',
 );
 
 console.log(`office-terminal-exact-authority smoke passed (${assertions} assertions)`);

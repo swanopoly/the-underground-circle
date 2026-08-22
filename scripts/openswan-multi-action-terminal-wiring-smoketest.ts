@@ -329,7 +329,7 @@ async function main(): Promise<void> {
     assert.match(runtime, /sealedToolInputMatchesTarget\s*\(event\.tool,\s*event\.input,\s*targetTokens\)/);
     assert.match(runtime, /mutationAuthority\s*===\s*['"]action_ledger['"]/);
     assert.match(runtime, /interleaveBoundedToolGroups\s*\(/);
-    assert.match(runtime, /parallelToolConcurrency\s*:\s*args\.forceSequentialToolDispatch\s*\?\s*1\s*:\s*4/);
+    assert.match(runtime, /parallelToolConcurrency\s*:\s*args\.forceSequentialToolDispatch\s*\|\|\s*args\.workflowReviewAuthority\s*\?\s*1\s*:\s*4/);
     assert.match(runtime, /forceSequentialToolDispatch\s*:\s*!!plannedMultiActionContract/g);
     assert.match(swanbot, /!opts\.forceSequentialToolDispatch[\s\S]{0,120}!enforceConstraints/);
     assert.match(
@@ -358,8 +358,8 @@ async function main(): Promise<void> {
   await check('single-purpose Chat shortcuts yield to an authoritative compound turn', () => {
     assert.match(chat, /const preflightAutomationForTurn\s*=/);
     assert.match(chat, /const preflightHasAuthoritativeMultiActionContract\s*=\s*Boolean\s*\(/);
-    assert.match(chat, /webDecision\.attach\s*&&\s*!hasAuthoritativeMultiActionContract/);
-    assert.match(chat, /!boundOpenSwanResume\s*&&\s*!hasAuthoritativeMultiActionContract/);
+    assert.match(chat, /webDecision\.attach\s*&&\s*!preservesIntactMultiIntentTurn/);
+    assert.match(chat, /!boundOpenSwanResume\s*&&\s*!preservesIntactMultiIntentTurn/);
     assert.match(chat, /const multiAgentPlan\s*=\s*preflightHasAuthoritativeMultiActionContract\s*\?\s*null/);
     assert.match(chat, /!preflightHasAuthoritativeMultiActionContract[\s\S]{0,120}!conversationOnlyTurn[\s\S]{0,160}selectedChatAgentTarget/);
     assert.match(chat, /shouldRunDesktopAttachmentTask\s*=\s*!preflightHasAuthoritativeMultiActionContract/);

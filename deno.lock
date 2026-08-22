@@ -47,7 +47,7 @@
         "npm:expo-notifications@~0.32.16",
         "npm:expo-secure-store@^15.0.8",
         "npm:expo-status-bar@~3.0.9",
-        "npm:expo@~54.0.33",
+        "npm:expo@~54.0.37",
         "npm:kbar@~0.1.0-beta.48",
         "npm:playwright@1.55.1",
         "npm:postprocessing@^6.39.0",

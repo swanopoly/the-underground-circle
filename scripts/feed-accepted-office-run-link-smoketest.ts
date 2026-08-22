@@ -165,8 +165,13 @@ expectMatch(
 
 expectMatch(
   kanbanHook,
-  /import\s*\{[\s\S]{0,300}?recordConnectedAgentAcceptedRun[\s\S]{0,300}?\}\s*from\s*['"]\.\.\/lib\/agentRunSystem['"]/,
-  'Feed imports the canonical connected-agent accepted-run writer',
+  /import\(['"]\.\.\/lib\/agentRunSystem['"]\)/,
+  'Feed defers the canonical connected-agent run system until task execution',
+);
+expectMatch(
+  kanbanHook,
+  /const \{ recordConnectedAgentAcceptedRun \} = runSystemRuntime/,
+  'Feed resolves the canonical connected-agent accepted-run writer from the deferred runtime',
 );
 check(
   count(feedHandoffBranch, /recordConnectedAgentAcceptedRun\(/g) === 1,

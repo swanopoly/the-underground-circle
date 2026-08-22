@@ -189,8 +189,8 @@ export function OfficeWorkspaceSection({
   const EditorBodyContainer: any = isDesktop ? View : ScrollView;
   const editorBodyContainerProps = isDesktop ? {} : {
     testID: 'office-compact-editor-tray',
-    style: { maxHeight: 180 },
-    contentContainerStyle: { paddingBottom: 8 },
+    style: { maxHeight: 156 },
+    contentContainerStyle: { paddingBottom: 5 },
     nestedScrollEnabled: true,
     keyboardShouldPersistTaps: 'handled',
     showsVerticalScrollIndicator: true,
@@ -631,17 +631,18 @@ export function OfficeWorkspaceSection({
                 ? `TAP FLOOR — PLACING: ${placingType.toUpperCase()}`
                 : selectedFurnitureId
                   ? isDesktop
-                    ? 'ITEM SELECTED — MOVE, RESIZE, ROTATE, DUPLICATE, OR DELETE'
+                    ? 'ITEM SELECTED — DRAG OR USE CONTROLS'
                     : 'ITEM SELECTED — USE THE FLOOR OR INSPECTOR'
                   : isDesktop
-                    ? 'CHOOSE AN ITEM, THEN TAP THE FLOOR TO PLACE IT'
+                    ? 'SELECT AN ITEM TO PLACE'
                     : 'ADD AN ITEM, THEN EDIT IT ON THE FLOOR'}
             </Text>
             <View style={[styles.editToolbarActions, !isDesktop && { flexWrap: 'wrap' }]}>
               <Pressable
                 onPress={onUndo}
                 disabled={!historyAvailability?.canUndo}
-                style={[styles.editActionBtn, { minHeight: 36, opacity: historyAvailability?.canUndo ? 1 : 0.4 }]}
+                hitSlop={6}
+                style={[styles.editActionBtn, { opacity: historyAvailability?.canUndo ? 1 : 0.4 }]}
                 accessibilityRole="button"
                 accessibilityLabel={historyAvailability?.undoLabel ? `Undo ${historyAvailability.undoLabel}` : 'Undo'}
                 accessibilityState={{ disabled: !historyAvailability?.canUndo }}
@@ -651,7 +652,8 @@ export function OfficeWorkspaceSection({
               <Pressable
                 onPress={onRedo}
                 disabled={!historyAvailability?.canRedo}
-                style={[styles.editActionBtn, { minHeight: 36, opacity: historyAvailability?.canRedo ? 1 : 0.4 }]}
+                hitSlop={6}
+                style={[styles.editActionBtn, { opacity: historyAvailability?.canRedo ? 1 : 0.4 }]}
                 accessibilityRole="button"
                 accessibilityLabel={historyAvailability?.redoLabel ? `Redo ${historyAvailability.redoLabel}` : 'Redo'}
                 accessibilityState={{ disabled: !historyAvailability?.canRedo }}
@@ -659,14 +661,15 @@ export function OfficeWorkspaceSection({
                 <Text style={[styles.editActionBtnText, { color: '#c4b5fd' }]}>↷ REDO</Text>
               </Pressable>
               {placingType && (
-                <Pressable onPress={onCancelPlacing} style={[styles.editActionBtn, { borderColor: '#ffffff25', minHeight: 36 }]}>
+                <Pressable onPress={onCancelPlacing} hitSlop={6} style={[styles.editActionBtn, { borderColor: '#ffffff25' }]}>
                   <Text style={[styles.editActionBtnText, { color: '#9e9e9e' }]}>CANCEL</Text>
                 </Pressable>
               )}
               {currentFloor.furniture.length > 0 && (
                 <Pressable
                   onPress={() => { void onClearFloorFurniture(); }}
-                  style={[styles.editActionBtn, { borderColor: '#ef444455', minHeight: 36 }]}
+                  hitSlop={6}
+                  style={[styles.editActionBtn, { borderColor: '#ef444455' }]}
                   accessibilityRole="button"
                   accessibilityLabel={`Clear all ${currentFloor.furniture.length} items from ${currentFloor.name}`}
                   accessibilityHint="Opens a confirmation before removing every item"
@@ -680,7 +683,7 @@ export function OfficeWorkspaceSection({
           {!isDesktop ? (
             <View
               testID="office-compact-editor-panels"
-              style={{ flexDirection: 'row', gap: 6, marginBottom: 8 }}
+              style={{ flexDirection: 'row', gap: 5, marginBottom: 5 }}
               accessibilityRole="tablist"
             >
               {([
@@ -697,7 +700,7 @@ export function OfficeWorkspaceSection({
                     styles.editActionBtn,
                     {
                       flex: 1,
-                      minHeight: 40,
+                      minHeight: 32,
                       alignItems: 'center',
                       justifyContent: 'center',
                       opacity: disabled ? 0.4 : 1,
@@ -706,6 +709,7 @@ export function OfficeWorkspaceSection({
                     },
                   ]}
                   accessibilityRole="tab"
+                  hitSlop={6}
                   accessibilityLabel={`Show Office ${panel}`}
                   accessibilityState={{ selected: compactEditorPanel === panel, disabled, expanded: compactEditorPanel === panel }}
                 >
@@ -718,12 +722,13 @@ export function OfficeWorkspaceSection({
           {(isDesktop || compactEditorPanel) ? <EditorBodyContainer {...editorBodyContainerProps}>
 
           {(isDesktop || compactEditorPanel === 'kits') ? (
-            <View style={{ marginBottom: 8 }}>
+            <View style={{ marginBottom: 5 }}>
               {isDesktop ? (
                 <Pressable
                   testID="office-room-kits-toggle"
                   onPress={() => setShowRoomKits((visible) => !visible)}
-                  style={[styles.editActionBtn, { minHeight: 40, borderColor: '#8b5cf666', alignSelf: 'flex-start', justifyContent: 'center' }]}
+                  hitSlop={6}
+                  style={[styles.editActionBtn, { borderColor: '#8b5cf666', alignSelf: 'flex-start' }]}
                   accessibilityRole="button"
                   accessibilityLabel={showRoomKits ? 'Hide room kits' : 'Show room kits'}
                   accessibilityState={{ expanded: showRoomKits }}
@@ -732,19 +737,19 @@ export function OfficeWorkspaceSection({
                 </Pressable>
               ) : null}
               {(!isDesktop || showRoomKits) ? (
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingTop: 8, paddingRight: 12 }}>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 5, paddingTop: 5, paddingRight: 8 }}>
                 {OFFICE_ROOM_KITS.map((kit) => (
                   <Pressable
                     key={kit.id}
                     testID={`office-room-kit-${kit.id}`}
                     onPress={() => onApplyRoomKit(kit.id)}
-                    style={[styles.editItem, { width: 150, minHeight: 90, alignItems: 'flex-start', paddingHorizontal: 10 }]}
+                    style={[styles.editItem, { width: 132, height: 64, alignItems: 'flex-start', paddingHorizontal: 8 }]}
                     accessibilityRole="button"
                     accessibilityLabel={`Add ${kit.name} room kit`}
                     accessibilityHint={`${kit.description} Adds ${kit.items.length} items as one undoable edit.`}
                   >
                     <Text style={[styles.editItemName, { color: '#e2e8f0', textAlign: 'left' }]}>{kit.name.toUpperCase()}</Text>
-                    <Text style={[styles.editItemDesc, { maxWidth: 132, textAlign: 'left', color: '#94a3b8' }]} numberOfLines={3}>{kit.description}</Text>
+                    <Text style={[styles.editItemDesc, { maxWidth: 116, textAlign: 'left', color: '#94a3b8' }]} numberOfLines={2}>{kit.description}</Text>
                     <Text style={{ color: '#a78bfa', fontSize: 8, fontFamily: 'monospace', fontWeight: '800' }}>{kit.items.length} ITEMS · UNDOABLE</Text>
                   </Pressable>
                 ))}
@@ -756,7 +761,7 @@ export function OfficeWorkspaceSection({
           {(isDesktop || compactEditorPanel === 'catalog') && (!catalogPreferencesReady ? (
             <View
               testID="office-catalog-preferences-loading"
-              style={{ minHeight: 84, alignItems: 'center', justifyContent: 'center', gap: 8, borderWidth: 1, borderColor: '#334155', borderRadius: 10 }}
+              style={{ minHeight: 56, alignItems: 'center', justifyContent: 'center', gap: 6, borderWidth: 1, borderColor: '#334155', borderRadius: 8 }}
               accessibilityLiveRegion="polite"
               accessibilityLabel="Loading your Office item favorites and recent items"
             >
@@ -789,7 +794,9 @@ export function OfficeWorkspaceSection({
                 ? ['setup_required', 'stale', 'error']
                 : catalogStatus === 'all' ? [] : [catalogStatus],
               favoriteTypes: favoriteOfficeAddonTypes,
-              recentTypes: recentOfficeAddonTypes,
+              // Keep normal catalog positions stable. Recent-use ordering only
+              // belongs in the explicit Recent view.
+              recentTypes: catalogScope === 'recent' ? recentOfficeAddonTypes : [],
               onlyFavorites: catalogScope === 'favorites',
               runtimeByType,
             });
@@ -818,7 +825,7 @@ export function OfficeWorkspaceSection({
             ];
             return (
               <View testID="office-catalog-ready" style={styles.editCatalogWrap}>
-                <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
+                <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center', marginBottom: 5 }}>
                   <TextInput
                     value={catalogSearch}
                     onChangeText={(value) => {
@@ -829,12 +836,17 @@ export function OfficeWorkspaceSection({
                     }}
                     placeholder={`Search ${FURNITURE_CATALOG.length} Office items…`}
                     placeholderTextColor="#64748b"
-                    style={{ flexGrow: 1, minWidth: 220, minHeight: 42, borderWidth: 1, borderColor: '#334155', borderRadius: 9, color: '#f8fafc', backgroundColor: '#020617', paddingHorizontal: 12, fontFamily: 'monospace', fontSize: 11 }}
+                    style={{ flex: 1, minWidth: 160, height: 32, borderWidth: 1, borderColor: '#334155', borderRadius: 6, color: '#f8fafc', backgroundColor: '#020617', paddingHorizontal: 9, paddingVertical: 0, fontFamily: 'monospace', fontSize: 10 }}
                     accessibilityLabel="Search Office items"
                   />
-                  <Text style={{ color: '#94a3b8', fontFamily: 'monospace', fontSize: 9 }}>{items.length} MATCH{items.length === 1 ? '' : 'ES'}</Text>
+                  <Text style={{ color: '#94a3b8', fontFamily: 'monospace', fontSize: 8 }}>{items.length} MATCH{items.length === 1 ? '' : 'ES'}</Text>
                 </View>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, paddingBottom: 8 }}>
+                <ScrollView
+                  testID="office-catalog-filter-rail"
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.editFilterRail}
+                >
                   {catalogScopes.map((option) => (
                     <Pressable
                       key={option.value}
@@ -843,11 +855,8 @@ export function OfficeWorkspaceSection({
                         setCatalogScope(option.value);
                         if (option.value === 'problems') setCatalogStatus('all');
                       }}
-                      style={[
-                        styles.editCatTab,
-                        { minHeight: 36 },
-                        catalogScope === option.value && { borderColor: '#f59e0b88', backgroundColor: '#78350f33' },
-                      ]}
+                      hitSlop={{ top: 6, bottom: 6, left: 0, right: 0 }}
+                      style={[styles.editCatTab, catalogScope === option.value && { borderColor: '#f59e0b88', backgroundColor: '#78350f33' }]}
                       accessibilityRole="button"
                       accessibilityLabel={option.accessibilityLabel}
                       accessibilityState={{ selected: catalogScope === option.value }}
@@ -856,28 +865,31 @@ export function OfficeWorkspaceSection({
                       <Text style={[styles.editCatTabText, { color: catalogScope === option.value ? '#fde68a' : '#64748b' }]}>{option.label}</Text>
                     </Pressable>
                   ))}
-                </ScrollView>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, paddingBottom: 8 }}>
+                  <View style={styles.editFilterDivider} />
                   {statusOptions.map((option) => (
                     <Pressable
                       key={option.value}
+                      testID={`office-catalog-status-${option.value}`}
                       onPress={() => { setCatalogStatus(option.value); setCatalogScope('all'); }}
-                      style={[styles.editCatTab, catalogStatus === option.value && { borderColor: '#a78bfa88', backgroundColor: '#4c1d9533', minHeight: 34 }]}
+                      hitSlop={{ top: 6, bottom: 6, left: 0, right: 0 }}
+                      style={[styles.editCatTab, catalogStatus === option.value && { borderColor: '#a78bfa88', backgroundColor: '#4c1d9533' }]}
                       accessibilityRole="button"
                       accessibilityLabel={`Show ${option.label.toLowerCase()} Office items`}
                       accessibilityState={{ selected: catalogStatus === option.value }}
+                      {...(Platform.OS === 'web' ? ({ 'aria-pressed': catalogStatus === option.value } as any) : {})}
                     >
                       <Text style={[styles.editCatTabText, { color: catalogStatus === option.value ? '#ddd6fe' : '#64748b' }]}>{option.label}</Text>
                     </Pressable>
                   ))}
-                </ScrollView>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.editCatTabs}>
+                  <View style={styles.editFilterDivider} />
                   {allCats.map(catKey => {
                     const count = catKey === 'all' ? FURNITURE_CATALOG.length : FURNITURE_CATALOG.filter((f: any) => f.category === catKey).length;
                     return (
                       <Pressable
                         key={catKey}
+                        testID={`office-catalog-category-${catKey}`}
                         onPress={() => { setActiveCatalogCat(catKey as any); catalogScrollRef.current?.scrollTo?.({ x: 0, animated: false }); }}
+                        hitSlop={{ top: 6, bottom: 6, left: 0, right: 0 }}
                         style={[
                           styles.editCatTab,
                           activeCatalogCat === catKey && { borderColor: catColors[catKey] + '80', backgroundColor: catColors[catKey] + '15' },
@@ -886,8 +898,9 @@ export function OfficeWorkspaceSection({
                         accessibilityRole="button"
                         accessibilityLabel={`Show ${catKey === 'all' ? 'all' : catKey} Office items, ${count} available`}
                         accessibilityState={{ selected: activeCatalogCat === catKey }}
+                        {...(Platform.OS === 'web' ? ({ 'aria-pressed': activeCatalogCat === catKey } as any) : {})}
                       >
-                        <Text style={{ fontSize: 10 }}>{catIcons[catKey]}</Text>
+                        <Text style={{ fontSize: 9 }}>{catIcons[catKey]}</Text>
                         <Text style={[styles.editCatTabText, { color: activeCatalogCat === catKey ? catColors[catKey] : '#666' }]}>{catKey.toUpperCase()}</Text>
                         <Text style={[styles.editCatTabCount, { color: catColors[catKey] + '80' }]}>{count}</Text>
                       </Pressable>
@@ -907,7 +920,7 @@ export function OfficeWorkspaceSection({
                       const item = viewItem.entry;
                       const isActive = placingType === item.type;
                       return (
-                        <View key={item.type} style={{ width: 88, height: 88, position: 'relative' }}>
+                        <View key={item.type} style={styles.editItemSlot}>
                           <Pressable
                             testID={`office-catalog-item-${item.type}`}
                             onPress={() => {
@@ -927,8 +940,8 @@ export function OfficeWorkspaceSection({
                           >
                             <Text style={styles.editItemIcon}>{item.icon}</Text>
                             <Text style={[styles.editItemName, isActive && { color: '#eee' }]}>{item.name}</Text>
-                            {item.description ? <Text style={styles.editItemDesc} numberOfLines={2}>{item.description}</Text> : null}
-                            <View style={{ paddingHorizontal: 5, paddingVertical: 2, borderRadius: 4, backgroundColor: statusColors[viewItem.status] + '22', borderWidth: 1, borderColor: statusColors[viewItem.status] + '66' }}>
+                            {item.description ? <Text style={styles.editItemDesc} numberOfLines={1}>{item.description}</Text> : null}
+                            <View style={{ paddingHorizontal: 4, paddingVertical: 1, borderRadius: 4, backgroundColor: statusColors[viewItem.status] + '22', borderWidth: 1, borderColor: statusColors[viewItem.status] + '66' }}>
                               <Text style={{ color: statusColors[viewItem.status], fontSize: 6, lineHeight: 8, fontFamily: 'monospace', fontWeight: '900' }}>{statusLabels[viewItem.status]}</Text>
                             </View>
                           </Pressable>
@@ -938,12 +951,13 @@ export function OfficeWorkspaceSection({
                               event.stopPropagation?.();
                               onToggleCatalogFavorite(item.type);
                             }}
-                            style={{ position: 'absolute', top: 2, right: 2, width: 30, height: 30, zIndex: 4, alignItems: 'center', justifyContent: 'center', borderRadius: 15, backgroundColor: viewItem.favorite ? '#f59e0b33' : '#020617cc', borderWidth: 1, borderColor: viewItem.favorite ? '#f59e0b88' : '#334155' }}
+                            hitSlop={4}
+                            style={{ position: 'absolute', top: 1, right: 1, width: 24, height: 24, zIndex: 4, alignItems: 'center', justifyContent: 'center', borderRadius: 12, backgroundColor: viewItem.favorite ? '#f59e0b33' : '#020617cc', borderWidth: 1, borderColor: viewItem.favorite ? '#f59e0b88' : '#334155' }}
                             accessibilityRole="button"
                             accessibilityLabel={`${viewItem.favorite ? 'Remove' : 'Add'} ${item.name} ${viewItem.favorite ? 'from' : 'to'} favorites`}
                             accessibilityState={{ selected: viewItem.favorite }}
                           >
-                            <Text style={{ color: viewItem.favorite ? '#fbbf24' : '#64748b', fontSize: 15 }}>{viewItem.favorite ? '★' : '☆'}</Text>
+                            <Text style={{ color: viewItem.favorite ? '#fbbf24' : '#64748b', fontSize: 12 }}>{viewItem.favorite ? '★' : '☆'}</Text>
                           </Pressable>
                         </View>
                       );
@@ -957,7 +971,7 @@ export function OfficeWorkspaceSection({
                   )}
                 </View>
                 {items.length === 0 ? (
-                  <View style={{ minHeight: 84, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#334155', borderRadius: 10 }}>
+                  <View style={{ minHeight: 56, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#334155', borderRadius: 8 }}>
                     <Text style={{ color: '#cbd5e1', fontSize: 11, fontWeight: '800' }}>No Office items match</Text>
                     <Text style={{ color: '#64748b', fontSize: 9, marginTop: 4 }}>Clear the search or choose a different filter.</Text>
                   </View>
@@ -967,11 +981,11 @@ export function OfficeWorkspaceSection({
           })())}
 
           {!isDesktop && compactEditorPanel === 'inspector' && currentFloor.furniture.length > 0 ? (
-            <View testID="office-compact-placed-items" style={{ marginBottom: 8 }}>
-              <Text style={{ color: '#94a3b8', fontSize: 9, fontFamily: 'monospace', fontWeight: '900', marginBottom: 6 }}>
+            <View testID="office-compact-placed-items" style={{ marginBottom: 5 }}>
+              <Text style={{ color: '#94a3b8', fontSize: 8, fontFamily: 'monospace', fontWeight: '900', marginBottom: 4 }}>
                 PLACED ITEMS — SELECT WITHOUT TAPPING THE FLOOR
               </Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, paddingRight: 12 }}>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 5, paddingRight: 8 }}>
                 {currentFloor.furniture.map((item: any) => {
                   const definition = FURNITURE_CATALOG.find((entry: any) => entry.type === item.type);
                   const active = selectedFurnitureId === item.id;
@@ -983,8 +997,8 @@ export function OfficeWorkspaceSection({
                       style={[
                         styles.editActionBtn,
                         {
-                          minWidth: 112,
-                          minHeight: 44,
+                          minWidth: 96,
+                          minHeight: 32,
                           flexDirection: 'row',
                           alignItems: 'center',
                           justifyContent: 'center',
@@ -993,11 +1007,12 @@ export function OfficeWorkspaceSection({
                           backgroundColor: active ? '#172554' : '#020617',
                         },
                       ]}
+                      hitSlop={{ top: 6, bottom: 6, left: 0, right: 0 }}
                       accessibilityRole="button"
                       accessibilityLabel={`Select placed ${definition?.name || item.type}`}
                       accessibilityState={{ selected: active }}
                     >
-                      <Text style={{ fontSize: 16 }}>{definition?.icon || '□'}</Text>
+                      <Text style={{ fontSize: 13 }}>{definition?.icon || '□'}</Text>
                       <Text style={[styles.editActionBtnText, { color: active ? '#bfdbfe' : '#cbd5e1' }]} numberOfLines={1}>
                         {definition?.name || item.type}
                       </Text>
@@ -1011,43 +1026,43 @@ export function OfficeWorkspaceSection({
           {(isDesktop || compactEditorPanel === 'inspector') && selectedFurniture ? (() => {
             const definition = FURNITURE_CATALOG.find((item: any) => item.type === selectedFurniture.type);
             return (
-              <View style={{ marginTop: 10, padding: 10, borderWidth: 1, borderColor: '#3b82f655', backgroundColor: '#07111f', borderRadius: 10 }}>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <View style={{ marginTop: 6, padding: 6, borderWidth: 1, borderColor: '#3b82f655', backgroundColor: '#07111f', borderRadius: 8 }}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 5, alignItems: 'center', flexWrap: 'wrap' }}>
                   <View>
-                    <Text style={{ color: '#dbeafe', fontSize: 11, fontWeight: '900' }}>{definition?.icon} {definition?.name || selectedFurniture.type}</Text>
-                    <Text style={{ color: '#64748b', fontSize: 8, fontFamily: 'monospace', marginTop: 3 }}>
+                    <Text style={{ color: '#dbeafe', fontSize: 10, fontWeight: '900' }}>{definition?.icon} {definition?.name || selectedFurniture.type}</Text>
+                    <Text style={{ color: '#64748b', fontSize: 7, fontFamily: 'monospace', marginTop: 1 }}>
                       X {selectedFurniture.x} · Y {selectedFurniture.y} · {selectedFurniture.itemWidth || definition?.width}×{selectedFurniture.itemHeight || definition?.height} · {selectedFurniture.rotation || 0}°
                     </Text>
                   </View>
-                  <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}>
+                  <View style={{ flexDirection: 'row', gap: 4, flexWrap: 'wrap' }}>
                     {definition && (definition.configuration === 'modal' || definition.configuration === 'connection') ? (
-                      <Pressable onPress={onConfigureSelected} style={[styles.editActionBtn, { minHeight: 36, justifyContent: 'center', borderColor: '#22c55e66' }]} accessibilityRole="button" accessibilityLabel={`Configure ${definition.name}`}>
-                        <Text style={[styles.editActionBtnText, { color: '#86efac' }]}>CONFIGURE / OPEN</Text>
+                      <Pressable onPress={onConfigureSelected} hitSlop={6} style={[styles.editActionBtn, { borderColor: '#22c55e66' }]} accessibilityRole="button" accessibilityLabel={`Configure ${definition.name}`}>
+                        <Text style={[styles.editActionBtnText, { color: '#86efac' }]}>OPEN</Text>
                       </Pressable>
                     ) : null}
                     {[
-                      ['DUPLICATE', onDuplicateSelected], ['ROTATE 90°', onRotateSelected], ['RESET SIZE', onResetSelectedSize],
-                      ['SEND BACK', () => onMoveSelectedLayer('back')], ['BRING FRONT', () => onMoveSelectedLayer('front')],
-                    ].map(([label, action]: any) => (
-                      <Pressable key={label} onPress={action} style={[styles.editActionBtn, { minHeight: 36, justifyContent: 'center' }]} accessibilityRole="button" accessibilityLabel={`${label.toLowerCase()} ${definition?.name || 'selected item'}`}>
-                        <Text style={[styles.editActionBtnText, { color: '#bfdbfe' }]}>{label}</Text>
+                      ['DUPLICATE', 'DUP', onDuplicateSelected], ['ROTATE 90°', 'ROTATE', onRotateSelected], ['RESET SIZE', 'RESET', onResetSelectedSize],
+                      ['SEND BACK', 'BACK', () => onMoveSelectedLayer('back')], ['BRING FRONT', 'FRONT', () => onMoveSelectedLayer('front')],
+                    ].map(([label, compactLabel, action]: any) => (
+                      <Pressable key={label} onPress={action} hitSlop={6} style={styles.editActionBtn} accessibilityRole="button" accessibilityLabel={`${label.toLowerCase()} ${definition?.name || 'selected item'}`}>
+                        <Text style={[styles.editActionBtnText, { color: '#bfdbfe' }]}>{compactLabel}</Text>
                       </Pressable>
                     ))}
-                    <Pressable onPress={() => { void onDeleteSelected(); }} style={[styles.editActionBtn, { minHeight: 36, borderColor: '#ef444466', justifyContent: 'center' }]} accessibilityRole="button" accessibilityLabel={`Delete ${definition?.name || 'selected item'}`}>
+                    <Pressable onPress={() => { void onDeleteSelected(); }} hitSlop={6} style={[styles.editActionBtn, { borderColor: '#ef444466' }]} accessibilityRole="button" accessibilityLabel={`Delete ${definition?.name || 'selected item'}`}>
                       <Text style={[styles.editActionBtnText, { color: '#fca5a5' }]}>DELETE</Text>
                     </Pressable>
                   </View>
                 </View>
-                <View style={{ flexDirection: 'row', gap: 6, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <View style={{ flexDirection: 'row', gap: 4, marginTop: 5, alignItems: 'center', flexWrap: 'wrap' }}>
                   <Text style={{ color: '#64748b', fontSize: 8, fontFamily: 'monospace', fontWeight: '800' }}>NUDGE</Text>
                   {[
                     ['←', -OFFICE_FLOOR_GRID_SIZE, 0, 'left'], ['↑', 0, -OFFICE_FLOOR_GRID_SIZE, 'up'], ['↓', 0, OFFICE_FLOOR_GRID_SIZE, 'down'], ['→', OFFICE_FLOOR_GRID_SIZE, 0, 'right'],
                   ].map(([label, dx, dy, direction]: any) => (
-                    <Pressable key={direction} onPress={() => onNudgeSelected(dx, dy)} style={[styles.editActionBtn, { width: 40, minHeight: 36, alignItems: 'center', justifyContent: 'center' }]} accessibilityRole="button" accessibilityLabel={`Move ${definition?.name || 'selected item'} ${direction}`}>
-                      <Text style={[styles.editActionBtnText, { color: '#c4b5fd', fontSize: 14 }]}>{label}</Text>
+                    <Pressable key={direction} onPress={() => onNudgeSelected(dx, dy)} hitSlop={6} style={[styles.editActionBtn, { width: 30 }]} accessibilityRole="button" accessibilityLabel={`Move ${definition?.name || 'selected item'} ${direction}`}>
+                      <Text style={[styles.editActionBtnText, { color: '#c4b5fd', fontSize: 12 }]}>{label}</Text>
                     </Pressable>
                   ))}
-                  <Text style={{ color: '#64748b', fontSize: 8, fontFamily: 'monospace', fontWeight: '800', marginLeft: 6 }}>RESIZE</Text>
+                  <Text style={{ color: '#64748b', fontSize: 8, fontFamily: 'monospace', fontWeight: '800', marginLeft: 3 }}>RESIZE</Text>
                   {[
                     ['W−', -OFFICE_FLOOR_GRID_SIZE, 0, 'narrower'], ['W+', OFFICE_FLOOR_GRID_SIZE, 0, 'wider'],
                     ['H−', 0, -OFFICE_FLOOR_GRID_SIZE, 'shorter'], ['H+', 0, OFFICE_FLOOR_GRID_SIZE, 'taller'],
@@ -1055,7 +1070,8 @@ export function OfficeWorkspaceSection({
                     <Pressable
                       key={direction}
                       onPress={() => onResizeSelected(dw, dh)}
-                      style={[styles.editActionBtn, { minWidth: 40, minHeight: 36, alignItems: 'center', justifyContent: 'center' }]}
+                      hitSlop={6}
+                      style={[styles.editActionBtn, { minWidth: 30 }]}
                       accessibilityRole="button"
                       accessibilityLabel={`Make ${definition?.name || 'selected item'} ${direction}`}
                     >

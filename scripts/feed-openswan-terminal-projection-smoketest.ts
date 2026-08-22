@@ -243,7 +243,7 @@ const collaborativeFinalization = section(
 // Exact authoritative receipt import + carry. Do not define a Feed-local copy.
 expectMatch(
   hook,
-  /import\s*\{[\s\S]{0,260}\btype\s+OpenSwanTerminalReceipt\b[\s\S]{0,260}\}\s*from\s*['"]\.\.\/lib\/openswanSessionRuntime['"]\s*;|import\s+type\s*\{\s*OpenSwanTerminalReceipt\s*\}\s*from\s*['"]\.\.\/lib\/openswanSessionRuntimeAdapters['"]\s*;/,
+  /import\s*\{[\s\S]{0,260}\btype\s+OpenSwanTerminalReceipt\b[\s\S]{0,260}\}\s*from\s*['"]\.\.\/lib\/openswanSessionRuntime['"]\s*;|import\s+type\s*\{[^}]*\bOpenSwanTerminalReceipt\b[^}]*\}\s*from\s*['"]\.\.\/lib\/openswanSessionRuntimeAdapters['"]\s*;/,
   'Feed imports the authoritative OpenSwanTerminalReceipt type instead of inferring a prose outcome',
 );
 expectNoMatch(

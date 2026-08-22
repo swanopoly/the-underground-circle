@@ -70,7 +70,29 @@ export function resolveModelForProfile(
   // Sonnet route they have connected; otherwise the direct Anthropic model.
   const anthropicConnected = hasProvider(connectedProviders, 'anthropic');
   const orConnected = hasProvider(connectedProviders, 'openrouter');
-  if (!anthropicConnected && orConnected) return 'openrouter/anthropic/claude-sonnet-4-6';
+  if (anthropicConnected) return 'claude-sonnet-4-6';
+  if (orConnected) return 'openrouter/anthropic/claude-sonnet-4-6';
+  // Neither Sonnet route has a connected Marketplace key. Resolve through the
+  // ladder restricted to the connected providers so Auto names a model the
+  // account can actually call; lanes without the pre-dispatch fallback core
+  // (computer-task planning) would otherwise carry an uncallable Sonnet id to
+  // the edge and take a key_missing credential quarantine. With no connected
+  // providers at all, keep the Sonnet default so the catalog gate fails
+  // closed with its connect-a-provider message instead of inventing a route.
+  if (connectedProviders && connectedProviders.size > 0) {
+    const laddered = resolveModelForSoul(
+      spiritIdForProfile(profile),
+      'auto',
+      intent,
+      complexity,
+      undefined,
+      undefined,
+      connectedProviders,
+      opts,
+      message,
+    );
+    if (laddered) return laddered;
+  }
   return 'claude-sonnet-4-6';
 }
 

@@ -130,7 +130,7 @@ check(!/addBotMessage\(|sendMessage\(|queuedApprovalResumesRef|flushQueuedApprov
   'the stale desktop branch emits no ephemeral substitute and schedules no retry or dispatch');
 
 check(/const messageThreadId = activeThreadId;/.test(chatSource), 'Chat snapshots the mounted thread for every bot message');
-check(/if \(durability === 'transcript' && messageThreadId\) \{[\s\S]*saveRecoverableChatMessage\(messageThreadId, msg\)/.test(chatSource),
+check(/if \(durability === 'transcript' && messageThreadId\) \{[\s\S]*saveRecoverableChatMessage\(\s*\{ userId: currentUserId, circleId: messageCircleId, threadId: messageThreadId \},\s*msg,?\s*\)/.test(chatSource),
   'transcript recovery enters the local refresh-recovery store');
 check(/if \(durability === 'transcript' && currentUserId && messageThreadId\) \{[\s\S]*persistChatTabBotMessageWithRetry\(/.test(chatSource),
   'transcript recovery enters durable Chat persistence with retry');

@@ -24,6 +24,7 @@ interface Props {
   onOpenCompartment: (key: BackpackCompartmentKey) => void;
   restoreFocusKey?: BackpackCompartmentKey | null;
   stats?: Partial<Record<BackpackCompartmentKey, BackpackCompartmentStatus>>;
+  disabled?: boolean;
 }
 
 type PocketVariant = 'lid' | 'main' | 'front' | 'side' | 'base';
@@ -43,6 +44,7 @@ export default function InteractiveBackpack2D({
   onOpenCompartment,
   restoreFocusKey = null,
   stats = {},
+  disabled = false,
 }: Props) {
   const { width: windowWidth } = useWindowDimensions();
   const [measuredWidth, setMeasuredWidth] = useState(0);
@@ -76,6 +78,7 @@ export default function InteractiveBackpack2D({
       compact={compact}
       tiny={tiny}
       status={stats[item.key]}
+      disabled={disabled}
       onPress={() => onOpenCompartment(item.key)}
       setRef={(node) => {
         pocketRefs.current[item.key] = node;
@@ -228,6 +231,7 @@ function BackpackPocket({
   compact,
   tiny,
   status,
+  disabled,
   onPress,
   setRef,
 }: {
@@ -236,10 +240,13 @@ function BackpackPocket({
   compact: boolean;
   tiny: boolean;
   status?: BackpackCompartmentStatus;
+  disabled: boolean;
   onPress: () => void;
   setRef: (node: FocusableNode) => void;
 }) {
-  const statusText = status?.miniStat?.trim() || (status?.hasActivity ? 'Recent activity' : '');
+  const statusText = disabled
+    ? 'Loading workspace data'
+    : status?.miniStat?.trim() || (status?.hasActivity ? 'Recent activity' : '');
   const desktopSidePocket = variant === 'side' && !compact;
 
   return (
@@ -249,8 +256,10 @@ function BackpackPocket({
       accessibilityLabel={`Open ${item.label}`}
       accessibilityHint={item.description}
       accessibilityValue={statusText ? { text: statusText } : undefined}
+      accessibilityState={{ disabled, busy: disabled }}
       testID={`backpack-compartment-${item.key}`}
-      onPress={onPress}
+      disabled={disabled}
+      onPress={disabled ? undefined : onPress}
       style={({ hovered, pressed, focused }: any) => [
         styles.pocket,
         variant === 'lid' && styles.lidPocket,
@@ -263,6 +272,7 @@ function BackpackPocket({
         tiny && variant === 'main' && styles.mainGridPocketTiny,
         tiny && variant === 'front' && styles.frontGridPocketTiny,
         tiny && variant === 'side' && styles.sidePocketTiny,
+        disabled ? styles.pocketDisabled : null,
         hovered && Platform.OS === 'web' ? styles.pocketHovered : null,
         hovered && Platform.OS === 'web' ? { borderColor: `${item.color}8c` } : null,
         focused ? styles.pocketFocused : null,
@@ -322,32 +332,32 @@ function BackpackPocket({
 
 const styles = StyleSheet.create({
   section: {
-    marginHorizontal: 16,
-    marginBottom: 20,
+    marginHorizontal: 12,
+    marginBottom: 14,
   },
   sectionHeader: {
     width: '100%',
-    maxWidth: 900,
+    maxWidth: 720,
     alignSelf: 'center',
     flexDirection: 'row',
     alignItems: 'flex-end',
     justifyContent: 'space-between',
     flexWrap: 'wrap',
-    gap: 12,
-    marginBottom: 14,
+    gap: 10,
+    marginBottom: 10,
   },
   title: {
     color: '#eef2f7',
-    fontSize: 16,
-    lineHeight: 21,
+    fontSize: 14,
+    lineHeight: 19,
     fontWeight: '600',
   },
   countBadge: {
-    minHeight: 32,
+    minHeight: 28,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 7,
-    paddingHorizontal: 11,
+    gap: 6,
+    paddingHorizontal: 9,
     borderWidth: 1,
     borderColor: '#2b3441',
     borderRadius: 999,
@@ -358,23 +368,23 @@ const styles = StyleSheet.create({
 
   stage: {
     width: '100%',
-    maxWidth: 900,
+    maxWidth: 720,
     alignSelf: 'center',
     position: 'relative',
-    paddingTop: 46,
-    paddingBottom: 28,
-    paddingHorizontal: 24,
+    paddingTop: 38,
+    paddingBottom: 18,
+    paddingHorizontal: 18,
   },
-  stageCompact: { paddingHorizontal: 0, paddingTop: 40, paddingBottom: 18 },
-  stageTiny: { paddingTop: 38 },
+  stageCompact: { paddingHorizontal: 0, paddingTop: 34, paddingBottom: 14 },
+  stageTiny: { paddingTop: 32 },
   stageHalo: {
     position: 'absolute',
     zIndex: 0,
-    top: 74,
+    top: 60,
     left: '9%',
     right: '9%',
-    bottom: 30,
-    borderRadius: 96,
+    bottom: 20,
+    borderRadius: 76,
     backgroundColor: '#14251c66',
   },
   stageHaloCompact: { left: -5, right: -5, borderRadius: 54 },
@@ -383,50 +393,50 @@ const styles = StyleSheet.create({
     zIndex: 0,
     top: 5,
     left: '50%',
-    width: 124,
-    height: 72,
-    marginLeft: -57,
-    borderWidth: 10,
+    width: 106,
+    height: 60,
+    marginLeft: -48,
+    borderWidth: 8,
     borderBottomWidth: 0,
     borderColor: '#16221b',
-    borderTopLeftRadius: 42,
-    borderTopRightRadius: 42,
+    borderTopLeftRadius: 36,
+    borderTopRightRadius: 36,
   },
   handleOuter: {
     position: 'absolute',
     zIndex: 1,
     top: 0,
     left: '50%',
-    width: 124,
-    height: 72,
-    marginLeft: -62,
-    borderWidth: 9,
+    width: 106,
+    height: 60,
+    marginLeft: -53,
+    borderWidth: 8,
     borderBottomWidth: 0,
     borderColor: '#405247',
-    borderTopLeftRadius: 42,
-    borderTopRightRadius: 42,
+    borderTopLeftRadius: 36,
+    borderTopRightRadius: 36,
     backgroundColor: '#111a15',
   },
   handleInner: {
     flex: 1,
-    margin: 6,
+    margin: 5,
     borderWidth: 1,
     borderBottomWidth: 0,
     borderColor: '#738477',
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
   },
   handleAnchor: {
     position: 'absolute',
     zIndex: 4,
-    top: 48,
-    width: 36,
-    height: 28,
+    top: 40,
+    width: 30,
+    height: 24,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
     borderColor: '#53695b',
-    borderRadius: 9,
+    borderRadius: 8,
     backgroundColor: '#1b3025',
     ...Platform.select({
       web: { boxShadow: '0 5px 8px rgba(0,0,0,0.34)' } as any,
@@ -442,8 +452,8 @@ const styles = StyleSheet.create({
   handleAnchorLeft: { left: '39%' },
   handleAnchorRight: { right: '39%' },
   hardwareRivet: {
-    width: 8,
-    height: 8,
+    width: 7,
+    height: 7,
     borderWidth: 1,
     borderColor: '#d2c48d',
     borderRadius: 999,
@@ -452,9 +462,9 @@ const styles = StyleSheet.create({
   shoulderStrap: {
     position: 'absolute',
     zIndex: 0,
-    top: 84,
-    bottom: 44,
-    width: 58,
+    top: 68,
+    bottom: 34,
+    width: 48,
     borderWidth: 1,
     borderColor: '#303d34',
     borderRadius: 30,
@@ -467,8 +477,8 @@ const styles = StyleSheet.create({
     zIndex: 0,
     left: '15%',
     right: '12%',
-    bottom: 7,
-    height: 34,
+    bottom: 5,
+    height: 28,
     borderRadius: 999,
     backgroundColor: '#00000052',
     transform: [{ scaleX: 1.04 }],
@@ -478,14 +488,14 @@ const styles = StyleSheet.create({
     zIndex: 0,
     left: '25%',
     right: '21%',
-    bottom: 14,
-    height: 15,
+    bottom: 10,
+    height: 12,
     borderRadius: 999,
     backgroundColor: '#00000094',
   },
   packAssembly: {
     zIndex: 2,
-    width: '76%',
+    width: '74%',
     alignSelf: 'center',
     position: 'relative',
   },
@@ -493,9 +503,9 @@ const styles = StyleSheet.create({
   bodyGusset: {
     position: 'absolute',
     zIndex: 0,
-    top: 70,
-    bottom: 28,
-    width: 22,
+    top: 58,
+    bottom: 22,
+    width: 18,
     borderWidth: 1,
     borderColor: '#35483b',
     backgroundColor: '#17271f',
@@ -515,10 +525,10 @@ const styles = StyleSheet.create({
   packDepth: {
     position: 'absolute',
     zIndex: 1,
-    top: 10,
-    left: 9,
-    right: -11,
-    bottom: -12,
+    top: 8,
+    left: 7,
+    right: -9,
+    bottom: -9,
     borderWidth: 1,
     borderColor: '#304238',
     borderTopLeftRadius: 58,
@@ -542,15 +552,15 @@ const styles = StyleSheet.create({
     width: '100%',
     position: 'relative',
     overflow: 'hidden',
-    gap: 12,
-    padding: 18,
-    paddingTop: 16,
+    gap: 8,
+    padding: 14,
+    paddingTop: 13,
     borderWidth: 1,
     borderColor: '#5c7162',
-    borderTopLeftRadius: 58,
-    borderTopRightRadius: 58,
-    borderBottomLeftRadius: 28,
-    borderBottomRightRadius: 28,
+    borderTopLeftRadius: 46,
+    borderTopRightRadius: 46,
+    borderBottomLeftRadius: 24,
+    borderBottomRightRadius: 24,
     backgroundColor: '#284535',
     ...Platform.select({
       web: { boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.09)' } as any,
@@ -558,18 +568,18 @@ const styles = StyleSheet.create({
     }),
   },
   packBodyCompact: {
-    paddingHorizontal: 12,
-    paddingVertical: 14,
-    borderTopLeftRadius: 42,
-    borderTopRightRadius: 42,
+    paddingHorizontal: 10,
+    paddingVertical: 11,
+    borderTopLeftRadius: 36,
+    borderTopRightRadius: 36,
   },
-  packBodyTiny: { paddingHorizontal: 10, gap: 11 },
+  packBodyTiny: { paddingHorizontal: 8, gap: 8 },
   canvasTopBand: {
     position: 'absolute',
     top: 0,
     left: 0,
     right: 0,
-    height: 118,
+    height: 96,
     backgroundColor: '#345642',
   },
   canvasWeave: {
@@ -632,7 +642,7 @@ const styles = StyleSheet.create({
   lidShell: {
     zIndex: 3,
     position: 'relative',
-    paddingBottom: 6,
+    paddingBottom: 4,
   },
   lidDepth: {
     position: 'absolute',
@@ -659,15 +669,15 @@ const styles = StyleSheet.create({
   },
   buckleRail: {
     zIndex: 3,
-    height: 20,
+    height: 16,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     marginTop: -3,
   },
   buckleStrap: {
-    width: 38,
-    height: 7,
+    width: 32,
+    height: 6,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
@@ -675,10 +685,10 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     backgroundColor: '#0d1410',
   },
-  strapStitch: { width: 26, height: 1, backgroundColor: '#7d897f72' },
+  strapStitch: { width: 22, height: 1, backgroundColor: '#7d897f72' },
   buckle: {
-    width: 34,
-    height: 22,
+    width: 30,
+    height: 19,
     padding: 3,
     borderWidth: 1,
     borderColor: '#b9a66f',
@@ -690,7 +700,7 @@ const styles = StyleSheet.create({
   raisedPocketShell: {
     zIndex: 2,
     position: 'relative',
-    paddingBottom: 5,
+    paddingBottom: 3,
   },
   mainPocketDepth: {
     position: 'absolute',
@@ -722,8 +732,8 @@ const styles = StyleSheet.create({
   mainPocket: {
     zIndex: 1,
     position: 'relative',
-    gap: 10,
-    padding: 12,
+    gap: 7,
+    padding: 9,
     borderWidth: 1,
     borderColor: '#5d7463',
     borderRadius: 18,
@@ -751,13 +761,13 @@ const styles = StyleSheet.create({
   pocketHeading: { color: '#9eac9f', fontSize: 9, fontWeight: '700', letterSpacing: 0.9 },
   zipTrack: { flexDirection: 'row', gap: 3 },
   zipTooth: { width: 5, height: 2, borderRadius: 1, backgroundColor: '#a89e76' },
-  mainGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  mainGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   frontPocket: {
     zIndex: 1,
     position: 'relative',
-    gap: 9,
-    padding: 12,
-    paddingTop: 17,
+    gap: 6,
+    padding: 9,
+    paddingTop: 14,
     borderWidth: 1,
     borderColor: '#617b67',
     borderBottomLeftRadius: 22,
@@ -779,9 +789,9 @@ const styles = StyleSheet.create({
     borderRadius: 2,
     backgroundColor: '#93a493a8',
   },
-  frontGrid: { flexDirection: 'row', gap: 8 },
+  frontGrid: { flexDirection: 'row', gap: 6 },
   frontGridCompact: { flexWrap: 'wrap' },
-  compactSideRow: { zIndex: 3, flexDirection: 'row', gap: 8 },
+  compactSideRow: { zIndex: 3, flexDirection: 'row', gap: 6 },
   compactSideRowTiny: { flexWrap: 'wrap' },
   baseSleeveShell: {
     zIndex: 3,
@@ -803,8 +813,8 @@ const styles = StyleSheet.create({
   baseSleeve: {
     zIndex: 1,
     position: 'relative',
-    padding: 7,
-    paddingTop: 10,
+    padding: 6,
+    paddingTop: 8,
     borderWidth: 1,
     borderColor: '#556c5c',
     borderRadius: 14,
@@ -823,9 +833,9 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 7,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
+    gap: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
     borderWidth: 1,
     borderColor: '#687b6d',
     borderRadius: 6,
@@ -877,11 +887,11 @@ const styles = StyleSheet.create({
   },
 
   pocket: {
-    minHeight: 58,
+    minHeight: 52,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 9,
-    padding: 9,
+    gap: 7,
+    padding: 7,
     borderWidth: 1,
     borderColor: '#3d5044',
     borderRadius: 12,
@@ -891,26 +901,26 @@ const styles = StyleSheet.create({
     } as any : {}),
   },
   lidPocket: {
-    minHeight: 106,
-    paddingHorizontal: 14,
-    borderRadius: 22,
+    minHeight: 88,
+    paddingHorizontal: 11,
+    borderRadius: 18,
     backgroundColor: '#172820f5',
   },
-  mainGridPocket: { flexBasis: '31%', flexGrow: 1, minWidth: 128, minHeight: 66 },
-  mainGridPocketCompact: { flexBasis: '46%', minWidth: 112, minHeight: 68 },
+  mainGridPocket: { flexBasis: '31%', flexGrow: 1, minWidth: 112, minHeight: 56 },
+  mainGridPocketCompact: { flexBasis: '46%', minWidth: 104, minHeight: 58 },
   mainGridPocketTiny: { width: '100%', flexBasis: 'auto', flexGrow: 0, flexShrink: 0, minWidth: 0 },
-  frontGridPocket: { flex: 1, minWidth: 100, minHeight: 66 },
+  frontGridPocket: { flex: 1, minWidth: 92, minHeight: 56 },
   frontGridPocketTiny: { width: '100%', flex: 0, flexBasis: 'auto', minWidth: 0 },
   sidePocket: {
-    minHeight: 132,
+    minHeight: 112,
     flexDirection: 'column',
     justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: 7,
   },
-  sidePocketCompact: { flex: 1, minHeight: 74, flexDirection: 'row', justifyContent: 'flex-start' },
+  sidePocketCompact: { flex: 1, minHeight: 62, flexDirection: 'row', justifyContent: 'flex-start' },
   sidePocketTiny: { width: '100%', flex: 0, flexBasis: 'auto', minWidth: 0 },
-  basePocket: { minHeight: 66, backgroundColor: '#0e1914f5' },
+  basePocket: { minHeight: 56, backgroundColor: '#0e1914f5' },
   pocketHovered: {
     backgroundColor: '#192820',
     ...Platform.select({ web: { boxShadow: '0 4px 12px rgba(0,0,0,0.26)' } as any, default: {} }),
@@ -919,17 +929,18 @@ const styles = StyleSheet.create({
     borderColor: '#f8fafc',
     ...Platform.select({ web: { outlineStyle: 'none', boxShadow: '0 0 0 3px rgba(167,139,250,0.42)' } as any, default: {} }),
   },
+  pocketDisabled: { opacity: 0.72 },
   pocketPressed: { opacity: 0.82, backgroundColor: '#1d2d25' },
   iconPlate: {
-    width: 34,
-    height: 34,
+    width: 30,
+    height: 30,
     flexShrink: 0,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
     borderRadius: 9,
   },
-  iconPlateFeatured: { width: 44, height: 44, borderRadius: 12 },
+  iconPlateFeatured: { width: 38, height: 38, borderRadius: 10 },
   iconText: { fontSize: 10, lineHeight: 14, fontWeight: '700' },
   iconTextFeatured: { fontSize: 12, lineHeight: 16 },
   pocketCopy: { flex: 1, minWidth: 0 },

@@ -916,7 +916,13 @@ function buildPlanFromLocalComputerIntent(
   const localComputerIntent = detectLocalComputerAwarenessIntent(normalized);
   if (!localComputerIntent.route) return null;
   const computerRequestRoute = buildChatComputerRequestRoute(normalized, { pipelineDecision });
-  if (computerRequestRoute) {
+  // Local browser-tab inventory must stay on the desktop bridge. The generic
+  // router can otherwise interpret "Chrome" as a browser-automation target
+  // and replace the exact read-only desktop-awareness pipeline with a remote
+  // browser route. Genuine desktop-app tab routes remain eligible here.
+  const remoteBrowserTabMismatch = localComputerIntent.kind === 'browser_tabs'
+    && computerRequestRoute?.kind === 'browser';
+  if (computerRequestRoute && !remoteBrowserTabMismatch) {
     const canonicalPlan = buildPlanFromComputerRequestRoute(computerRequestRoute, normalized);
     return {
       ...canonicalPlan,

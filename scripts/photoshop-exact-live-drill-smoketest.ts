@@ -671,9 +671,12 @@ async function main(): Promise<void> {
       && exactOccurrences(releasePrecheck, 'smoke:photoshop-exact-drill') === 1,
     'package wiring: daily and release prechecks each contain the Photoshop drill smoke exactly once',
   );
+  const smokeAllCommand = String(packageScripts['smoke:all'] || '');
   assert(
-    exactOccurrences(String(packageScripts['smoke:all'] || ''), 'smoke:photoshop-exact-drill') === 1,
-    'package wiring: smoke:all contains the Photoshop drill smoke exactly once',
+    smokeAllCommand.includes('scripts/run-smokes.mjs')
+      ? typeof packageScripts['smoke:photoshop-exact-drill'] === 'string'
+      : exactOccurrences(smokeAllCommand, 'smoke:photoshop-exact-drill') === 1,
+    'package wiring: smoke:all discovers the Photoshop drill smoke exactly once',
   );
   assert(
     !/computerTaskRuntime|desktopBridge|react-native/.test(coreSource.replace(/\*[^]*?\*\//g, '')),

@@ -14,9 +14,14 @@
  */
 
 import { deleteLocalSecret, readLocalSecret, writeLocalSecret } from './localSecrets';
+import { safeGetUserId } from './authSession';
 
 const NETLIFY_API = 'https://api.netlify.com/api/v1';
 const NETLIFY_SECRET_NS = 'netlify_pat';
+
+function netlifySecretId(userId: string, circleId: string): string {
+  return `${encodeURIComponent(userId)}:${encodeURIComponent(circleId)}`;
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -66,15 +71,26 @@ export interface DeployArtifactInput {
 // ─── Token storage (per-circle, same pattern as GitHub PAT) ──────────────────
 
 export async function getStoredNetlifyToken(circleId: string): Promise<string | null> {
-  return (await readLocalSecret(NETLIFY_SECRET_NS, circleId)) || null;
+  const userId = await safeGetUserId();
+  if (!userId || !circleId) return null;
+  // Circle-only legacy values cannot be attributed after an account switch.
+  await deleteLocalSecret(NETLIFY_SECRET_NS, circleId);
+  return (await readLocalSecret(NETLIFY_SECRET_NS, netlifySecretId(userId, circleId))) || null;
 }
 
 export async function storeNetlifyToken(circleId: string, token: string): Promise<void> {
-  await writeLocalSecret(NETLIFY_SECRET_NS, circleId, token);
+  const userId = await safeGetUserId();
+  if (!userId || !circleId) throw new Error('An authenticated user and Circle are required.');
+  await deleteLocalSecret(NETLIFY_SECRET_NS, circleId);
+  await writeLocalSecret(NETLIFY_SECRET_NS, netlifySecretId(userId, circleId), token);
 }
 
 export async function removeNetlifyToken(circleId: string): Promise<void> {
+  const userId = await safeGetUserId();
   await deleteLocalSecret(NETLIFY_SECRET_NS, circleId);
+  if (userId && circleId) {
+    await deleteLocalSecret(NETLIFY_SECRET_NS, netlifySecretId(userId, circleId));
+  }
 }
 
 // ─── Low-level fetch helper ──────────────────────────────────────────────────

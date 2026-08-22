@@ -71,6 +71,8 @@ has(migrationSql, 'ON CONFLICT (id) DO UPDATE', 'private bucket settings converg
 has(migrationSql, 'public = false', 'bucket converges to private');
 has(migrationSql, 'file_size_limit = 52428800', 'bucket converges to the 50 MiB limit');
 has(migrationSql, 'bucket identity mismatch; inspect before applying', 'ambiguous bucket identity aborts without replacement');
+has(migrationSql, 'Hosted Supabase owns storage.objects through supabase_storage_admin', 'migration respects hosted Storage table ownership');
+check(!migrationSql.includes('ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;'), 'migration does not ALTER the platform-owned Storage table');
 
 const objectMatchHelper = section(
   'CREATE OR REPLACE FUNCTION public.message_attachment_storage_object_matches_row_v1(',

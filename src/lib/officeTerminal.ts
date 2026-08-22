@@ -17,10 +17,11 @@
  *   mark_message_done; clients read updates via Realtime Postgres changes.
  */
 
-import { supabase } from './supabase';
+import { getSupabaseClientForAccessToken, supabase } from './supabase';
 import { subscribeWithReconnect, type ResilientSubscriptionHandle } from './subscribeWithReconnect';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import type { AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
+import { safeGetUserForAccessToken } from './authSession';
 
 const TERMINAL_HISTORY_CACHE_TTL_MS = 15_000;
 const TERMINAL_RESPONSES_CACHE_TTL_MS = 15_000;
@@ -767,6 +768,14 @@ const terminalHistoryCache = new Map<string, { at: number; messages: TerminalMes
 const terminalHistoryInflight = new Map<string, Promise<{ messages: TerminalMessage[]; error?: string }>>();
 const terminalResponsesCache = new Map<string, { at: number; responses: TerminalResponse[] }>();
 const terminalResponsesInflight = new Map<string, Promise<TerminalResponse[]>>();
+// Authenticated Office mounts never share the compatibility caches above.
+// Even though Circle history is shared among members, an RLS result belongs to
+// the exact user/circle/generation that fetched it and cannot be reused by a
+// second account on the same browser profile.
+const terminalExactHistoryCache = new Map<string, { at: number; messages: TerminalMessage[] }>();
+const terminalExactHistoryInflight = new Map<string, Promise<{ messages: TerminalMessage[]; error?: string }>>();
+const terminalExactResponsesCache = new Map<string, { at: number; responses: TerminalResponse[] }>();
+const terminalExactResponsesInflight = new Map<string, Promise<{ responses: TerminalResponse[]; error?: string }>>();
 
 // ─── Send a command ───────────────────────────────────────────────────────────
 
@@ -1023,7 +1032,7 @@ export function subscribeToTerminalCommands(
   // the sender stops seeing its own commands after the first drop.
   const handle = subscribeWithReconnect({
     channelName,
-    channelConfig: { config: { broadcast: { self: true } } },
+    channelConfig: { config: { private: true, broadcast: { self: true } } },
     setup: (channel) => channel
       .on('broadcast', { event: 'command' }, ({ payload }) => {
         const expected = parseTerminalCommandWakeup(circleId, payload);
@@ -1092,7 +1101,7 @@ export function subscribeToTerminalCommandsExact(
 
   const handle = subscribeWithReconnect({
     channelName,
-    channelConfig: { config: { broadcast: { self: true } } },
+    channelConfig: { config: { private: true, broadcast: { self: true } } },
     setup: (channel) => channel
       .on('broadcast', { event: 'command' }, ({ payload }) => {
         if (!requestIsCurrent()) return;
@@ -1145,6 +1154,7 @@ export function subscribeToTerminalResponses(
 
   const handle = subscribeWithReconnect({
     channelName,
+    channelConfig: { config: { private: true } },
     setup: (channel) => channel
       .on('broadcast', { event: 'response' }, ({ payload }) => {
         onResponse(payload as BroadcastResponsePayload);
@@ -1173,6 +1183,217 @@ export interface TerminalResponse {
   errorMessage?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface TerminalExactResponsesResult {
+  responses: TerminalResponse[];
+  error?: string;
+}
+
+export interface TerminalExactReadOptions {
+  /** Realtime notifications are advisory; bypass a pre-event cache on catch-up. */
+  forceRefresh?: boolean;
+}
+
+const TERMINAL_MESSAGE_STATUSES = new Set<TerminalMessageStatus>([
+  'pending',
+  'invoked',
+  'streaming',
+  'done',
+  'error',
+  'deleted',
+]);
+const TERMINAL_RESPONSE_STATUSES = new Set<TerminalResponse['status']>([
+  'pending',
+  'streaming',
+  'done',
+  'error',
+]);
+
+function terminalBearerCacheFingerprint(accessToken: string): string {
+  // This is a cache discriminator, not a credential hash. Keeping the bearer
+  // itself out of module-map keys also keeps it out of diagnostic snapshots.
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < accessToken.length; index += 1) {
+    hash ^= accessToken.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `${accessToken.length}:${(hash >>> 0).toString(16)}`;
+}
+
+function terminalExactReadScopeKey(authority: TerminalExactAuthority): string {
+  return [
+    authority.userId,
+    authority.circleId,
+    String(authority.generation),
+    terminalBearerCacheFingerprint(authority.accessToken),
+  ].join('\u0000');
+}
+
+function mapExactTerminalMessageRow(
+  value: unknown,
+  expectedCircleId: string,
+): TerminalMessage | null {
+  const row = asTerminalRow(value);
+  if (
+    !row
+    || !isTerminalUuid(row.id)
+    || row.circle_id !== expectedCircleId
+    || !isTerminalUuid(row.sender_id)
+    || typeof row.sender_name !== 'string'
+    || !row.sender_name.trim()
+    || typeof row.target_agent_name !== 'string'
+    || !row.target_agent_name.trim()
+    || (row.target_agent_id !== null && row.target_agent_id !== undefined && !isTerminalUuid(row.target_agent_id))
+    || (
+      row.target_agent_ids !== null
+      && row.target_agent_ids !== undefined
+      && (!Array.isArray(row.target_agent_ids) || row.target_agent_ids.some(id => !isTerminalUuid(id)))
+    )
+    || (row.model !== null && row.model !== undefined && typeof row.model !== 'string')
+    || typeof row.command_text !== 'string'
+    || !TERMINAL_MESSAGE_STATUSES.has(row.status as TerminalMessageStatus)
+    || typeof row.created_at !== 'string'
+    || typeof row.updated_at !== 'string'
+  ) return null;
+  return fromRow(row);
+}
+
+function mapExactTerminalResponseRow(
+  value: unknown,
+  expectedCircleId: string,
+  expectedMessageIds: ReadonlySet<string>,
+): TerminalResponse | null {
+  const row = asTerminalRow(value);
+  if (
+    !row
+    || !isTerminalUuid(row.id)
+    || row.circle_id !== expectedCircleId
+    || !isTerminalUuid(row.message_id)
+    || !expectedMessageIds.has(row.message_id)
+    || typeof row.agent_name !== 'string'
+    || !row.agent_name.trim()
+    || typeof row.response_text !== 'string'
+    || !TERMINAL_RESPONSE_STATUSES.has(row.status as TerminalResponse['status'])
+    || typeof row.created_at !== 'string'
+    || typeof row.updated_at !== 'string'
+  ) return null;
+  return {
+    id: row.id,
+    messageId: row.message_id,
+    agentId: typeof row.agent_id === 'string'
+      ? row.agent_id
+      : typeof row.agent_subject_key === 'string'
+        ? row.agent_subject_key
+        : '',
+    agentName: row.agent_name,
+    responseText: row.response_text,
+    status: row.status as TerminalResponse['status'],
+    tokenCount: typeof row.token_count === 'number' && Number.isFinite(row.token_count)
+      ? row.token_count
+      : 0,
+    latencyMs: typeof row.latency_ms === 'number' && Number.isFinite(row.latency_ms)
+      ? row.latency_ms
+      : undefined,
+    errorMessage: typeof row.error_message === 'string' ? row.error_message : undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * Load response content through one captured bearer. No compatibility cache or
+ * mutable-session query is consulted, and every row must belong to the exact
+ * circle and requested message set before it can enter React state.
+ */
+export async function loadResponsesForMessagesExact(
+  messageIds: string[],
+  capturedAuthority: TerminalExactAuthority,
+  isCurrent: TerminalAuthorityCurrentGuard,
+  client?: TerminalAuthorityClient,
+  options: TerminalExactReadOptions = {},
+): Promise<TerminalExactResponsesResult> {
+  const authority = normalizeTerminalExactAuthority(capturedAuthority);
+  const exactMessageIds = Array.from(new Set(messageIds));
+  if (
+    !authority
+    || exactMessageIds.some(messageId => !isTerminalUuid(messageId))
+    || !terminalAuthorityGuardPasses(authority, isCurrent)
+  ) {
+    return { responses: [], error: 'The terminal session changed before responses could be loaded.' };
+  }
+  if (exactMessageIds.length === 0) return { responses: [] };
+
+  const cacheKey = `${terminalExactReadScopeKey(authority)}\u0000${[...exactMessageIds].sort().join(',')}`;
+  if (!options.forceRefresh) {
+    const cached = terminalExactResponsesCache.get(cacheKey);
+    if (
+      cached
+      && Date.now() - cached.at < TERMINAL_RESPONSES_CACHE_TTL_MS
+      && terminalAuthorityGuardPasses(authority, isCurrent)
+    ) return { responses: cached.responses };
+    const inflight = terminalExactResponsesInflight.get(cacheKey);
+    if (inflight) {
+      const result = await inflight;
+      return terminalAuthorityGuardPasses(authority, isCurrent)
+        ? result
+        : { responses: [], error: 'The terminal session changed before responses could be loaded.' };
+    }
+  }
+
+  const run = (async (): Promise<TerminalExactResponsesResult> => {
+    const fence = createTerminalAuthorityOperationFence(authority, isCurrent);
+    if (!fence) {
+      return { responses: [], error: 'The terminal session changed before responses could be loaded.' };
+    }
+    try {
+      const exactClient = client || getSupabaseClientForAccessToken(authority.accessToken);
+      const { data: authData, error: authError } = await exactClient.auth.getUser(authority.accessToken);
+      if (authError || authData.user?.id !== authority.userId || !fence.isCurrent()) {
+        return { responses: [], error: 'The terminal session could not verify response access.' };
+      }
+      const { data, error } = await exactClient
+        .from('office_terminal_responses')
+        .select('*')
+        .eq('circle_id', authority.circleId)
+        .in('message_id', exactMessageIds)
+        .setHeader('Authorization', `Bearer ${authority.accessToken}`)
+        .abortSignal(fence.signal);
+      if (error) return { responses: [], error: error.message };
+      if (!fence.isCurrent()) {
+        return { responses: [], error: 'The terminal session changed before responses could be loaded.' };
+      }
+      const expectedMessageIds = new Set(exactMessageIds);
+      const responses: TerminalResponse[] = [];
+      for (const row of (data as unknown[]) || []) {
+        const response = mapExactTerminalResponseRow(row, authority.circleId, expectedMessageIds);
+        if (!response) {
+          return { responses: [], error: 'Terminal responses returned outside the exact requested scope.' };
+        }
+        responses.push(response);
+      }
+      if (!fence.isCurrent()) {
+        return { responses: [], error: 'The terminal session changed before responses could be loaded.' };
+      }
+      terminalExactResponsesCache.set(cacheKey, { at: Date.now(), responses });
+      return { responses };
+    } catch (error) {
+      return {
+        responses: [],
+        error: error instanceof Error ? error.message : 'Terminal responses could not be loaded.',
+      };
+    } finally {
+      fence.stop();
+    }
+  })();
+  if (!options.forceRefresh) terminalExactResponsesInflight.set(cacheKey, run);
+  try {
+    return await run;
+  } finally {
+    if (!options.forceRefresh && terminalExactResponsesInflight.get(cacheKey) === run) {
+      terminalExactResponsesInflight.delete(cacheKey);
+    }
+  }
 }
 
 export async function loadResponsesForMessages(
@@ -1261,6 +1482,98 @@ export async function loadTerminalHistory(
   return run;
 }
 
+/**
+ * Exact-authority Office transcript read. The result cache is partitioned by
+ * user, circle, bearer discriminator, and lifecycle generation; it never reads
+ * or falls back to the legacy circle-only cache above.
+ */
+export async function loadTerminalHistoryExact(
+  capturedAuthority: TerminalExactAuthority,
+  isCurrent: TerminalAuthorityCurrentGuard,
+  limit = 50,
+  client?: TerminalAuthorityClient,
+  options: TerminalExactReadOptions = {},
+): Promise<{ messages: TerminalMessage[]; error?: string }> {
+  const authority = normalizeTerminalExactAuthority(capturedAuthority);
+  const safeLimit = Number.isSafeInteger(limit) && limit > 0 && limit <= 100
+    ? limit
+    : 50;
+  if (!authority || !terminalAuthorityGuardPasses(authority, isCurrent)) {
+    return { messages: [], error: 'The terminal session changed before history could be loaded.' };
+  }
+  const cacheKey = `${terminalExactReadScopeKey(authority)}\u0000${safeLimit}`;
+  if (!options.forceRefresh) {
+    const cached = terminalExactHistoryCache.get(cacheKey);
+    if (
+      cached
+      && Date.now() - cached.at < TERMINAL_HISTORY_CACHE_TTL_MS
+      && terminalAuthorityGuardPasses(authority, isCurrent)
+    ) return { messages: cached.messages };
+    const inflight = terminalExactHistoryInflight.get(cacheKey);
+    if (inflight) {
+      const result = await inflight;
+      return terminalAuthorityGuardPasses(authority, isCurrent)
+        ? result
+        : { messages: [], error: 'The terminal session changed before history could be loaded.' };
+    }
+  }
+
+  const run = (async (): Promise<{ messages: TerminalMessage[]; error?: string }> => {
+    const fence = createTerminalAuthorityOperationFence(authority, isCurrent);
+    if (!fence) {
+      return { messages: [], error: 'The terminal session changed before history could be loaded.' };
+    }
+    try {
+      const exactClient = client || getSupabaseClientForAccessToken(authority.accessToken);
+      const { data: authData, error: authError } = await exactClient.auth.getUser(authority.accessToken);
+      if (authError || authData.user?.id !== authority.userId || !fence.isCurrent()) {
+        return { messages: [], error: 'The terminal session could not verify history access.' };
+      }
+      const { data, error } = await exactClient
+        .from('office_terminal_messages')
+        .select('*')
+        .eq('circle_id', authority.circleId)
+        .order('created_at', { ascending: false })
+        .limit(safeLimit)
+        .setHeader('Authorization', `Bearer ${authority.accessToken}`)
+        .abortSignal(fence.signal);
+      if (error) return { messages: [], error: error.message };
+      if (!fence.isCurrent()) {
+        return { messages: [], error: 'The terminal session changed before history could be loaded.' };
+      }
+      const messages: TerminalMessage[] = [];
+      for (const row of (data as unknown[]) || []) {
+        const message = mapExactTerminalMessageRow(row, authority.circleId);
+        if (!message) {
+          return { messages: [], error: 'Terminal history returned outside the exact requested scope.' };
+        }
+        messages.push(message);
+      }
+      messages.reverse();
+      if (!fence.isCurrent()) {
+        return { messages: [], error: 'The terminal session changed before history could be loaded.' };
+      }
+      terminalExactHistoryCache.set(cacheKey, { at: Date.now(), messages });
+      return { messages };
+    } catch (error) {
+      return {
+        messages: [],
+        error: error instanceof Error ? error.message : 'Terminal history could not be loaded.',
+      };
+    } finally {
+      fence.stop();
+    }
+  })();
+  if (!options.forceRefresh) terminalExactHistoryInflight.set(cacheKey, run);
+  try {
+    return await run;
+  } finally {
+    if (!options.forceRefresh && terminalExactHistoryInflight.get(cacheKey) === run) {
+      terminalExactHistoryInflight.delete(cacheKey);
+    }
+  }
+}
+
 // ─── Subscribe to Realtime DB changes on terminal messages ────────────────────
 
 export function subscribeToTerminalMessages(
@@ -1271,9 +1584,15 @@ export function subscribeToTerminalMessages(
    *  Terminal output that landed while the socket was down never arrives as an
    *  event, so without this the transcript is permanently missing that gap. */
   onCatchUp?: () => void,
+  /** Namespace only. Exact mounts still treat every event as an advisory and
+   *  re-read through their captured bearer before rendering content. */
+  subscriptionScope?: string,
 ): () => void {
+  const safeSubscriptionScope = String(subscriptionScope || 'compat')
+    .replace(/[^a-zA-Z0-9_-]/g, '_')
+    .slice(0, 180);
   const handle = subscribeWithReconnect({
-    channelName: `terminal-db-${circleId}`,
+    channelName: `terminal-db-${circleId}-${safeSubscriptionScope}`,
     onCatchUp,
     setup: (channel) => channel
     .on('postgres_changes', {
@@ -1379,6 +1698,20 @@ export async function deleteTerminalMessageExact(
         responses: cached.responses.filter(response => response.messageId !== messageId),
       });
     }
+    for (const [cacheKey, cached] of terminalExactHistoryCache) {
+      if (!cacheKey.includes(`\u0000${authority.circleId}\u0000`)) continue;
+      terminalExactHistoryCache.set(cacheKey, {
+        at: cached.at,
+        messages: cached.messages.filter(message => message.id !== messageId),
+      });
+    }
+    for (const [cacheKey, cached] of terminalExactResponsesCache) {
+      if (!cacheKey.includes(`\u0000${authority.circleId}\u0000`)) continue;
+      terminalExactResponsesCache.set(cacheKey, {
+        at: cached.at,
+        responses: cached.responses.filter(response => response.messageId !== messageId),
+      });
+    }
 
     const receipt = Object.freeze({
       messageId,
@@ -1462,11 +1795,14 @@ export async function updateAgentAnalytics(
 
 // ─── Sync agent token snapshot to DB ──────────────────────────────────────────
 // Called every 30s from OfficeTab with cumulative session token counts.
-// The DB-side RPC tracks the prior snapshot key so bridge restarts cannot
-// reset daily/all-time aggregates back to zero.
+// The v1 profile RPC owns a private, per-user/session lifetime ledger even
+// when the agent is not published to the Circle Office. The older RPC remains
+// a rollout-only compatibility path for published-agent daily aggregates.
 
 let _tokenSnapshotSyncDisabled = false;
 let _tokenSnapshotSyncWarningShown = false;
+let _profileUsageSyncRpcUnavailable = false;
+let _profileUsageSyncWarningShown = false;
 const _overflowDisabledTokenSnapshotIds = new Set<string>();
 const _invalidTokenSnapshotWarnings = new Set<string>();
 
@@ -1476,6 +1812,8 @@ const POSTGRES_INTEGER_MAX = 2_147_483_647;
 // rounding into a 13th digit.
 const OFFICE_TOKEN_SNAPSHOT_COST_MAX = 999_999.999_999;
 const TOKEN_SNAPSHOT_DIAGNOSTIC_VALUE_MAX = 64;
+const OFFICE_AGENT_USAGE_PROFILE_LIMIT = 5_000;
+const OFFICE_USAGE_TEXT_MAX = 200;
 
 type TokenSnapshotUsageValidation = {
   valid: true;
@@ -1488,6 +1826,224 @@ type TokenSnapshotUsageValidation = {
 export function normalizeTokenSnapshotKey(agentName: string, snapshotKey?: string): string {
   const explicitKey = snapshotKey?.trim();
   return explicitKey || agentName.toLowerCase();
+}
+
+export interface OfficeAgentUsageProfile {
+  readonly sessionKey: string;
+  readonly agentName: string;
+  readonly providerType: string;
+  readonly modelName: string | null;
+  readonly lifetimeTokens: number;
+  readonly lifetimeInputTokens: number;
+  readonly lifetimeOutputTokens: number;
+  readonly lifetimeCachedTokens: number;
+  readonly lifetimeMessages: number;
+  readonly lifetimeCost: number;
+  readonly sessionCount: number;
+  readonly lastObservedAt: string;
+  readonly firstSeenAt: string;
+  readonly lastSeenAt: string;
+  readonly updatedAt: string;
+}
+
+export interface SyncAgentTokenSnapshotInput {
+  readonly authority: TerminalExactAuthority;
+  readonly isCurrent: TerminalAuthorityCurrentGuard;
+  readonly agentName: string;
+  readonly providerType: string;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cachedTokens: number;
+  readonly messageCount: number;
+  readonly estimatedCost: number;
+  readonly model?: string;
+  readonly snapshotKey: string;
+  /** Exact bridge/session observation timestamp used to reject delayed lower
+   *  meters before they can masquerade as a fresh counter reset. */
+  readonly observedAt: string;
+}
+
+export type SyncAgentTokenSnapshotResult =
+  | Readonly<{
+      ok: true;
+      profile: OfficeAgentUsageProfile;
+      officeAgentUpdated: boolean;
+      observationDisposition: 'applied' | 'unchanged' | 'stale';
+    }>
+  | Readonly<{
+      ok: false;
+      error: 'invalid_snapshot' | 'authority_mismatch' | 'authority_retired' | 'profile_rpc_unavailable' | 'server_unavailable';
+      legacySaved?: boolean;
+    }>;
+
+function isBoundedOfficeUsageText(value: unknown, allowEmpty = false): value is string {
+  if (typeof value !== 'string') return false;
+  const normalized = value.trim();
+  return (allowEmpty || normalized.length > 0)
+    && normalized.length <= OFFICE_USAGE_TEXT_MAX
+    && !/[\u0000-\u001f\u007f]/u.test(normalized);
+}
+
+function readOfficeUsageSafeInteger(value: unknown): number | null {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function readOfficeUsageCost(value: unknown): number | null {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function parseOfficeAgentUsageProfileRow(
+  value: unknown,
+  expectedUserId?: string,
+): OfficeAgentUsageProfile | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const userId = typeof row.owner_id === 'string' ? row.owner_id : '';
+  const sessionKey = typeof row.session_key === 'string' ? row.session_key : '';
+  const agentName = typeof row.agent_name === 'string' ? row.agent_name : '';
+  const providerType = typeof row.provider_type === 'string' ? row.provider_type : '';
+  const modelName = row.model_name === null || row.model_name === undefined
+    ? null
+    : typeof row.model_name === 'string' && isBoundedOfficeUsageText(row.model_name)
+      ? row.model_name.trim()
+      : undefined;
+  const lifetimeTokens = readOfficeUsageSafeInteger(row.lifetime_tokens);
+  const lifetimeInputTokens = readOfficeUsageSafeInteger(row.lifetime_input_tokens);
+  const lifetimeOutputTokens = readOfficeUsageSafeInteger(row.lifetime_output_tokens);
+  const lifetimeCachedTokens = readOfficeUsageSafeInteger(row.lifetime_cached_tokens);
+  const lifetimeMessages = readOfficeUsageSafeInteger(row.lifetime_messages);
+  const lifetimeCost = readOfficeUsageCost(row.lifetime_cost);
+  const sessionCount = readOfficeUsageSafeInteger(row.session_count);
+  const lastObservedAt = typeof row.last_observed_at === 'string' ? row.last_observed_at : '';
+  const firstSeenAt = typeof row.first_seen_at === 'string' ? row.first_seen_at : '';
+  const lastSeenAt = typeof row.last_seen_at === 'string' ? row.last_seen_at : '';
+  const updatedAt = typeof row.updated_at === 'string' ? row.updated_at : '';
+  if (
+    (expectedUserId && userId !== expectedUserId)
+    || !isBoundedOfficeUsageText(sessionKey)
+    || !isBoundedOfficeUsageText(agentName)
+    || !isBoundedOfficeUsageText(providerType)
+    || modelName === undefined
+    || lifetimeTokens === null
+    || lifetimeInputTokens === null
+    || lifetimeOutputTokens === null
+    || lifetimeCachedTokens === null
+    || lifetimeMessages === null
+    || lifetimeCost === null
+    || sessionCount === null
+    || sessionCount < 1
+    || !Number.isFinite(Date.parse(lastObservedAt))
+    || !Number.isFinite(Date.parse(firstSeenAt))
+    || !Number.isFinite(Date.parse(lastSeenAt))
+    || !Number.isFinite(Date.parse(updatedAt))
+  ) return null;
+  return Object.freeze({
+    sessionKey: sessionKey.trim(),
+    agentName: agentName.trim(),
+    providerType: providerType.trim(),
+    modelName,
+    lifetimeTokens,
+    lifetimeInputTokens,
+    lifetimeOutputTokens,
+    lifetimeCachedTokens,
+    lifetimeMessages,
+    lifetimeCost,
+    sessionCount,
+    lastObservedAt,
+    firstSeenAt,
+    lastSeenAt,
+    updatedAt,
+  });
+}
+
+function parseOfficeAgentUsageSyncReceipt(
+  value: unknown,
+  authority: TerminalExactAuthority,
+  expectedSessionKey: string,
+): {
+  profile: OfficeAgentUsageProfile;
+  officeAgentUpdated: boolean;
+  observationDisposition: 'applied' | 'unchanged' | 'stale';
+} | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const receipt = value as Record<string, unknown>;
+  const officeAgentRowCount = readOfficeUsageSafeInteger(receipt.officeAgentRowCount);
+  const observationDisposition = String(receipt.observationDisposition);
+  const expectedProjectionDisposition = officeAgentRowCount === 0
+    ? 'not_found'
+    : officeAgentRowCount !== null && officeAgentRowCount > 1
+      ? 'ambiguous'
+      : observationDisposition === 'stale'
+        ? 'stale'
+        : 'applied';
+  if (
+    receipt.schemaVersion !== 1
+    || receipt.userId !== authority.userId
+    || receipt.circleId !== authority.circleId
+    || receipt.sessionKey !== expectedSessionKey
+    || officeAgentRowCount === null
+    || officeAgentRowCount > OFFICE_AGENT_USAGE_PROFILE_LIMIT
+    || !['applied', 'unchanged', 'stale'].includes(observationDisposition)
+    || receipt.publicProjectionDisposition !== expectedProjectionDisposition
+    || typeof receipt.publicProjectionApplied !== 'boolean'
+    || receipt.publicProjectionApplied !== (expectedProjectionDisposition === 'applied')
+  ) return null;
+  const profile = parseOfficeAgentUsageProfileRow(receipt.profile, authority.userId);
+  if (!profile || profile.sessionKey !== expectedSessionKey) return null;
+  return {
+    profile,
+    officeAgentUpdated: receipt.publicProjectionApplied,
+    observationDisposition: observationDisposition as 'applied' | 'unchanged' | 'stale',
+  };
+}
+
+export async function loadOfficeAgentUsageProfilesExact(
+  capturedAuthority: TerminalExactAuthority,
+  isCurrent: TerminalAuthorityCurrentGuard,
+): Promise<Readonly<{ ok: true; profiles: Map<string, OfficeAgentUsageProfile> }> | Readonly<{ ok: false; error: string }>> {
+  const operation = createTerminalAuthorityOperationFence(capturedAuthority, isCurrent);
+  if (!operation) return { ok: false, error: 'The Office usage authority is unavailable.' };
+  try {
+    const { value: verifiedUser } = await safeGetUserForAccessToken(operation.authority.accessToken);
+    if (verifiedUser?.id !== operation.authority.userId || !operation.isCurrent()) {
+      return { ok: false, error: 'The Office usage authority changed before the ledger loaded.' };
+    }
+    const exactClient = getSupabaseClientForAccessToken(operation.authority.accessToken);
+    const { data, error, count } = await exactClient
+      .from('office_agent_usage_profiles')
+      .select('*', { count: 'exact' })
+      .eq('owner_id', operation.authority.userId)
+      .limit(OFFICE_AGENT_USAGE_PROFILE_LIMIT + 1)
+      .abortSignal(operation.signal);
+    if (error || !Array.isArray(data) || !operation.isCurrent()) {
+      return { ok: false, error: 'The lifetime usage ledger could not be loaded.' };
+    }
+    if (
+      typeof count !== 'number'
+      || !Number.isSafeInteger(count)
+      || count < 0
+      || count > OFFICE_AGENT_USAGE_PROFILE_LIMIT
+      || data.length !== count
+    ) return { ok: false, error: 'The lifetime usage ledger returned an incomplete snapshot.' };
+    const profiles = new Map<string, OfficeAgentUsageProfile>();
+    for (const row of data) {
+      const profile = parseOfficeAgentUsageProfileRow(row, operation.authority.userId);
+      if (!profile || profiles.has(profile.sessionKey)) {
+        return { ok: false, error: 'The lifetime usage ledger returned an invalid row.' };
+      }
+      profiles.set(profile.sessionKey, profile);
+    }
+    if (!operation.isCurrent()) {
+      return { ok: false, error: 'The Office usage authority changed before the ledger loaded.' };
+    }
+    return { ok: true, profiles };
+  } catch {
+    return { ok: false, error: 'The lifetime usage ledger could not be loaded.' };
+  } finally {
+    operation.stop();
+  }
 }
 
 export function validateTokenSnapshotUsage(
@@ -1608,6 +2164,30 @@ function shouldDisableTokenSnapshotSync(error: any): boolean {
   );
 }
 
+function isProfileUsageRpcUnavailable(error: any): boolean {
+  const code = String(error?.code || '');
+  const status = Number(error?.status || 0);
+  const message = String(error?.message || error?.details || '').toLowerCase();
+  return code === 'PGRST202'
+    || code === 'PGRST204'
+    || status === 404
+    || message.includes('sync_agent_profile_usage_v1')
+    || message.includes('schema cache')
+    || message.includes('could not find the function');
+}
+
+function markProfileUsageRpcUnavailable(error?: any) {
+  _profileUsageSyncRpcUnavailable = true;
+  if (_profileUsageSyncWarningShown) return;
+  _profileUsageSyncWarningShown = true;
+  const detail = error?.message ? ` Last error: ${error.message}` : '';
+  console.warn(
+    '[syncAgentTokenSnapshot] Owner-private lifetime usage RPC unavailable; ' +
+    'using the published-agent compatibility ledger until §51 is applied.' +
+    detail,
+  );
+}
+
 function disableTokenSnapshotSyncForSession(error?: any) {
   _tokenSnapshotSyncDisabled = true;
   if (_tokenSnapshotSyncWarningShown) return;
@@ -1615,107 +2195,143 @@ function disableTokenSnapshotSyncForSession(error?: any) {
   const detail = error?.message ? ` Last error: ${error.message}` : '';
   console.warn(
     '[syncAgentTokenSnapshot] RPC unavailable; disabled Office token snapshot sync for this page session. ' +
-    'Apply the Office cost snapshot migration and reload to re-enable DB sync.' +
+    'Apply the Office lifetime usage migration and reload to re-enable DB sync.' +
     detail,
   );
 }
 
+async function syncLegacyPublishedAgentSnapshot(
+  exactClient: ReturnType<typeof getSupabaseClientForAccessToken>,
+  authority: TerminalExactAuthority,
+  input: SyncAgentTokenSnapshotInput,
+  normalizedSnapshotKey: string,
+  signal: AbortSignal,
+): Promise<{ saved: boolean; error?: any }> {
+  const { error } = await exactClient.rpc('sync_agent_token_snapshot', {
+    p_circle_id: authority.circleId,
+    p_owner_id: authority.userId,
+    p_agent_name: input.agentName,
+    p_input_tokens: input.inputTokens,
+    p_output_tokens: input.outputTokens,
+    p_cached_tokens: input.cachedTokens,
+    p_message_count: input.messageCount,
+    p_estimated_cost: input.estimatedCost,
+    p_model: input.model || null,
+    p_snapshot_key: normalizedSnapshotKey,
+  }).abortSignal(signal);
+  return error ? { saved: false, error } : { saved: true };
+}
+
 export async function syncAgentTokenSnapshot(
-  circleId: string,
-  agentName: string,
-  inputTokens: number,
-  outputTokens: number,
-  cachedTokens: number,
-  messageCount: number,
-  estimatedCost: number,
-  model?: string,
-  snapshotKey?: string,
-): Promise<void> {
-  if (_tokenSnapshotSyncDisabled) return;
-  const normalizedSnapshotKey = normalizeTokenSnapshotKey(agentName, snapshotKey);
-  const snapshotId = tokenSnapshotIdentity(circleId, agentName, normalizedSnapshotKey);
-  if (_overflowDisabledTokenSnapshotIds.has(snapshotId)) return;
+  input: SyncAgentTokenSnapshotInput,
+): Promise<SyncAgentTokenSnapshotResult> {
+  if (_tokenSnapshotSyncDisabled) return { ok: false, error: 'server_unavailable' };
+  const authority = normalizeTerminalExactAuthority(input.authority);
+  const normalizedSnapshotKey = normalizeTokenSnapshotKey(input.agentName, input.snapshotKey);
+  if (
+    !authority
+    || authority.circleId !== input.authority.circleId
+    || typeof input.isCurrent !== 'function'
+    || !isBoundedOfficeUsageText(input.agentName)
+    || !isBoundedOfficeUsageText(input.providerType)
+    || !isBoundedOfficeUsageText(normalizedSnapshotKey)
+    || (input.model !== undefined && !isBoundedOfficeUsageText(input.model))
+    || !Number.isFinite(Date.parse(input.observedAt))
+  ) return { ok: false, error: 'invalid_snapshot' };
+  const snapshotId = tokenSnapshotIdentity(authority.circleId, input.agentName, normalizedSnapshotKey);
+  if (_overflowDisabledTokenSnapshotIds.has(snapshotId)) return { ok: false, error: 'invalid_snapshot' };
 
   const validation = validateTokenSnapshotUsage(
-    inputTokens,
-    outputTokens,
-    cachedTokens,
-    messageCount,
-    estimatedCost,
+    input.inputTokens,
+    input.outputTokens,
+    input.cachedTokens,
+    input.messageCount,
+    input.estimatedCost,
   );
   if (validation.valid === false) {
-    warnInvalidTokenSnapshotOnce(snapshotId, agentName, validation);
-    return;
+    warnInvalidTokenSnapshotOnce(snapshotId, input.agentName, validation);
+    return { ok: false, error: 'invalid_snapshot' };
   }
 
+  const operation = createTerminalAuthorityOperationFence(authority, input.isCurrent);
+  if (!operation) return { ok: false, error: 'authority_retired' };
   try {
-    const { data: auth } = await supabase.auth.getUser();
-    if (!auth.user) return;
+    const { value: verifiedUser } = await safeGetUserForAccessToken(authority.accessToken);
+    if (verifiedUser?.id !== authority.userId) return { ok: false, error: 'authority_mismatch' };
+    if (!operation.isCurrent()) return { ok: false, error: 'authority_retired' };
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
 
-    const { error } = await supabase.rpc('sync_agent_token_snapshot', {
-      p_circle_id:      circleId,
-      p_owner_id:       auth.user.id,
-      p_agent_name:     agentName,
-      p_input_tokens:   inputTokens,
-      p_output_tokens:  outputTokens,
-      p_cached_tokens:  cachedTokens,
-      p_message_count:  messageCount,
-      p_estimated_cost: estimatedCost,
-      p_model:          model || null,
-      p_snapshot_key:   normalizedSnapshotKey,
-    });
-
-    if (error) {
+    if (!_profileUsageSyncRpcUnavailable) {
+      const { data, error } = await exactClient.rpc('sync_agent_profile_usage_v1', {
+        p_circle_id: authority.circleId,
+        p_agent_name: input.agentName.trim(),
+        p_provider_type: input.providerType.trim(),
+        p_input_tokens: input.inputTokens,
+        p_output_tokens: input.outputTokens,
+        p_cached_tokens: input.cachedTokens,
+        p_message_count: input.messageCount,
+        p_estimated_cost: input.estimatedCost,
+        p_model: input.model?.trim() || null,
+        p_session_key: normalizedSnapshotKey,
+        p_observed_at: input.observedAt,
+      }).abortSignal(operation.signal);
+      if (!error) {
+        if (!operation.isCurrent()) return { ok: false, error: 'authority_retired' };
+        const parsed = parseOfficeAgentUsageSyncReceipt(data, authority, normalizedSnapshotKey);
+        return parsed
+          ? { ok: true, ...parsed }
+          : { ok: false, error: 'server_unavailable' };
+      }
       if (isTokenSnapshotNumericOverflow(error)) {
         disableOverflowingTokenSnapshotForSession(
           snapshotId,
-          agentName,
+          input.agentName,
           normalizedSnapshotKey,
         );
-        return;
+        return { ok: false, error: 'invalid_snapshot' };
       }
-      if (snapshotKey && /p_snapshot_key|sync_agent_token_snapshot|function/i.test(error.message || '')) {
-        const { error: legacyError } = await supabase.rpc('sync_agent_token_snapshot', {
-          p_circle_id:      circleId,
-          p_owner_id:       auth.user.id,
-          p_agent_name:     agentName,
-          p_input_tokens:   inputTokens,
-          p_output_tokens:  outputTokens,
-          p_cached_tokens:  cachedTokens,
-          p_message_count:  messageCount,
-          p_estimated_cost: estimatedCost,
-          p_model:          model || null,
-        });
-        if (!legacyError) return;
-        if (isTokenSnapshotNumericOverflow(legacyError)) {
-          disableOverflowingTokenSnapshotForSession(
-            snapshotId,
-            agentName,
-            normalizedSnapshotKey,
-          );
-          return;
-        }
-        if (shouldDisableTokenSnapshotSync(legacyError)) {
-          disableTokenSnapshotSyncForSession(legacyError);
-          return;
-        }
+      if (!isProfileUsageRpcUnavailable(error)) {
+        console.warn('[syncAgentTokenSnapshot] Lifetime usage RPC failed:', error.message);
+        return { ok: false, error: 'server_unavailable' };
       }
-      if (shouldDisableTokenSnapshotSync(error)) {
-        disableTokenSnapshotSyncForSession(error);
-        return;
-      }
-      console.warn('[syncAgentTokenSnapshot] RPC failed:', error.message);
+      markProfileUsageRpcUnavailable(error);
     }
+
+    if (!operation.isCurrent()) return { ok: false, error: 'authority_retired' };
+    const legacy = await syncLegacyPublishedAgentSnapshot(
+      exactClient,
+      authority,
+      input,
+      normalizedSnapshotKey,
+      operation.signal,
+    );
+    if (!operation.isCurrent()) return { ok: false, error: 'authority_retired' };
+    if (legacy.saved) return { ok: false, error: 'profile_rpc_unavailable', legacySaved: true };
+    if (isTokenSnapshotNumericOverflow(legacy.error)) {
+      disableOverflowingTokenSnapshotForSession(snapshotId, input.agentName, normalizedSnapshotKey);
+      return { ok: false, error: 'invalid_snapshot' };
+    }
+    if (shouldDisableTokenSnapshotSync(legacy.error)) {
+      disableTokenSnapshotSyncForSession(legacy.error);
+      return { ok: false, error: 'profile_rpc_unavailable' };
+    }
+    console.warn('[syncAgentTokenSnapshot] Compatibility RPC failed:', legacy.error?.message || 'unknown error');
+    return { ok: false, error: 'server_unavailable' };
   } catch (err) {
     if (isTokenSnapshotNumericOverflow(err)) {
       disableOverflowingTokenSnapshotForSession(
         snapshotId,
-        agentName,
+        input.agentName,
         normalizedSnapshotKey,
       );
-      return;
+      return { ok: false, error: 'invalid_snapshot' };
     }
     console.warn('[syncAgentTokenSnapshot] Error:', err);
+    return operation.isCurrent()
+      ? { ok: false, error: 'server_unavailable' }
+      : { ok: false, error: 'authority_retired' };
+  } finally {
+    operation.stop();
   }
 }
 
@@ -1774,7 +2390,7 @@ async function getOrCreateCommandChannel(circleId: string): Promise<RealtimeChan
   if (existing) return existing;
 
   const channel = supabase.channel(`office-terminal-cmd-${circleId}`, {
-    config: { broadcast: { self: true } },
+    config: { private: true, broadcast: { self: true } },
   });
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => {

@@ -15,6 +15,7 @@ import {
   type ComputerUseHistoryExactAuthority,
   type ComputerUseRunRow,
 } from '../lib/computerUseHistory';
+import { PROFILE_DASHBOARD_TOKENS as PD } from './profile/profileDashboardTheme';
 
 interface Props {
   circleId: string;
@@ -114,7 +115,7 @@ export default function ComputerUseHistoryPanel({
           <View style={s.countPill}>
             <Text style={s.countText}>{visibleRows.length}</Text>
           </View>
-          <Pressable onPress={() => refresh(true)} style={s.refreshBtn} accessibilityRole="button">
+          <Pressable onPress={() => refresh(true)} style={s.refreshBtn} accessibilityRole="button" accessibilityLabel="Refresh browser history">
             <Text style={s.refreshText}>↻</Text>
           </Pressable>
         </View>
@@ -167,12 +168,22 @@ function RunRow({ row, accentColor, onRerun }: { row: ComputerUseRunRow; accentC
           <Text style={s.rowMeta}>{timeAgo(row.created_at)}</Text>
           {row.iterations > 0 ? <Text style={s.rowMeta}>{row.iterations} step{row.iterations === 1 ? '' : 's'}</Text> : null}
           {row.live_url ? (
-            <Pressable onPress={() => Linking.openURL(row.live_url!)} style={s.rowAction} accessibilityRole="button">
+            <Pressable
+              onPress={() => Linking.openURL(row.live_url!)}
+              style={s.rowAction}
+              accessibilityRole="button"
+              accessibilityLabel={`Open live browser session for ${row.task}`}
+            >
               <Text style={[s.rowActionText, { color: '#38bdf8' }]}>OPEN ↗</Text>
             </Pressable>
           ) : null}
           {onRerun && row.status !== 'running' ? (
-            <Pressable onPress={() => onRerun(row.task)} style={s.rowAction} accessibilityRole="button">
+            <Pressable
+              onPress={() => onRerun(row.task)}
+              style={s.rowAction}
+              accessibilityRole="button"
+              accessibilityLabel={`Run ${row.task} again`}
+            >
               <Text style={[s.rowActionText, { color: accentColor }]}>RE-RUN</Text>
             </Pressable>
           ) : null}
@@ -196,12 +207,10 @@ function timeAgo(iso: string): string {
 
 const s = StyleSheet.create({
   card: {
-    marginHorizontal: 16,
-    marginTop: 16,
-    backgroundColor: '#0f172a',
+    backgroundColor: PD.panel,
     borderWidth: 1,
-    borderColor: '#1f2937',
-    borderRadius: 16,
+    borderColor: PD.border,
+    borderRadius: PD.panelRadius,
     padding: 16,
   },
   header: {
@@ -225,7 +234,7 @@ const s = StyleSheet.create({
   },
   title: {
     flex: 1,
-    color: '#e2e8f0',
+    color: PD.text,
     fontFamily: 'monospace',
     fontSize: 12,
     fontWeight: '900',
@@ -236,13 +245,13 @@ const s = StyleSheet.create({
     paddingHorizontal: 7,
     paddingVertical: 2,
     borderRadius: 999,
-    backgroundColor: '#111827',
+    backgroundColor: PD.inset,
     borderWidth: 1,
-    borderColor: '#243041',
+    borderColor: PD.borderStrong,
     alignItems: 'center',
   },
   countText: {
-    color: '#94a3b8',
+    color: PD.textSecondary,
     fontSize: 10,
     fontWeight: '900',
     fontFamily: 'monospace',
@@ -257,12 +266,12 @@ const s = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   refreshText: {
-    color: '#94a3b8',
+    color: PD.textSecondary,
     fontSize: 14,
     fontWeight: '700',
   },
   hint: {
-    color: '#64748b',
+    color: PD.textMuted,
     fontSize: 10,
     fontWeight: '700',
     letterSpacing: 1.2,
@@ -271,20 +280,20 @@ const s = StyleSheet.create({
   },
   emptyBox: {
     padding: 16,
-    borderRadius: 12,
+    borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#1f2937',
-    backgroundColor: '#0a0f1c',
+    borderColor: PD.border,
+    backgroundColor: PD.inset,
     gap: 6,
     alignItems: 'center',
   },
   emptyTitle: {
-    color: '#e2e8f0',
+    color: PD.text,
     fontSize: 13,
     fontWeight: '800',
   },
   emptyHint: {
-    color: '#64748b',
+    color: PD.textMuted,
     fontSize: 11,
     lineHeight: 16,
     textAlign: 'center',
@@ -296,8 +305,8 @@ const s = StyleSheet.create({
     padding: 10,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#1f2937',
-    backgroundColor: '#020617',
+    borderColor: PD.border,
+    backgroundColor: PD.inset,
   },
   rowDot: {
     width: 8,
@@ -306,13 +315,13 @@ const s = StyleSheet.create({
     marginTop: 6,
   },
   rowTask: {
-    color: '#e2e8f0',
+    color: PD.text,
     fontSize: 12,
     fontWeight: '700',
     lineHeight: 17,
   },
   rowSummary: {
-    color: '#94a3b8',
+    color: PD.textSecondary,
     fontSize: 11,
     lineHeight: 15,
   },
@@ -340,7 +349,7 @@ const s = StyleSheet.create({
     fontFamily: 'monospace',
   },
   rowMeta: {
-    color: '#64748b',
+    color: PD.textMuted,
     fontSize: 9,
     fontFamily: 'monospace',
     letterSpacing: 0.4,
@@ -350,7 +359,7 @@ const s = StyleSheet.create({
     paddingVertical: 2,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#1e293b',
+    borderColor: PD.borderStrong,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   rowActionText: {

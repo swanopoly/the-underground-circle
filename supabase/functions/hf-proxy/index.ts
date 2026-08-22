@@ -31,6 +31,8 @@ type ErrorCode =
   | 'token_invalid'
   | 'token_rate_limited'
   | 'unauthenticated'
+  | 'forbidden'
+  | 'authority_unavailable'
   | 'key_missing'
   | 'tool_not_found'
   | 'model_not_found'
@@ -111,6 +113,29 @@ Deno.serve(async (req: Request) => {
     }
 
     const serviceClient = createClient(supabaseUrl, serviceKey);
+    const serviceCircleId = isServiceRole && typeof body.circleId === 'string'
+      ? body.circleId.trim()
+      : '';
+    if (isServiceRole) {
+      // An internal caller naming a user is not, by itself, authority to spend
+      // that user's personal Hugging Face key. Bind the delegation to a
+      // current exact Circle membership before key resolution or provider IO.
+      if (!serviceCircleId) {
+        return errResponse(400, 'bad_request', 'Service calls require an exact Circle.');
+      }
+      const { data: membership, error: membershipError } = await serviceClient
+        .from('circle_members')
+        .select('circle_id')
+        .eq('circle_id', serviceCircleId)
+        .eq('user_id', userId)
+        .maybeSingle();
+      if (membershipError) {
+        return errResponse(503, 'authority_unavailable', 'Circle access could not be verified.');
+      }
+      if (!membership) {
+        return errResponse(403, 'forbidden', 'The delegated user is not a current member of this Circle.');
+      }
+    }
     const hfKey = await resolveUserModelApiKey({
       supabase: serviceClient,
       userId,
@@ -122,19 +147,23 @@ Deno.serve(async (req: Request) => {
     }
     const hfToken = hfKey.apiKey;
 
-    // If toolId is provided, verify access via RLS
+    // If toolId is provided, verify exact access. User calls use their own RLS;
+    // trusted service calls are pinned to the delegated Circle above rather
+    // than forwarding the service key through an apparent anon client.
     if (toolId) {
-      const supabaseClient = createClient(
-        supabaseUrl,
-        Deno.env.get('SUPABASE_ANON_KEY') ?? '',
-        { global: { headers: { Authorization: req.headers.get('Authorization')! } } }
-      );
-
-      const { data: tool, error: toolError } = await supabaseClient
+      const toolClient = isServiceRole
+        ? serviceClient
+        : createClient(
+          supabaseUrl,
+          Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+          { global: { headers: { Authorization: req.headers.get('Authorization')! } } },
+        );
+      let toolQuery = toolClient
         .from('circle_hf_tools')
         .select('*')
-        .eq('id', toolId)
-        .single();
+        .eq('id', toolId);
+      if (isServiceRole) toolQuery = toolQuery.eq('circle_id', serviceCircleId);
+      const { data: tool, error: toolError } = await toolQuery.single();
 
       if (toolError || !tool) {
         return errResponse(403, 'tool_not_found',
@@ -438,7 +467,9 @@ Deno.serve(async (req: Request) => {
     });
 
   } catch (error: any) {
-    console.error('hf-proxy error:', error);
+    console.error('[hf-proxy] request failed', {
+      name: error instanceof Error ? error.name : typeof error,
+    });
     const message = error?.message || 'Internal error';
     // Pattern-match the per-task throws (`HF Chat Error: 401 — …`) into
     // structured codes so the client UI can show specific guidance.
@@ -452,8 +483,8 @@ Deno.serve(async (req: Request) => {
     }
     if (/\b404\b/.test(message)) {
       return errResponse(404, 'model_not_found',
-        `HuggingFace doesn't recognize that model. ${message}`);
+        'HuggingFace does not recognize that model.');
     }
-    return errResponse(500, 'internal', message);
+    return errResponse(500, 'internal', 'Hugging Face request failed.');
   }
 });

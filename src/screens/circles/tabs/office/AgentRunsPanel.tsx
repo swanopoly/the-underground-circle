@@ -425,7 +425,7 @@ export default function AgentRunsPanel({
       </View>
 
       {loadError ? (
-        <View accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ borderWidth: 1, borderColor: '#ef444455', backgroundColor: '#2a0b0b', borderRadius: 2, padding: 10, gap: 8 }}>
+        <View accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ borderWidth: 1, borderColor: '#ef444455', backgroundColor: '#2a0b0b', borderRadius: 6, padding: 10, gap: 8 }}>
           <Text style={{ color: '#fca5a5', fontSize: 12, fontFamily: MONO, lineHeight: 17 }}>{loadError}</Text>
           {verifiedRuns.length > 0 ? (
             <Text style={{ color: '#d1a2a2', fontSize: 11, fontFamily: MONO }}>Showing the last loaded run list.</Text>
@@ -436,7 +436,7 @@ export default function AgentRunsPanel({
             accessibilityState={{ disabled: loading, busy: loading }}
             disabled={loading}
             onPress={() => setReloadGeneration(value => value + 1)}
-            style={[{ alignSelf: 'flex-start', minHeight: 44, minWidth: 72, paddingHorizontal: 12, borderWidth: 1, borderColor: '#ef444466', borderRadius: 2, alignItems: 'center', justifyContent: 'center', opacity: loading ? 0.55 : 1 }, Platform.OS === 'web' && ({ cursor: loading ? 'default' : 'pointer' } as any)]}
+            style={[{ alignSelf: 'flex-start', minHeight: 44, minWidth: 72, paddingHorizontal: 12, borderWidth: 1, borderColor: '#ef444466', borderRadius: 6, alignItems: 'center', justifyContent: 'center', opacity: loading ? 0.55 : 1 }, Platform.OS === 'web' && ({ cursor: loading ? 'default' : 'pointer' } as any)]}
           >
             <Text style={{ color: '#fca5a5', fontSize: 11, fontWeight: '800', fontFamily: MONO }}>{loading ? 'RETRYING…' : 'RETRY'}</Text>
           </Pressable>
@@ -444,7 +444,7 @@ export default function AgentRunsPanel({
       ) : null}
 
       {verifiedSnapshotTruncated ? (
-        <View accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ borderWidth: 1, borderColor: '#f59e0b55', backgroundColor: '#2a1908', borderRadius: 2, padding: 10, gap: 6 }}>
+        <View accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ borderWidth: 1, borderColor: '#f59e0b55', backgroundColor: '#2a1908', borderRadius: 6, padding: 10, gap: 6 }}>
           <Text style={{ color: '#fcd34d', fontSize: 11, fontFamily: MONO, lineHeight: 16 }}>
             Run history is partial. The bounded scan reached {scanLimit.toLocaleString()} candidate rows before proving there are no older runs for this exact agent.
           </Text>
@@ -454,7 +454,7 @@ export default function AgentRunsPanel({
             accessibilityState={{ disabled: loading || scanLimit >= 5_000, busy: loading }}
             disabled={loading || scanLimit >= 5_000}
             onPress={() => setScanLimit(value => Math.min(value + 1_000, 5_000))}
-            style={[{ alignSelf: 'flex-start', minHeight: 44, minWidth: 72, paddingHorizontal: 12, borderWidth: 1, borderColor: '#f59e0b66', borderRadius: 2, alignItems: 'center', justifyContent: 'center', opacity: loading || scanLimit >= 5_000 ? 0.55 : 1 }, Platform.OS === 'web' && ({ cursor: loading || scanLimit >= 5_000 ? 'default' : 'pointer' } as any)]}
+            style={[{ alignSelf: 'flex-start', minHeight: 44, minWidth: 72, paddingHorizontal: 12, borderWidth: 1, borderColor: '#f59e0b66', borderRadius: 6, alignItems: 'center', justifyContent: 'center', opacity: loading || scanLimit >= 5_000 ? 0.55 : 1 }, Platform.OS === 'web' && ({ cursor: loading || scanLimit >= 5_000 ? 'default' : 'pointer' } as any)]}
           >
             <Text style={{ color: '#fcd34d', fontSize: 11, fontWeight: '800', fontFamily: MONO }}>
               {loading ? 'SCANNING…' : scanLimit >= 5_000 ? 'SCAN LIMIT REACHED' : 'SCAN 1,000 MORE'}
@@ -552,7 +552,7 @@ export default function AgentRunsPanel({
               const subjectSummary = getRunSubjectSummary(run, agentName);
 
               return (
-                <View key={run.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: isExpanded ? sc + '40' : '#1a1a28', borderRadius: 2, marginBottom: 8, overflow: 'hidden' }}>
+                <View key={run.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: isExpanded ? sc + '40' : '#1a1a28', borderRadius: 6, marginBottom: 8, overflow: 'hidden' }}>
                   <Pressable
                     accessibilityRole="button"
                     accessibilityLabel={`${isExpanded ? 'Collapse' : 'Expand'} run: ${String(run.title || 'Untitled run')}`}
@@ -570,7 +570,7 @@ export default function AgentRunsPanel({
                     style={[{ padding: 12, minHeight: 44 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                   >
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                      <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: sc }} />
+                      <View style={{ width: 8, height: 8, borderRadius: 6, backgroundColor: sc }} />
                       <Text style={{ color: '#f0f0f5', fontSize: 13, fontWeight: '600', fontFamily: MONO, flex: 1 }} numberOfLines={1}>{run.title || 'Untitled run'}</Text>
                       {verifiedStaleRunIds.has(run.id) ? (
                         <Text style={{ color: '#f59e0b', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>STALLED?</Text>
@@ -604,7 +604,7 @@ export default function AgentRunsPanel({
                   {isExpanded && (
                     <View style={{ paddingHorizontal: 8, paddingBottom: 8, borderTopWidth: 1, borderTopColor: '#1a1a28', paddingTop: 6 }}>
                       {(subjectSummary.subjectKey || subjectSummary.aliases.length > 0 || subjectSummary.dbId) ? (
-                        <View style={{ borderWidth: 1, borderColor: '#24243a', backgroundColor: '#0b0b14', borderRadius: 2, padding: 8, marginBottom: 8, gap: 5 }}>
+                        <View style={{ borderWidth: 1, borderColor: '#24243a', backgroundColor: '#0b0b14', borderRadius: 6, padding: 8, marginBottom: 8, gap: 5 }}>
                           <Text style={{ color: '#909098', fontSize: 10, fontWeight: '800', letterSpacing: 1, fontFamily: MONO }}>
                             {currentDetails?.selectedRun ? 'PARENT SUBJECT IDENTITY' : 'SUBJECT IDENTITY'}
                           </Text>
@@ -634,7 +634,7 @@ export default function AgentRunsPanel({
                         return (
                           <View
                             accessibilityLiveRegion="polite"
-                            style={{ borderWidth: 1, borderColor: '#6d28d955', backgroundColor: '#120b24', borderRadius: 2, padding: 10, marginBottom: 10, gap: 6 }}
+                            style={{ borderWidth: 1, borderColor: '#6d28d955', backgroundColor: '#120b24', borderRadius: 6, padding: 10, marginBottom: 10, gap: 6 }}
                           >
                             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                               <View style={{ width: 7, height: 7, borderRadius: 999, backgroundColor: selectedChildStatusColor }} />
@@ -661,7 +661,7 @@ export default function AgentRunsPanel({
                               accessibilityRole="button"
                               accessibilityLabel={`Back to parent run: ${String(run.title || 'Untitled run')}`}
                               onPress={() => { void loadRunDetails(run.id); }}
-                              style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 10, borderWidth: 1, borderColor: '#7c3aed66', borderRadius: 2, justifyContent: 'center' }, Platform.OS === 'web' && ({ cursor: 'pointer' } as any)]}
+                              style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 10, borderWidth: 1, borderColor: '#7c3aed66', borderRadius: 6, justifyContent: 'center' }, Platform.OS === 'web' && ({ cursor: 'pointer' } as any)]}
                             >
                               <Text style={{ color: '#c4b5fd', fontSize: 10, fontWeight: '800', fontFamily: MONO }}>BACK TO PARENT RUN</Text>
                             </Pressable>
@@ -674,7 +674,7 @@ export default function AgentRunsPanel({
                           <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>Loading run details…</Text>
                         </View>
                       ) : currentDetails.status === 'error' ? (
-                        <View accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ borderWidth: 1, borderColor: '#ef444455', backgroundColor: '#2a0b0b', borderRadius: 2, padding: 10, gap: 8 }}>
+                        <View accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ borderWidth: 1, borderColor: '#ef444455', backgroundColor: '#2a0b0b', borderRadius: 6, padding: 10, gap: 8 }}>
                           <Text style={{ color: '#fca5a5', fontSize: 12, fontFamily: MONO }}>{currentDetails.error}</Text>
                           <Pressable
                             accessibilityRole="button"
@@ -685,7 +685,7 @@ export default function AgentRunsPanel({
                                 selectedRun: currentDetails.selectedRun,
                               });
                             }}
-                            style={[{ alignSelf: 'flex-start', minHeight: 44, minWidth: 72, paddingHorizontal: 12, borderWidth: 1, borderColor: '#ef444466', borderRadius: 2, alignItems: 'center', justifyContent: 'center' }, Platform.OS === 'web' && ({ cursor: 'pointer' } as any)]}
+                            style={[{ alignSelf: 'flex-start', minHeight: 44, minWidth: 72, paddingHorizontal: 12, borderWidth: 1, borderColor: '#ef444466', borderRadius: 6, alignItems: 'center', justifyContent: 'center' }, Platform.OS === 'web' && ({ cursor: 'pointer' } as any)]}
                           >
                             <Text style={{ color: '#fca5a5', fontSize: 11, fontWeight: '800', fontFamily: MONO }}>RETRY DETAILS</Text>
                           </Pressable>
@@ -718,7 +718,7 @@ export default function AgentRunsPanel({
                                   borderWidth: 1,
                                   borderColor: '#312e81',
                                   backgroundColor: '#0a1022',
-                                  borderRadius: 2,
+                                  borderRadius: 6,
                                   padding: 8,
                                   minHeight: 44,
                                   gap: 5,
@@ -817,7 +817,7 @@ export default function AgentRunsPanel({
                   {
                     marginTop: 4,
                     minHeight: 44,
-                    borderRadius: 2,
+                    borderRadius: 6,
                     borderWidth: 1,
                     borderColor: accentColor + '40',
                     backgroundColor: accentColor + '10',

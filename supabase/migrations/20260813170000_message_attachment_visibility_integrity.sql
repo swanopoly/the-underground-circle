@@ -684,7 +684,9 @@ TO authenticated;
 GRANT EXECUTE ON FUNCTION public.message_attachment_storage_object_owned_v1(text, text)
 TO authenticated;
 
-ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;
+-- Hosted Supabase owns storage.objects through supabase_storage_admin and
+-- keeps RLS enabled. The postgres migration role may manage policies but must
+-- not ALTER the platform-owned table.
 
 DROP POLICY IF EXISTS chat_attachments_select_visible_v1 ON storage.objects;
 DROP POLICY IF EXISTS chat_attachments_select_guard_v1 ON storage.objects;

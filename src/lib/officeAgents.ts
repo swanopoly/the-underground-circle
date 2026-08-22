@@ -23,6 +23,9 @@ export interface OfficeAgent {
   costTotal: number;
   costWeek: number;
   tokensUsed: number;
+  /** Owner-private lifetime token ledger. `tokensUsed` remains the live
+   *  bridge/session meter so a reconnect cannot masquerade as all-time use. */
+  tokensTotal?: number;
   inputTokens: number;
   outputTokens: number;
   cachedTokens: number;
@@ -67,11 +70,37 @@ export interface DurableOfficeAgentCostLike {
   provider?: string | null;
   estimated_cost_today?: number | string | null;
   estimated_cost_total?: number | string | null;
+  token_usage_total?: number | string | null;
 }
 
 function finiteNonNegativeCost(value: unknown): number {
   const parsed = typeof value === 'number' ? value : Number.parseFloat(String(value ?? ''));
   return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+}
+
+/** Normalize a verified server spend value without turning missing or invalid
+ * telemetry into a convincing zero. A real zero remains distinguishable from
+ * an unavailable snapshot. */
+export function normalizeOfficeTrackedCost(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : null;
+}
+
+/** Compact USD formatting for tracked Office spend. Retains sub-cent values
+ * so low but real usage is never displayed as `$0.00`. */
+export function formatOfficeTrackedCost(value: number): string {
+  const normalized = normalizeOfficeTrackedCost(value);
+  if (normalized === null) return '—';
+  if (normalized === 0) return '$0.00';
+  if (normalized < 0.01) return `$${normalized.toFixed(4)}`;
+  if (normalized < 1) return `$${normalized.toFixed(3)}`;
+  return `$${normalized.toFixed(2)}`;
+}
+
+function finiteNonNegativeTokenCount(value: unknown): number {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isSafeInteger(parsed) ? Math.max(0, parsed) : 0;
 }
 
 function normalizedCostIdentity(value: unknown): string {
@@ -123,6 +152,10 @@ export function applyDurableOfficeAgentCost(
       costToday,
       sessionCostToday: sessionCost,
       costTotal: Math.max(costToday, finiteNonNegativeCost(agent.costTotal)),
+      tokensTotal: Math.max(
+        finiteNonNegativeTokenCount(agent.tokensUsed),
+        finiteNonNegativeTokenCount(agent.tokensTotal),
+      ),
     };
   }
 
@@ -132,6 +165,75 @@ export function applyDurableOfficeAgentCost(
     costToday,
     sessionCostToday: sessionCost,
     costTotal: Math.max(costToday, finiteNonNegativeCost(durable.estimated_cost_total)),
+    tokensTotal: Math.max(
+      finiteNonNegativeTokenCount(agent.tokensUsed),
+      finiteNonNegativeTokenCount(agent.tokensTotal),
+      finiteNonNegativeTokenCount(durable.token_usage_total),
+    ),
+  };
+}
+
+export interface OfficeAgentLifetimeUsageLike {
+  sessionKey: string;
+  lifetimeTokens: number;
+  lifetimeCost: number;
+  lifetimeMessages?: number;
+}
+
+export interface OfficeAgentLifetimeUsageSummary {
+  tokens: number;
+  messages: number;
+  cost: number;
+}
+
+/** Count each exact owner/session ledger row once for account-wide Profile and
+ * Analytics totals. Invalid local values contribute zero and every sum stays
+ * inside the client safe-integer boundary enforced by §51. */
+export function summarizeOfficeAgentLifetimeUsage(
+  rows: Iterable<OfficeAgentLifetimeUsageLike>,
+): OfficeAgentLifetimeUsageSummary {
+  let tokens = 0;
+  let messages = 0;
+  let cost = 0;
+  for (const row of rows) {
+    tokens = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      tokens + finiteNonNegativeTokenCount(row.lifetimeTokens),
+    );
+    messages = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      messages + finiteNonNegativeTokenCount(row.lifetimeMessages),
+    );
+    cost = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      cost + finiteNonNegativeCost(row.lifetimeCost),
+    );
+  }
+  return { tokens, messages, cost };
+}
+
+/**
+ * Project the owner-private lifetime ledger without overwriting live session
+ * counters. A bridge restart may reset `tokensUsed` and `sessionCostToday`,
+ * while these two all-time fields remain monotonic server truth.
+ */
+export function applyOfficeAgentLifetimeUsage(
+  agent: OfficeAgent,
+  usage: OfficeAgentLifetimeUsageLike | null | undefined,
+): OfficeAgent {
+  if (!usage || usage.sessionKey !== agent.sessionKey) return agent;
+  return {
+    ...agent,
+    tokensTotal: Math.max(
+      finiteNonNegativeTokenCount(agent.tokensUsed),
+      finiteNonNegativeTokenCount(agent.tokensTotal),
+      finiteNonNegativeTokenCount(usage.lifetimeTokens),
+    ),
+    costTotal: Math.max(
+      finiteNonNegativeCost(agent.costTotal),
+      finiteNonNegativeCost(agent.costToday),
+      finiteNonNegativeCost(usage.lifetimeCost),
+    ),
   };
 }
 

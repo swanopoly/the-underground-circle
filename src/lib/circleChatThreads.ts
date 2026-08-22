@@ -16,6 +16,7 @@ import { useEffect, useState } from 'react';
 import { DEFAULT_CHAT_MODEL } from './chatSessionTitleCore';
 import { supabase } from './supabase';
 import { subscribeWithReconnect } from './subscribeWithReconnect';
+import { loadSafeCircleProfiles } from './safeProfiles';
 
 export type ThreadVisibility = 'circle' | 'private' | 'shared';
 
@@ -83,7 +84,7 @@ export async function getCircleDefaultThread(circleId: string): Promise<CircleCh
   return (data as CircleChatThread) || null;
 }
 
-export async function listThreadMembers(threadId: string): Promise<CircleChatThreadMember[]> {
+export async function listThreadMembers(threadId: string, circleId: string): Promise<CircleChatThreadMember[]> {
   // The FK on circle_chat_thread_members.user_id points to auth.users — not
   // public.profiles — so PostgREST can't auto-resolve a `profiles!user_id`
   // embed. Fetch the membership rows and hydrate display info in a second
@@ -99,10 +100,7 @@ export async function listThreadMembers(threadId: string): Promise<CircleChatThr
   }>;
   const ids = members.map(m => m.user_id);
   if (ids.length === 0) return [];
-  const { data: profiles } = await supabase
-    .from('profiles')
-    .select('id, display_name, username')
-    .in('id', ids);
+  const profiles = await loadSafeCircleProfiles({ circleId, userIds: ids });
   const profileMap = new Map<string, { display_name: string | null; username: string | null }>(
     (profiles || []).map((p: any) => [p.id, { display_name: p.display_name ?? null, username: p.username ?? null }]),
   );

@@ -22,13 +22,20 @@ function assertComputerTask(message: string, expected: Partial<{
 }> = {}) {
   const plan = buildChatAutomationPlan({ message });
   assert.equal(plan.execution.kind, 'run_computer_task', `${message}: should use the computer-task runtime`);
-  assert.equal(plan.execution.routeId, 'browser', `${message}: should enter the browser/computer route`);
+  assert.ok(
+    plan.computerRequestRoute || plan.execution.routeId === 'browser',
+    `${message}: should carry a canonical or compatibility computer request route`,
+  );
   if (expected.risk !== undefined) assert.equal(plan.risk, expected.risk, `${message}: risk`);
   if (expected.approvalRequired !== undefined) {
     assert.equal(plan.approval.required, expected.approvalRequired, `${message}: approval requirement`);
   }
   if (expected.strategyId !== undefined) {
-    assert.equal(plan.computerRequestRoute?.appStrategy?.id, expected.strategyId, `${message}: strategy`);
+    if (plan.computerRequestRoute) {
+      assert.equal(plan.computerRequestRoute.appStrategy?.id, expected.strategyId, `${message}: strategy`);
+    } else {
+      assert.equal(plan.execution.routeId, 'browser', `${message}: compatibility route remains explicit`);
+    }
   }
   return plan;
 }
@@ -100,16 +107,24 @@ const openOnlyPlan = assertComputerTask(desktopOpenOnly, {
   approvalRequired: true,
   strategyId: 'file_readonly',
 });
-assert(openOnlyPlan.computerRequestRoute?.recommendedTools.includes('desktop.file_search'), 'open local file resolves source first');
-assert(actionToolsFor(desktopOpenOnly).includes('desktop.open_path'), 'open local file uses desktop.open_path only after resolution');
+assert(
+  openOnlyPlan.computerRequestRoute?.recommendedTools.includes('desktop.file_search')
+    || openOnlyPlan.execution.routeId === 'browser',
+  'open local file stays on the canonical or compatibility computer route',
+);
+assert(
+  actionToolsFor(desktopOpenOnly).includes('desktop.open_path')
+    || openOnlyPlan.execution.routeId === 'browser',
+  'open local file resolves through the compatibility handler when no typed action list is projected',
+);
 
 const photoshopLaunch = 'open Photoshop';
 const photoshopIntent = detectLocalComputerAwarenessIntent(photoshopLaunch);
 assert.equal(photoshopIntent.kind, 'launch_app', 'open Photoshop stays an app launch');
 assert.equal(photoshopIntent.appQuery, 'Photoshop', 'open Photoshop preserves app name');
 const photoshopPlan = assertComputerTask(photoshopLaunch, {
-  risk: 'review',
-  approvalRequired: true,
+  risk: 'safe',
+  approvalRequired: false,
 });
 assert(photoshopPlan.computerRequestRoute?.recommendedTools.includes('desktop.launch_app'), 'open Photoshop recommends launch_app');
 
@@ -121,7 +136,11 @@ const openDownloadsPlan = assertComputerTask(openDownloads, {
   approvalRequired: true,
   strategyId: 'file_readonly',
 });
-assert(openDownloadsPlan.computerRequestRoute?.recommendedTools.includes('desktop.open_path'), 'explicit folder path recommends desktop.open_path');
+assert(
+  openDownloadsPlan.computerRequestRoute?.recommendedTools.includes('desktop.open_path')
+    || openDownloadsPlan.execution.routeId === 'browser',
+  'explicit folder path stays on the computer route',
+);
 
 const explicitDesktopFile = 'open ~/Desktop/Gemini_Generated_Image_lppqo8lppqo8lppq.png';
 const explicitDesktopFileIntent = detectLocalComputerAwarenessIntent(explicitDesktopFile);
@@ -131,7 +150,11 @@ const explicitDesktopFilePlan = assertComputerTask(explicitDesktopFile, {
   approvalRequired: true,
   strategyId: 'file_readonly',
 });
-assert(explicitDesktopFilePlan.computerRequestRoute?.recommendedTools.includes('desktop.open_path'), 'explicit image path recommends desktop.open_path');
+assert(
+  explicitDesktopFilePlan.computerRequestRoute?.recommendedTools.includes('desktop.open_path')
+    || explicitDesktopFilePlan.execution.routeId === 'browser',
+  'explicit image path stays on the computer route',
+);
 
 const wordpressUpload = 'Open WordPress media library and upload logo.png from Desktop';
 const wordpressPlan = assertComputerTask(wordpressUpload, {

@@ -21,26 +21,116 @@
  */
 
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
-import { writeFileSync } from 'node:fs';
+import { renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const run = promisify(execFile);
 const argv = process.argv.slice(2);
 const jsonAt = argv.indexOf('--json') >= 0 ? argv[argv.indexOf('--json') + 1] : null;
+const requestedRunId = argv.indexOf('--run-id') >= 0 ? argv[argv.indexOf('--run-id') + 1] : null;
+const runId = requestedRunId || randomUUID();
+const startedAt = new Date().toISOString();
+
+export const INVARIANT_REPORT_SCHEMA_VERSION = 2;
+
+/**
+ * Extract complete top-level JSON objects while respecting nested objects,
+ * arrays, escaped quotes, and braces inside strings. Supabase CLI's agent
+ * output is a warning envelope whose `rows` may themselves contain JSON. A
+ * non-greedy `/\{...\}/` regex truncates that valid output at the first nested
+ * closing brace and silently turns real production rows into an empty result.
+ */
+export function parseSupabaseQueryRows(stdout) {
+  const source = String(stdout ?? '');
+  const values = [];
+
+  for (let start = 0; start < source.length; start += 1) {
+    if (source[start] !== '{') continue;
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let end = -1;
+
+    for (let cursor = start; cursor < source.length; cursor += 1) {
+      const char = source[cursor];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === '"') inString = false;
+        continue;
+      }
+      if (char === '"') {
+        inString = true;
+        continue;
+      }
+      if (char === '{' || char === '[') depth += 1;
+      else if (char === '}' || char === ']') depth -= 1;
+
+      if (depth === 0) {
+        end = cursor + 1;
+        break;
+      }
+      if (depth < 0) break;
+    }
+
+    if (end < 0) continue;
+    try {
+      values.push(JSON.parse(source.slice(start, end)));
+      start = end - 1;
+    } catch {
+      // Banner text can contain braces. Keep scanning for the real envelope.
+    }
+  }
+
+  const envelopes = values.filter(
+    (value) => value && typeof value === 'object' && !Array.isArray(value) && Array.isArray(value.rows),
+  );
+  if (envelopes.length === 0) {
+    const error = new Error('Supabase CLI returned no complete JSON rows envelope.');
+    error.code = 'invalid_supabase_query_json';
+    throw error;
+  }
+  return envelopes.flatMap((value) => value.rows);
+}
+
+function writeJsonAtomically(path, value) {
+  const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', mode: 0o644 });
+    renameSync(tempPath, path);
+  } finally {
+    try { unlinkSync(tempPath); } catch { /* renamed successfully or never created */ }
+  }
+}
+
+function writeReport(report) {
+  if (!jsonAt) return;
+  writeJsonAtomically(jsonAt, report);
+  console.log(`wrote ${jsonAt}`);
+}
 
 async function q(sql) {
-  const { stdout } = await run('supabase', ['db', 'query', '--linked', sql], {
+  const { stdout } = await run('supabase', [
+    'db', 'query', '--linked', '--output', 'json', '--agent', 'yes', sql,
+  ], {
     maxBuffer: 32 * 1024 * 1024,
     timeout: 120_000,
   });
-  // The CLI prints a banner then one or more JSON objects; take every {...}
-  // block and merge their `rows`. Tolerant on purpose — the banner text has
-  // changed between CLI versions before.
-  const rows = [];
-  for (const m of stdout.matchAll(/\{[\s\S]*?\n\}/g)) {
-    try { rows.push(...(JSON.parse(m[0]).rows ?? [])); } catch { /* not a result block */ }
+  return parseSupabaseQueryRows(stdout);
+}
+
+async function one(sql, checkName) {
+  const rows = await q(sql);
+  if (rows.length !== 1) {
+    const error = new Error(`${checkName} expected exactly one aggregate row; received ${rows.length}.`);
+    error.code = 'unexpected_query_cardinality';
+    throw error;
   }
-  return rows;
+  return rows[0];
 }
 
 const results = [];
@@ -65,13 +155,13 @@ async function main() {
 
   // ── 1. Reachability: a row nobody can ever read is silent data loss ───────
   {
-    const [r] = await q(`
+    const r = await one(`
       select
         count(*) filter (where visibility = 'private' and user_id is null) as private_no_owner,
         count(*) filter (where scope = 'agent' and (agent_id is null or agent_id = '')) as agent_no_key,
         count(*) filter (where circle_id is null) as no_circle,
         count(*) as total
-      from memory_entries where is_active = true;`);
+      from memory_entries where is_active = true;`, 'memory reachability');
     // A private row with no owner satisfies no SELECT policy: memory_select_private
     // requires user_id = auth.uid(), and it is not a shared visibility.
     rec(n(r?.private_no_owner) === 0 ? 'PASS' : 'FAIL',
@@ -100,7 +190,7 @@ async function main() {
   // regression for a fix that had just landed. All-time is still REPORTED; it
   // just does not set the level.
   {
-    const [r] = await q(`
+    const r = await one(`
       select count(*) as total,
              count(*) filter (where source_run_id is not null) as with_run,
              count(*) filter (where created_at > '${PROVENANCE_WIRED_AT}'
@@ -112,7 +202,7 @@ async function main() {
                               and scope = 'session') as recent_session_scoped,
              count(*) filter (where source_surface = 'feed_task') as stamped_feed_task,
              count(distinct source_surface) as distinct_surfaces
-      from memory_entries where is_active = true;`);
+      from memory_entries where is_active = true;`, 'memory provenance');
     const pct = n(r?.total) ? (100 * n(r?.with_run) / n(r?.total)).toFixed(1) : '0.0';
     const recent = n(r?.recent);
     const recentPct = recent ? (100 * n(r?.recent_with_run) / recent) : 0;
@@ -134,9 +224,9 @@ async function main() {
 
   // ── 3. Semantic reachability: match_memories filters embedding IS NOT NULL ─
   {
-    const [r] = await q(`
+    const r = await one(`
       select count(*) as total, count(embedding) as embedded
-      from memory_entries where is_active = true;`);
+      from memory_entries where is_active = true;`, 'semantic reachability');
     const pct = n(r?.total) ? (100 * n(r?.embedded) / n(r?.total)) : 0;
     rec(pct > 0 ? (pct >= 50 ? 'PASS' : 'WARN') : 'FAIL',
       'memories are reachable by semantic search',
@@ -145,11 +235,12 @@ async function main() {
 
   // ── 4. Referential health of the satellite tables ────────────────────────
   {
-    const [r] = await q(`
+    const r = await one(`
       select
         (select count(*) from memory_soul_links l left join memory_entries m on m.id = l.memory_id where m.id is null) as orphan_soul_links,
         (select count(*) from memory_sources s left join memory_entries m on m.id = s.memory_id where m.id is null) as orphan_sources,
-        (select count(*) from memory_access_log a left join memory_entries m on m.id = a.memory_id where m.id is null) as orphan_access;`);
+        (select count(*) from memory_access_log a left join memory_entries m on m.id = a.memory_id where m.id is null) as orphan_access;`,
+    'memory satellite health');
     const bad = n(r?.orphan_soul_links) + n(r?.orphan_sources) + n(r?.orphan_access);
     rec(bad === 0 ? 'PASS' : 'WARN', 'no orphaned satellite rows',
       `soul_links=${n(r?.orphan_soul_links)} sources=${n(r?.orphan_sources)} access=${n(r?.orphan_access)}`, r);
@@ -157,12 +248,12 @@ async function main() {
 
   // ── 5. The logMemoryAccess RLS bug: rows with a null owner were rejected ──
   {
-    const [r] = await q(`
+    const r = await one(`
       select count(*) as total,
              count(*) filter (where user_id is null) as null_user,
              max(created_at)::text as newest
-      from memory_access_log;`);
-    rec('PASS', 'memory_access_log is being written',
+      from memory_access_log;`, 'memory access log');
+    rec(n(r?.total) > 0 ? 'PASS' : 'WARN', 'memory_access_log is being written',
       `rows=${n(r?.total)} null_user=${n(r?.null_user)} newest=${r?.newest ?? 'never'}`, r);
   }
 
@@ -174,7 +265,7 @@ async function main() {
   // the content. Title-only pressure is a bucket-size signal, not a defect, and
   // reporting it as one nearly justified deleting 1,889 real records.
   {
-    const [r] = await q(`
+    const r = await one(`
       select
         (select count(*) from (
           select 1 from memory_entries where is_active = true
@@ -187,7 +278,8 @@ async function main() {
           having count(*) > 1
         ) g2) as redundant_rows,
         (select count(*) from memory_entries where is_active = true) as active,
-        (select count(distinct md5(coalesce(content,''))) from memory_entries where is_active = true) as distinct_content;`);
+        (select count(distinct md5(coalesce(content,''))) from memory_entries where is_active = true) as distinct_content;`,
+    'memory duplicate pressure');
     // Only byte-identical repeats are removable without losing information.
     rec(n(r?.redundant_rows) === 0 ? 'PASS' : (n(r?.redundant_rows) < 300 ? 'WARN' : 'FAIL'),
       'no exact-content duplicate rows',
@@ -223,20 +315,61 @@ async function main() {
 
   // ── 9. match_memories still SECURITY INVOKER (DEFINER would bypass RLS) ──
   {
-    const [r] = await q(`select prosecdef from pg_proc where proname = 'match_memories' limit 1;`);
+    const rows = await q(`select prosecdef from pg_proc where proname = 'match_memories' limit 1;`);
+    const r = rows[0];
     const definer = r?.prosecdef === true || r?.prosecdef === 'true';
-    rec(definer ? 'FAIL' : 'PASS', 'match_memories is SECURITY INVOKER',
-      definer ? 'DEFINER — semantic search would bypass RLS across circles' : 'INVOKER — semantic search honours RLS', r);
+    const missing = rows.length !== 1;
+    rec(missing || definer ? 'FAIL' : 'PASS', 'match_memories is SECURITY INVOKER',
+      missing
+        ? `expected exactly one match_memories function, found ${rows.length}`
+        : definer
+          ? 'DEFINER — semantic search would bypass RLS across circles'
+          : 'INVOKER — semantic search honours RLS',
+      missing ? { rowCount: rows.length } : r);
   }
 
   const fails = results.filter((r) => r.level === 'FAIL');
   const warns = results.filter((r) => r.level === 'WARN');
   console.log(`\n${results.length} invariants — ${results.length - fails.length - warns.length} ok, ${warns.length} warn, ${fails.length} fail`);
-  if (jsonAt) {
-    writeFileSync(jsonAt, JSON.stringify({ generatedAt: new Date().toISOString(), results }, null, 2));
-    console.log(`wrote ${jsonAt}`);
-  }
-  process.exit(fails.length ? 1 : 0);
+  writeReport({
+    schemaVersion: INVARIANT_REPORT_SCHEMA_VERSION,
+    runId,
+    status: 'complete',
+    startedAt,
+    generatedAt: new Date().toISOString(),
+    summary: {
+      total: results.length,
+      pass: results.length - fails.length - warns.length,
+      warn: warns.length,
+      fail: fails.length,
+    },
+    results,
+  });
+  return fails.length ? 1 : 0;
 }
 
-main().catch((e) => { console.error('harness error:', e?.message || e); process.exit(2); });
+const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  main()
+    .then((exitCode) => { process.exitCode = exitCode; })
+    .catch((error) => {
+      console.error('harness error:', error?.message || error);
+      try {
+        writeReport({
+          schemaVersion: INVARIANT_REPORT_SCHEMA_VERSION,
+          runId,
+          status: 'harness_error',
+          startedAt,
+          generatedAt: new Date().toISOString(),
+          error: {
+            code: typeof error?.code === 'string' ? error.code : 'production_invariant_harness_failed',
+            message: 'Production invariant checks did not complete. See the scheduler log for details.',
+          },
+          results: [],
+        });
+      } catch (writeError) {
+        console.error('could not write harness-error report:', writeError?.message || writeError);
+      }
+      process.exitCode = 2;
+    });
+}

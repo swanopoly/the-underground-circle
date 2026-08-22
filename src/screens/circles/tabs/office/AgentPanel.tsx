@@ -155,7 +155,12 @@ function LazySectionState({
         style={{ paddingHorizontal: 12, paddingVertical: 24, alignItems: 'center', gap: 10 }}
         accessibilityLiveRegion="polite"
       >
-        <ActivityIndicator size="small" color={accentColor} />
+        <ActivityIndicator
+          accessibilityRole="progressbar"
+          accessibilityLabel={`Loading ${label}`}
+          size="small"
+          color={accentColor}
+        />
         <Text style={{ color: '#8b949e', fontSize: 12 }}>Loading {label}…</Text>
       </View>
     );
@@ -1073,7 +1078,7 @@ export default function AgentPanel({
       )}
       {/* ── MEMORY TAB — view and edit agent memories ── */}
       {panelTab === 'memory' && circleId && (
-        <View nativeID="section-agent-memory" style={{ paddingHorizontal: 8, paddingBottom: 12 }}>
+        <View nativeID="section-agent-memory" style={{ paddingBottom: 12 }}>
           {memoryPanelModule?.default ? (
             <memoryPanelModule.default
               key={panelScopeKey}
@@ -1100,7 +1105,7 @@ export default function AgentPanel({
 
       {/* ── RUNS TAB — recent agent runs and their status ── */}
       {panelTab === 'runs' && circleId && (
-        <View nativeID="section-agent-runs" style={{ paddingHorizontal: 8, paddingBottom: 12 }}>
+        <View nativeID="section-agent-runs" style={{ paddingBottom: 12 }}>
           {runsPanelModule?.default ? (
             <runsPanelModule.default
               key={panelScopeKey}
@@ -1125,7 +1130,7 @@ export default function AgentPanel({
 
       {/* ── CRON JOBS TAB ── */}
       {panelTab === 'cron' && circleId && runtimeConnectionId && runtimeConnectionSnapshot && isRuntimeConnectionSnapshotCurrent && (
-        <View nativeID="section-agent-cron" style={{ paddingHorizontal: 8, paddingBottom: 12 }}>
+        <View nativeID="section-agent-cron" style={{ paddingBottom: 12 }}>
           {gatewayPanelsModule?.CronJobsPanel ? (
             <gatewayPanelsModule.CronJobsPanel
               agent={agent}

@@ -26,6 +26,8 @@
 import { supabase } from './supabase';
 import { safeGetUserId } from './authSession';
 
+const PERSISTED_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 // automationService + agentMemory are lazy-imported inside each handler
 // so the core `chatCheckpoints` module can be smoke-tested in Node
 // without react-native getting pulled into the dependency graph.
@@ -66,6 +68,7 @@ export type CheckpointToolKind =
 export interface ChatCheckpointRow {
   id: string;
   circle_id: string;
+  chat_thread_id: string | null;
   session_key: string | null;
   plan_id: string | null;
   tool_kind: CheckpointToolKind;
@@ -85,6 +88,8 @@ export interface ChatCheckpointRow {
 
 export interface WithCheckpointOptions<TResult, TBefore, TAfter> {
   circleId: string;
+  /** Canonical Chat thread authority. Omit only for genuinely Circle-wide work. */
+  threadId?: string | null;
   toolKind: CheckpointToolKind;
   /** FK-ish target identifiers — help the UI group by target row. */
   targetKind?: string;
@@ -116,6 +121,10 @@ export interface WithCheckpointResult<TResult> {
 export async function withCheckpoint<TResult, TBefore = unknown, TAfter = unknown>(
   opts: WithCheckpointOptions<TResult, TBefore, TAfter>,
 ): Promise<WithCheckpointResult<TResult>> {
+  const chatThreadId = opts.threadId == null ? null : String(opts.threadId).trim();
+  if (chatThreadId && !PERSISTED_UUID_RE.test(chatThreadId)) {
+    throw new Error('A persisted Chat thread is required for a thread-scoped checkpoint.');
+  }
   const before = await opts.readBefore().catch(() => null);
 
   let result: TResult;
@@ -140,6 +149,7 @@ export async function withCheckpoint<TResult, TBefore = unknown, TAfter = unknow
       .from('chat_checkpoints')
       .insert({
         circle_id: opts.circleId,
+        chat_thread_id: chatThreadId,
         session_key: opts.sessionKey ?? null,
         plan_id: opts.planId ?? null,
         tool_kind: opts.toolKind,
@@ -241,7 +251,7 @@ export async function restoreCheckpoint(id: string): Promise<RestoreOutcome> {
 
 export async function listCheckpoints(
   circleId: string,
-  opts?: { planId?: string; limit?: number },
+  opts?: { planId?: string; threadId?: string | null; limit?: number },
 ): Promise<ChatCheckpointRow[]> {
   const limit = Math.min(opts?.limit ?? 50, 200);
   let query = supabase
@@ -251,6 +261,11 @@ export async function listCheckpoints(
     .order('created_at', { ascending: false })
     .limit(limit);
   if (opts?.planId) query = query.eq('plan_id', opts.planId);
+  if (opts?.threadId != null) {
+    const threadId = String(opts.threadId).trim();
+    if (!PERSISTED_UUID_RE.test(threadId)) return [];
+    query = query.eq('chat_thread_id', threadId);
+  }
   const { data, error } = await query;
   if (error) return [];
   return (data || []) as ChatCheckpointRow[];

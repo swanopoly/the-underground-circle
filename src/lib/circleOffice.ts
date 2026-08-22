@@ -145,22 +145,24 @@ function normalizeResourceId(value: string): string | null {
 async function resolveAuthority(
   capturedScope?: CircleOfficeAuthScope,
 ): Promise<ResolvedCircleOfficeAuthority | null> {
+  if (capturedScope !== undefined) {
+    // Captured dashboard reads must not fall back to the shared browser auth
+    // client: that can wait on the Auth Web Lock before the request is sent.
+    // The exact resolver uses the bounded explicit-token verifier instead.
+    return resolveExactAuthority(capturedScope);
+  }
   let authority: ResolvedCircleOfficeAuthority | null;
 
-  if (capturedScope !== undefined) {
-    authority = normalizeAuthScope(capturedScope);
-  } else {
-    const { data, error } = await supabase.auth.getSession();
-    if (error) return null;
-    authority = normalizeAuthScope(data.session ? {
-      userId: data.session.user.id,
-      accessToken: data.session.access_token,
-    } : undefined);
-  }
+  const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+  if (sessionError) return null;
+  authority = normalizeAuthScope(sessionData.session ? {
+    userId: sessionData.session.user.id,
+    accessToken: sessionData.session.access_token,
+  } : undefined);
 
   if (!authority) return null;
-  const { data, error } = await supabase.auth.getUser(authority.accessToken);
-  if (error || !data.user || data.user.id !== authority.userId) return null;
+  const { data: userData, error: userError } = await supabase.auth.getUser(authority.accessToken);
+  if (userError || !userData.user || userData.user.id !== authority.userId) return null;
   return authority;
 }
 

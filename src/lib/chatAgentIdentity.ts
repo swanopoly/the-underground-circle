@@ -1,6 +1,11 @@
 import type { ImageSourcePropType } from 'react-native';
 import { storage } from './storage';
 import type { SwanBotStructuredArtifact } from './swanbot';
+import {
+  chatPersonalCircleStorageKey,
+  chatPersonalThreadStorageKey,
+  type ChatPersonalStorageScope,
+} from './chatSessionStatePersistence';
 export {
   BOT_META_MARKER,
   formatPersistedChatBotMessage,
@@ -23,8 +28,16 @@ export const CHAT_THREAD_BUILD_ARTIFACT_STORAGE_KEY = 'uc_chat_thread_build_arti
 export const MAIN_CHAT_AGENT_NAME = 'OpenSwan';
 export const MAIN_CHAT_AGENT_ICON = require('../../assets/swanai.png');
 
-function buildThreadArtifactKey(threadId: string): string {
+function legacyThreadArtifactKey(threadId: string): string {
   return `${CHAT_THREAD_BUILD_ARTIFACT_STORAGE_KEY}_${threadId}`;
+}
+
+export type ChatThreadArtifactStorageScope = ChatPersonalStorageScope & {
+  threadId: string | null | undefined;
+};
+
+function buildThreadArtifactKey(scope: ChatThreadArtifactStorageScope): string | null {
+  return chatPersonalThreadStorageKey('builder_artifact', scope, scope.threadId);
 }
 
 function normalizeChatAgentName(value: string | null | undefined): string {
@@ -33,37 +46,56 @@ function normalizeChatAgentName(value: string | null | undefined): string {
   return trimmed;
 }
 
-export async function loadChatAgentName(circleId: string): Promise<string> {
-  const saved = await storage.getItem(`${CHAT_AGENT_STORAGE_KEY}_${circleId}`);
+export async function loadChatAgentName(scope: ChatPersonalStorageScope): Promise<string> {
+  const key = chatPersonalCircleStorageKey('agent_name', scope);
+  if (!key || !scope.circleId) return MAIN_CHAT_AGENT_NAME;
+  await storage.removeItem(`${CHAT_AGENT_STORAGE_KEY}_${scope.circleId}`).catch(() => {});
+  const saved = await storage.getItem(key);
   return normalizeChatAgentName(saved);
 }
 
-export async function saveChatAgentName(circleId: string, name: string): Promise<string> {
+export async function saveChatAgentName(scope: ChatPersonalStorageScope, name: string): Promise<string> {
   const normalized = normalizeChatAgentName(name);
-  await storage.setItem(`${CHAT_AGENT_STORAGE_KEY}_${circleId}`, normalized);
+  const key = chatPersonalCircleStorageKey('agent_name', scope);
+  if (!key) return normalized;
+  if (scope.circleId) await storage.removeItem(`${CHAT_AGENT_STORAGE_KEY}_${scope.circleId}`).catch(() => {});
+  await storage.setItem(key, normalized);
   return normalized;
 }
 
-export async function loadChatAgentAvatar(circleId: string): Promise<string | null> {
-  return storage.getItem(`${CHAT_AGENT_AVATAR_STORAGE_KEY}_${circleId}`);
+export async function loadChatAgentAvatar(scope: ChatPersonalStorageScope): Promise<string | null> {
+  const key = chatPersonalCircleStorageKey('agent_avatar', scope);
+  if (!key || !scope.circleId) return null;
+  await storage.removeItem(`${CHAT_AGENT_AVATAR_STORAGE_KEY}_${scope.circleId}`).catch(() => {});
+  return storage.getItem(key);
 }
 
-export async function saveChatAgentAvatar(circleId: string, avatarUri: string): Promise<void> {
-  await storage.setItem(`${CHAT_AGENT_AVATAR_STORAGE_KEY}_${circleId}`, avatarUri);
+export async function saveChatAgentAvatar(scope: ChatPersonalStorageScope, avatarUri: string): Promise<void> {
+  const key = chatPersonalCircleStorageKey('agent_avatar', scope);
+  if (!key) return;
+  if (scope.circleId) await storage.removeItem(`${CHAT_AGENT_AVATAR_STORAGE_KEY}_${scope.circleId}`).catch(() => {});
+  await storage.setItem(key, avatarUri);
 }
 
-export async function clearChatAgentAvatar(circleId: string): Promise<void> {
-  await storage.removeItem(`${CHAT_AGENT_AVATAR_STORAGE_KEY}_${circleId}`);
+export async function clearChatAgentAvatar(scope: ChatPersonalStorageScope): Promise<void> {
+  const key = chatPersonalCircleStorageKey('agent_avatar', scope);
+  if (!key) return;
+  await storage.removeItem(key);
+  if (scope.circleId) {
+    await storage.removeItem(`${CHAT_AGENT_AVATAR_STORAGE_KEY}_${scope.circleId}`).catch(() => {});
+  }
 }
 
 export function getChatAgentAvatarSource(agentAvatarUri: string | null): ImageSourcePropType {
   return agentAvatarUri ? { uri: agentAvatarUri } : MAIN_CHAT_AGENT_ICON;
 }
 
-export async function loadLastThreadBuildArtifact(threadId: string | null | undefined): Promise<SwanBotStructuredArtifact | null> {
-  if (!threadId) return null;
+export async function loadLastThreadBuildArtifact(scope: ChatThreadArtifactStorageScope): Promise<SwanBotStructuredArtifact | null> {
+  const key = buildThreadArtifactKey(scope);
+  if (!key || !scope.threadId) return null;
   try {
-    const raw = await storage.getItem(buildThreadArtifactKey(threadId));
+    await storage.removeItem(legacyThreadArtifactKey(scope.threadId));
+    const raw = await storage.getItem(key);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as SwanBotStructuredArtifact;
     if (!parsed || typeof parsed !== 'object') return null;
@@ -75,15 +107,17 @@ export async function loadLastThreadBuildArtifact(threadId: string | null | unde
 }
 
 export async function saveLastThreadBuildArtifact(
-  threadId: string | null | undefined,
+  scope: ChatThreadArtifactStorageScope,
   artifact: SwanBotStructuredArtifact | null | undefined,
 ): Promise<void> {
-  if (!threadId) return;
+  const key = buildThreadArtifactKey(scope);
+  if (!key) return;
+  if (scope.threadId) await storage.removeItem(legacyThreadArtifactKey(scope.threadId)).catch(() => {});
   if (!artifact || (artifact.kind !== 'webpage' && artifact.kind !== 'code')) {
-    await storage.removeItem(buildThreadArtifactKey(threadId));
+    await storage.removeItem(key);
     return;
   }
   try {
-    await storage.setItem(buildThreadArtifactKey(threadId), JSON.stringify(artifact));
+    await storage.setItem(key, JSON.stringify(artifact));
   } catch {}
 }

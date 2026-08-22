@@ -170,6 +170,125 @@ Deno.test("user_required resolves only the explicit or authenticated user's cred
   }
 });
 
+Deno.test("user_required preserves canonical-first legacy provider-key compatibility", async () => {
+  const canonicalCalls: string[] = [];
+  const canonical = await resolveUserModelApiKey({
+    supabase: rpcClient((_name, args) => {
+      const provider = String(args.p_provider || "");
+      canonicalCalls.push(provider);
+      return provider === "huggingface"
+        ? {
+          data: [{ api_key: "canonical-hf-key", endpoint: null }],
+          error: null,
+        }
+        : { data: [{ api_key: "legacy-hf-key", endpoint: null }], error: null };
+    }),
+    userId: "authenticated-user",
+    provider: "huggingface",
+    label: null,
+    credentialPolicy: "user_required",
+  });
+  check(
+    canonical?.apiKey === "canonical-hf-key",
+    "the canonical Hugging Face row wins",
+  );
+  check(
+    JSON.stringify(canonicalCalls) === JSON.stringify(["huggingface"]),
+    "a canonical hit does not query the legacy Hugging Face alias",
+  );
+
+  for (
+    const testCase of [
+      {
+        canonical: "huggingface",
+        legacy: "hugging_face",
+        key: "legacy-hf-key",
+      },
+      { canonical: "zai", legacy: "z_ai", key: "legacy-zai-key" },
+    ]
+  ) {
+    const calls: string[] = [];
+    const resolved = await resolveUserModelApiKey({
+      supabase: rpcClient((_name, args) => {
+        const provider = String(args.p_provider || "");
+        calls.push(provider);
+        return provider === testCase.legacy
+          ? { data: [{ api_key: testCase.key, endpoint: null }], error: null }
+          : { data: null, error: null };
+      }),
+      userId: "authenticated-user",
+      provider: testCase.canonical,
+      label: null,
+      credentialPolicy: "user_required",
+    });
+    check(
+      resolved?.source === "user" && resolved.apiKey === testCase.key,
+      `${testCase.canonical} uses its legacy row after a clean canonical miss`,
+    );
+    check(
+      JSON.stringify(calls) ===
+        JSON.stringify([testCase.canonical, testCase.legacy]),
+      `${testCase.canonical} lookup order is canonical then legacy`,
+    );
+  }
+
+  const missingCalls: string[] = [];
+  const missing = await resolveUserModelApiKey({
+    supabase: rpcClient((_name, args) => {
+      missingCalls.push(String(args.p_provider || ""));
+      return { data: null, error: null };
+    }),
+    userId: "authenticated-user",
+    provider: "huggingface",
+    label: null,
+    envVarName: "HF_TOKEN",
+    credentialPolicy: "user_required",
+  });
+  check(
+    missing === null,
+    "missing canonical and legacy rows do not use a platform key",
+  );
+  check(
+    JSON.stringify(missingCalls) ===
+      JSON.stringify(["huggingface", "hugging_face"]),
+    "a clean double miss performs only the two stored-key lookups",
+  );
+
+  for (const failProvider of ["huggingface", "hugging_face"]) {
+    const calls: string[] = [];
+    let failure: unknown = null;
+    try {
+      await resolveUserModelApiKey({
+        supabase: rpcClient((_name, args) => {
+          const provider = String(args.p_provider || "");
+          calls.push(provider);
+          return provider === failProvider
+            ? { data: null, error: { message: "ciphertext failure" } }
+            : { data: null, error: null };
+        }),
+        userId: "authenticated-user",
+        provider: "huggingface",
+        label: null,
+        envVarName: "HF_TOKEN",
+        credentialPolicy: "user_required",
+      });
+    } catch (error) {
+      failure = error;
+    }
+    const expectedCalls = failProvider === "huggingface"
+      ? ["huggingface"]
+      : ["huggingface", "hugging_face"];
+    check(
+      failure instanceof StoredApiKeyLookupError,
+      `${failProvider} lookup error remains terminal`,
+    );
+    check(
+      JSON.stringify(calls) === JSON.stringify(expectedCalls),
+      `${failProvider} lookup error stops before any later credential source`,
+    );
+  }
+});
+
 Deno.test("public chat edges pin structured user-owned credential failures", async () => {
   const chatSource = await Deno.readTextFile(
     new URL("../supabase/functions/chat-stream/index.ts", import.meta.url),
@@ -213,9 +332,9 @@ Deno.test("public chat edges pin structured user-owned credential failures", asy
   );
   check(
     (proxySource.match(/credentialPolicy: "user_required"/g) || []).length ===
-        2 &&
-      (proxySource.match(/label: null/g) || []).length === 2,
-    "both public llm-proxy credential paths select the user's latest active key",
+        3 &&
+      (proxySource.match(/label: null/g) || []).length === 3,
+    "all public llm-proxy catalog, embedding, and chat credential paths select the user's latest active key",
   );
   check(
     !proxySource.includes("envVarName"),

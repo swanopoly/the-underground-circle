@@ -10,6 +10,7 @@ import {
   RefreshControl,
 } from 'react-native';
 import { supabase } from '../../../lib/supabase';
+import { indexSafeProfiles, loadSafeCircleProfiles } from '../../../lib/safeProfiles';
 import { safeGetUser } from '../../../lib/authSession';
 import { usePaginated } from '../../../hooks/usePaginated';
 import { showAlert } from '../../../lib/alert';
@@ -83,11 +84,17 @@ export default function ChallengesTab({ circleId }: { circleId: string }) {
     (async () => {
       const { data: parts } = await supabase
         .from('challenge_participants')
-        .select('*, user:profiles(username, display_name)')
+        .select('*')
         .in('challenge_id', ids);
       if (cancelled) return;
+      const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+        circleId,
+        userIds: (parts || []).map((row: any) => row.user_id),
+      }));
+      if (cancelled) return;
       const grouped: Record<string, ChallengeParticipant[]> = {};
-      for (const p of parts || []) {
+      for (const raw of parts || []) {
+        const p = { ...raw, user: profileById.get(raw.user_id) || null } as ChallengeParticipant;
         if (!grouped[p.challenge_id]) grouped[p.challenge_id] = [];
         grouped[p.challenge_id].push(p);
       }

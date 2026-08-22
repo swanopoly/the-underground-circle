@@ -22,7 +22,12 @@ const TEAMS_SCOPES = "ChannelMessage.Send Channel.ReadBasic.All Team.ReadBasic.A
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    headers: {
+      ...corsHeaders,
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      "Pragma": "no-cache",
+    },
   });
 }
 
@@ -45,35 +50,56 @@ async function getAuthedUser(req: Request): Promise<string | null> {
   return user?.id || null;
 }
 
-// Mirror the teams_connections RLS: org owner/admin OR circle creator may
-// connect a Teams bot for that org/circle.
+type ConnectionAuthority =
+  | { ok: true }
+  | { ok: false; unavailable: boolean };
+
+// Mirror the connection-table authority without its legacy OR ambiguity.
+// Every supplied target must be authorized, and an org+Circle pair must name
+// the Circle's actual organization.
 async function isAuthorizedForConnection(
   supabase: ReturnType<typeof svc>,
   userId: string,
   orgId: string | null,
   circleId: string | null,
-): Promise<boolean> {
+): Promise<ConnectionAuthority> {
+  if (!orgId && !circleId) return { ok: false, unavailable: false };
+
   if (orgId) {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("org_members")
       .select("user_id")
       .eq("org_id", orgId)
       .eq("user_id", userId)
       .in("role", ["owner", "admin"])
       .maybeSingle();
-    if (data) return true;
+    if (error) return { ok: false, unavailable: true };
+    if (!data) return { ok: false, unavailable: false };
   }
+
   if (circleId) {
-    const { data } = await supabase
+    const { data: circle, error: circleError } = await supabase
+      .from("circles")
+      .select("org_id")
+      .eq("id", circleId)
+      .maybeSingle();
+    if (circleError) return { ok: false, unavailable: true };
+    if (!circle || (orgId && circle.org_id !== orgId)) {
+      return { ok: false, unavailable: false };
+    }
+
+    const { data, error } = await supabase
       .from("circle_members")
       .select("user_id")
       .eq("circle_id", circleId)
       .eq("user_id", userId)
       .eq("role", "creator")
       .maybeSingle();
-    if (data) return true;
+    if (error) return { ok: false, unavailable: true };
+    if (!data) return { ok: false, unavailable: false };
   }
-  return false;
+
+  return { ok: true };
 }
 
 Deno.serve(async (req: Request) => {
@@ -93,8 +119,11 @@ Deno.serve(async (req: Request) => {
     if (!circleId && !orgId) return json({ error: "circleId or orgId required" }, 400);
 
     const supabase = svc();
-    if (!(await isAuthorizedForConnection(supabase, userId, orgId, circleId))) {
-      return json({ error: "Not authorized to connect Teams for this org/circle" }, 403);
+    const authority = await isAuthorizedForConnection(supabase, userId, orgId, circleId);
+    if (!authority.ok) {
+      return authority.unavailable
+        ? json({ error: "Teams connection access could not be verified" }, 503)
+        : json({ error: "Not authorized to connect Teams for this org/Circle" }, 403);
     }
 
     const clientId = Deno.env.get("TEAMS_CLIENT_ID");
@@ -184,8 +213,8 @@ Deno.serve(async (req: Request) => {
     });
 
     if (!tokenResponse.ok) {
-      const err = await tokenResponse.text();
-      console.error("Token exchange error:", err);
+      await tokenResponse.body?.cancel().catch(() => undefined);
+      console.error(`[teams-auth] token exchange failed (${tokenResponse.status})`);
       return new Response(
         `<html><body><h1>Authentication Failed</h1><p>Could not exchange code for token.</p></body></html>`,
         { status: 500, headers: { "Content-Type": "text/html" } },
@@ -202,6 +231,23 @@ Deno.serve(async (req: Request) => {
     const teamsData = await meResponse.json();
     const firstTeam = teamsData.value?.[0];
 
+    // Roles or membership may change while Azure consent is open. Re-prove
+    // the server-stored exact binding immediately before the service-role
+    // write; the OAuth state is CSRF proof, not durable tenant authority.
+    const commitAuthority = await isAuthorizedForConnection(
+      supabase,
+      stateRow.user_id,
+      stateRow.org_id || null,
+      stateRow.circle_id || null,
+    );
+    if (!commitAuthority.ok) {
+      await supabase.from("teams_oauth_states").delete().eq("id", stateRow.id);
+      return new Response(
+        "<html><body><h1>Authorization changed</h1><p>Reconnect from the current organization or Circle.</p></body></html>",
+        { status: commitAuthority.unavailable ? 503 : 403, headers: { "Content-Type": "text/html" } },
+      );
+    }
+
     // Bind using the SERVER-STORED org/circle, not client-supplied state.
     const { error: insertError } = await supabase
       .from("teams_connections")
@@ -216,7 +262,12 @@ Deno.serve(async (req: Request) => {
         is_active: true,
       });
     if (insertError) {
-      console.error("DB insert error:", insertError);
+      console.error("[teams-auth] connection commit failed");
+      await supabase.from("teams_oauth_states").delete().eq("id", stateRow.id);
+      return new Response(
+        "<html><body><h1>Connection failed</h1><p>Could not save the Teams connection.</p></body></html>",
+        { status: 503, headers: { "Content-Type": "text/html" } },
+      );
     }
 
     await supabase.from("teams_oauth_states").delete().eq("id", stateRow.id);
@@ -231,7 +282,9 @@ Deno.serve(async (req: Request) => {
       headers: { Location: `${appUrl}${redirectPath}` },
     });
   } catch (error: unknown) {
-    console.error("Teams auth error:", error);
-    return json({ error: error instanceof Error ? error.message : "internal" }, 500);
+    console.error("[teams-auth] request failed", {
+      name: error instanceof Error ? error.name : typeof error,
+    });
+    return json({ error: "Teams authorization failed" }, 500);
   }
 });

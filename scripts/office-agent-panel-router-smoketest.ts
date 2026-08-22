@@ -447,9 +447,10 @@ assert(
 );
 assert(
   office.includes('const rawAgents = useMemo<OfficeAgent[]>(() => {')
-    && office.includes('return projected;\n  }, [connectedConns, currentUserId, mergedCircleAgents, ownDbCostRows, sessionsTick]);')
+    && office.includes('return projected;\n  }, [agentUsageProfiles, connectedConns, currentUserId, mergedCircleAgents, ownDbCostRows, sessionsTick]);')
+    && office.includes('applyOfficeAgentLifetimeUsage(agent, agentUsageProfiles.get(agent.sessionKey))')
     && !office.includes('const rawAgents: OfficeAgent[] = [];'),
-  'unrelated Office renders retain roster object identity so selected-agent synchronization cannot feed back forever',
+  'unrelated Office renders retain roster object identity while exact lifetime-ledger updates reproject selected-agent metrics',
 );
 assert(
   office.includes('authority.accessToken !== authSession?.access_token')

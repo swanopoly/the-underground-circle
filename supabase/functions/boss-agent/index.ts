@@ -436,6 +436,7 @@ async function modelCouncil(supabase: any, circleId: string, taskId: string) {
     .from("tasks")
     .select("id, title, description, status, goal_id, peer_approvals")
     .eq("id", taskId)
+    .eq("circle_id", circleId)
     .single();
 
   if (!task) return { error: "Task not found" };
@@ -448,6 +449,7 @@ async function modelCouncil(supabase: any, circleId: string, taskId: string) {
       .from("goals")
       .select("assigned_agent_ids")
       .eq("id", task.goal_id)
+      .eq("circle_id", circleId)
       .single();
     reviewerAgentIds = goal?.assigned_agent_ids || [];
   }

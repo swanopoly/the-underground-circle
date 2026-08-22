@@ -324,7 +324,7 @@ export default function OpenSwanServiceMenu({
                 <View style={styles.controlMap}>
                   <Text style={styles.controlMapLabel}>Where to go</Text>
                   <Text style={styles.controlMapText}>
-                    Switch mode and crew here. Agent, model, approvals, and tools are in Control Panel. Past or blocked work is in Runs & recovery.
+                    Switch mode and crew here. Pick the agent from the composer's agent button. Model, approvals, and tools are in Control Panel. Past or blocked work is in Runs & recovery.
                   </Text>
                 </View>
 
@@ -384,12 +384,12 @@ export default function OpenSwanServiceMenu({
                 {...WEB_BUTTON_FOCUS_PROPS}
                 {...webDescriptiveLabel(
                   'Open full OpenSwan control panel',
-                  'Choose the agent and model, review approvals, and manage tools.',
+                  'Choose the model, review approvals, and manage tools. The agent is selected from the composer.',
                 )}
                 onPress={() => { onClose(); onOpenControlPanel(); }}
                 accessibilityRole="button"
                 accessibilityLabel="Open full OpenSwan control panel"
-                accessibilityHint="Choose the agent and model, review approvals, and manage tools."
+                accessibilityHint="Choose the model, review approvals, and manage tools. The agent is selected from the composer."
                 style={({ hovered, pressed, focused }: any) => [
                   styles.primaryBtn,
                   hovered && { borderColor: '#c084fc', backgroundColor: '#a855f724' },
@@ -400,7 +400,7 @@ export default function OpenSwanServiceMenu({
               >
                 <View style={styles.primaryBtnCopy}>
                   <Text style={styles.primaryBtnText}>Open Control Panel</Text>
-                  <Text style={styles.primaryBtnHint}>Agent · model · approvals · tools</Text>
+                  <Text style={styles.primaryBtnHint}>Model · approvals · tools</Text>
                 </View>
                 <Text style={styles.primaryBtnArrow}>{'>'}</Text>
               </Pressable>

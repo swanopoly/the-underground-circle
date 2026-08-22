@@ -20,7 +20,9 @@ import {
   TerminalResponse,
   sendTerminalCommandExact,
   loadTerminalHistory,
+  loadTerminalHistoryExact,
   loadResponsesForMessages,
+  loadResponsesForMessagesExact,
   subscribeToTerminalMessages,
   deleteTerminalMessage,
   deleteTerminalMessageExact,
@@ -1371,6 +1373,9 @@ export default function OfficeTerminal({
     terminalAuthority?.generation,
     terminalAuthority?.userId,
   ]);
+  const exactTerminalAuthorityRequired = (
+    terminalAuthority !== undefined || isTerminalAuthorityCurrent !== undefined
+  );
   const terminalAuthorityRef = useRef<TerminalExactAuthority | null>(normalizedTerminalAuthority);
   const terminalAuthorityGuardRef = useRef<TerminalAuthorityCurrentGuard | undefined>(
     isTerminalAuthorityCurrent,
@@ -1404,15 +1409,26 @@ export default function OfficeTerminal({
   // catalog browsing belongs in Chat/Marketplace rather than this command bar.
   useEffect(() => {
     let cancelled = false;
+    const capturedAuthority = terminalAuthorityRef.current;
+    const requestIsCurrent = () => (
+      !cancelled
+      && (!exactTerminalAuthorityRequired || Boolean(
+        capturedAuthority
+        && capturedTerminalAuthorityIsCurrent(capturedAuthority)
+      ))
+    );
     setAccountModelChoices([]);
     if (readOnly) {
       setModelCatalogNotice(null);
       return () => { cancelled = true; };
     }
     setModelCatalogNotice('Checking account model catalogs…');
+    if (exactTerminalAuthorityRequired && !requestIsCurrent()) {
+      return () => { cancelled = true; };
+    }
     void loadModelGroups(circleId, { includeDisconnected: false })
       .then((groups) => {
-        if (cancelled) return;
+        if (!requestIsCurrent()) return;
         const choices: Array<{ key: string; label: string; icon: string; color: string }> = [];
         const seen = new Set<string>(BASE_MODELS.map((model) => String(model.key || 'auto')));
         for (const group of groups) {
@@ -1450,12 +1466,21 @@ export default function OfficeTerminal({
         );
       })
       .catch(() => {
-        if (cancelled) return;
+        if (!requestIsCurrent()) return;
         setAccountModelChoices(buildBYOModels(byoProviderKeys || []));
         setModelCatalogNotice('Account model catalogs could not be checked; exact access is checked when the command starts.');
       });
     return () => { cancelled = true; };
-  }, [circleId, byoProviderKeys, readOnly]);
+  }, [
+    byoProviderKeys,
+    capturedTerminalAuthorityIsCurrent,
+    circleId,
+    exactTerminalAuthorityRequired,
+    normalizedTerminalAuthority?.accessToken,
+    normalizedTerminalAuthority?.generation,
+    normalizedTerminalAuthority?.userId,
+    readOnly,
+  ]);
 
   // Dynamic model list: base models + exact account rows. Preserve the
   // previous curated BYO builder only as the explicit load-failure fallback.
@@ -1493,9 +1518,6 @@ export default function OfficeTerminal({
   const transcriptGenerationRef = useRef(0);
   const transcriptCircleRef = useRef(circleId);
   transcriptCircleRef.current = circleId;
-  const exactTerminalAuthorityRequired = (
-    terminalAuthority !== undefined || isTerminalAuthorityCurrent !== undefined
-  );
   useEffect(() => {
     // A retired async operation intentionally cannot update replacement UI.
     // Reset its transient busy/error state from the new authority lifecycle so
@@ -1608,34 +1630,67 @@ export default function OfficeTerminal({
   // realtime catch-up. Messages/responses written while the socket was down
   // never arrive as events, so a reconnect that does not replay this leaves the
   // terminal permanently missing whatever the agent said during the gap.
-  const reloadTranscript = useCallback(async () => {
+  const reloadTranscript = useCallback(async (forceRefresh = false) => {
     const requestedCircleId = circleId;
+    const capturedAuthority = terminalAuthorityRef.current;
     const generation = ++transcriptGenerationRef.current;
     const requestIsCurrent = () => (
       transcriptGenerationRef.current === generation
       && transcriptCircleRef.current === requestedCircleId
+      && (!exactTerminalAuthorityRequired || Boolean(
+        capturedAuthority
+        && capturedAuthority.circleId === requestedCircleId
+        && capturedAuthority.userId === userId
+        && capturedTerminalAuthorityIsCurrent(capturedAuthority)
+      ))
     );
     setTranscriptError(null);
+    if (exactTerminalAuthorityRequired && !requestIsCurrent()) {
+      setMessages([]);
+      setResponses(new Map());
+      setLoading(false);
+      setTranscriptError('Recorded command history is waiting for an exact Office session.');
+      return;
+    }
     try {
-      const { messages: hist, error: historyError } = await loadTerminalHistory(requestedCircleId, 50);
+      const { messages: hist, error: historyError } = capturedAuthority
+        ? await loadTerminalHistoryExact(
+            capturedAuthority,
+            capturedTerminalAuthorityIsCurrent,
+            50,
+            undefined,
+            { forceRefresh },
+          )
+        : await loadTerminalHistory(requestedCircleId, 50);
       if (historyError) throw new Error(historyError);
       if (!requestIsCurrent()) return;
-      setMessages(hist.filter(message => !deletedIdsRef.current.has(message.id)));
+      const nextMessages = hist.filter(message => !deletedIdsRef.current.has(message.id));
+      const nextResponses = new Map<string, TerminalResponse[]>();
       // Phase 3: load existing responses for history messages
       if (hist.length > 0) {
-        const resps = await loadResponsesForMessages(hist.map(m => m.id));
+        const responseResult = capturedAuthority
+          ? await loadResponsesForMessagesExact(
+              hist.map(m => m.id),
+              capturedAuthority,
+              capturedTerminalAuthorityIsCurrent,
+              undefined,
+              { forceRefresh },
+            )
+          : { responses: await loadResponsesForMessages(hist.map(m => m.id)) };
+        if (responseResult.error) throw new Error(responseResult.error);
         if (!requestIsCurrent()) return;
-        const map = new Map<string, TerminalResponse[]>();
-        for (const r of resps) {
+        for (const r of responseResult.responses) {
           if (deletedIdsRef.current.has(r.messageId)) continue;
-          const arr = map.get(r.messageId) || [];
+          const arr = nextResponses.get(r.messageId) || [];
           arr.push(r);
-          map.set(r.messageId, arr);
+          nextResponses.set(r.messageId, arr);
         }
-        setResponses(map);
-      } else {
-        setResponses(new Map());
       }
+      if (!requestIsCurrent()) return;
+      // Publish the transcript atomically so a retired subject's message body
+      // cannot linger while the replacement response query is still pending.
+      setMessages(nextMessages);
+      setResponses(nextResponses);
     } catch (err) {
       console.error('[OfficeTerminal] transcript load failed:', err);
       if (requestIsCurrent()) {
@@ -1644,7 +1699,15 @@ export default function OfficeTerminal({
     } finally {
       if (requestIsCurrent()) setLoading(false);
     }
-  }, [circleId]);
+  }, [
+    capturedTerminalAuthorityIsCurrent,
+    circleId,
+    exactTerminalAuthorityRequired,
+    normalizedTerminalAuthority?.accessToken,
+    normalizedTerminalAuthority?.generation,
+    normalizedTerminalAuthority?.userId,
+    userId,
+  ]);
 
   useEffect(() => {
     deletedIdsRef.current.clear();
@@ -1656,9 +1719,30 @@ export default function OfficeTerminal({
     return () => {
       transcriptGenerationRef.current += 1;
     };
-  }, [circleId, reloadTranscript]);
+  }, [
+    circleId,
+    normalizedTerminalAuthority?.accessToken,
+    normalizedTerminalAuthority?.generation,
+    normalizedTerminalAuthority?.userId,
+    reloadTranscript,
+  ]);
 
   useEffect(() => {
+    const exactSubscriptionScope = normalizedTerminalAuthority
+      ? `${normalizedTerminalAuthority.userId}-${normalizedTerminalAuthority.generation}`
+      : 'compat';
+    if (exactTerminalAuthorityRequired) {
+      // Postgres payloads are wake-ups, not render authority. Re-read through
+      // the captured bearer so a stale/shared Realtime session cannot inject
+      // another account's message body into this mounted terminal.
+      return subscribeToTerminalMessages(
+        circleId,
+        () => { void reloadTranscript(true); },
+        () => { void reloadTranscript(true); },
+        () => { void reloadTranscript(true); },
+        exactSubscriptionScope,
+      );
+    }
     const unsub = subscribeToTerminalMessages(
       circleId,
       (updated) => {
@@ -1684,9 +1768,16 @@ export default function OfficeTerminal({
         });
       },
       () => { void reloadTranscript(); },
+      exactSubscriptionScope,
     );
     return unsub;
-  }, [circleId, reloadTranscript]);
+  }, [
+    circleId,
+    exactTerminalAuthorityRequired,
+    normalizedTerminalAuthority?.generation,
+    normalizedTerminalAuthority?.userId,
+    reloadTranscript,
+  ]);
 
   // Phase 2 broadcast subscription removed — Phase 3 postgres_changes on
   // office_terminal_responses is now the single source of truth for responses.
@@ -1694,9 +1785,12 @@ export default function OfficeTerminal({
   // Phase 3: Subscribe to office_terminal_responses for this circle's responses.
   // Single stable channel — never re-created on messages change to avoid missing events.
   useEffect(() => {
+    const exactSubscriptionScope = normalizedTerminalAuthority
+      ? `${normalizedTerminalAuthority.userId}:${normalizedTerminalAuthority.generation}`
+      : 'compat';
     const handle = subscribeWithReconnect({
-      channelName: `terminal-responses:${circleId}`,
-      onCatchUp: () => { void reloadTranscript(); },
+      channelName: `terminal-responses:${circleId}:${exactSubscriptionScope}`,
+      onCatchUp: () => { void reloadTranscript(true); },
       setup: (channel) => channel
       .on(
         'postgres_changes',
@@ -1707,6 +1801,12 @@ export default function OfficeTerminal({
           filter: `circle_id=eq.${circleId}`,
         },
         (payload: any) => {
+          if (exactTerminalAuthorityRequired) {
+            // Realtime only signals that the exact RLS-backed response set may
+            // have changed. Never render response_text from the envelope.
+            void reloadTranscript(true);
+            return;
+          }
           const raw = payload.new;
           if (!raw) return;
 
@@ -1746,7 +1846,13 @@ export default function OfficeTerminal({
     return () => {
       handle.unsubscribe();
     };
-  }, [circleId, reloadTranscript]);
+  }, [
+    circleId,
+    exactTerminalAuthorityRequired,
+    normalizedTerminalAuthority?.generation,
+    normalizedTerminalAuthority?.userId,
+    reloadTranscript,
+  ]);
 
   // Scroll to bottom on new messages
   useEffect(() => {
@@ -2104,11 +2210,27 @@ export default function OfficeTerminal({
         });
         if (operationFence && !operationFence.isCurrent()) return;
         const now = new Date().toISOString();
+        const recordedEstimate = typeof data?.estimated_cost === 'number'
+          && Number.isFinite(data.estimated_cost)
+          && data.estimated_cost >= 0
+            ? `Estimated cost: $${data.estimated_cost.toFixed(3)}`
+            : null;
+        const generatedImageParts = [
+          typeof data?.url === 'string' && data.url
+            ? `![Generated Image](${data.url})`
+            : null,
+          typeof data?.revised_prompt === 'string' && data.revised_prompt.trim()
+            ? `*${data.revised_prompt.trim()}*`
+            : null,
+          recordedEstimate,
+        ].filter((part): part is string => Boolean(part));
         const responseText = error
           ? `Image generation failed: ${error.message}`
           : data?.error
             ? `Error: ${data.error}`
-            : `![Generated Image](${data.url})\n\n${data.revised_prompt ? `*${data.revised_prompt}*` : ''}\n\nCost: $${(data.estimated_cost || 0).toFixed(3)}`;
+            : generatedImageParts.length > 0
+              ? generatedImageParts.join('\n\n')
+              : 'Image generation completed without a readable image receipt.';
         const imgMsg: TerminalMessage = {
           id: `local-imagine-${Date.now()}`,
           circleId, senderId: userId, senderName: userDisplayName,

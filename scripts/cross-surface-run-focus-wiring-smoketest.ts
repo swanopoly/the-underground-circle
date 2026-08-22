@@ -146,10 +146,14 @@ assert.match(
   'the shared focus capture decodes the untrusted payload exactly once',
 );
 const alignmentGuard = section(captureFocus, 'if (', 'officeRunFocusSequenceRef.current += 1;');
-assert.match(alignmentGuard, /target\s*!==\s*['"]OFFICE['"]/, 'focus rejects a destination other than OFFICE');
-assert.match(alignmentGuard, /handle\?\.kind\s*!==\s*['"]run['"]/, 'focus rejects a non-run entity kind');
-assert.match(alignmentGuard, /handle\.surface\s*!==\s*['"]office['"]/, 'focus rejects a non-office surface');
-assert.match(alignmentGuard, /\)\s*return;/, 'malformed or mismatched focus returns before state changes');
+assert.match(alignmentGuard, /target\s*===\s*['"]OFFICE['"]/, 'Office focus is positively allowlisted');
+assert.match(alignmentGuard, /handle\?\.kind\s*===\s*['"]run['"]/, 'Office focus requires a decoded run entity');
+assert.match(alignmentGuard, /handle\.surface\s*===\s*['"]office['"]/, 'Office focus requires the matching office surface');
+assert.match(
+  captureFocus,
+  /if \(target === ['"]OFFICE['"][\s\S]*?return true;[\s\S]*?return false;/,
+  'malformed or mismatched focus falls through without mutating Office state',
+);
 assert.match(circle, /const officeRunFocusSequenceRef\s*=\s*useRef\(0\)/, 'focus requests start from a bounded local sequence');
 assert.match(
   captureFocus,
@@ -161,7 +165,7 @@ const switchHandler = section(circle, 'const onSwitchTab =', "window.addEventLis
 assert.match(switchHandler, /detail\?\.focus|detail\.focus/, 'web listener reads only the encoded focus payload');
 assert.match(
   switchHandler,
-  /captureCrossSurfaceFocus\(\s*e\?\.detail\?\.focus\s*,\s*target\s*\)/,
+  /captureCrossSurfaceFocus\(\s*e\?\.detail\?\.focus\s*,\s*target\s*,\s*e\?\.detail\?\.draft\s*\)/,
   'the web event uses the shared decoder and alignment guard',
 );
 assert.ok(

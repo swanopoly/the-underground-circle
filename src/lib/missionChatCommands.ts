@@ -107,14 +107,23 @@ export async function executeSummaryCommand(ctx: CommandContext): Promise<Comman
 
   // Members
   try {
-    const { data: members } = await import('./supabase').then(m => m.supabase
+    const { supabase } = await import('./supabase');
+    const { indexSafeProfiles, loadSafeCircleProfiles } = await import('./safeProfiles');
+    const { data: members } = await supabase
       .from('circle_members')
-      .select('user_id, profiles(display_name, username)')
-      .eq('circle_id', ctx.circleId));
+      .select('user_id')
+      .eq('circle_id', ctx.circleId);
     if (members) {
+      const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+        circleId: ctx.circleId,
+        userIds: members.map((member: any) => member.user_id),
+      }));
       lines.push('');
       lines.push(`**Team** — ${members.length} member${members.length !== 1 ? 's' : ''}`);
-      lines.push(`  ${members.map((m: any) => m.profiles?.display_name || m.profiles?.username || 'member').join(', ')}`);
+      lines.push(`  ${members.map((m: any) => {
+        const profile = profileById.get(m.user_id);
+        return profile?.display_name || profile?.username || 'member';
+      }).join(', ')}`);
     }
   } catch {}
 

@@ -13,7 +13,12 @@ import {
   Easing,
   useWindowDimensions,
 } from 'react-native';
-import { supabase } from '../../lib/supabase';
+import { getSupabaseClientForAccessToken } from '../../lib/supabase';
+import { useAuth } from '../../hooks/useAuth';
+import {
+  persistedCircleImageValue,
+  resolveCircleImageValues,
+} from '../../lib/circleImageStorage';
 import { Circle } from '../../types';
 
 // ─── Design Tokens — "Linear meets Arc Browser" ────────────────────────────
@@ -43,6 +48,8 @@ const RADIUS_PILL = 100;
 const RADIUS_INNER= 10;
 
 const MONO = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
+
+const CIRCLE_LIST_READ_COLUMNS = 'id,name,description,invite_code,max_members,created_by,created_at,vibe,rules,circle_image_url,org_id,is_public,settings,circle_type,icon,accent_color,check_in_format,tags,circle_members!inner(count)' as const;
 
 // Deterministic "random" from string seed for stable mock data
 function hashSeed(str: string): number {
@@ -374,7 +381,18 @@ function writeCircleCache(userId: string, circles: Circle[]): void {
 }
 
 export default function CirclesScreen({ navigation }: any) {
+  const { session, user: authUser, loading: authLoading } = useAuth();
   const [circles, setCircles] = useState<Circle[]>([]);
+  const [circlesScopeUserId, setCirclesScopeUserId] = useState<string | null>(null);
+  const fetchGenerationRef = useRef(0);
+  const liveAuthorityRef = useRef({
+    userId: authUser?.id || null,
+    accessToken: session?.access_token || null,
+  });
+  liveAuthorityRef.current = {
+    userId: authUser?.id || null,
+    accessToken: session?.access_token || null,
+  };
   const [refreshing, setRefreshing] = useState(false);
   // `hasLoadedOnce` distinguishes "still doing the first fetch" from "fetch
   // returned zero results". Without this, the empty state ("the void awaits")
@@ -390,15 +408,48 @@ export default function CirclesScreen({ navigation }: any) {
   }, [headerAnim]);
 
   const fetchCircles = useCallback(async () => {
+    const generation = fetchGenerationRef.current + 1;
+    fetchGenerationRef.current = generation;
+    const userId = authUser?.id || null;
+    const accessToken = session?.access_token || null;
+    const isCurrent = () => generation === fetchGenerationRef.current
+      && liveAuthorityRef.current.userId === userId
+      && liveAuthorityRef.current.accessToken === accessToken;
     try {
-      const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
-      if (!user) { setCircles([]); setHasLoadedOnce(true); return; }
+      if (authLoading) return;
+      if (!userId || !accessToken) {
+        setCircles([]);
+        setCirclesScopeUserId(null);
+        setHasLoadedOnce(true);
+        return;
+      }
+      const client = getSupabaseClientForAccessToken(accessToken);
+      const commitRows = async (rawRows: Circle[]) => {
+        const persisted = rawRows.map((row) => ({
+          ...row,
+          circle_image_url: persistedCircleImageValue(row.circle_image_url) || undefined,
+        }));
+        writeCircleCache(userId, persisted);
+        const resolved = await resolveCircleImageValues(
+          client,
+          persisted.map((row) => row.circle_image_url),
+        );
+        if (!isCurrent()) return;
+        setCircles(persisted.map((row) => ({
+          ...row,
+          circle_image_url: row.circle_image_url
+            ? resolved.get(row.circle_image_url) || undefined
+            : undefined,
+        })));
+        setCirclesScopeUserId(userId);
+        setHasLoadedOnce(true);
+      };
 
       // Fast path: projected RPC with joined counts. Drops ~70% of bytes vs
       // the old `get_user_circles` which returned SETOF circles (all cols
       // including JSONB settings). Falls through to the legacy RPC if this
       // migration hasn't been run yet on the target database.
-      const fast = await supabase.rpc('get_user_circles_fast', { user_uuid: user.id });
+      const fast = await client.rpc('get_user_circles_fast', { user_uuid: userId });
       if (!fast.error && fast.data) {
         const mapped = (fast.data as any[]).map((c) => ({
           id: c.id, name: c.name, description: c.description, invite_code: c.invite_code,
@@ -407,13 +458,11 @@ export default function CirclesScreen({ navigation }: any) {
           icon: c.icon, accent_color: c.accent_color, circle_image_url: c.circle_image_url,
           active_missions: Number(c.active_missions) || 0,
         }));
-        setCircles(mapped);
-        writeCircleCache(user.id, mapped);
-        setHasLoadedOnce(true);
+        await commitRows(mapped);
         return;
       }
 
-      const { data: optimizedData, error: funcError } = await supabase.rpc('get_user_circles', { user_uuid: user.id });
+      const { data: optimizedData, error: funcError } = await client.rpc('get_user_circles', { user_uuid: userId });
       if (!funcError && optimizedData) {
         const mapped = optimizedData.map((c: any) => ({
           id: c.id, name: c.name, description: c.description, invite_code: c.invite_code,
@@ -421,23 +470,19 @@ export default function CirclesScreen({ navigation }: any) {
           member_count: Number(c.member_count) || 0, user_role: c.user_role,
           icon: c.icon, accent_color: c.accent_color, circle_image_url: c.circle_image_url,
         }));
-        setCircles(mapped);
-        writeCircleCache(user.id, mapped);
-        setHasLoadedOnce(true);
+        await commitRows(mapped);
         return;
       }
 
-      const { data: memberships } = await supabase.from('circle_members').select('circle_id').eq('user_id', user.id).limit(50);
+      const { data: memberships } = await client.from('circle_members').select('circle_id').eq('user_id', userId).limit(50);
       if (!memberships?.length) {
-        setCircles([]);
-        writeCircleCache(user.id, []);
-        setHasLoadedOnce(true);
+        await commitRows([]);
         return;
       }
       const circleIds = memberships.map(m => m.circle_id);
       const [circlesResult, missionsResult] = await Promise.allSettled([
-        supabase.from('circles').select('*, circle_members!inner(count)').in('id', circleIds).limit(50),
-        supabase.from('circle_missions').select('circle_id, status').in('circle_id', circleIds).eq('status', 'active'),
+        client.from('circles').select(CIRCLE_LIST_READ_COLUMNS).in('id', circleIds).limit(50),
+        client.from('circle_missions').select('circle_id, status').in('circle_id', circleIds).eq('status', 'active'),
       ]);
       const data = circlesResult.status === 'fulfilled' ? (circlesResult.value.data || []) : [];
       const missionCounts = missionsResult.status === 'fulfilled' ? (missionsResult.value.data || []) : [];
@@ -445,14 +490,12 @@ export default function CirclesScreen({ navigation }: any) {
       const missionMap: Record<string, number> = {};
       (missionCounts || []).forEach((m: any) => { missionMap[m.circle_id] = (missionMap[m.circle_id] || 0) + 1; });
       const mapped = (data || []).map((c: any) => ({ ...c, member_count: c.circle_members?.[0]?.count || 0, active_missions: missionMap[c.id] || 0 }));
-      setCircles(mapped);
-      writeCircleCache(user.id, mapped);
-      setHasLoadedOnce(true);
+      await commitRows(mapped);
     } catch (err) {
       console.error('CirclesScreen fetch error:', err);
-      setHasLoadedOnce(true);
+      if (isCurrent()) setHasLoadedOnce(true);
     }
-  }, []);
+  }, [authLoading, authUser?.id, session?.access_token]);
 
   // Stale-while-revalidate: on mount, synchronously paint whatever we cached
   // last session so the user sees their circles instantly. The real fetch
@@ -460,21 +503,52 @@ export default function CirclesScreen({ navigation }: any) {
   useEffect(() => {
     (async () => {
       try {
-        const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
-        if (!user) return;
-        const cached = readCircleCache(user.id);
+        const userId = authUser?.id;
+        const accessToken = session?.access_token;
+        if (authLoading || !userId || !accessToken) return;
+        const cached = readCircleCache(userId);
         if (cached && cached.length > 0) {
-          setCircles(cached);
+          const client = getSupabaseClientForAccessToken(accessToken);
+          // A device cache is never membership authority. Prove the account's
+          // current Circle set before showing even the bounded cached shell.
+          const { data: memberships, error: membershipError } = await client
+            .from('circle_members')
+            .select('circle_id')
+            .eq('user_id', userId)
+            .limit(200);
+          if (membershipError) return;
+          const allowedCircleIds = new Set((memberships || []).map((row) => row.circle_id));
+          const authorizedCache = cached.filter((row) => allowedCircleIds.has(row.id));
+          const resolved = await resolveCircleImageValues(
+            client,
+            authorizedCache.map((row) => row.circle_image_url),
+          );
+          if (
+            liveAuthorityRef.current.userId !== userId
+            || liveAuthorityRef.current.accessToken !== accessToken
+          ) return;
+          setCircles(authorizedCache.map((row) => ({
+            ...row,
+            circle_image_url: row.circle_image_url
+              ? resolved.get(row.circle_image_url) || undefined
+              : undefined,
+          })));
+          setCirclesScopeUserId(userId);
           setHasLoadedOnce(true);
         }
       } catch {}
     })();
-  }, []);
+  }, [authLoading, authUser?.id, session?.access_token]);
 
   useEffect(() => {
+    setCircles([]);
+    setCirclesScopeUserId(null);
+    setHasLoadedOnce(false);
     fetchCircles();
     return navigation.addListener('focus', fetchCircles);
   }, [fetchCircles, navigation]);
+
+  const visibleCircles = circlesScopeUserId === authUser?.id ? circles : [];
 
   return (
     <View style={s.page}>
@@ -492,26 +566,26 @@ export default function CirclesScreen({ navigation }: any) {
             <Text style={s.headerTitle}>Your Circles</Text>
           </View>
           <View style={s.headerPill}>
-            <Text style={s.headerPillText}>{circles.length} active</Text>
+            <Text style={s.headerPillText}>{visibleCircles.length} active</Text>
           </View>
         </Animated.View>
 
         {/* Content */}
-        {!hasLoadedOnce && circles.length === 0 ? (
+        {!hasLoadedOnce && visibleCircles.length === 0 ? (
           <CirclesLoadingSkeleton isDesktop={isDesktop} />
-        ) : circles.length === 0 ? (
+        ) : visibleCircles.length === 0 ? (
           <EmptyState
             onCreate={() => navigation.navigate('CreateCircle')}
             onJoin={() => navigation.navigate('JoinCircle')}
           />
         ) : (
-          <View style={[s.grid, isDesktop && circles.length > 1 && { flexDirection: 'row', flexWrap: 'wrap' }]}>
-            {circles.map((item, i) => (
-              <View key={item.id} style={[s.gridItem, isDesktop && circles.length > 1 && { width: '48%' }]}>
+          <View style={[s.grid, isDesktop && visibleCircles.length > 1 && { flexDirection: 'row', flexWrap: 'wrap' }]}>
+            {visibleCircles.map((item, i) => (
+              <View key={item.id} style={[s.gridItem, isDesktop && visibleCircles.length > 1 && { width: '48%' }]}>
                 <CircleCard item={item} index={i} onPress={() => navigation.navigate('CircleDetail', { circleId: item.id, circleName: item.name })} />
               </View>
             ))}
-            <View style={[s.gridItem, isDesktop && circles.length > 1 && { width: '48%' }]}>
+            <View style={[s.gridItem, isDesktop && visibleCircles.length > 1 && { width: '48%' }]}>
               <CreateJoinCard onCreate={() => navigation.navigate('CreateCircle')} onJoin={() => navigation.navigate('JoinCircle')} onDiscover={() => navigation.navigate('Discover')} />
             </View>
           </View>
