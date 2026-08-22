@@ -119,7 +119,7 @@ export default function ConnectAllBridgesPanel({ circleId, onConnected, hidden, 
       <View style={styles.headerRow}>
         <View style={styles.headerLeft}>
           <View style={[styles.statusDot, { backgroundColor: dotForState(result, running) }]} />
-          <Text style={styles.title}>
+          <Text style={styles.title} accessibilityRole="header">
             {result && fullyConnected ? 'All bridges connected' : 'Connect your agents'}
           </Text>
         </View>
@@ -128,12 +128,13 @@ export default function ConnectAllBridgesPanel({ circleId, onConnected, hidden, 
           style={styles.dismiss}
           accessibilityRole="button"
           accessibilityLabel="Dismiss connect panel"
+          accessibilityHint="Hides this connection panel for the current circle."
         >
           <Text style={styles.dismissText}>×</Text>
         </Pressable>
       </View>
 
-      <Text style={styles.subtitle}>
+      <Text style={styles.subtitle} accessibilityLiveRegion={result ? 'polite' : 'none'}>
         {result
           ? result.summary
           : 'Detect Claude Code, Codex, Gemini CLI, and Cursor on your machine in one click. The desktop bridge auto-pairs.'}
@@ -143,6 +144,10 @@ export default function ConnectAllBridgesPanel({ circleId, onConnected, hidden, 
         <Pressable
           onPress={handleConnect}
           disabled={running}
+          accessibilityRole="button"
+          accessibilityLabel={result ? 'Re-scan agent bridges' : 'Connect agent bridges'}
+          accessibilityHint="Detects local coding-agent bridges and pairs desktop automation when available."
+          accessibilityState={{ disabled: running, busy: running }}
           style={({ hovered }: any) => [
             styles.primaryBtn,
             hovered && !running && styles.primaryBtnHover,
@@ -157,14 +162,20 @@ export default function ConnectAllBridgesPanel({ circleId, onConnected, hidden, 
       )}
 
       {expanded && error && (
-        <Text style={styles.errorText}>{error}</Text>
+        <Text
+          style={styles.errorText}
+          accessibilityRole="alert"
+          accessibilityLiveRegion="assertive"
+        >
+          {error}
+        </Text>
       )}
 
       {expanded && result && (
         <View style={styles.resultsBlock}>
           {result.liveAgentCount > 0 && (
             <View style={styles.agentBadge}>
-              <Text style={styles.agentBadgeText}>
+              <Text style={styles.agentBadgeText} accessibilityLiveRegion="polite">
                 {result.liveAgentCount} live agent{result.liveAgentCount === 1 ? '' : 's'} discovered
               </Text>
             </View>
@@ -213,9 +224,12 @@ export default function ConnectAllBridgesPanel({ circleId, onConnected, hidden, 
             onPress={() => handleCopy(npxCommand, 'npx')}
             style={[styles.copyBtn, Platform.OS === 'web' && ({ cursor: 'pointer' } as any)]}
             accessibilityRole="button"
-            accessibilityLabel="Copy install command"
+            accessibilityLabel={copied === 'npx' ? 'Install command copied' : 'Copy install command'}
+            accessibilityHint="Copies the pre-tokenized bridge install command to the clipboard."
           >
-            <Text style={styles.copyBtnText}>{copied === 'npx' ? 'Copied' : 'Copy'}</Text>
+            <Text style={styles.copyBtnText} accessibilityLiveRegion="polite">
+              {copied === 'npx' ? 'Copied' : 'Copy'}
+            </Text>
           </Pressable>
         </View>
         <Text style={styles.installHint}>
@@ -229,8 +243,13 @@ export default function ConnectAllBridgesPanel({ circleId, onConnected, hidden, 
             <Pressable
               onPress={() => handleCopy(REOPEN_COMMAND, 'reopen')}
               style={[styles.copyBtn, Platform.OS === 'web' && ({ cursor: 'pointer' } as any)]}
+              accessibilityRole="button"
+              accessibilityLabel={copied === 'reopen' ? 'Local bridge command copied' : 'Copy local bridge command'}
+              accessibilityHint="Copies the command for starting bridges from a cloned repository."
             >
-              <Text style={styles.copyBtnText}>{copied === 'reopen' ? 'Copied' : 'Copy'}</Text>
+              <Text style={styles.copyBtnText} accessibilityLiveRegion="polite">
+                {copied === 'reopen' ? 'Copied' : 'Copy'}
+              </Text>
             </Pressable>
           </View>
         </View>
@@ -282,9 +301,14 @@ function BridgeRow({
           onPress={() => onCopy(restartCmd, copyKey)}
           style={[styles.smallCopyBtn, Platform.OS === 'web' && ({ cursor: 'pointer' } as any)]}
           accessibilityRole="button"
-          accessibilityLabel={`Copy restart command for ${bridge.label}`}
+          accessibilityLabel={
+            copiedLabel === copyKey
+              ? `Restart command copied for ${bridge.label}`
+              : `Copy restart command for ${bridge.label}`
+          }
+          accessibilityHint={`Copies the terminal command for restarting ${bridge.label}.`}
         >
-          <Text style={styles.smallCopyBtnText}>
+          <Text style={styles.smallCopyBtnText} accessibilityLiveRegion="polite">
             {copiedLabel === copyKey ? 'Copied' : 'Copy cmd'}
           </Text>
         </Pressable>
@@ -338,7 +362,12 @@ const styles = StyleSheet.create({
   statusDot: { width: 8, height: 8, borderRadius: 999 },
   title: { color: '#e6edf3', fontSize: 14, fontWeight: '700' },
   subtitle: { color: '#94a3b8', fontSize: 12, lineHeight: 18 },
-  dismiss: { padding: 4 },
+  dismiss: {
+    width: 44,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   dismissText: { color: '#64748b', fontSize: 16, lineHeight: 16 },
   primaryBtn: {
     alignSelf: 'flex-start',
@@ -347,7 +376,9 @@ const styles = StyleSheet.create({
     paddingVertical: 9,
     borderRadius: 10,
     minWidth: 160,
+    minHeight: 44,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   primaryBtnHover: { backgroundColor: '#4f46e5' },
   primaryBtnDisabled: { backgroundColor: '#312e81', opacity: 0.85 },
@@ -400,6 +431,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#334155',
     alignSelf: 'center',
+    minHeight: 44,
+    minWidth: 72,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   smallCopyBtnText: { color: '#cbd5e1', fontSize: 10, fontWeight: '700' },
   pairingNote: {
@@ -446,6 +481,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 5,
     borderRadius: 6,
+    minHeight: 44,
+    minWidth: 52,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   copyBtnText: { color: '#fff', fontSize: 11, fontWeight: '700' },
   installHint: { color: '#64748b', fontSize: 11 },

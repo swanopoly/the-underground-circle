@@ -65,6 +65,14 @@ export async function setChatWebSearchEnabled(
   const current = coerce((existing?.settings as any)?.chatWebSearch);
   const next: ChatWebSearchSettings = { ...current, enabled };
   const merged = { ...(existing?.settings || {}), chatWebSearch: next };
-  await supabase.from('circles').update({ settings: merged }).eq('id', circleId);
+  // ChatTab already has the honest handling for this ("Persist failed — revert
+  // UI so toggle state stays honest"), but it was unreachable: an unchecked
+  // supabase call resolves with `{ error }` rather than throwing, so the
+  // toggle always looked like it saved. Only circle admins can update
+  // `circles`, so this denial is the common case, not the rare one.
+  const { error } = await supabase.from('circles').update({ settings: merged }).eq('id', circleId);
+  if (error) {
+    throw new Error(error.message || 'Could not save the web search setting');
+  }
   return next;
 }

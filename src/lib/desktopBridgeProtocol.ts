@@ -35,6 +35,7 @@ export type DesktopBridgeError =
   | 'browser_fill_verification_failed'
   | 'browser_toggle_canary_blocked'
   | 'browser_toggle_verification_failed'
+  | 'browser_scroll_verification_failed'
   | 'selector_not_found'
   | 'uncertain_ui_target'
   | 'auth_required'
@@ -71,6 +72,344 @@ export interface DesktopHealth {
   platform: string;
   supported: boolean;
   tools: string[];
+  /**
+   * Random identifier minted once per local bridge process. Recovery actions
+   * bind to this value so a restart or a different computer cannot satisfy a
+   * read that was authorized against an earlier desktop state.
+   */
+  instanceId?: string;
+  /**
+   * Secret-free observation of whether the running process can be replaced
+   * without interrupting work. This is evidence only: browser clients never
+   * gain restart authority from it.
+   */
+  restartSafety?: DesktopBridgeRestartSafety;
+}
+
+export interface DesktopBridgeRestartSafety {
+  sourceChanged: boolean;
+  safeToRefresh: boolean;
+  blockers: string[];
+  opaqueAttachmentCapabilityPresent?: boolean;
+}
+
+export const DESKTOP_ATTACHMENT_OPEN_CAPABILITY = 'attachment_open_capability' as const;
+
+export type DesktopBridgeReadinessState =
+  | 'current'
+  | 'capability_missing'
+  | 'source_changed'
+  | 'restart_blocked'
+  | 'unavailable';
+
+export type DesktopBridgeReadinessRecoveryCode =
+  | 'none'
+  | 'bridge_unavailable'
+  | 'platform_unsupported'
+  | 'bridge_health_invalid'
+  | 'bridge_capability_missing'
+  | 'bridge_source_changed'
+  | 'bridge_restart_blocked';
+
+export interface DesktopBridgeHealthClassification {
+  state: DesktopBridgeReadinessState;
+  recoveryCode: DesktopBridgeReadinessRecoveryCode;
+  reachable: boolean;
+  supported: boolean;
+  /** A supported bridge still exposes its existing tools in non-current
+   * states. Callers must check exact tool membership before dispatch. */
+  genericToolsReady: boolean;
+  attachmentOpenReady: boolean;
+  requiredToolsReady: boolean;
+  platform: string;
+  advertisedTools: readonly string[];
+  requiredTools: readonly string[];
+  missingTools: readonly string[];
+  sourceChanged: boolean | null;
+  safeToRefresh: boolean | null;
+  blockers: readonly string[];
+  detail: string;
+  /** Deliberately constant. Health is observation, never restart authority. */
+  automaticRestartAllowed: false;
+}
+
+export interface ClassifyDesktopBridgeHealthOptions {
+  /** Defaults to the private uploaded-attachment open capability. Passing an
+   * empty array classifies source currency while requiring no feature tool. */
+  requiredTools?: readonly string[];
+}
+
+const DESKTOP_TOOL_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,127}$/u;
+const DESKTOP_PLATFORM_RE = /^[a-z0-9][a-z0-9._-]{0,39}$/iu;
+const DESKTOP_RESTART_BLOCKER_RE = /^[a-z0-9_]{1,96}$/u;
+const KNOWN_DESKTOP_RESTART_BLOCKERS = new Set([
+  'aborted_bridge_work_outcome_unknown',
+  'bridge_work_request_in_flight',
+  'browser_runtime_active',
+  'browser_runtime_state_unknown',
+  'current_source_dependency_load_failed',
+  'current_source_dependency_missing',
+  'current_source_invalid',
+  'current_source_main_load_failed',
+  'current_source_manifest_unknown',
+  'current_source_not_quiet',
+  'current_source_syntax_invalid',
+  'current_source_unstable',
+  'current_source_validation_required',
+  'immutable_source_handoff_unavailable',
+  'live_spawned_children',
+  'manual_process_owner',
+  'pending_private_capabilities',
+  'possibly_active_sessions',
+  'private_capability_request_in_flight',
+  'private_capability_state_unknown',
+  'refresh_drain_active',
+  'session_mutation_request_in_flight',
+  'session_scan_failed',
+  'session_scan_stale',
+  'session_state_unknown',
+  'source_hash_unknown',
+  'source_not_changed',
+  'spawned_child_state_unknown',
+  'supervisor_ack_stale',
+  'supervisor_ipc_unavailable',
+  'supervisor_not_alive',
+  'supervisor_replacement_not_ready',
+  'supervisor_state_unknown',
+]);
+const MAX_DESKTOP_HEALTH_TOOLS = 512;
+const MAX_DESKTOP_REQUIRED_TOOLS = 32;
+const MAX_DESKTOP_RESTART_BLOCKERS = 64;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function freezeStrings(values: string[]): readonly string[] {
+  return Object.freeze(values.slice());
+}
+
+function unavailableDesktopBridgeClassification(
+  recoveryCode: Extract<DesktopBridgeReadinessRecoveryCode, 'bridge_unavailable' | 'platform_unsupported' | 'bridge_health_invalid'>,
+  detail: string,
+  input?: { reachable?: boolean; platform?: string; requiredTools?: readonly string[] },
+): DesktopBridgeHealthClassification {
+  const requiredTools = [...(input?.requiredTools || [DESKTOP_ATTACHMENT_OPEN_CAPABILITY])];
+  return Object.freeze({
+    state: 'unavailable' as const,
+    recoveryCode,
+    reachable: input?.reachable === true,
+    supported: false,
+    genericToolsReady: false,
+    attachmentOpenReady: false,
+    requiredToolsReady: false,
+    platform: String(input?.platform || 'unknown').slice(0, 40),
+    advertisedTools: freezeStrings([]),
+    requiredTools: freezeStrings(requiredTools),
+    missingTools: freezeStrings(requiredTools),
+    sourceChanged: null,
+    safeToRefresh: null,
+    blockers: freezeStrings([]),
+    detail,
+    automaticRestartAllowed: false as const,
+  });
+}
+
+function normalizeRequiredDesktopTools(options?: ClassifyDesktopBridgeHealthOptions): string[] {
+  const rawTools = options?.requiredTools ?? [DESKTOP_ATTACHMENT_OPEN_CAPABILITY];
+  if (!Array.isArray(rawTools) || rawTools.length > MAX_DESKTOP_REQUIRED_TOOLS) {
+    throw new TypeError(`requiredTools must contain at most ${MAX_DESKTOP_REQUIRED_TOOLS} tool names`);
+  }
+  const tools: string[] = [];
+  for (const rawTool of rawTools) {
+    const tool = String(rawTool || '').trim().toLowerCase();
+    if (!DESKTOP_TOOL_NAME_RE.test(tool)) {
+      throw new TypeError('requiredTools contains an invalid desktop tool name');
+    }
+    if (!tools.includes(tool)) tools.push(tool);
+  }
+  return tools;
+}
+
+function readAdvertisedDesktopTools(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length > MAX_DESKTOP_HEALTH_TOOLS) return null;
+  const tools: string[] = [];
+  for (const rawTool of value) {
+    if (typeof rawTool !== 'string') return null;
+    const tool = rawTool.trim().toLowerCase();
+    if (!DESKTOP_TOOL_NAME_RE.test(tool)) return null;
+    if (!tools.includes(tool)) tools.push(tool);
+  }
+  return tools;
+}
+
+type ParsedDesktopRestartSafety = {
+  sourceChanged: boolean;
+  safeToRefresh: boolean;
+  blockers: string[];
+  opaqueAttachmentCapabilityPresent: boolean | null;
+};
+
+function readDesktopRestartSafety(value: unknown): ParsedDesktopRestartSafety | null {
+  if (!isRecord(value)) return null;
+  if (Object.prototype.hasOwnProperty.call(value, 'schemaVersion') && value.schemaVersion !== 1) return null;
+  if (typeof value.sourceChanged !== 'boolean' || typeof value.safeToRefresh !== 'boolean') return null;
+  if (!Array.isArray(value.blockers) || value.blockers.length > MAX_DESKTOP_RESTART_BLOCKERS) return null;
+  const blockers: string[] = [];
+  for (const rawBlocker of value.blockers) {
+    if (
+      typeof rawBlocker !== 'string'
+      || !DESKTOP_RESTART_BLOCKER_RE.test(rawBlocker)
+      || !KNOWN_DESKTOP_RESTART_BLOCKERS.has(rawBlocker)
+    ) return null;
+    if (!blockers.includes(rawBlocker)) blockers.push(rawBlocker);
+  }
+  const hasOpaqueCapability = Object.prototype.hasOwnProperty.call(value, 'opaqueAttachmentCapabilityPresent');
+  if (hasOpaqueCapability && typeof value.opaqueAttachmentCapabilityPresent !== 'boolean') return null;
+  // A refresh cannot be safe when there is no source change, nor while the
+  // bridge itself reports any blocker. Treat contradictory evidence as
+  // malformed instead of selecting the most optimistic field.
+  if (value.safeToRefresh && (!value.sourceChanged || blockers.length > 0)) return null;
+  return {
+    sourceChanged: value.sourceChanged,
+    safeToRefresh: value.safeToRefresh,
+    blockers,
+    opaqueAttachmentCapabilityPresent: hasOpaqueCapability
+      ? value.opaqueAttachmentCapabilityPresent as boolean
+      : null,
+  };
+}
+
+/**
+ * Strictly classifies the unauthenticated `/desktop/health` payload without
+ * performing a fetch, pairing, refresh, or process action. `supported: true`
+ * proves only that the process advertises a platform tool surface; exact
+ * feature readiness and source/restart evidence remain separate.
+ */
+export function classifyDesktopBridgeHealth(
+  value: unknown,
+  options?: ClassifyDesktopBridgeHealthOptions,
+): DesktopBridgeHealthClassification {
+  const requiredTools = normalizeRequiredDesktopTools(options);
+  if (!isRecord(value)) {
+    return unavailableDesktopBridgeClassification(
+      'bridge_unavailable',
+      'No local desktop bridge health response is available.',
+      { requiredTools },
+    );
+  }
+
+  const rawPlatform = typeof value.platform === 'string' ? value.platform.trim() : '';
+  const platform = DESKTOP_PLATFORM_RE.test(rawPlatform) ? rawPlatform : 'unknown';
+  if (value.ok !== true) {
+    return unavailableDesktopBridgeClassification(
+      value.ok === false ? 'bridge_unavailable' : 'bridge_health_invalid',
+      value.ok === false
+        ? 'The local desktop bridge reported that it is unavailable.'
+        : 'The local desktop bridge returned an invalid health contract.',
+      { reachable: true, platform, requiredTools },
+    );
+  }
+  if (typeof value.supported !== 'boolean') {
+    return unavailableDesktopBridgeClassification(
+      'bridge_health_invalid',
+      'The local desktop bridge health response omitted a valid platform-support flag.',
+      { reachable: true, platform, requiredTools },
+    );
+  }
+  const advertisedTools = readAdvertisedDesktopTools(value.tools);
+  if (!advertisedTools) {
+    return unavailableDesktopBridgeClassification(
+      'bridge_health_invalid',
+      'The local desktop bridge returned an invalid tool catalog.',
+      { reachable: true, platform, requiredTools },
+    );
+  }
+  if (!value.supported) {
+    return unavailableDesktopBridgeClassification(
+      'platform_unsupported',
+      `The local desktop bridge is reachable on ${platform}, but desktop automation is not supported there.`,
+      { reachable: true, platform, requiredTools },
+    );
+  }
+
+  const hasRestartSafety = Object.prototype.hasOwnProperty.call(value, 'restartSafety');
+  const restartSafety = hasRestartSafety ? readDesktopRestartSafety(value.restartSafety) : null;
+  const advertisedToolSet = new Set(advertisedTools);
+  const attachmentAdvertised = advertisedToolSet.has(DESKTOP_ATTACHMENT_OPEN_CAPABILITY);
+  const attachmentOpenReady = attachmentAdvertised
+    && restartSafety?.opaqueAttachmentCapabilityPresent !== false;
+  const missingTools = requiredTools.filter((tool) => (
+    !advertisedToolSet.has(tool)
+    || (tool === DESKTOP_ATTACHMENT_OPEN_CAPABILITY && !attachmentOpenReady)
+  ));
+  const base = {
+    reachable: true,
+    supported: true,
+    genericToolsReady: advertisedTools.length > 0,
+    attachmentOpenReady,
+    requiredToolsReady: missingTools.length === 0,
+    platform,
+    advertisedTools: freezeStrings(advertisedTools),
+    requiredTools: freezeStrings(requiredTools),
+    missingTools: freezeStrings(missingTools),
+    sourceChanged: restartSafety?.sourceChanged ?? null,
+    safeToRefresh: restartSafety?.safeToRefresh ?? (hasRestartSafety ? false : null),
+    blockers: freezeStrings(restartSafety?.blockers || []),
+    automaticRestartAllowed: false as const,
+  };
+
+  if (hasRestartSafety && !restartSafety) {
+    return Object.freeze({
+      ...base,
+      state: 'restart_blocked' as const,
+      recoveryCode: 'bridge_restart_blocked' as const,
+      detail: 'The bridge remains usable for advertised tools, but returned malformed restart-safety evidence. Restart it manually through the local supervisor only after current work is safe.',
+    });
+  }
+  if (missingTools.length > 0) {
+    const drift = restartSafety?.sourceChanged === true
+      ? ' The running process also reports that newer local source is available.'
+      : '';
+    return Object.freeze({
+      ...base,
+      state: 'capability_missing' as const,
+      recoveryCode: 'bridge_capability_missing' as const,
+      detail: `The bridge remains usable for its advertised tools, but is missing ${missingTools.join(', ')}.${drift} Restart the local supervisor when current work is safe, then recheck.`,
+    });
+  }
+  if (!restartSafety) {
+    return Object.freeze({
+      ...base,
+      state: 'restart_blocked' as const,
+      recoveryCode: 'bridge_restart_blocked' as const,
+      detail: 'The requested tools are advertised, but this bridge provides no restart-safety evidence. Existing tools remain available; source currency is unproven.',
+    });
+  }
+  if (!restartSafety.sourceChanged) {
+    return Object.freeze({
+      ...base,
+      state: 'current' as const,
+      recoveryCode: 'none' as const,
+      detail: 'The running desktop bridge is source-current and advertises every requested tool.',
+    });
+  }
+  if (restartSafety.safeToRefresh) {
+    return Object.freeze({
+      ...base,
+      state: 'source_changed' as const,
+      recoveryCode: 'bridge_source_changed' as const,
+      detail: 'Newer local bridge source is available and the running bridge reports an idle-safe refresh opportunity. This health check did not restart it.',
+    });
+  }
+  return Object.freeze({
+    ...base,
+    state: 'restart_blocked' as const,
+    recoveryCode: 'bridge_restart_blocked' as const,
+    detail: restartSafety.blockers.length > 0
+      ? `Newer local bridge source is available, but refresh is blocked by ${restartSafety.blockers.join(', ')}. Existing advertised tools remain available.`
+      : 'Newer local bridge source is available, but the bridge did not report safe refresh authority. Existing advertised tools remain available.',
+  });
 }
 
 export interface DesktopResult<T = unknown> {

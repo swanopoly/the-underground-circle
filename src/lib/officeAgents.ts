@@ -23,6 +23,9 @@ export interface OfficeAgent {
   costTotal: number;
   costWeek: number;
   tokensUsed: number;
+  /** Owner-private lifetime token ledger. `tokensUsed` remains the live
+   *  bridge/session meter so a reconnect cannot masquerade as all-time use. */
+  tokensTotal?: number;
   inputTokens: number;
   outputTokens: number;
   cachedTokens: number;
@@ -54,6 +57,187 @@ export interface OfficeAgent {
   statusNote?: string;
 }
 
+/**
+ * Durable cost fields published with a Circle Office agent. The database row
+ * owns calendar-day and lifetime totals; live bridge sessions own only their
+ * cumulative session meter. Keeping those meanings separate prevents a login,
+ * bridge restart, or local-cache restore from changing a value labelled
+ * "today".
+ */
+export interface DurableOfficeAgentCostLike {
+  id?: string | null;
+  name?: string | null;
+  provider?: string | null;
+  estimated_cost_today?: number | string | null;
+  estimated_cost_total?: number | string | null;
+  token_usage_total?: number | string | null;
+}
+
+function finiteNonNegativeCost(value: unknown): number {
+  const parsed = typeof value === 'number' ? value : Number.parseFloat(String(value ?? ''));
+  return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+}
+
+/** Normalize a verified server spend value without turning missing or invalid
+ * telemetry into a convincing zero. A real zero remains distinguishable from
+ * an unavailable snapshot. */
+export function normalizeOfficeTrackedCost(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : null;
+}
+
+/** Compact USD formatting for tracked Office spend. Retains sub-cent values
+ * so low but real usage is never displayed as `$0.00`. */
+export function formatOfficeTrackedCost(value: number): string {
+  const normalized = normalizeOfficeTrackedCost(value);
+  if (normalized === null) return '—';
+  if (normalized === 0) return '$0.00';
+  if (normalized < 0.0001) return '<$0.0001';
+  if (normalized < 0.01) return `$${normalized.toFixed(4)}`;
+  if (normalized < 1) return `$${normalized.toFixed(3)}`;
+  return `$${normalized.toFixed(2)}`;
+}
+
+function finiteNonNegativeTokenCount(value: unknown): number {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isSafeInteger(parsed) ? Math.max(0, parsed) : 0;
+}
+
+function normalizedCostIdentity(value: unknown): string {
+  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+/**
+ * Resolve one durable cost row without order-dependent provider fallback.
+ * Exact DB id/name wins. A provider-level fallback is allowed only when both
+ * sides are singular; multiple same-provider sessions must not all inherit the
+ * same aggregate or pick whichever DB row happened to load last.
+ */
+export function findDurableOfficeAgentCost<T extends DurableOfficeAgentCostLike>(
+  agent: Pick<OfficeAgent, 'name' | 'providerType' | 'connectionId' | 'sessionKey'>,
+  rows: readonly T[],
+  options: { liveProviderAgentCount?: number } = {},
+): T | null {
+  const candidates = Array.isArray(rows) ? rows.filter(Boolean) : [];
+  if (agent.connectionId === 'db-agent') {
+    const exactId = candidates.filter((row) => String(row.id || '') === agent.sessionKey);
+    if (exactId.length === 1) return exactId[0];
+    if (exactId.length > 1) return null;
+  }
+
+  const agentName = normalizedCostIdentity(agent.name);
+  if (agentName) {
+    const exactName = candidates.filter((row) => normalizedCostIdentity(row.name) === agentName);
+    if (exactName.length === 1) return exactName[0];
+    if (exactName.length > 1) return null;
+  }
+
+  if (options.liveProviderAgentCount !== 1) return null;
+  const provider = normalizedCostIdentity(agent.providerType);
+  if (!provider) return null;
+  const providerRows = candidates.filter((row) => normalizedCostIdentity(row.provider) === provider);
+  return providerRows.length === 1 ? providerRows[0] : null;
+}
+
+/** Apply server-owned daily/lifetime totals while retaining session lineage. */
+export function applyDurableOfficeAgentCost(
+  agent: OfficeAgent,
+  durable: DurableOfficeAgentCostLike | null | undefined,
+): OfficeAgent {
+  const sessionCost = finiteNonNegativeCost(agent.sessionCostToday ?? agent.costToday);
+  if (!durable) {
+    const costToday = finiteNonNegativeCost(agent.costToday);
+    return {
+      ...agent,
+      costToday,
+      sessionCostToday: sessionCost,
+      costTotal: Math.max(costToday, finiteNonNegativeCost(agent.costTotal)),
+      tokensTotal: Math.max(
+        finiteNonNegativeTokenCount(agent.tokensUsed),
+        finiteNonNegativeTokenCount(agent.tokensTotal),
+      ),
+    };
+  }
+
+  const costToday = finiteNonNegativeCost(durable.estimated_cost_today);
+  return {
+    ...agent,
+    costToday,
+    sessionCostToday: sessionCost,
+    costTotal: Math.max(costToday, finiteNonNegativeCost(durable.estimated_cost_total)),
+    tokensTotal: Math.max(
+      finiteNonNegativeTokenCount(agent.tokensUsed),
+      finiteNonNegativeTokenCount(agent.tokensTotal),
+      finiteNonNegativeTokenCount(durable.token_usage_total),
+    ),
+  };
+}
+
+export interface OfficeAgentLifetimeUsageLike {
+  sessionKey: string;
+  lifetimeTokens: number;
+  lifetimeCost: number;
+  lifetimeMessages?: number;
+}
+
+export interface OfficeAgentLifetimeUsageSummary {
+  tokens: number;
+  messages: number;
+  cost: number;
+}
+
+/** Count each exact owner/session ledger row once for account-wide Profile and
+ * Analytics totals. Invalid local values contribute zero and every sum stays
+ * inside the client safe-integer boundary enforced by §51. */
+export function summarizeOfficeAgentLifetimeUsage(
+  rows: Iterable<OfficeAgentLifetimeUsageLike>,
+): OfficeAgentLifetimeUsageSummary {
+  let tokens = 0;
+  let messages = 0;
+  let cost = 0;
+  for (const row of rows) {
+    tokens = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      tokens + finiteNonNegativeTokenCount(row.lifetimeTokens),
+    );
+    messages = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      messages + finiteNonNegativeTokenCount(row.lifetimeMessages),
+    );
+    cost = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      cost + finiteNonNegativeCost(row.lifetimeCost),
+    );
+  }
+  return { tokens, messages, cost };
+}
+
+/**
+ * Project the owner-private lifetime ledger without overwriting live session
+ * counters. A bridge restart may reset `tokensUsed` and `sessionCostToday`,
+ * while these two all-time fields remain monotonic server truth.
+ */
+export function applyOfficeAgentLifetimeUsage(
+  agent: OfficeAgent,
+  usage: OfficeAgentLifetimeUsageLike | null | undefined,
+): OfficeAgent {
+  if (!usage || usage.sessionKey !== agent.sessionKey) return agent;
+  return {
+    ...agent,
+    tokensTotal: Math.max(
+      finiteNonNegativeTokenCount(agent.tokensUsed),
+      finiteNonNegativeTokenCount(agent.tokensTotal),
+      finiteNonNegativeTokenCount(usage.lifetimeTokens),
+    ),
+    costTotal: Math.max(
+      finiteNonNegativeCost(agent.costTotal),
+      finiteNonNegativeCost(agent.costToday),
+      finiteNonNegativeCost(usage.lifetimeCost),
+    ),
+  };
+}
+
 export const STATUS_COLORS: Record<AgentStatus, string> = {
   active: '#22c55e',
   idle: '#22c55e',
@@ -64,6 +248,56 @@ export const STATUS_COLORS: Record<AgentStatus, string> = {
 
 export function isConnectedOfficeStatus(status: AgentStatus | string | undefined): boolean {
   return status === 'active' || status === 'building' || status === 'idle';
+}
+
+export type OfficeAgentExecutionTruth = {
+  state: 'warning' | 'active' | 'connected' | 'unavailable';
+  statusWarning: string;
+  currentToolName: string;
+  currentToolFile: string;
+  activity: string;
+};
+
+/**
+ * Resolve the execution claims that a user-facing Office surface may make.
+ * Bridge reconciliation deliberately retains recent tool fields for
+ * diagnostics, so a warning or non-live status must fence those fields before
+ * UI copy can describe them as current work.
+ */
+export function resolveOfficeAgentExecutionTruth(
+  agent: Pick<OfficeAgent, 'status' | 'statusNote' | 'currentToolName' | 'currentToolFile' | 'activity'>,
+): OfficeAgentExecutionTruth {
+  const statusWarning = typeof agent.statusNote === 'string'
+    ? agent.statusNote.trim().slice(0, 240)
+    : '';
+  if (statusWarning) {
+    return {
+      state: 'warning',
+      statusWarning,
+      currentToolName: '',
+      currentToolFile: '',
+      activity: '',
+    };
+  }
+
+  const active = agent.status === 'active' || agent.status === 'building';
+  if (active) {
+    return {
+      state: 'active',
+      statusWarning: '',
+      currentToolName: String(agent.currentToolName || '').trim(),
+      currentToolFile: String(agent.currentToolFile || '').trim(),
+      activity: String(agent.activity || '').trim(),
+    };
+  }
+
+  return {
+    state: isConnectedOfficeStatus(agent.status) ? 'connected' : 'unavailable',
+    statusWarning: '',
+    currentToolName: '',
+    currentToolFile: '',
+    activity: '',
+  };
 }
 
 export function getOfficeStatusColor(status: AgentStatus | string | undefined): string {
@@ -188,7 +422,7 @@ export function reconcileAgentStatusWithConnection(
 export const AGENT_COLORS = [
   '#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899',
   '#14b8a6', '#f472b6', '#fb923c', '#dc2626', '#84cc16', '#38bdf8',
-  '#a855f7', '#22d3ee', '#e879f9', '#facc15',
+  '#a855f7', '#6366f1', '#e879f9', '#facc15',
 ];
 
 // Empty default — no mock data

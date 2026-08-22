@@ -43,27 +43,12 @@ export interface GitHubCommandResult {
 // ─── Token Resolution ────────────────────────────────────────────────────────
 
 /**
- * Get a working GitHub token for this circle/user.
- * Tries the circle PAT first, then falls back to the user's OAuth token.
+ * Get a client-held GitHub PAT for this circle. OAuth tokens are server-only;
+ * browser-side GitHub commands fail closed until their operation is available
+ * through the authenticated GitHub edge proxy.
  */
-async function getToken(circleId: string, userId: string): Promise<string | null> {
-  // 1. Try PAT stored per-circle
-  const pat = await getStoredToken(circleId);
-  if (pat) return pat;
-
-  // 2. Try OAuth token from user_github_tokens table
-  try {
-    const { data } = await supabase
-      .from('user_github_tokens')
-      .select('access_token')
-      .eq('user_id', userId)
-      .maybeSingle();
-    if (data?.access_token) return data.access_token;
-  } catch {
-    // Silently fall through — table may not exist or RLS may block
-  }
-
-  return null;
+async function getToken(circleId: string, _userId: string): Promise<string | null> {
+  return (await getStoredToken(circleId)) || null;
 }
 
 // ─── Repo Resolution ─────────────────────────────────────────────────────────
@@ -266,7 +251,7 @@ async function handleCat(
 ): Promise<GitHubCommandResult> {
   try {
     const { content, size, sha, error } = await getFileContent(
-      token, repo.owner, repo.repo, filePath,
+      token, repo.owner, repo.repo, filePath, repo.branch,
     );
     if (error) return errorResult(error);
 
@@ -295,7 +280,7 @@ async function handleEdit(
 ): Promise<GitHubCommandResult> {
   try {
     const { content, sha, size, error } = await getFileContent(
-      token, repo.owner, repo.repo, filePath,
+      token, repo.owner, repo.repo, filePath, repo.branch,
     );
     if (error) return errorResult(error);
 

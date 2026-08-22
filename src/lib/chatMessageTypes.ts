@@ -25,7 +25,10 @@ import type {
   PersistedChatRecoveryReliabilitySummary,
   PersistedComputerFindings,
   PersistedBestOfNRace,
+  PersistedOpenSwanMultiActionCompletion,
+  PersistedOpenSwanTerminal,
 } from './persistedChatMetadata';
+import type { OpenSwanResumeLocator } from './toolLoopResume';
 import type { ChatComputerHandoffMetadata } from './chatComputerHandoffContext';
 import type { ChatAutomationPlanPreview } from './chatAutomationPlanPreview';
 import type { ChatOutcomeVerdict, ChatUserSignal } from './chatOutcomeSignals';
@@ -41,6 +44,7 @@ import type { PreflightBlockerItem } from '../screens/circles/tabs/chat/Prefligh
 import type { SearchResultRow } from '../screens/circles/tabs/chat/SearchResultsCard';
 import type { AssignPickerAgent } from '../screens/circles/tabs/chat/AssignPickerCard';
 import type { ComputerTaskOutcomeStatus } from './computerTaskOutcome';
+import type { ConnectedAgentHandoffSnapshot } from './connectedAgentHandoffCore';
 
 // ─── Types (moved verbatim from ChatTab.tsx) ─────────────────────────────────
 
@@ -59,7 +63,7 @@ export type ChatMessage = {
   isBot: boolean;
   isUser: boolean;
   userName?: string;
-  /** Stable human author id; null/undefined for bot or legacy unknown rows. */
+  /** Stable database row author id, including persisted bot envelopes. */
   authorId?: string | null;
   timestamp: Date;
   reactions: Record<string, string[]>;
@@ -79,6 +83,15 @@ export type ChatMessage = {
   /** Mounted-only guidance is excluded from persistence, recovery, and model/memory history. */
   durability?: 'transcript' | 'ephemeral';
   agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
+  /** Durable accepted/drafted/failed handoff identity; never task completion. */
+  connectedAgentHandoff?: ConnectedAgentHandoffSnapshot | null;
+  /** Durable enum-only OpenSwan outcome. Resumability alone never enables a
+   * chip; only an exact locally-resolved openSwanResumeLocator is actionable. */
+  openSwanTerminal?: PersistedOpenSwanTerminal | null;
+  /** Value-free pointer to one exact local OpenSwan checkpoint event. */
+  openSwanResumeLocator?: OpenSwanResumeLocator | null;
+  /** Value-free A1-A3 completion snapshot; raw evidence remains runtime-only. */
+  openSwanMultiActionCompletion?: PersistedOpenSwanMultiActionCompletion | null;
   usage?: SwanBotStructuredResponse['usage'];
   executionStream?: OpenSwanExecutionContract[];
   agentPlan?: AgentPlanDraft | Record<string, unknown>;
@@ -121,6 +134,9 @@ export type ChatMessage = {
   /** Stable human requester for this bot turn. Unlike nearest-message
    *  inference, this remains correct when multiple circle members interleave. */
   requestAuthorId?: string | null;
+  /** Exact persisted user-message row that originated this bot run. Value-free
+   *  lineage for reload ownership; never inferred from transcript adjacency. */
+  requestSourceMessageId?: string | null;
   /** Last complete parsed envelope. Sync paths merge into this snapshot so a
    *  small reaction/status update cannot erase metadata not rendered in UI. */
   persistedMetadataSnapshot?: PersistedChatBotMetadata | null;
@@ -153,6 +169,10 @@ export type ChatMessage = {
 export type ChatBotMessageExtra = {
   delegatedTo?: string;
   delegatedSubagents?: string[];
+  connectedAgentHandoff?: ConnectedAgentHandoffSnapshot | null;
+  openSwanTerminal?: PersistedOpenSwanTerminal | null;
+  openSwanResumeLocator?: OpenSwanResumeLocator | null;
+  openSwanMultiActionCompletion?: PersistedOpenSwanMultiActionCompletion | null;
   memoriesUsed?: string[];
   memoryRefs?: PromptMemoryReference[];
   memoryRecommendations?: OpenSwanMemoryRecommendation[];
@@ -180,8 +200,16 @@ export type ChatBotMessageExtra = {
    */
   durability?: 'transcript' | 'ephemeral';
   runId?: string | null;
+  /**
+   * Typed non-terminal lanes (for example, a connected-agent bridge that only
+   * accepted a task) may override generic clean-text inference. Runtime-owned
+   * computer/browser terminal states still take precedence in ChatTab.
+   */
+  outcomeVerdict?: ChatOutcomeVerdict;
   requestId?: string | null;
   requestAuthorId?: string | null;
+  /** Exact persisted user-message row that originated this bot run. */
+  requestSourceMessageId?: string | null;
   /**
    * followup-chips: set true by error-path callers so the outcome verdict can
    * reach 'failed' (deriveOutcomeVerdict) independently of recoveryOptions —

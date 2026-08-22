@@ -10,6 +10,7 @@ import {
   type FeedMobileMode,
   type FeedLowerMode,
 } from '../../lib/workspaceAdaptation';
+import { PROFILE_DASHBOARD_TOKENS as PD } from './profileDashboardTheme';
 
 const LANDING_TABS: WorkspaceTabKey[] = ['OFFICE', 'CHAT', 'FEED', 'ROOMS', 'INTEGRATIONS'];
 const FEED_MOBILE: FeedMobileMode[] = ['missions', 'activity', 'agents', 'ai-tools', 'plan'];
@@ -49,16 +50,23 @@ export default function AdaptiveWorkspaceCard({ circleId }: { circleId: string }
           <Text style={styles.title}>Adaptive Workspace</Text>
           <Text style={styles.subtitle}>The app can learn how you use Chat, Feed, and Office, then choose better defaults. You can pin anything important.</Text>
         </View>
-        <Pressable onPress={toggleEnabled} style={[styles.toggle, settings.enabled === false ? styles.toggleOff : styles.toggleOn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
+        <Pressable
+          onPress={toggleEnabled}
+          disabled={saving}
+          accessibilityRole="switch"
+          accessibilityLabel="Adaptive workspace"
+          accessibilityState={{ checked: settings.enabled !== false, disabled: saving }}
+          style={[styles.toggle, settings.enabled === false ? styles.toggleOff : styles.toggleOn, saving && styles.disabled, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+        >
           <Text style={styles.toggleText}>{settings.enabled === false ? 'OFF' : 'ON'}</Text>
         </Pressable>
       </View>
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Learned Usage</Text>
-        {summary.map(item => (
-          <Text key={item} style={styles.summaryItem}>- {item}</Text>
-        ))}
+        {summary.length > 0
+          ? summary.map(item => <Text key={item} style={styles.summaryItem}>- {item}</Text>)
+          : <Text style={styles.summaryMuted}>No learned patterns yet.</Text>}
       </View>
 
       <View style={styles.section}>
@@ -95,7 +103,7 @@ export default function AdaptiveWorkspaceCard({ circleId }: { circleId: string }
         />
       </View>
 
-      {saving ? <Text style={styles.saving}>Saving adaptive workspace settings…</Text> : null}
+      {saving ? <Text accessibilityLiveRegion="polite" style={styles.saving}>Saving adaptive workspace settings…</Text> : null}
     </View>
   );
 }
@@ -121,6 +129,9 @@ function OptionRow({
             <Pressable
               key={option}
               onPress={() => onSelect(option)}
+              accessibilityRole="button"
+              accessibilityLabel={`Set ${label} to ${option}`}
+              accessibilityState={{ selected: active }}
               style={[styles.optionChip, active ? styles.optionChipActive : null, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
             >
               <Text style={[styles.optionChipText, active ? styles.optionChipTextActive : null]}>{option}</Text>
@@ -134,12 +145,11 @@ function OptionRow({
 
 const styles = StyleSheet.create({
   card: {
-    marginTop: 18,
     padding: 16,
-    borderRadius: 14,
+    borderRadius: PD.panelRadius,
     borderWidth: 1,
-    borderColor: '#1f2937',
-    backgroundColor: '#0b1020',
+    borderColor: PD.border,
+    backgroundColor: PD.panel,
     gap: 14,
   },
   headerRow: {
@@ -148,15 +158,18 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   title: {
-    color: '#f8fafc',
-    fontSize: 18,
-    fontWeight: '800',
+    color: PD.text,
+    fontSize: 13,
+    fontWeight: '900',
+    letterSpacing: 1.2,
+    textTransform: 'uppercase',
+    fontFamily: 'monospace',
   },
   subtitle: {
     marginTop: 4,
-    color: '#94a3b8',
-    fontSize: 13,
-    lineHeight: 18,
+    color: PD.textMuted,
+    fontSize: 11,
+    lineHeight: 16,
   },
   toggle: {
     minWidth: 56,
@@ -166,10 +179,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   toggleOn: {
-    backgroundColor: '#1d4ed8',
+    backgroundColor: `${PD.accent}30`,
+    borderWidth: 1,
+    borderColor: `${PD.accent}70`,
   },
   toggleOff: {
-    backgroundColor: '#334155',
+    backgroundColor: PD.inset,
+    borderWidth: 1,
+    borderColor: PD.borderStrong,
   },
   toggleText: {
     color: '#fff',
@@ -181,22 +198,27 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   sectionTitle: {
-    color: '#cbd5e1',
+    color: PD.textSecondary,
     fontSize: 12,
     fontWeight: '800',
     letterSpacing: 1,
     textTransform: 'uppercase',
   },
   summaryItem: {
-    color: '#e2e8f0',
+    color: PD.textSecondary,
     fontSize: 13,
     lineHeight: 18,
+  },
+  summaryMuted: {
+    color: PD.textMuted,
+    fontSize: 12,
+    lineHeight: 17,
   },
   optionRow: {
     gap: 8,
   },
   optionLabel: {
-    color: '#e2e8f0',
+    color: PD.text,
     fontSize: 13,
     fontWeight: '700',
   },
@@ -210,24 +232,27 @@ const styles = StyleSheet.create({
     paddingVertical: 7,
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: '#334155',
-    backgroundColor: '#111827',
+    borderColor: PD.borderStrong,
+    backgroundColor: PD.inset,
   },
   optionChipActive: {
-    borderColor: '#60a5fa',
-    backgroundColor: '#172554',
+    borderColor: PD.accent,
+    backgroundColor: `${PD.accent}20`,
   },
   optionChipText: {
-    color: '#94a3b8',
+    color: PD.textSecondary,
     fontSize: 12,
     fontWeight: '700',
   },
   optionChipTextActive: {
-    color: '#dbeafe',
+    color: PD.text,
   },
   saving: {
-    color: '#60a5fa',
+    color: PD.accent,
     fontSize: 12,
     fontWeight: '700',
+  },
+  disabled: {
+    opacity: 0.55,
   },
 });

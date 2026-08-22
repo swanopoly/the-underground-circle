@@ -11,31 +11,38 @@
  * `chatComputerRequestRouter.ts`; the reviewable surface is the PERMISSIONS
  * section of `ComputerUseConsole`.
  *
- * Hard invariant: the always-confirm floor (pay / delete / login / grant) can
- * NEVER be inside a sticky scope, can never be auto-approved by one, and is
- * filtered out even from maliciously crafted persisted scope objects. The
- * floor list is canonical here and re-exported by the router as
- * `ALWAYS_CONFIRM_FLOOR` so the two can never drift.
+ * Hard invariant: canonical exact effects can NEVER be inside a sticky scope,
+ * can never be auto-approved by one, and are filtered out even from malicious
+ * persisted scope objects. The router re-exports this module's projection of
+ * the dependency-free `approvalEffectPolicyCore` taxonomy.
  *
  * Dependency-light on purpose (type-only imports) so tsx smoke tests can load
  * it without react-native.
  */
 
 import type { ChatComputerConstraintCategory } from './chatComputerRequestRouter';
+import {
+  CHAT_COMPUTER_ALWAYS_EXACT_CATEGORIES,
+  CHAT_COMPUTER_STICKY_GRANTABLE_CATEGORIES,
+} from './approvalEffectPolicyCore';
 
 /**
  * Canonical always-confirm floor (T7). Re-exported by
  * `chatComputerRequestRouter.ALWAYS_CONFIRM_FLOOR`. Never grantable, never
  * downgradable, not user-disableable.
  */
-export const STICKY_FLOOR_CATEGORIES: readonly ChatComputerConstraintCategory[] = ['pay', 'delete', 'login', 'grant'];
+export const STICKY_FLOOR_CATEGORIES: readonly ChatComputerConstraintCategory[] =
+  CHAT_COMPUTER_ALWAYS_EXACT_CATEGORIES;
 
 const FLOOR_SET = new Set<ChatComputerConstraintCategory>(STICKY_FLOOR_CATEGORIES);
 
-/** The only categories a sticky scope may carry — every category minus the floor. */
-export const STICKY_GRANTABLE_CATEGORIES: readonly ChatComputerConstraintCategory[] = [
-  'submit', 'send', 'publish', 'download', 'upload', 'save',
-];
+/**
+ * The only categories a sticky scope may carry. The current router exposes no
+ * positively safe reversible category, so this is intentionally empty until
+ * such a category is added to the canonical effect policy.
+ */
+export const STICKY_GRANTABLE_CATEGORIES: readonly ChatComputerConstraintCategory[] =
+  CHAT_COMPUTER_STICKY_GRANTABLE_CATEGORIES;
 
 const GRANTABLE_SET = new Set<ChatComputerConstraintCategory>(STICKY_GRANTABLE_CATEGORIES);
 
@@ -146,9 +153,9 @@ export type CreateStickyScopeResult =
   | { ok: false; error: string };
 
 /**
- * Create a sticky allow scope. Rejects floor categories (pay/delete/login/
- * grant) outright — degrading them silently would let a "grant everything"
- * UI bug create an unbypassable-floor bypass.
+ * Create a sticky allow scope. Rejects exact-floor categories outright —
+ * degrading them silently would let a broad standing grant bypass exact
+ * outcome consent.
  */
 export function createStickyScope(input: {
   scopeKind: StickyAllowScopeKind;
@@ -202,7 +209,7 @@ export function isStickyScopeExpired(scope: StickyAllowScope, nowMs = Date.now()
 }
 
 export function isStickyScopeActive(scope: StickyAllowScope, nowMs = Date.now()): boolean {
-  return !scope.revoked && !isStickyScopeExpired(scope, nowMs) && scope.allowedCategories.length > 0;
+  return !scope.revoked && !isStickyScopeExpired(scope, nowMs) && sanitizeCategories(scope.allowedCategories).length > 0;
 }
 
 export function revokeStickyScope(
@@ -326,7 +333,9 @@ export function applyStickyScopes(
   const requested = Array.from(new Set(requestedCategories || []));
   const floorRequested = requested.filter((cat) => FLOOR_SET.has(cat));
   const nonFloorRequested = requested.filter((cat) => !FLOOR_SET.has(cat));
-  const matching = (scopes || []).filter((scope) => scopeMatchesTask(scope, target, nowMs));
+  const matching = (scopes || []).filter((scope) => (
+    scopeMatchesTask(scope, target, nowMs) && sanitizeCategories(scope.allowedCategories).length > 0
+  ));
 
   const autoApproved: ChatComputerConstraintCategory[] = [];
   const stillRequired: ChatComputerConstraintCategory[] = [...floorRequested];
@@ -431,11 +440,9 @@ export interface StickyScopeOffer {
 }
 
 /**
- * Build the one-tap "Always allow <categories> on <scopeKey>" offer shown on
- * a COMPLETED task that needed approval. Floor categories are stripped; when
- * the task exposed no concrete category, the offer falls back to the generic
- * non-destructive mutation category ('save') so the grant stays bounded.
- * Returns null when no target site/app can be extracted.
+ * Build the one-tap standing-grant offer for a completed task. Exact categories
+ * are stripped and no synthetic fallback is invented; if nothing is positively
+ * category-auto eligible, no sticky offer is shown.
  */
 export function buildStickyScopeOfferFromTask(args: {
   task: string;
@@ -446,7 +453,8 @@ export function buildStickyScopeOfferFromTask(args: {
   if (!scopeKind) return null;
   const scopeKey = scopeKind === 'site' ? targets.hostname! : targets.appName!;
   const categories = sanitizeCategories(args.categories || []);
-  const offered = categories.length > 0 ? categories : (['save'] as ChatComputerConstraintCategory[]);
+  if (categories.length === 0) return null;
+  const offered = categories;
   return {
     scopeKind,
     scopeKey,

@@ -14,7 +14,7 @@ import { View, Platform } from 'react-native';
 
 // Same palette as the Quick Actions header so the glyph reads as the
 // same animated mark anywhere it appears.
-const DOT_COLORS = ['#22d3ee', '#facc15', '#22c55e', '#ef4444', '#a855f7', '#f97316'];
+const DOT_COLORS = ['#6366f1', '#facc15', '#22c55e', '#ef4444', '#a855f7', '#f97316'];
 
 // Formations are defined for a 26x26 box (S). We scale at render time by
 // rewriting `left`/`top` proportionally if the caller asks for a smaller

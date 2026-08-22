@@ -6,10 +6,6 @@
  * Returns structured results with rendered artifacts.
  */
 
-const GEMINI_API_KEY = process.env.EXPO_PUBLIC_ALLOW_PLATFORM_MODEL_KEYS === 'true'
-  ? process.env.EXPO_PUBLIC_GEMINI_API_KEY || ''
-  : '';
-
 // ── Model capability definitions ────────────────────────────────────────────
 
 export type ModelCapability = 'text' | 'code' | 'image_gen' | 'image_understand' | 'video_gen' | 'audio_gen' | 'webpage_gen' | 'reasoning';
@@ -19,10 +15,18 @@ const MODEL_CAPABILITIES: Record<string, ModelCapability[]> = {
   'flux-schnell':        ['image_gen'],
   'flux-dev':            ['image_gen'],
   'stable-diffusion-xl': ['image_gen'],
+  'gpt-image-2':         ['image_gen'],
 
   // Multimodal (text + image understanding + generation)
-  'gpt-4o':                     ['text', 'code', 'image_understand', 'image_gen', 'webpage_gen'],
-  'gemini-2.5-flash-preview':   ['text', 'code', 'image_understand', 'image_gen', 'webpage_gen'],
+  'gpt-4o':                     ['text', 'code', 'image_understand', 'webpage_gen'],
+  'gpt-5.6-sol':                ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
+  'gpt-5.6-terra':              ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
+  'gpt-5.6-luna':               ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
+  'gpt-4.1':                    ['text', 'code', 'image_understand', 'webpage_gen'],
+  'gpt-4.1-mini':               ['text', 'code', 'image_understand', 'webpage_gen'],
+  'gemini-3.6-flash':           ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
+  'gemini-3.5-flash-lite':      ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
+  'gemini-2.5-flash-preview':   ['text', 'code', 'image_understand', 'webpage_gen'],
   'gemini-3.5-flash':           ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
   'gemini-3.1-pro-preview':     ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
   'gemini-3.1-flash-lite':      ['text', 'code', 'image_understand', 'webpage_gen'],
@@ -32,6 +36,8 @@ const MODEL_CAPABILITIES: Record<string, ModelCapability[]> = {
 
   // Coding models
   'claude-fable-5':      ['text', 'code', 'reasoning', 'webpage_gen'],
+  'claude-opus-5':       ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
+  'claude-sonnet-5':     ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
   'claude-opus-4-8':     ['text', 'code', 'reasoning', 'webpage_gen'],
   'claude-opus-4-7':     ['text', 'code', 'reasoning', 'webpage_gen'],
   'claude-opus-4-6':     ['text', 'code', 'reasoning', 'webpage_gen'],
@@ -43,8 +49,23 @@ const MODEL_CAPABILITIES: Record<string, ModelCapability[]> = {
   'gpt-5.4':             ['text', 'code', 'reasoning', 'webpage_gen'],
   'gpt-5.4-mini':        ['text', 'code', 'reasoning', 'webpage_gen'],
   'gpt-5.4-nano':        ['text', 'code'],
+  'o3-pro':              ['text', 'code', 'reasoning'],
+  'o3':                  ['text', 'code', 'reasoning'],
   'codex-mini':          ['text', 'code'],
   'deepseek-v3.2':       ['text', 'code'],
+  'deepseek-v4-pro':     ['text', 'code', 'reasoning', 'webpage_gen'],
+  'deepseek-v4-flash':   ['text', 'code', 'reasoning', 'webpage_gen'],
+  'mistral-medium-3-5':  ['text', 'code', 'reasoning', 'webpage_gen'],
+  'mistral-large-2512':  ['text', 'code', 'reasoning', 'webpage_gen'],
+  'mistral-small-2603':  ['text', 'code', 'webpage_gen'],
+  'codestral-2508':      ['text', 'code'],
+  'glm-5.1':             ['text', 'code', 'reasoning', 'webpage_gen'],
+  'glm-5':               ['text', 'code', 'reasoning', 'webpage_gen'],
+  'minimax-m2.7':        ['text', 'code', 'reasoning', 'webpage_gen'],
+  'command-a-plus-05-2026': ['text', 'code', 'reasoning'],
+  'command-a-reasoning-08-2025': ['text', 'reasoning'],
+  'gpt-oss-120b':        ['text', 'code', 'reasoning'],
+  'gpt-oss-20b':         ['text', 'code', 'reasoning'],
   'qwen-3.5-coder':      ['text', 'code'],
 
   // Reasoning
@@ -100,7 +121,9 @@ const PROVIDER_PREFIX_HEADS = new Set<string>([
   'openswan',
   // Vendor/org heads seen inside OpenRouter/HF-style ids.
   'meta-llama', 'deepseek-ai', 'qwen', 'black-forest-labs', 'stabilityai',
-  'moonshotai', 'x-ai',
+  'moonshotai', 'x-ai', 'meta', 'mistral-ai', 'zai-org', 'minimaxai',
+  // Fireworks canonical account-scoped model ids.
+  'accounts', 'fireworks', 'models',
 ]);
 
 /**
@@ -213,6 +236,12 @@ const SONAR_FLAGS = flagSet({});
 /** Strong coder over the plain tool-chat base (OpenAI/DeepSeek/Qwen coders). */
 const STRONG_CODER_TOOL_FLAGS = flagSet({ toolUse: true, codingTier: 'strong' });
 const STRONG_CODER_VISION_FLAGS = flagSet({ toolUse: true, vision: true, codingTier: 'strong' });
+const GPT_56_STRONG_FLAGS = flagSet({ toolUse: true, vision: true, maxOutputTokens: 128000, codingTier: 'strong' });
+const GPT_56_FAST_FLAGS = flagSet({ toolUse: true, vision: true, maxOutputTokens: 128000, codingTier: 'basic' });
+const CLAUDE_5_SONNET_FLAGS = flagSet({ toolUse: true, vision: true, computerUse: true, maxOutputTokens: 128000, codingTier: 'strong' });
+const CLAUDE_5_CHAT_FLAGS = flagSet({ toolUse: true, vision: true, maxOutputTokens: 128000, codingTier: 'strong' });
+const GEMINI_36_FLAGS = flagSet({ toolUse: true, vision: true, maxOutputTokens: 65536, codingTier: 'strong' });
+const GEMINI_35_LITE_FLAGS = flagSet({ toolUse: true, vision: true, maxOutputTokens: 65536, codingTier: 'basic' });
 
 /** Explicit per-model flags, keyed by normalizeModelId() output. */
 const MODEL_CAPABILITY_FLAGS: Record<string, ModelCapabilityFlags> = {
@@ -220,6 +249,7 @@ const MODEL_CAPABILITY_FLAGS: Record<string, ModelCapabilityFlags> = {
   'flux-schnell':        IMAGE_ONLY_FLAGS,
   'flux-dev':            IMAGE_ONLY_FLAGS,
   'stable-diffusion-xl': IMAGE_ONLY_FLAGS,
+  'gpt-image-2':         IMAGE_ONLY_FLAGS,
 
   // BlackSwan-v5 (app-trained Qwen; P8) — now registered DELIBERATELY with
   // the same fail-closed tool/vision posture the unknown-default gave it by
@@ -231,6 +261,8 @@ const MODEL_CAPABILITY_FLAGS: Record<string, ModelCapabilityFlags> = {
   'cswan801/blackswan-v5': flagSet({ streaming: false }),
 
   // Anthropic
+  'claude-sonnet-5':     CLAUDE_5_SONNET_FLAGS,
+  'claude-opus-5':       CLAUDE_5_CHAT_FLAGS,
   'claude-sonnet-4-6':   CLAUDE_SONNET_FLAGS,
   'claude-fable-5':      CLAUDE_CHAT_FLAGS,
   'claude-opus-4-8':     CLAUDE_CHAT_FLAGS,
@@ -240,16 +272,25 @@ const MODEL_CAPABILITY_FLAGS: Record<string, ModelCapabilityFlags> = {
   'claude-haiku-4-5-20251001': CLAUDE_FAST_FLAGS,
 
   // OpenAI
+  'gpt-5.6-sol':   GPT_56_STRONG_FLAGS,
+  'gpt-5.6-terra': GPT_56_STRONG_FLAGS,
+  'gpt-5.6-luna':  GPT_56_FAST_FLAGS,
   'gpt-4o':        TOOL_VISION_FLAGS,
   'gpt-5.5-pro':   STRONG_CODER_VISION_FLAGS,
   'gpt-5.5':       STRONG_CODER_VISION_FLAGS,
   'gpt-5.4':       STRONG_CODER_VISION_FLAGS,
   'gpt-5.4-mini':  TOOL_VISION_FLAGS,
   'gpt-5.4-nano':  TOOL_CHAT_FLAGS,
+  'o3-pro':        STRONG_CODER_TOOL_FLAGS,
+  'o3':            STRONG_CODER_TOOL_FLAGS,
+  'gpt-4.1':       TOOL_VISION_FLAGS,
+  'gpt-4.1-mini':  TOOL_VISION_FLAGS,
   'gpt-4.1-nano':  TOOL_VISION_FLAGS,
   'codex-mini':    STRONG_CODER_TOOL_FLAGS,
 
   // Google
+  'gemini-3.6-flash':         GEMINI_36_FLAGS,
+  'gemini-3.5-flash-lite':    GEMINI_35_LITE_FLAGS,
   'gemini-3.5-flash':         GEMINI_FLAGS,
   'gemini-3.1-pro-preview':   GEMINI_PRO_FLAGS,
   'gemini-3.1-flash-lite':    GEMINI_FLAGS,
@@ -263,10 +304,23 @@ const MODEL_CAPABILITY_FLAGS: Record<string, ModelCapabilityFlags> = {
   // frontier-class coders (r1 = strong PLANNER, no tools → never executor).
   'deepseek-v3':   STRONG_CODER_TOOL_FLAGS,
   'deepseek-v3.2': STRONG_CODER_TOOL_FLAGS,
+  'deepseek-v4-pro': STRONG_CODER_TOOL_FLAGS,
+  'deepseek-v4-flash': STRONG_CODER_TOOL_FLAGS,
   'deepseek-r1':   flagSet({ codingTier: 'strong' }),
 
   // Mistral / Qwen / Llama (Groq-hosted etc.)
   'mistral-large-3':  TOOL_CHAT_FLAGS,
+  'mistral-medium-3-5': STRONG_CODER_TOOL_FLAGS,
+  'mistral-large-2512': STRONG_CODER_TOOL_FLAGS,
+  'mistral-small-2603': TOOL_CHAT_FLAGS,
+  'codestral-2508': STRONG_CODER_TOOL_FLAGS,
+  'glm-5.1': STRONG_CODER_TOOL_FLAGS,
+  'glm-5': STRONG_CODER_TOOL_FLAGS,
+  'minimax-m2.7': STRONG_CODER_TOOL_FLAGS,
+  'command-a-plus-05-2026': TOOL_CHAT_FLAGS,
+  'command-a-reasoning-08-2025': flagSet({ codingTier: 'strong' }),
+  'gpt-oss-120b': STRONG_CODER_TOOL_FLAGS,
+  'gpt-oss-20b': TOOL_CHAT_FLAGS,
   'qwen-3.5-coder':   STRONG_CODER_TOOL_FLAGS,
   'qwen-3.5-flash':   TOOL_CHAT_FLAGS,
   'qwen-3.5-plus':    TOOL_CHAT_FLAGS,
@@ -283,14 +337,22 @@ const MODEL_CAPABILITY_FLAGS: Record<string, ModelCapabilityFlags> = {
  *  provider variants). Ordered: first match wins; image-only families are
  *  checked before chat families. Anything unmatched stays fail-closed. */
 const FAMILY_FLAG_PATTERNS: Array<{ pattern: RegExp; flags: ModelCapabilityFlags }> = [
-  { pattern: /(^|[-_/.])(flux|sdxl|dall-e|dalle)([-_/.\d]|$)|stable-diffusion|(^|[-_/.])imagen([-_/.\d]|$)/, flags: IMAGE_ONLY_FLAGS },
+  { pattern: /(^|[-_/.])(flux|sdxl|dall-e|dalle|gpt-image)([-_/.\d]|$)|stable-diffusion|(^|[-_/.])imagen([-_/.\d]|$)/, flags: IMAGE_ONLY_FLAGS },
   { pattern: /^claude-sonnet\b/,                 flags: CLAUDE_SONNET_FLAGS },
   { pattern: /^claude-(opus|fable)\b/,           flags: CLAUDE_CHAT_FLAGS },
   { pattern: /^claude-haiku\b/,                  flags: CLAUDE_FAST_FLAGS },
   { pattern: /^(gpt-4o|gpt-4\.1|gpt-5)/,         flags: TOOL_VISION_FLAGS },
+  { pattern: /^o3(?:-|$)/,                        flags: STRONG_CODER_TOOL_FLAGS },
   { pattern: /^gemini-/,                         flags: GEMINI_FLAGS },
   { pattern: /^(deepseek-v|deepseek-chat)/,      flags: TOOL_CHAT_FLAGS },
   { pattern: /^(mistral|ministral|magistral)-/,  flags: TOOL_CHAT_FLAGS },
+  { pattern: /^codestral-/,                      flags: STRONG_CODER_TOOL_FLAGS },
+  { pattern: /^gpt-oss-/,                        flags: TOOL_CHAT_FLAGS },
+  { pattern: /^(?:groq\/)?compound/,             flags: TOOL_CHAT_FLAGS },
+  { pattern: /^glm-/,                            flags: TOOL_CHAT_FLAGS },
+  { pattern: /^minimax-/,                        flags: TOOL_CHAT_FLAGS },
+  { pattern: /^command-/,                        flags: TOOL_CHAT_FLAGS },
+  { pattern: /^(kimi-|moonshot)/,                flags: TOOL_CHAT_FLAGS },
   { pattern: /^llama-4/,                         flags: TOOL_VISION_FLAGS },
   { pattern: /^llama-3/,                         flags: TOOL_CHAT_FLAGS },
   { pattern: /^qwen/,                            flags: TOOL_CHAT_FLAGS },
@@ -364,14 +426,37 @@ const AUDIO_PATTERNS = [
   /\b(say this|read this|speak this)\b/i,
 ];
 
+/**
+ * Split image-only picker prompts without hijacking ordinary questions.
+ * Explicit image commands/imperatives and descriptive noun phrases generate;
+ * questions and text/code tasks fall through to Chat's normal text-model
+ * fallback. This is intentionally pure so Chat can decide before any catalog
+ * or provider request starts.
+ */
+export function shouldRouteSelectedImageModelPrompt(message: string, modelId: string): boolean {
+  if (!getModelCapabilityFlags(modelId).imageOnly) return false;
+  const trimmed = message.trim();
+  if (!trimmed) return false;
+  const lower = trimmed.toLowerCase();
+  if (/^\/(?:imagine|image)\b/.test(lower)) return true;
+  if (IMAGE_PATTERNS.some((pattern) => pattern.test(trimmed))) return true;
+
+  const endsWithQuestion = /\?\s*$/.test(trimmed);
+  const startsConversationalOrTextTask = /^(?:what|why|how|when|where|who|can|could|do|does|is|are|explain|summarize|translate|help|tell|write|fix|debug|refactor|review|implement)\b/.test(lower);
+  const explicitTextOrCodeCommand = /^\/(?:code|build-page)\b/.test(lower);
+  const codeRepairTask = /\b(?:fix|debug)\b[^.?!]{0,60}\b(?:code|bug|error|test|function|script)\b/.test(lower);
+  return !(endsWithQuestion || startsConversationalOrTextTask || explicitTextOrCodeCommand || codeRepairTask);
+}
+
 export function detectIntent(message: string, modelId: string): UserIntent {
   // If an image-capable model is selected (especially image-only), assume image intent
   const caps = getModelCapabilities(modelId);
   const isImageModel = caps.includes('image_gen');
   const isImageOnlyModel = isImageModel && caps.length === 1;
 
-  // Image-only model: every message is an image prompt
-  if (isImageOnlyModel) return 'image_gen';
+  // An image-only picker turns descriptive prompts into images, while a
+  // question/text task remains eligible for Chat's text-model fallback.
+  if (isImageOnlyModel && shouldRouteSelectedImageModelPrompt(message, modelId)) return 'image_gen';
 
   // Image-capable model + message mentions anything image-related
   if (isImageModel && IMAGE_PATTERNS.some(p => p.test(message))) return 'image_gen';
@@ -390,7 +475,7 @@ export function detectIntent(message: string, modelId: string): UserIntent {
 export function pickBestModel(intent: UserIntent): string {
   switch (intent) {
     case 'image_gen': return 'flux-schnell';
-    case 'webpage_gen': return 'gemini-2.5-flash';
+    case 'webpage_gen': return 'gemini-3.6-flash';
     case 'code_gen': return 'auto'; // keep default AI path
     case 'video_gen': return 'auto';
     case 'audio_gen': return 'auto';
@@ -421,132 +506,28 @@ export interface CapabilityResult {
   }>;
 }
 
-// ── Image Generation via HF Inference API ───────────────────────────────────
-
-async function generateImageHF(prompt: string, model: string): Promise<{ url: string } | null> {
-  const hfModelMap: Record<string, string> = {
-    'flux-schnell': 'black-forest-labs/FLUX.1-schnell',
-    'flux-dev': 'black-forest-labs/FLUX.1-dev',
-    'stable-diffusion-xl': 'stabilityai/stable-diffusion-xl-base-1.0',
-  };
-
-  const hfModel = hfModelMap[model];
-  if (!hfModel) return null;
-
-  try {
-    console.log(`[ImageGen] Calling HF model: ${hfModel} with prompt: "${prompt.slice(0, 80)}"`);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout
-    const resp = await fetch(`https://api-inference.huggingface.co/models/${hfModel}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ inputs: prompt }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-
-    if (!resp.ok) {
-      console.warn(`[ImageGen] HF returned ${resp.status} for ${hfModel}`);
-      // 503 = model loading, try waiting and retrying once
-      if (resp.status === 503) {
-        const body = await resp.json().catch(() => ({}));
-        const wait = (body as any)?.estimated_time || 10;
-        console.log(`[ImageGen] Model loading, waiting ${Math.min(wait, 20)}s...`);
-        await new Promise(r => setTimeout(r, Math.min(wait, 20) * 1000));
-        const retry = await fetch(`https://api-inference.huggingface.co/models/${hfModel}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ inputs: prompt }),
-          signal: AbortSignal.timeout(30000),
-        });
-        if (retry.ok) {
-          const blob = await retry.blob();
-          return { url: URL.createObjectURL(blob) };
-        }
-      }
-      return null;
-    }
-
-    // HF returns binary image data
-    const contentType = resp.headers.get('content-type') || '';
-    if (contentType.startsWith('image/')) {
-      const blob = await resp.blob();
-      return { url: URL.createObjectURL(blob) };
-    }
-    // Sometimes HF returns JSON error even with 200
-    console.warn('[ImageGen] HF returned non-image content type:', contentType);
-    return null;
-  } catch (e) {
-    console.warn('[ImageGen] HF error:', e);
-    return null;
-  }
-}
-
-// ── Image Generation via Gemini ─────────────────────────────────────────────
-
-async function generateImageGemini(prompt: string): Promise<{ url: string; text?: string } | null> {
-  if (!GEMINI_API_KEY) return null;
-
-  try {
-    const resp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: `Generate an image: ${prompt}` }] }],
-          generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
-        }),
-      }
-    );
-
-    if (!resp.ok) return null;
-    const data = await resp.json();
-
-    const parts = data?.candidates?.[0]?.content?.parts || [];
-    let imageUrl = '';
-    let textResp = '';
-
-    for (const part of parts) {
-      if (part.inlineData?.mimeType?.startsWith('image/')) {
-        const b64 = part.inlineData.data;
-        imageUrl = `data:${part.inlineData.mimeType};base64,${b64}`;
-      }
-      if (part.text) textResp += part.text;
-    }
-
-    if (imageUrl) return { url: imageUrl, text: textResp };
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-// ── Webpage Generation via Gemini ───────────────────────────────────────────
+// ── Webpage Generation via server-side Google AI BYOK ──────────────────────
 
 async function generateWebpage(prompt: string): Promise<string | null> {
-  if (!GEMINI_API_KEY) return null;
-
   try {
-    const resp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{
-            parts: [{
-              text: `You are a web developer. Generate a complete, self-contained HTML page with inline CSS and JavaScript based on this request: "${prompt}"\n\nRequirements:\n- Single HTML file, all CSS/JS inline\n- Modern, dark theme design\n- Responsive layout\n- Use modern CSS (flexbox/grid)\n- Make it visually impressive\n- Return ONLY the HTML code, no markdown fences, no explanation before or after`,
-            }],
-          }],
-          generationConfig: { maxOutputTokens: 8192, temperature: 0.7 },
-        }),
+    // Keep this module pure for intent/capability callers; load the authenticated
+    // edge client only if the dormant webpage lane is explicitly invoked.
+    const { supabase } = await import('./supabase');
+    const { data, error } = await supabase.functions.invoke('llm-proxy', {
+      body: {
+        provider: 'google_ai',
+        model: 'gemini-3.6-flash',
+        messages: [{
+          role: 'user',
+          content: `You are a web developer. Generate a complete, self-contained HTML page with inline CSS and JavaScript based on this request: "${prompt}"\n\nRequirements:\n- Single HTML file, all CSS/JS inline\n- Modern, dark theme design\n- Responsive layout\n- Use modern CSS (flexbox/grid)\n- Make it visually impressive\n- Return ONLY the HTML code, no markdown fences, no explanation before or after`,
+        }],
+        max_tokens: 8192,
+        temperature: 0.7,
       }
-    );
+    });
 
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    let html = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    if (error || data?.error) return null;
+    let html = typeof data?.response === 'string' ? data.response : '';
     // Strip markdown fences if present
     html = html.replace(/^```html?\n?/i, '').replace(/\n?```$/i, '').trim();
     if (html.includes('<html') || html.includes('<!DOCTYPE') || html.includes('<body')) {
@@ -569,55 +550,13 @@ export async function routeByCapability(
 
   // ── Image Generation ──────────────────────────────────────────────────────
   if (intent === 'image_gen') {
-    const imagePrompt = message
-      .replace(/^(generate|create|make|draw|paint|design|render|show me|imagine)\s*/i, '')
-      .replace(/\b(an?|the)\s+(image|picture|photo|illustration|artwork)\s*(of|for|with|showing)?\s*/i, '')
-      .trim() || message;
-
-    // Try HF first for dedicated image models
-    const attemptedImageBackends: string[] = [];
-    if (['flux-schnell', 'flux-dev', 'stable-diffusion-xl'].includes(effectiveModel)) {
-      attemptedImageBackends.push(effectiveModel);
-      const hfResult = await generateImageHF(imagePrompt, effectiveModel);
-      if (hfResult) {
-        return {
-          handled: true,
-          response: `Generated with ${effectiveModel}`,
-          artifacts: [{
-            kind: 'image',
-            title: imagePrompt.slice(0, 60),
-            url: hfResult.url,
-            metadata: { model: effectiveModel, prompt: imagePrompt },
-          }],
-        };
-      }
-    }
-
-    // Fallback to Gemini image gen
-    if (GEMINI_API_KEY) attemptedImageBackends.push('Gemini image gen');
-    const geminiResult = await generateImageGemini(imagePrompt);
-    if (geminiResult) {
-      return {
-        handled: true,
-        response: geminiResult.text || `Generated image for: "${imagePrompt.slice(0, 80)}"`,
-        artifacts: [{
-          kind: 'image',
-          title: imagePrompt.slice(0, 60),
-          url: geminiResult.url,
-          metadata: { model: 'gemini-2.0-flash-exp', prompt: imagePrompt },
-        }],
-      };
-    }
-
-    // All image gen APIs failed — return handled:false so the caller's
-    // normal tiered path recovers with the user's selected model instead of
-    // rendering a dead-end "temporarily unavailable" bubble. The notice tells
-    // the user WHY no image is coming (backend names only, never keys) with a
-    // plain next action.
-    const fallbackNotice = attemptedImageBackends.length > 0
-      ? `Image generation didn't work just now (${attemptedImageBackends.join(' and ')} failed), so I'll answer in text instead. Try again in a minute, or pick a different image model.`
-      : `Image generation isn't set up yet (no image backend is configured), so I'll answer in text instead. Add a Google AI key in Marketplace to enable it.`;
-    return { handled: false, response: '', fallbackNotice };
+    // Chat owns image generation through generatedChatImages, where exact
+    // persisted request identity, server-side credentials, bounded response
+    // validation, and durable storage are enforced. This legacy capability
+    // router must stay network-free so it cannot create browser blobs/data
+    // URLs or duplicate a provider request.
+    void effectiveModel;
+    return { handled: false, response: '' };
   }
 
   // ── Webpage Generation ────────────────────────────────────────────────────
@@ -631,11 +570,15 @@ export async function routeByCapability(
           kind: 'webpage',
           title: message.slice(0, 60),
           html,
-          metadata: { model: 'gemini-2.5-flash', prompt: message },
+          metadata: { model: 'gemini-3.6-flash', prompt: message },
         }],
       };
     }
-    return { handled: false, response: '' };
+    return {
+      handled: false,
+      response: '',
+      fallbackNotice: `I couldn't build the page through the server-side model route. Connect or verify a Google AI key in Marketplace, then try again.`,
+    };
   }
 
   // ── Video Generation (placeholder — describe intent) ──────────────────────

@@ -25,6 +25,38 @@ export interface DiagnosticResult {
   sessionCount?: number;
 }
 
+type OpenSwanToolUnavailablePayload = {
+  ok: false;
+  error: {
+    type: 'not_found';
+    message: string;
+  };
+};
+
+/**
+ * Recognize only OpenSwan's documented application-level capability miss.
+ * The loopback browser proxy can preserve this JSON body while translating
+ * the upstream 404 to HTTP 200; diagnostics must not mistake that response for
+ * a successful sessions_list call.
+ */
+export function isExactOpenSwanToolUnavailablePayload(
+  value: unknown,
+  tool: string,
+): value is OpenSwanToolUnavailablePayload {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const payload = value as Record<string, unknown>;
+  if (payload.ok !== false || !payload.error || typeof payload.error !== 'object' || Array.isArray(payload.error)) {
+    return false;
+  }
+  const error = payload.error as Record<string, unknown>;
+  if (error.type !== 'not_found' || typeof error.message !== 'string') return false;
+  const normalizedTool = String(tool || '').trim().toLowerCase();
+  if (!normalizedTool) return false;
+  const message = error.message.replace(/\s+/g, ' ').trim().toLowerCase();
+  return message === `tool not available: ${normalizedTool}`
+    || message === `tool not found: ${normalizedTool}`;
+}
+
 // ─── Main diagnostic function ─────────────────────────────────────────────────
 
 export async function diagnoseConnection(
@@ -66,8 +98,19 @@ export async function diagnoseConnection(
       };
     }
 
+    const payload = await tryParseJson(res);
+    if (isExactOpenSwanToolUnavailablePayload(payload, 'sessions_list')) {
+      return {
+        ok: false,
+        errorCode: 'proxy_incompatible',
+        message: 'Endpoint responded, but it does not support OpenSwan session tool RPCs',
+        fix: 'Point this connection at a compatible OpenSwan gateway/proxy endpoint',
+        fixAction: 'none',
+      };
+    }
+
     // Any other response means server is reachable
-    const sessionCount = await tryParseSessionCount(res);
+    const sessionCount = tryParseSessionCount(payload);
     return {
       ok: true,
       message: 'Connected successfully',
@@ -146,15 +189,22 @@ async function probeNoAuth(url: string): Promise<boolean> {
   }
 }
 
-async function tryParseSessionCount(res: Response): Promise<number | undefined> {
+async function tryParseJson(res: Response): Promise<unknown> {
   try {
-    const data = await res.clone().json();
-    const sessions =
-      data?.result?.details?.sessions ||
-      data?.result?.sessions ||
-      data?.sessions;
-    if (Array.isArray(sessions)) return sessions.length;
-  } catch {}
+    return await res.json();
+  } catch {
+    return undefined;
+  }
+}
+
+function tryParseSessionCount(value: unknown): number | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const data = value as any;
+  const sessions =
+    data?.result?.details?.sessions ||
+    data?.result?.sessions ||
+    data?.sessions;
+  if (Array.isArray(sessions)) return sessions.length;
   return undefined;
 }
 

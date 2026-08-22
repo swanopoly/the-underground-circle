@@ -13,8 +13,10 @@
 //
 // WIRING:
 //   • src/lib/swanbot.ts localCommands help handler  → buildCapabilityOverview()
-//   • ChatTab renderEmptyState                       → buildEmptyChatSuggestions()
-//     rendered as tappable starter chips under the hero image
+//   • buildEmptyChatSuggestions() has NO caller as of 2026-08-07 — the ChatTab
+//     empty-state starter chips it fed were removed by request, so a fresh chat
+//     shows the hero plus the one-line "See everything I can do →" link. Kept
+//     (and still smoke-pinned) because it is a pure, reusable generator.
 //   • feature-tip surfaces (help footer, post-answer nudges)
 //                                                    → buildFeatureDiscoveryHint(id)
 //

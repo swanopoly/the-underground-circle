@@ -14,6 +14,14 @@ import {
   type SecondBrainPromptNote,
 } from '../src/lib/secondBrainCore';
 
+function between(source: string, start: string, end: string): string {
+  const startIndex = source.indexOf(start);
+  const endIndex = source.indexOf(end, startIndex + start.length);
+  assert(startIndex >= 0, `missing source boundary: ${start}`);
+  assert(endIndex > startIndex, `missing source boundary: ${end}`);
+  return source.slice(startIndex, endIndex);
+}
+
 function note(partial: Partial<SecondBrainPromptNote> & { id?: string }): SecondBrainPromptNote & { id: string } {
   return {
     id: partial.id || 'note-1',
@@ -151,5 +159,127 @@ assert.equal(DIGITAL_BRAIN_DB_TABLES.find(table => table.table === 'circle_secon
 const siteMapSource = readFileSync('src/lib/secondBrainSiteMap.ts', 'utf8');
 assert(siteMapSource.includes("SECOND_BRAIN_SITE_MAP_AGENT_STATUSES = ['building', 'idle']"), 'site map only queries db-safe office agent statuses');
 assert(!siteMapSource.includes(".in('status', ['active', 'idle'])"), 'site map never queries unsupported active db status');
+
+const secondBrainSource = readFileSync('src/lib/secondBrain.ts', 'utf8');
+const scopedMemoryLoadSource = between(
+  secondBrainSource,
+  'export async function loadSecondBrainMemoriesForScope(',
+  'export async function loadSecondBrainNotes(',
+);
+assert(
+  scopedMemoryLoadSource.includes(".eq('visibility', 'circle_shared')")
+    && scopedMemoryLoadSource.includes(".eq('user_id', input.userId as string)")
+    && scopedMemoryLoadSource.includes(".eq('visibility', 'private')"),
+  'Knowledge refresh reads Circle and Personal memory through explicit visibility and user filters',
+);
+assert(
+  scopedMemoryLoadSource.includes('if (sharedResult.error || privateResult.error)'),
+  'Knowledge memory refresh surfaces query failures instead of converting them to empty results',
+);
+const promotionSource = between(
+  secondBrainSource,
+  'export async function promoteSecondBrainNoteToMemory(',
+  'export async function shareSecondBrainNote(',
+);
+assert(
+  promotionSource.includes("if (scope === 'circle')"),
+  'circle-memory promotion has a dedicated publication boundary',
+);
+assert(
+  promotionSource.includes('if (!isCircleShareableSecondBrainNote(note))'),
+  'private notes are refused before circle-memory promotion',
+);
+assert(
+  promotionSource.includes(".eq('visibility', 'circle_shared')")
+    && promotionSource.includes('.maybeSingle()'),
+  'circle-share visibility is re-read at the promotion boundary',
+);
+assert(
+  promotionSource.indexOf(".eq('visibility', 'circle_shared')") < promotionSource.indexOf('const memory = await saveMemory({'),
+  'circle-share revalidation happens before the shared memory write',
+);
+
+const keywordNoteSearchSource = between(
+  secondBrainSource,
+  'async function keywordSearchNotes(',
+  'async function keywordSearchMemories(',
+);
+assert(
+  keywordNoteSearchSource.includes("query.eq('visibility', 'circle_shared')")
+    && keywordNoteSearchSource.includes("query.eq('created_by', scope.userId)"),
+  'keyword note search enforces Circle visibility or Personal ownership',
+);
+
+const keywordMemorySearchSource = between(
+  secondBrainSource,
+  'async function keywordSearchMemories(',
+  'export async function searchSecondBrain(',
+);
+assert(
+  keywordMemorySearchSource.includes("query.eq('visibility', 'circle_shared')")
+    && keywordMemorySearchSource.includes("query.eq('user_id', scope.userId).eq('visibility', 'private')"),
+  'memory search enforces Circle visibility or Personal user-private scope',
+);
+
+const searchSource = between(
+  secondBrainSource,
+  'export async function searchSecondBrain(',
+  'export async function loadSecondBrainAgentBriefInputs(',
+);
+assert(searchSource.includes('opts: SecondBrainSearchOptions'), 'search requires an explicit Personal or Circle scope');
+assert(
+  searchSource.includes('if (!isSecondBrainNoteInSearchScope(note, circleId, scope)) continue;'),
+  'semantic RPC results are scope-filtered before reaching the caller',
+);
+assert(
+  !searchSource.includes('semanticSearchMemories('),
+  'search does not use the legacy memory RPC that cannot prove user or visibility scope',
+);
+
+const briefInputSource = between(
+  secondBrainSource,
+  'export async function loadSecondBrainAgentBriefInputs(',
+  'export async function buildSecondBrainGraph(',
+);
+assert(
+  briefInputSource.includes("visibilityFilter: 'circle_shared'")
+    && briefInputSource.includes("query.eq('visibility', 'circle_shared')"),
+  'Circle brief source notes and memories are queried as circle-shared',
+);
+assert(
+  briefInputSource.includes('Circle brief inputs failed visibility validation.'),
+  'Circle brief inputs are defensively revalidated after the read',
+);
+
+const dashboardSource = readFileSync('src/components/SecondBrainDashboard.tsx', 'utf8');
+const saveBriefSource = between(
+  dashboardSource,
+  'const handleSaveAgentBrief = async () => {',
+  'const handleMapSite = async () => {',
+);
+assert(
+  saveBriefSource.indexOf('await loadSecondBrainAgentBriefInputs({')
+    < saveBriefSource.indexOf('const result = await createSecondBrainNote({'),
+  'brief visibility is revalidated immediately before the note save',
+);
+assert(
+  dashboardSource.includes("onPromote(note, isPrivate ? 'user' : 'circle')"),
+  'private-note memory action remains private until the separate Share action completes',
+);
+assert(
+  dashboardSource.includes('Previously loaded data is still shown and may be stale.')
+    && dashboardSource.includes('Showing stale Knowledge'),
+  'failed same-scope refreshes label retained Knowledge as stale',
+);
+assert(
+  dashboardSource.includes('loadSecondBrainMemoriesForScope({')
+    && dashboardSource.includes('memoryResult.error && hadMemorySnapshot'),
+  'failed memory refreshes retain only a labeled stale same-scope snapshot',
+);
+assert(
+  dashboardSource.includes("readGenerationRef.current.mutation += 1")
+    && dashboardSource.includes("isCurrentScopeOperation('mutation'"),
+  'mutation completion and reload paths retire when the Knowledge scope changes',
+);
 
 console.log('second-brain smoketest passed');

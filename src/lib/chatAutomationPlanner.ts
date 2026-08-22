@@ -1,4 +1,5 @@
 import { inferChatCommandExecution, matchesChatCommandRoute, type ChatCommandDecisionSource, type ChatCommandRouteId } from './chatCommandRegistry';
+import { resolveQuickActionExecution } from './chatActions';
 import { isLowRiskLocalImageExportTask, planComputerTaskPreview } from './computerTaskPlanner';
 import { classifyBrowserbaseWorkflow } from './browserbaseWorkflowIntent';
 import { detectLocalComputerAwarenessIntent, detectLocalComputerAwarenessIntentSequence, getLocalComputerAwarenessRisk } from './localComputerAwarenessIntent';
@@ -35,6 +36,8 @@ import type { LocalComputerAwarenessKind } from './localComputerAwarenessIntent'
 import { detectWordPressImagePostIntent } from './wpImagePostFlow';
 import { isDecisionRelevantAmbiguity, describeClarificationValue } from './clarificationGate';
 import { compileComputerSequenceProgram } from './computerSequenceProgramCore';
+import { segmentChatIntents, type IntentConnective } from './chatMultiIntentCore';
+import { classifyOpenSwanMultiActionOperation } from './openSwanMultiActionCompletionCore';
 
 export type PlannerConversationalIntent =
   | { type: 'wordpress_publish'; title?: string; imageUrl?: string; status: 'draft' | 'publish' }
@@ -97,6 +100,30 @@ export type ChatAutomationApproval =
   | { required: false; reason: null }
   | { required: true; reason: string };
 
+export type ChatBoundedMultiActionLedger = {
+  schemaVersion: 1;
+  dispatchMode: 'single_openswan_turn';
+  /** One action is reserved for an attachment-bearing turn whose source must
+   * cross the same receipt/evidence boundary as a compound A1-A3 turn. The
+   * ordinary conversational segmenter still creates only two- or three-action
+   * ledgers. */
+  actionCount: 1 | 2 | 3;
+  actions: Array<{
+    id: 'A1' | 'A2' | 'A3';
+    ordinal: 1 | 2 | 3;
+    text: string;
+    connective: IntentConnective;
+    dependsOnActionIds: Array<'A1' | 'A2' | 'A3'>;
+  }>;
+  completionRule: string;
+};
+
+export type ChatMultiActionOverflow = {
+  schemaVersion: 1;
+  actionCount: number;
+  maxActionsPerTurn: 3;
+};
+
 export type ChatAutomationPlan = {
   source: ChatCommandDecisionSource | 'conversational_intent' | 'plain_chat';
   intent: ChatAutomationIntent;
@@ -119,6 +146,10 @@ export type ChatAutomationPlan = {
   computerRequestRoute?: ChatComputerRequestRoute | null;
   recoveryPolicy?: ChatFailureRecoveryExecutionPolicy | null;
   recoveryExecutionPlan?: ChatFailureRecoveryExecutionPlan | null;
+  multiActionLedger?: ChatBoundedMultiActionLedger | null;
+  /** A real compound request exceeded the authoritative A1-A3 bound. It must
+   * reach one clarification response, never fall back to a first-match child. */
+  multiActionOverflow?: ChatMultiActionOverflow | null;
 };
 
 export type BuildChatAutomationPlanInput = {
@@ -291,8 +322,8 @@ function extractPlannerOfficeAgentName(message: string): string | null {
 
 function extractPlannerRequestedModel(message: string): string | undefined {
   const lower = message.toLowerCase();
-  if (/\bopus\b/.test(lower)) return 'claude-opus-4-8';
-  if (/\bsonnet\b/.test(lower)) return 'claude-sonnet-4-6';
+  if (/\bopus\b/.test(lower)) return 'claude-opus-5';
+  if (/\bsonnet\b/.test(lower)) return 'claude-sonnet-5';
   if (/\bhaiku\b/.test(lower)) return 'claude-haiku-4-5';
   return undefined;
 }
@@ -885,7 +916,13 @@ function buildPlanFromLocalComputerIntent(
   const localComputerIntent = detectLocalComputerAwarenessIntent(normalized);
   if (!localComputerIntent.route) return null;
   const computerRequestRoute = buildChatComputerRequestRoute(normalized, { pipelineDecision });
-  if (computerRequestRoute) {
+  // Local browser-tab inventory must stay on the desktop bridge. The generic
+  // router can otherwise interpret "Chrome" as a browser-automation target
+  // and replace the exact read-only desktop-awareness pipeline with a remote
+  // browser route. Genuine desktop-app tab routes remain eligible here.
+  const remoteBrowserTabMismatch = localComputerIntent.kind === 'browser_tabs'
+    && computerRequestRoute?.kind === 'browser';
+  if (computerRequestRoute && !remoteBrowserTabMismatch) {
     const canonicalPlan = buildPlanFromComputerRequestRoute(computerRequestRoute, normalized);
     return {
       ...canonicalPlan,
@@ -960,37 +997,7 @@ function buildPlanFromComputerRequestRoute(route: ChatComputerRequestRoute, norm
   };
 }
 
-function resolvePlannerQuickActionExecution(text: string): { text: string; mode: 'send' | 'prefill' | 'special'; routeId: ChatCommandRouteId | null } {
-  switch (text) {
-    case '__COMPUTER_USE__':
-      return { text, mode: 'special', routeId: 'browser' };
-    case '__TIP__':
-      return { text, mode: 'special', routeId: null };
-    case '__ASSIGN_AGENT__':
-    case '__SPAWN_AGENT__':
-    case '__SPAWN_AGENTS__':
-    case '__LOG_PROOF__':
-    case '__STEP_AWAY__':
-    case '__OPEN_SEARCH__':
-    case '__OPEN_GAMES__':
-    case '__SEND_CRYPTO__':
-    case '__NUKE__':
-      return { text, mode: 'special', routeId: null };
-    default:
-      if (text.startsWith('/')) {
-        // W-A1/M5: keep in sync with the slash branch below — 'vault' was
-        // missing, so /vault commands fell to the "did not map cleanly" path.
-        const routeIds: ChatCommandRouteId[] = [
-          'help', 'summary', 'schedule', 'mission', 'room', 'github', 'wordpress', 'browser', 'build_page', 'hf_tools', 'local_knowledge', 'memory', 'governance', 'vault', 'search',
-        ];
-        const matchedRoute = routeIds.find((routeId) => matchesChatCommandRoute(text, routeId)) || null;
-        return { text, mode: 'send', routeId: matchedRoute };
-      }
-      return { text, mode: 'send', routeId: null };
-  }
-}
-
-export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): ChatAutomationPlan {
+function buildSingleChatAutomationPlan(input: BuildChatAutomationPlanInput): ChatAutomationPlan {
   const normalized = input.message.trim();
   const lower = normalized.toLowerCase();
 
@@ -1019,7 +1026,7 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
   const pipelineDecision = buildUserTaskPipelineDecision(normalized, { includeFallback: false });
 
   if (input.quickActionText) {
-    const execution = resolvePlannerQuickActionExecution(input.quickActionText);
+    const execution = resolveQuickActionExecution(input.quickActionText);
     const routeId = execution.routeId || null;
     const risk = buildRiskForRoute(routeId);
     return {
@@ -1475,6 +1482,377 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
   };
 }
 
+const BOUNDED_MULTI_ACTION_MIN = 2;
+const BOUNDED_MULTI_ACTION_MAX = 3;
+const BOUNDED_MULTI_ACTION_COMPLETION_RULE =
+  'Do not report the turn complete until every ledger action is completed with evidence or explicitly reported blocked or failed; never silently omit an action.';
+
+/**
+ * Put a single attachment-bearing request on the same authoritative evidence
+ * path as a compound Chat request. This is intentionally applied by Chat only
+ * when at least one current-turn attachment exists. It prevents the ordinary
+ * capability/plain-model lanes from inlining picker text, URLs, or local
+ * paths, while leaving the existing two-/three-action segmenter unchanged.
+ */
+export function bindChatAttachmentActionContract(
+  plan: ChatAutomationPlan,
+  input: Readonly<{
+    message: string;
+    hasCurrentTurnAttachment: boolean;
+    addressedToCurrentAgent?: boolean;
+    preserveExistingExecutor?: boolean;
+  }>,
+): ChatAutomationPlan {
+  const message = String(input.message || '').trim();
+  const hasLeadingMention = /^@[a-z0-9_.:-]+/i.test(message);
+  if (input.addressedToCurrentAgent === false && hasLeadingMention) {
+    // The general planner runs before Chat resolves its concrete member row,
+    // so a compound request addressed to a real member named `swan` may have
+    // inherited an agent-style A-ledger from the lexical alias fallback.
+    // Strip that stale execution contract once the typed recipient says this
+    // is a human. The human delivery path owns the turn and performs no AI
+    // dispatch; keeping a promoted ledger here would misstate that authority.
+    if (plan.multiActionLedger || plan.multiActionOverflow) {
+      return {
+        ...plan,
+        multiActionLedger: undefined,
+        multiActionOverflow: undefined,
+      };
+    }
+    return plan;
+  }
+  if (
+    !input.hasCurrentTurnAttachment
+    || !message
+    || message.startsWith('/')
+    || plan.multiActionLedger
+    || plan.multiActionOverflow
+    || input.preserveExistingExecutor
+    // Human/connected-agent addressing owns its own delivery semantics. Chat
+    // must not silently turn a human-directed attachment into an OpenSwan run.
+    || (
+      // When Chat has resolved a concrete leading mention, that typed
+      // recipient decision is authoritative. In particular, a real member
+      // named `swan` must not be reinterpreted as the built-in agent here.
+      input.addressedToCurrentAgent === false
+      && hasLeadingMention
+    )
+    || (
+      // Callers without a typed recipient keep the legacy conservative
+      // fallback: non-OpenSwan handles remain outside this executor.
+      input.addressedToCurrentAgent === undefined
+      && /^@(?!agent\b|blackswan\b|swanbot\b|swan\b)[a-z0-9_.:-]+/i.test(message)
+    )
+  ) return plan;
+
+  // Keep the user's ask intact and add only a structural current-turn source
+  // marker. The runtime's attachment binder recognizes this marker without a
+  // brand/path/source-location denylist; importantly it contains no `from/in`
+  // qualifier that could accidentally retarget the source.
+  const sourceBoundActionText = `${message}\nCurrent-turn upload is the sole requested source.`;
+
+  return {
+    ...plan,
+    execution: {
+      kind: 'run_openswan',
+      routeId: plan.execution.routeId,
+      commandText: message,
+    },
+    notes: [
+      'Current-turn attachment content is available only through the sealed OpenSwan source receipt.',
+      ...plan.notes,
+    ],
+    multiActionLedger: {
+      schemaVersion: 1,
+      dispatchMode: 'single_openswan_turn',
+      actionCount: 1,
+      actions: [{
+        id: 'A1',
+        ordinal: 1,
+        text: sourceBoundActionText,
+        connective: 'lead',
+        dependsOnActionIds: [],
+      }],
+      completionRule: BOUNDED_MULTI_ACTION_COMPLETION_RULE,
+    },
+  };
+}
+
+/**
+ * Bind an approved Chat continuation back to OpenSwan without reclassifying a
+ * synthetic "approval granted" prompt. The original user task remains the
+ * command, while a singleton A1 contract gives even an originally single-step
+ * request the same terminal/evidence boundary as compound turns. A caller may
+ * supply the exact original ledger when the source run already had A1-A3.
+ *
+ * This is routing only. It never authorizes a tool: the runtime must also
+ * receive and validate the transient exact approval-resume binding.
+ */
+export function bindChatApprovalResumeActionContract(
+  plan: ChatAutomationPlan,
+  input: Readonly<{
+    originalUserTaskText: string;
+    ledger?: ChatBoundedMultiActionLedger | null;
+  }>,
+): ChatAutomationPlan | null {
+  const originalUserTaskText = typeof input?.originalUserTaskText === 'string'
+    ? input.originalUserTaskText.trim()
+    : '';
+  if (!originalUserTaskText || originalUserTaskText.length > 4_000) return null;
+  const ledger = input.ledger || {
+    schemaVersion: 1 as const,
+    dispatchMode: 'single_openswan_turn' as const,
+    actionCount: 1 as const,
+    actions: [{
+      id: 'A1' as const,
+      ordinal: 1 as const,
+      text: originalUserTaskText,
+      connective: 'lead' as const,
+      dependsOnActionIds: [],
+    }],
+    completionRule: BOUNDED_MULTI_ACTION_COMPLETION_RULE,
+  };
+  return {
+    ...plan,
+    execution: {
+      kind: 'run_openswan',
+      routeId: plan.execution.routeId,
+      commandText: originalUserTaskText,
+    },
+    notes: [
+      'This is an exact Chat approval continuation; runtime approval authority remains separate.',
+      ...plan.notes,
+    ],
+    multiActionLedger: ledger,
+    multiActionOverflow: undefined,
+  };
+}
+
+function buildBoundedMultiActionLedger(message: string): ChatBoundedMultiActionLedger | null {
+  // Leading @mentions belong to the addressed member/connected-agent lane.
+  // Issuing an OpenSwan A# contract here would suppress that lane and, for a
+  // human mention, leave the request with no executor at all.
+  if (/^@(?!agent\b|blackswan\b|swanbot\b|swan\b)[a-z0-9_.:-]+/i.test(message.trim())) {
+    return null;
+  }
+  const segmented = segmentChatIntents(message);
+  if (
+    !segmented.isMultiIntent
+    || segmented.segments.length < BOUNDED_MULTI_ACTION_MIN
+    || segmented.segments.length > BOUNDED_MULTI_ACTION_MAX
+  ) {
+    return null;
+  }
+
+  let currentParallelGroupIds: Array<'A1' | 'A2' | 'A3'> = [];
+  let currentParallelGroupDependencies: Array<'A1' | 'A2' | 'A3'> = [];
+  const actions = segmented.segments.map((segment, index) => {
+    const actionId = `A${index + 1}` as 'A1' | 'A2' | 'A3';
+    const previous = segmented.segments[index - 1];
+    const startsSequentialGroup = index > 0
+      && (segment.connective === 'then' || previous?.sequential === true);
+    if (startsSequentialGroup) {
+      // "A and B, then C" means C waits for the whole preceding parallel
+      // group. Likewise "A, then B and C" gives both B and C the same A
+      // prerequisite. Immediate-group edges are sufficient because the core
+      // enforces them transitively across the bounded A1-A3 DAG.
+      currentParallelGroupDependencies = [...currentParallelGroupIds];
+      currentParallelGroupIds = [actionId];
+    } else {
+      currentParallelGroupIds.push(actionId);
+    }
+    return {
+      id: actionId,
+      ordinal: (index + 1) as 1 | 2 | 3,
+      text: segment.text,
+      connective: segment.connective,
+      dependsOnActionIds: [...currentParallelGroupDependencies],
+    };
+  });
+
+  return {
+    schemaVersion: 1,
+    dispatchMode: 'single_openswan_turn',
+    actionCount: actions.length as 2 | 3,
+    actions,
+    completionRule: BOUNDED_MULTI_ACTION_COMPLETION_RULE,
+  };
+}
+
+function routeBoundedMultiActionThroughOpenSwan(
+  message: string,
+  candidate: ChatAutomationPlan,
+  input: BuildChatAutomationPlanInput,
+): ChatAutomationPlan {
+  const segmented = segmentChatIntents(message);
+  const isAddressedElsewhere = /^@(?!agent\b|blackswan\b|swanbot\b|swan\b)[a-z0-9_.:-]+/i.test(message.trim());
+  if (!segmented.isMultiIntent || isAddressedElsewhere || message.startsWith('/')) return candidate;
+
+  // "Turn this into an automation: ... and ask before ..." describes one
+  // planned workflow with an approval condition. The segmenter's conjunction
+  // heuristic must not reinterpret "ask before publishing" as a sibling
+  // executable action or raise the planning-only seed's risk.
+  if (startsWithOpenSwanAutomationSeed(message)) return candidate;
+
+  // Recovery chips serialize a typed policy/context envelope into one hidden
+  // Chat message. Its diagnostic sentences are not independent user asks;
+  // the recovery owner already supplies one bounded attempt, evidence rule,
+  // and approval posture. Re-segmenting that envelope would both fabricate an
+  // A-ledger and strengthen its settled risk for the wrong reason.
+  if (parseChatFailureRecoveryOptionSelection(message)) return candidate;
+
+  // Office agent creation + attachment is one atomic, unified executor-owned
+  // operation even though its natural wording contains two verbs. Keep that
+  // lane intact; this promotion is for genuinely cross-intent command/build
+  // matches whose first-match handler would otherwise drop a sibling ask.
+  if (
+    candidate.intent.kind === 'conversational_action'
+    && candidate.intent.intent.type === 'office_agent_task'
+  ) {
+    return candidate;
+  }
+  // The deterministic computer sequence compiler already owns multi-step app
+  // work and produces its own requested-action/evidence contract.
+  if (candidate.execution.kind === 'run_computer_task') {
+    return candidate;
+  }
+
+  if (segmented.segments.length > BOUNDED_MULTI_ACTION_MAX) {
+    return {
+      ...candidate,
+      execution: {
+        kind: 'ask_clarification',
+        routeId: null,
+        commandText: message,
+        clarification: {
+          question: `I found ${segmented.segments.length} separate actions. Please send them in batches of up to ${BOUNDED_MULTI_ACTION_MAX} so each action can be executed and verified without silently dropping work.`,
+          missingParams: ['bounded action batch'],
+          reason: 'multi_action_limit',
+          pendingIntent: 'bounded_multi_action',
+          examples: ['Send actions 1-3 first, then send the remaining actions after that run is verified.'],
+        },
+      },
+      risk: 'review',
+      approval: { required: false, reason: null },
+      notes: [
+        `Compound request contains ${segmented.segments.length} actions; authoritative turns support at most ${BOUNDED_MULTI_ACTION_MAX}. Nothing was executed.`,
+        ...candidate.notes,
+      ],
+      multiActionOverflow: {
+        schemaVersion: 1,
+        actionCount: segmented.segments.length,
+        maxActionsPerTurn: BOUNDED_MULTI_ACTION_MAX,
+      },
+    };
+  }
+
+  const multiActionLedger = buildBoundedMultiActionLedger(message);
+  if (!multiActionLedger) return candidate;
+
+  // The whole turn inherits the strongest child risk/approval posture. The
+  // first-match candidate is not enough here: a read-then-write request such
+  // as "list drafts, then publish the latest" used to inherit the safe list
+  // posture even though the second action is an external mutation. Tool-level
+  // gates remain authoritative; this is the truthful preflight/UI projection.
+  const riskRank: Record<ChatAutomationRisk, number> = {
+    safe: 0,
+    review: 1,
+    external_side_effect: 2,
+    destructive: 3,
+  };
+  const childPlans = multiActionLedger.actions.map((action) => (
+    buildSingleChatAutomationPlan({ ...input, message: action.text })
+  ));
+  let aggregateRisk = childPlans.reduce<ChatAutomationRisk>((strongest, child) => (
+    riskRank[child.risk] > riskRank[strongest] ? child.risk : strongest
+  ), candidate.risk);
+  // Pronoun-bearing later segments often omit the route noun ("list the
+  // drafts, then publish the latest one"), so a child classifier may not know
+  // it is still WordPress. Keep the existing conservative mutation vocabulary
+  // as a whole-ledger floor instead of letting that missing noun downgrade the
+  // combined request to safe.
+  const operationClassifications = multiActionLedger.actions.map((action) => (
+    classifyOpenSwanMultiActionOperation(action.text)
+  ));
+  if (operationClassifications.some((classification) => classification.destructive)) {
+    aggregateRisk = 'destructive';
+  } else if (
+    riskRank[aggregateRisk] < riskRank.external_side_effect
+    && operationClassifications.some((classification) => classification.externalSideEffect)
+  ) {
+    aggregateRisk = 'external_side_effect';
+  } else if (
+    aggregateRisk === 'safe'
+    && operationClassifications.some((classification) => classification.requiresMutation)
+  ) {
+    aggregateRisk = 'review';
+  }
+  const approvalReasons = childPlans
+    .map((child) => child.approval.required ? child.approval.reason : null)
+    .filter((reason): reason is string => !!reason);
+  const aggregateApproval: ChatAutomationApproval = approvalReasons.length > 0
+    ? {
+        required: true,
+        reason: `One or more actions require approval: ${Array.from(new Set(approvalReasons)).join(' ')}`.slice(0, 400),
+      }
+    : aggregateRisk === 'external_side_effect' || aggregateRisk === 'destructive'
+      ? { required: true, reason: 'One or more actions require approval before an external or destructive side effect.' }
+      : candidate.approval;
+
+  const ledgerNote = multiActionLedger.actions
+    .map((action) => `${action.id}: ${action.text}`)
+    .join(' | ');
+
+  return {
+    ...candidate,
+    execution: {
+      kind: 'run_openswan',
+      routeId: null,
+      commandText: message,
+    },
+    risk: aggregateRisk,
+    approval: aggregateApproval,
+    notes: [
+      `Bounded multi-action ledger (${multiActionLedger.actionCount} actions; one intact OpenSwan dispatch): ${ledgerNote}`,
+      multiActionLedger.completionRule,
+      ...candidate.notes,
+    ],
+    multiActionLedger,
+  };
+}
+
+export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): ChatAutomationPlan {
+  const normalized = input.message.trim();
+  return routeBoundedMultiActionThroughOpenSwan(
+    normalized,
+    buildSingleChatAutomationPlan({ ...input, message: normalized }),
+    input,
+  );
+}
+
+export function formatChatBoundedMultiActionPromptBlock(plan: ChatAutomationPlan): string | null {
+  const ledger = plan.multiActionLedger;
+  if (!ledger || plan.execution.kind !== 'run_openswan') return null;
+
+  const actionLines = ledger.actions.map((action) => {
+    const dependency = action.dependsOnActionIds.length > 0
+      ? `; after ${action.dependsOnActionIds.join(', ')}`
+      : '';
+    const text = action.text.replace(/\s+/g, ' ').trim();
+    return `- ${action.id}${dependency}: ${text}`;
+  });
+
+  return [
+    '## Bounded Multi-Action Ledger',
+    `Dispatch contract: process this intact request once as one OpenSwan turn containing ${ledger.actionCount} ${ledger.actionCount === 1 ? 'action' : 'actions'}.`,
+    ...actionLines,
+    `Completion gate: ${ledger.completionRule}`,
+    'For an assistant-authored deliverable such as a summary, analysis, comparison, calculation, classification, draft, explanation, outline, ranking, recommendation, report, synthesis, or translation, call run.publish_action_artifact once for that exact A# with the complete bounded user-visible deliverable before the final report. A read/search call alone does not prove that derived output exists.',
+    'After every action attempt, call run.report_action_outcomes exactly once. Report every A# and reference only the exact earlier provider tool-use IDs that prove that action outcome. The reporting call is not evidence and does not decide completion.',
+    'Do not execute only one classifier-selected child. Do not auto-replay any child as a second turn.',
+  ].join('\n');
+}
+
 // ─── Plan vs Act mode (Cline research item 1) ──────────────────────────────
 //
 // In Plan mode the executor must refuse anything that would mutate external
@@ -1587,6 +1965,22 @@ export function summarisePlanForTelemetry(plan: ChatAutomationPlan): Record<stri
           fallbackPipelineIds: plan.computerRequestRoute.fallbackPipelineIds,
           recommendedTools: plan.computerRequestRoute.recommendedTools.slice(0, 10),
           completionProof: plan.computerRequestRoute.completionProof.slice(0, 6),
+          requestedActionContract: plan.computerRequestRoute.requestedActionContract
+            ? {
+                mode: plan.computerRequestRoute.requestedActionContract.mode,
+                actionCount: plan.computerRequestRoute.requestedActionContract.actionCount,
+                capped: plan.computerRequestRoute.requestedActionContract.capped,
+                requiresDecompositionBeforeMutation:
+                  plan.computerRequestRoute.requestedActionContract.requiresDecompositionBeforeMutation,
+                actions: plan.computerRequestRoute.requestedActionContract.actions.slice(0, 8).map((action) => ({
+                  id: action.id,
+                  verb: action.verb,
+                  connective: action.connective,
+                  dependsOnActionIds: action.dependsOnActionIds,
+                  text: compactTelemetryText(action.text, 180),
+                })),
+              }
+            : null,
           userNotice: summarizeChatComputerRequestUserNotice(plan.computerRequestRoute),
           evidenceContract: plan.computerRequestRoute.evidenceContract
             ? summarizeComputerTaskEvidenceContract(plan.computerRequestRoute.evidenceContract)

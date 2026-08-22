@@ -5,21 +5,12 @@
  */
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { supabase } from '../lib/supabase';
-import { awardXP, getXPForAction } from '../lib/gamification';
-import { invokeDirect } from '../lib/agentInvocation';
-import { wakeAndAssignTask } from '../lib/bridgeTaskDispatcher';
-import { runOpenSwanSessionTurn, type OpenSwanToolEvent } from '../lib/openswanSessionRuntime';
-import { resolveSessionCodingProfile } from '../lib/chatSessionProfile';
-import { inferTaskCapabilityProfile, getTaskCapabilityProfile } from '../lib/taskCapabilityProfiles';
-import {
-  createInitialTaskRunSteps, appendTaskRunStep, createTaskRunArtifact,
-  ensureTaskAcceptanceChecks, evaluateTaskRunChecks, canTaskRunMarkComplete,
-  buildTaskExecutionMemoryBrief, saveTaskCompletionMemory, saveTaskBlockerMemory, saveTaskRunResumeSnapshot,
-  loadCollaborativeHandoffs, markCollaborativeHandoffsConsumed, saveTaskRunHandoff,
-} from '../lib/taskExecutionRuntime';
+import { getSupabaseClientForAccessToken, supabase } from '../lib/supabase';
+import type { OpenSwanTerminalReceipt } from '../lib/openswanSessionRuntimeAdapters';
+import type { OpenSwanToolEvent } from '../lib/openswanSessionRuntime';
 import { loadCircleOfficeAgents, CircleOfficeAgent, createBlackSwanAgent } from '../lib/circleOffice';
-import { buildTaskOwnershipClaim } from '../lib/circleIntegrations';
+import { indexSafeProfiles, loadSafeCircleProfiles } from '../lib/safeProfiles';
+import { useAuth } from './useAuth';
 import {
   KanbanTask,
   TaskComment,
@@ -39,6 +30,14 @@ import {
 } from '../types/kanban';
 import type { OpenSwanVerificationResult } from '../lib/openswanVerificationRuntime';
 import type { SwanBotStructuredArtifact } from '../lib/swanbot';
+import {
+  buildTaskImageStoragePath,
+  createTaskImageSignedUrl,
+  redactUnresolvedTaskImageValue,
+  resolveTaskImageValues,
+  taskImageStoragePathFromValue,
+  toTaskImageStorageReference,
+} from '../lib/taskImageStorage';
 
 export interface KanbanMember {
   id: string;
@@ -53,9 +52,9 @@ export interface KanbanData {
   agents: CircleOfficeAgent[];
   currentUserId: string | null;
   loading: boolean;
-  createTask: (fields: CreateTaskFields) => Promise<void>;
+  createTask: (fields: CreateTaskFields) => Promise<boolean | undefined>;
   moveTask: (taskId: string, newStatus: TaskStatus) => Promise<void>;
-  updateTask: (taskId: string, fields: TaskUpdateFields) => Promise<void>;
+  updateTask: (taskId: string, fields: TaskUpdateFields) => Promise<boolean>;
   deleteTask: (taskId: string) => Promise<void>;
   approveTask: (taskId: string, agentId: string) => Promise<void>;
   requestChanges: (taskId: string) => Promise<void>;
@@ -69,6 +68,8 @@ export interface KanbanData {
   toggleTaskMode: (taskId: string, mode: 'plan' | 'execute') => Promise<void>;
   recordTaskCost: (taskId: string, cost: number, tokens: number, durationMs: number) => Promise<void>;
   refresh: () => void;
+  /** Refresh only the Office roster; used by agent heartbeat subscriptions. */
+  refreshAgents: () => void;
 }
 
 export type ThinkingLevel = 'fast' | 'balanced' | 'deep';
@@ -86,6 +87,14 @@ export interface AgentRunOptions {
   handoffToAgentName?: string | null;
   handoffObjective?: string | null;
 }
+
+type AgentTaskInvocationOutcome = {
+  text: string;
+  disposition: 'completed' | 'accepted' | 'outcome_unknown' | 'partial' | 'failed' | 'cancelled';
+  taskRunId: string | null;
+};
+
+type CollaborativeDisposition = AgentTaskInvocationOutcome['disposition'] | 'no_result';
 
 export interface CreateTaskFields {
   title: string;
@@ -472,25 +481,73 @@ function mapOpenSwanArtifactsToTaskRunArtifacts(artifacts: SwanBotStructuredArti
   }));
 }
 
+function isVerifiedOpenSwanTerminalSuccess(terminal: OpenSwanTerminalReceipt): boolean {
+  return terminal.state === 'succeeded' && terminal.completionVerified === true;
+}
+
+function describeOpenSwanTaskTerminal(terminal: OpenSwanTerminalReceipt): string {
+  const reason = terminal.reason.replace(/_/g, ' ');
+  if (isVerifiedOpenSwanTerminalSuccess(terminal)) {
+    return 'OpenSwan finished this run with verified completion.';
+  }
+  if (terminal.state === 'cancelled') {
+    return `OpenSwan was cancelled (${reason}); completion was not verified.`;
+  }
+  if (terminal.state === 'partial') {
+    return `OpenSwan stopped with partial progress (${reason}); completion was not verified.`;
+  }
+  if (terminal.state === 'succeeded') {
+    return 'OpenSwan reported success without verified completion; the task remains incomplete.';
+  }
+  return `OpenSwan failed (${reason}); completion was not verified.`;
+}
+
+function invocationDispositionFromOpenSwanTerminal(
+  terminal: OpenSwanTerminalReceipt,
+): AgentTaskInvocationOutcome['disposition'] {
+  if (isVerifiedOpenSwanTerminalSuccess(terminal)) return 'completed';
+  return terminal.state === 'succeeded' ? 'partial' : terminal.state;
+}
+
+function describeCollaborativeChildStop(disposition: Exclude<CollaborativeDisposition, 'completed'>): string {
+  if (disposition === 'accepted') return 'accepted and awaiting a verified result';
+  if (disposition === 'outcome_unknown') return 'outcome unknown; verify the connected session before retrying';
+  if (disposition === 'partial') return 'stopped with partial, unverified progress';
+  if (disposition === 'cancelled') return 'cancelled before completion';
+  if (disposition === 'failed') return 'failed before verified completion';
+  return 'missing a verified result';
+}
+
 function buildOpenSwanTaskRunOutput(opts: {
   response: string;
   mode: AgentMode;
   artifacts: SwanBotStructuredArtifact[];
   verificationResults: OpenSwanVerificationResult[];
   toolEvents: OpenSwanToolEvent[];
+  terminal: OpenSwanTerminalReceipt;
 }): TaskRunOutput {
-  const summary = opts.response.split('\n').map(line => line.trim()).find(Boolean)?.slice(0, 240) || 'OpenSwan task run';
+  const completionVerified = isVerifiedOpenSwanTerminalSuccess(opts.terminal);
+  const terminalSummary = describeOpenSwanTaskTerminal(opts.terminal);
+  const responseSummary = opts.response.split('\n').map(line => line.trim()).find(Boolean)?.slice(0, 240) || 'OpenSwan task run';
+  const summary = completionVerified ? responseSummary : terminalSummary;
   const blockers = extractRuntimeBlockers(opts.response, opts.toolEvents, opts.verificationResults);
-  const markComplete = opts.mode === 'execute' && blockers.length === 0;
-  const needsReview = opts.verificationResults.some((result) => !result.ok);
+  if (!completionVerified) blockers.unshift(terminalSummary);
+  const boundedBlockers = Array.from(new Set(blockers)).slice(0, 6);
+  const markComplete = opts.mode === 'execute' && completionVerified && boundedBlockers.length === 0;
+  const needsReview = !completionVerified || opts.verificationResults.some((result) => !result.ok);
   return {
     summary,
     deliverable: opts.response,
-    blockers,
+    blockers: boundedBlockers,
     next_actions: [],
     proposed_status: markComplete ? null : 'in_progress',
     mark_complete: markComplete,
     needs_review: needsReview,
+    terminal_state: opts.terminal.state,
+    terminal_reason: opts.terminal.reason,
+    completion_verified: completionVerified,
+    terminal_resumable: opts.terminal.resumable,
+    terminal_checkpoint_available: opts.terminal.checkpoint != null,
     artifacts: opts.artifacts.map((artifact) => ({
       name: artifact.title || artifact.kind,
       type: artifact.kind === 'image' ? 'image' : artifact.kind === 'code' ? 'code' : artifact.url ? 'link' : 'other',
@@ -573,20 +630,50 @@ function resolveNextStatus(task: KanbanTask, output: TaskRunOutput, mode: AgentM
 }
 
 export function useKanbanData(circleId: string): KanbanData {
+  const { session: authSession, user: authUser, loading: authLoading } = useAuth();
   const [tasks, setTasks] = useState<KanbanTask[]>([]);
   const [members, setMembers] = useState<KanbanMember[]>([]);
   const [agents, setAgents] = useState<CircleOfficeAgent[]>([]);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const fetchRef = useRef(0);
+  const authenticatedAccessToken = authSession?.user.id === authUser?.id
+    ? authSession?.access_token || ''
+    : '';
+  const exactReadClient = useMemo(
+    () => authenticatedAccessToken
+      ? getSupabaseClientForAccessToken(authenticatedAccessToken)
+      : null,
+    [authenticatedAccessToken],
+  );
+  const liveReadScopeRef = useRef({ userId: '', circleId: '', accessToken: '' });
+  liveReadScopeRef.current = {
+    userId: authUser?.id || '',
+    circleId,
+    accessToken: authenticatedAccessToken,
+  };
+  const loadedLogicalScopeRef = useRef('');
   const assignmentSupportRef = useRef<boolean | null>(null);
   const assignmentOwnershipSupportRef = useRef<boolean | null>(null);
   const taskRunsSupportRef = useRef<boolean | null>(null);
   const commentTaskRunSupportRef = useRef<boolean | null>(null);
   const completionPolicySupportRef = useRef<boolean | null>(null);
 
+  const hydrateTaskImageUrls = useCallback(async (baseTasks: KanbanTask[]): Promise<KanbanTask[]> => {
+    if (!exactReadClient || baseTasks.length === 0) return baseTasks;
+    const resolved = await resolveTaskImageValues(
+      exactReadClient,
+      baseTasks.map(task => task.image_url),
+    );
+    return baseTasks.map(task => {
+      const original = String(task.image_url || '').trim();
+      if (!original) return task;
+      return { ...task, image_url: resolved.get(original) ?? null };
+    });
+  }, [exactReadClient]);
+
   const hydrateTaskTracking = useCallback(async (baseTasks: KanbanTask[]): Promise<KanbanTask[]> => {
-    if (baseTasks.length === 0) return baseTasks;
+    if (baseTasks.length === 0 || !exactReadClient) return baseTasks;
 
     const taskIds = baseTasks.map(task => task.id);
     let nextTasks: KanbanTask[] = baseTasks.map(task => ({
@@ -599,7 +686,7 @@ export function useKanbanData(circleId: string): KanbanData {
     }));
 
     if (assignmentSupportRef.current !== false) {
-      const { data, error } = await supabase
+      const { data, error } = await exactReadClient
         .from('task_agent_assignments')
         .select('*')
         .in('task_id', taskIds)
@@ -632,7 +719,7 @@ export function useKanbanData(circleId: string): KanbanData {
     }
 
     if (taskRunsSupportRef.current !== false) {
-      const { data, error } = await supabase
+      const { data, error } = await exactReadClient
         .from('task_runs')
         .select('*')
         .in('task_id', taskIds)
@@ -666,67 +753,173 @@ export function useKanbanData(circleId: string): KanbanData {
     }
 
     return nextTasks;
-  }, []);
+  }, [exactReadClient]);
 
   const fetchTasks = useCallback(async () => {
+    if (!exactReadClient) {
+      setLoading(false);
+      return;
+    }
     const id = ++fetchRef.current;
     try {
-      const { data, error } = await supabase
+      const { data, error } = await exactReadClient
         .from('tasks')
-        .select('*, creator:profiles!tasks_created_by_fkey(username, display_name), assignee:profiles!tasks_assigned_to_fkey(username, display_name), goal:goals!tasks_goal_id_fkey(id, name, status), room:project_rooms!tasks_room_id_fkey(id, name, status, color)')
+        .select('*, goal:goals!tasks_goal_id_fkey(id, name, status), room:project_rooms!tasks_room_id_fkey(id, name, status, color)')
         .eq('circle_id', circleId)
         .order('position', { ascending: true })
         .limit(200);
 
       if (id !== fetchRef.current) return;
-      if (error) { console.error('fetchTasks error:', error); return; }
+      if (error) {
+        console.error('fetchTasks error:', error);
+        setLoading(false);
+        return;
+      }
 
-      const normalized = (data || []).map(normalizeTask);
-      const hydrated = await hydrateTaskTracking(normalized);
+      const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+        circleId,
+        userIds: (data || []).flatMap((task: any) => [task.created_by, task.assigned_to]),
+        client: exactReadClient,
+      }));
+      const normalized = (data || []).map((task: any) => normalizeTask({
+        ...task,
+        creator: profileById.get(task.created_by) || null,
+        assignee: profileById.get(task.assigned_to) || null,
+      }));
       if (id !== fetchRef.current) return;
-      setTasks(hydrated);
+      // The base task rows are enough to render a truthful board. Assignment
+      // and recent-run enrichment is useful detail, but making it part of the
+      // first-paint gate kept Feed behind two additional serial queries.
+      setTasks(normalized.map(task => ({
+        ...task,
+        image_url: redactUnresolvedTaskImageValue(task.image_url),
+      })));
+      setLoading(false);
+
+      try {
+        const [tracked, imageHydrated] = await Promise.all([
+          hydrateTaskTracking(normalized),
+          hydrateTaskImageUrls(normalized),
+        ]);
+        if (id !== fetchRef.current) return;
+        const imagesByTaskId = new Map(imageHydrated.map(task => [task.id, task.image_url]));
+        setTasks(tracked.map(task => ({
+          ...task,
+          image_url: imagesByTaskId.get(task.id) ?? null,
+        })));
+      } catch (error) {
+        if (id === fetchRef.current) {
+          console.warn('[useKanbanData] task tracking enrichment unavailable:', error);
+        }
+      }
     } catch (err) {
       console.error('fetchTasks unexpected:', err);
+      if (id === fetchRef.current) setLoading(false);
     }
-  }, [circleId, hydrateTaskTracking]);
+  }, [circleId, exactReadClient, hydrateTaskImageUrls, hydrateTaskTracking]);
 
   const fetchMembers = useCallback(async () => {
+    if (!exactReadClient || !authUser?.id || !authenticatedAccessToken) return;
+    const requestedScope = {
+      userId: authUser.id,
+      circleId,
+      accessToken: authenticatedAccessToken,
+    };
     try {
-      const { data, error } = await supabase
+      const { data, error } = await exactReadClient
         .from('circle_members')
-        .select('user:profiles(id, username, display_name)')
+        .select('user_id')
         .eq('circle_id', circleId)
         .limit(50);
 
       if (error) {
-        console.error('fetchMembers error:', error);
+        console.warn(
+          '[useKanbanData] members unavailable:',
+          String((error as { code?: unknown }).code || 'unknown'),
+          String((error as { message?: unknown }).message || 'Member query failed.'),
+        );
         return;
       }
-      setMembers((data || []).map((m: any) => m.user).filter(Boolean));
+      const currentScope = liveReadScopeRef.current;
+      if (
+        currentScope.userId !== requestedScope.userId
+        || currentScope.circleId !== requestedScope.circleId
+        || currentScope.accessToken !== requestedScope.accessToken
+      ) return;
+      const safeProfiles = await loadSafeCircleProfiles({
+        circleId,
+        userIds: (data || []).map((row: any) => row.user_id),
+        client: exactReadClient,
+      });
+      const latestScope = liveReadScopeRef.current;
+      if (
+        latestScope.userId !== requestedScope.userId
+        || latestScope.circleId !== requestedScope.circleId
+        || latestScope.accessToken !== requestedScope.accessToken
+      ) return;
+      setMembers(safeProfiles.map(profile => ({
+        id: profile.id,
+        username: profile.username || '',
+        display_name: profile.display_name || profile.username || 'Circle member',
+      })));
     } catch (err) {
       console.error('fetchMembers unexpected:', err);
     }
-  }, [circleId]);
+  }, [authUser?.id, authenticatedAccessToken, circleId, exactReadClient]);
 
   const fetchAgents = useCallback(async () => {
+    if (!authUser?.id || !authenticatedAccessToken) return;
+    const requestedScope = {
+      userId: authUser.id,
+      circleId,
+      accessToken: authenticatedAccessToken,
+    };
     try {
-      const { agents: loadedAgents } = await loadCircleOfficeAgents(circleId);
+      const { agents: loadedAgents } = await loadCircleOfficeAgents(circleId, {
+        userId: requestedScope.userId,
+        accessToken: requestedScope.accessToken,
+      });
+      const currentScope = liveReadScopeRef.current;
+      if (
+        currentScope.userId !== requestedScope.userId
+        || currentScope.circleId !== requestedScope.circleId
+        || currentScope.accessToken !== requestedScope.accessToken
+      ) return;
       setAgents(loadedAgents);
     } catch (err) {
       console.error('fetchAgents unexpected:', err);
     }
-  }, [circleId]);
+  }, [authUser?.id, authenticatedAccessToken, circleId]);
 
   useEffect(() => {
-    let mounted = true;
-    (async () => {
-      const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
-      if (mounted && user) setCurrentUserId(user.id);
-      await Promise.allSettled([fetchTasks(), fetchMembers(), fetchAgents()]);
-      if (mounted) setLoading(false);
-    })();
-    return () => { mounted = false; };
-  }, [fetchTasks, fetchMembers, fetchAgents]);
+    if (authLoading) return undefined;
+    const nextLogicalScope = authUser?.id && circleId ? `${authUser.id}:${circleId}` : '';
+    const logicalScopeChanged = loadedLogicalScopeRef.current !== nextLogicalScope;
+    loadedLogicalScopeRef.current = nextLogicalScope;
+    setCurrentUserId(authUser?.id || null);
+    if (logicalScopeChanged) {
+      setTasks([]);
+      setMembers([]);
+      setAgents([]);
+      setLoading(Boolean(nextLogicalScope));
+    }
+
+    if (!nextLogicalScope || !exactReadClient) {
+      setLoading(false);
+      return undefined;
+    }
+
+    // Start all three lanes together. `fetchTasks` reveals the base board as
+    // soon as its primary query settles; members, agents, assignments, and run
+    // history continue enriching the already-usable Feed independently.
+    void fetchTasks();
+    void fetchMembers();
+    void fetchAgents();
+
+    return () => {
+      fetchRef.current += 1;
+    };
+  }, [authLoading, authUser?.id, circleId, exactReadClient, fetchTasks, fetchMembers, fetchAgents]);
 
   useEffect(() => {
     const channel = supabase
@@ -742,6 +935,7 @@ export function useKanbanData(circleId: string): KanbanData {
   const tasksByColumn = useMemo(() => groupByColumn(tasks), [tasks]);
 
   const buildAssignmentOwnershipPayload = useCallback(async (task: Pick<KanbanTask, 'id' | 'circle_id' | 'title' | 'description'> & { capability_profile_key?: string | null }) => {
+    const { buildTaskOwnershipClaim } = await import('../lib/circleIntegrations');
     const claim = await buildTaskOwnershipClaim({
       circleId: task.circle_id,
       title: task.title,
@@ -864,6 +1058,7 @@ export function useKanbanData(circleId: string): KanbanData {
       return data as TaskAgentAssignment;
     }
 
+    const { inferTaskCapabilityProfile } = await import('../lib/taskCapabilityProfiles');
     await syncTaskAssignments(
       task.id,
       uniqueAgentIds(task.assigned_agent_ids, task.assigned_agent_id, agentId),
@@ -1088,10 +1283,14 @@ export function useKanbanData(circleId: string): KanbanData {
 
     if (insertResult.error) {
       console.error('createTask error:', insertResult.error);
-      return;
+      // Report failure so the caller can keep the compose modal open with the
+      // user's typed fields. It used to return void indistinguishably from
+      // success, so the modal closed on an RLS denial and the task was gone.
+      return false;
     }
 
     if (desiredAgentIds.length > 0 && insertResult.data?.id) {
+      const { inferTaskCapabilityProfile } = await import('../lib/taskCapabilityProfiles');
       await syncTaskAssignments(insertResult.data.id, desiredAgentIds, primaryAgentId, {
         id: insertResult.data.id,
         circle_id: circleId,
@@ -1102,6 +1301,7 @@ export function useKanbanData(circleId: string): KanbanData {
     }
 
     fetchTasks();
+    return true;
   }, [circleId, currentUserId, fetchTasks, syncTaskAssignments, tasks]);
 
   const moveTask = useCallback(async (taskId: string, newStatus: TaskStatus) => {
@@ -1130,6 +1330,7 @@ export function useKanbanData(circleId: string): KanbanData {
     }
 
     if (newStatus === 'done' && currentUserId) {
+      const { awardXP, getXPForAction } = await import('../lib/gamification');
       awardXP(currentUserId, getXPForAction('task_complete'), 'task_complete', { task_id: taskId }).catch(console.error);
 
       // Auto-generate proof-of-work if task is linked to a mission
@@ -1190,11 +1391,12 @@ export function useKanbanData(circleId: string): KanbanData {
 
     if (updateResult.error) {
       console.error('updateTask error:', updateResult.error);
-      return;
+      return false;
     }
 
     if ((managesAssignments || shouldInheritRoomAgents) && desiredAgentIds) {
       const currentTask = tasks.find(task => task.id === taskId);
+      const { inferTaskCapabilityProfile } = await import('../lib/taskCapabilityProfiles');
       await syncTaskAssignments(taskId, desiredAgentIds, desiredAgentIds[0] || null, currentTask ? {
         id: currentTask.id,
         circle_id: currentTask.circle_id,
@@ -1208,6 +1410,7 @@ export function useKanbanData(circleId: string): KanbanData {
     }
 
     fetchTasks();
+    return true;
   }, [fetchTasks, syncTaskAssignments, tasks]);
 
   const deleteTask = useCallback(async (taskId: string) => {
@@ -1247,9 +1450,10 @@ export function useKanbanData(circleId: string): KanbanData {
   }, [fetchTasks]);
 
   const fetchComments = useCallback(async (taskId: string): Promise<TaskComment[]> => {
-    const { data, error } = await supabase
+    if (!exactReadClient) return [];
+    const { data, error } = await exactReadClient
       .from('task_comments')
-      .select('*, user:profiles!task_comments_user_id_fkey(username, display_name)')
+      .select('*')
       .eq('task_id', taskId)
       .order('created_at', { ascending: true });
 
@@ -1257,8 +1461,33 @@ export function useKanbanData(circleId: string): KanbanData {
       console.error('fetchComments error:', error);
       return [];
     }
-    return data || [];
-  }, []);
+    const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+      circleId,
+      userIds: (data || []).map((comment: any) => comment.user_id),
+      client: exactReadClient,
+    }));
+    const comments = (data || []).map((comment: any) => ({
+      ...comment,
+      user: profileById.get(comment.user_id) || null,
+    })) as TaskComment[];
+    const attachmentValues = comments.flatMap(comment =>
+      (comment.attachments || []).map(attachment => attachment.url),
+    );
+    const resolved = await resolveTaskImageValues(exactReadClient, attachmentValues);
+    return comments.map(comment => ({
+      ...comment,
+      attachments: comment.attachments?.map(attachment => {
+        const storagePath = attachment.storage_path
+          || taskImageStoragePathFromValue(attachment.url)
+          || undefined;
+        return {
+          ...attachment,
+          storage_path: storagePath,
+          url: resolved.get(attachment.url) ?? '',
+        };
+      }) || comment.attachments,
+    }));
+  }, [exactReadClient]);
 
   const insertTaskComment = useCallback(async ({
     taskId,
@@ -1281,7 +1510,14 @@ export function useKanbanData(circleId: string): KanbanData {
       agent_id: agentId,
       content: content.trim(),
     };
-    if (attachments && attachments.length > 0) insert.attachments = attachments;
+    if (attachments && attachments.length > 0) {
+      insert.attachments = attachments.map(attachment => ({
+        ...attachment,
+        url: attachment.storage_path
+          ? toTaskImageStorageReference(attachment.storage_path)
+          : attachment.url,
+      }));
+    }
     if (taskRunId && commentTaskRunSupportRef.current !== false) insert.task_run_id = taskRunId;
     let result = await supabase.from('task_comments').insert(insert);
     if (result.error && insert.task_run_id && String(result.error.message || '').includes('task_run_id')) {
@@ -1301,25 +1537,30 @@ export function useKanbanData(circleId: string): KanbanData {
   }, [insertTaskComment]);
 
   const uploadTaskFile = useCallback(async (taskId: string, file: File): Promise<TaskAttachment | null> => {
+    if (!exactReadClient) return null;
     try {
       const ext = file.name.split('.').pop()?.toLowerCase() || 'bin';
-      const path = `${taskId}/${Date.now()}-${file.name}`;
-      const { error: uploadError } = await supabase.storage
+      const path = buildTaskImageStoragePath(taskId, file.name);
+      const { error: uploadError } = await exactReadClient.storage
         .from('task-images')
         .upload(path, file, { cacheControl: '3600', upsert: false });
       if (uploadError) {
         console.error('uploadTaskFile error:', uploadError);
         return null;
       }
-      const { data: urlData } = supabase.storage.from('task-images').getPublicUrl(path);
-      if (!urlData?.publicUrl) return null;
+      const signedUrl = await createTaskImageSignedUrl(exactReadClient, path);
+      if (!signedUrl) {
+        await exactReadClient.storage.from('task-images').remove([path]).catch(() => undefined);
+        return null;
+      }
 
       const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'];
       const codeExts = ['ts', 'tsx', 'js', 'jsx', 'py', 'rs', 'go', 'java', 'c', 'cpp', 'h', 'css', 'html', 'json', 'yaml', 'yml', 'toml', 'sql', 'sh', 'md'];
       const type: TaskAttachment['type'] = imageExts.includes(ext) ? 'image' : codeExts.includes(ext) ? 'code' : 'file';
 
       return {
-        url: urlData.publicUrl,
+        url: signedUrl,
+        storage_path: path,
         name: file.name,
         type,
         mime: file.type || undefined,
@@ -1330,7 +1571,7 @@ export function useKanbanData(circleId: string): KanbanData {
       console.error('uploadTaskFile unexpected:', err);
       return null;
     }
-  }, []);
+  }, [exactReadClient]);
 
   const fetchTaskRuns = useCallback(async (taskId: string): Promise<TaskRun[]> => {
     if (taskRunsSupportRef.current === false) {
@@ -1354,7 +1595,11 @@ export function useKanbanData(circleId: string): KanbanData {
     return (data || []).map(normalizeTaskRun);
   }, [tasks]);
 
-  const runAgentOnTask = useCallback(async (taskId: string, agentId?: string, options?: AgentRunOptions): Promise<string | null> => {
+  const runAgentOnTaskWithOutcome = useCallback(async (
+    taskId: string,
+    agentId?: string,
+    options?: AgentRunOptions,
+  ): Promise<AgentTaskInvocationOutcome | null> => {
     const task = tasks.find(t => t.id === taskId);
     if (!task || !currentUserId) return null;
 
@@ -1363,6 +1608,64 @@ export function useKanbanData(circleId: string): KanbanData {
     const targetAgent = agents.find(a => a.id === targetAgentId)
       || (targetAgentId === 'blackswan-default' ? createBlackSwanAgent(circleId) : null);
     if (!targetAgent) return null;
+
+    // Task execution is a user-triggered path, not Feed bootstrap work. Keep
+    // its provider, telemetry, memory, and proof runtimes in deferred chunks
+    // so opening Feed does not download the entire agent execution stack.
+    const [
+      capabilityRuntime,
+      taskExecutionRuntime,
+      sessionBindingRuntime,
+      autoConnectRuntime,
+      openSwanRuntime,
+      sessionProfileRuntime,
+      invocationRuntime,
+      subjectRuntime,
+      handoffRuntime,
+      runSystemRuntime,
+      gamificationRuntime,
+    ] = await Promise.all([
+      import('../lib/taskCapabilityProfiles'),
+      import('../lib/taskExecutionRuntime'),
+      import('../lib/officeAgentSessionBinding'),
+      import('../lib/agentAutoConnectState'),
+      import('../lib/openswanSessionRuntime'),
+      import('../lib/chatSessionProfile'),
+      import('../lib/agentInvocation'),
+      import('../lib/agentRuntimeSubject'),
+      import('../lib/connectedAgentHandoffCore'),
+      import('../lib/agentRunSystem'),
+      import('../lib/gamification'),
+    ]);
+    const { inferTaskCapabilityProfile, getTaskCapabilityProfile } = capabilityRuntime;
+    const {
+      createInitialTaskRunSteps,
+      appendTaskRunStep,
+      createTaskRunArtifact,
+      ensureTaskAcceptanceChecks,
+      evaluateTaskRunChecks,
+      canTaskRunMarkComplete,
+      buildTaskExecutionMemoryBrief,
+      saveTaskCompletionMemory,
+      saveTaskBlockerMemory,
+      saveTaskRunResumeSnapshot,
+      loadCollaborativeHandoffs,
+      markCollaborativeHandoffsConsumed,
+      saveTaskRunHandoff,
+    } = taskExecutionRuntime;
+    const { buildOfficeSessionSnapshot } = sessionBindingRuntime;
+    const {
+      getAutoConnectConnections,
+      getAutoConnectSessionFingerprints,
+      getAutoConnectSessions,
+    } = autoConnectRuntime;
+    const { runOpenSwanSessionTurn } = openSwanRuntime;
+    const { resolveSessionCodingProfile } = sessionProfileRuntime;
+    const { invokeDirect } = invocationRuntime;
+    const { buildAgentRuntimeSubject, isUuidLike } = subjectRuntime;
+    const { buildConnectedAgentHandoffReceipt } = handoffRuntime;
+    const { recordConnectedAgentAcceptedRun } = runSystemRuntime;
+    const { awardXP, getXPForAction } = gamificationRuntime;
 
     const targetAgentName = targetAgent.name || 'BlackSwan';
     const thinkingLevel = options?.thinkingLevel || 'balanced';
@@ -1578,24 +1881,24 @@ export function useKanbanData(circleId: string): KanbanData {
       ensureTaskAcceptanceChecks(task.id, task.circle_id, profileKey).catch(() => {});
     }
 
-    // ── Wake idle agent before invocation — spawns terminal session if needed ──
-    const agentProvider = (targetAgent as any).providerType || (targetAgent as any).provider || '';
-    if (agentProvider && agentProvider !== 'blackswan') {
-      // Check if agent is idle/offline and try to wake it
-      const agentStatus = (targetAgent as any).status;
-      if (agentStatus === 'idle' || agentStatus === 'offline') {
-        console.log(`[runAgentOnTask] Agent "${targetAgentName}" is ${agentStatus}, waking...`);
-        await wakeAndAssignTask(agentProvider, targetAgentName, task.title, circleId).catch(() => {});
-      }
-    }
-
     try {
+      // The provider adapter below owns the one task-bearing dispatch attempt.
+      // `wakeAndAssignTask` also sends the task, so calling it here first would
+      // duplicate work whenever a roster row happened to look idle/offline.
       const useOpenSwanRuntime = targetAgent.provider === 'blackswan' || targetAgent.id === 'blackswan-default';
+      const officeSessionSnapshot = buildOfficeSessionSnapshot(
+        getAutoConnectConnections(),
+        getAutoConnectSessions(),
+        getAutoConnectSessionFingerprints(),
+      );
       const result = useOpenSwanRuntime
         ? await (async () => {
             const sessionProfile = resolveSessionCodingProfile('auto', message, 'main_chat');
             const structured = await runOpenSwanSessionTurn({
               message,
+              originalUserTaskText: task.description
+                ? `${task.title}\n${task.description}`
+                : task.title,
               context: {
                 userId: currentUserId,
                 circleId,
@@ -1629,6 +1932,7 @@ export function useKanbanData(circleId: string): KanbanData {
               artifacts: structured.artifacts || [],
               verificationResults: structured.verificationResults || [],
               toolEvents: structured.toolEvents || [],
+              terminal: structured.terminal,
             });
             const openSwanAttachments = mapOpenSwanArtifactsToTaskAttachments(structured.artifacts || []);
             const fallbackCodeAttachments = extractCodeAttachments(structured.response);
@@ -1646,18 +1950,116 @@ export function useKanbanData(circleId: string): KanbanData {
                 artifacts: structured.artifacts || [],
                 verificationResults: structured.verificationResults || [],
                 toolEvents: structured.toolEvents || [],
+                terminal: structured.terminal,
               },
             } as const;
           })()
-        : await invokeDirect({
-            messageId: crypto.randomUUID(),
-            circleId,
-            command: message,
-            senderId: currentUserId,
-            targetAgentId,
-            targetAgentName,
-            model: modelWithThinking || null,
-          }, targetAgent, targetAgent.gatewayUrl);
+        : await invokeDirect(
+            {
+              messageId: crypto.randomUUID(),
+              circleId,
+              command: message,
+              senderId: currentUserId,
+              targetAgentId,
+              targetAgentName,
+              model: modelWithThinking || null,
+            },
+            targetAgent,
+            targetAgent.gatewayUrl,
+            undefined,
+            officeSessionSnapshot,
+          );
+
+      const invocationHandoff = 'disposition' in result ? result : null;
+      const invocationDisposition = invocationHandoff?.disposition
+        || (result.success ? 'completed' : 'failed');
+      if (invocationDisposition === 'accepted' || invocationDisposition === 'outcome_unknown') {
+        const accepted = invocationDisposition === 'accepted';
+        const response = result.responseText || (accepted
+          ? `${targetAgentName} accepted the task. Completion has not been verified yet.`
+          : `${targetAgentName} may have received the task, but dispatch could not be confirmed. The task was not replayed; check the external session before retrying.`);
+        const nonterminalStatus = accepted ? 'running' : 'blocked';
+        let resolvedCanonicalAgentRunId = invocationHandoff?.runId || null;
+        if (accepted && !resolvedCanonicalAgentRunId && currentUserId) {
+          try {
+            const subject = buildAgentRuntimeSubject({
+              id: targetAgent.id,
+              name: targetAgentName,
+              providerType: targetAgent.provider as any,
+              spirit: targetAgent.spirit,
+            }, {
+              dbAgentId: isUuidLike(targetAgent.id) ? targetAgent.id : null,
+            });
+            const receipt = buildConnectedAgentHandoffReceipt({
+              status: 'accepted',
+              provider: targetAgent.provider,
+              actor: targetAgentName,
+              sessionId: invocationHandoff?.sessionId || null,
+              providerRunId: invocationHandoff?.providerRunId || null,
+              runId: null,
+              message: response,
+            });
+            const canonicalRun = await recordConnectedAgentAcceptedRun({
+              circleId: task.circle_id,
+              userId: currentUserId,
+              task: message,
+              taskId: task.id,
+              sourceTaskRunId: taskRunId,
+              surface: 'feed_task',
+              externalDispatchKind: invocationHandoff?.externalDispatchKind || null,
+              externalConnectionId: invocationHandoff?.externalConnectionId || null,
+              receipt,
+              agentSubjectMetadata: subject.metadata,
+            });
+            resolvedCanonicalAgentRunId = canonicalRun?.id || null;
+          } catch {
+            // Provider acceptance remains authoritative even when the optional
+            // cross-surface ledger write is unavailable. Never replay or turn
+            // this into a failed task-run claim.
+            console.warn('[useKanbanData] accepted_handoff_run_tracking_unavailable');
+          }
+        }
+
+        await updateTaskRunRecord(taskRunId || '', {
+          status: nonterminalStatus,
+          output_payload: {
+            handoff_status: invocationDisposition,
+            completion_verified: false,
+            external_session_id: invocationHandoff?.sessionId || null,
+            external_dispatch_kind: invocationHandoff?.externalDispatchKind || null,
+            external_connection_id: invocationHandoff?.externalConnectionId || null,
+            external_provider_run_id: invocationHandoff?.providerRunId || null,
+            canonical_agent_run_id: resolvedCanonicalAgentRunId || null,
+          },
+          summary: response.slice(0, 240),
+          model_used: result.model || modelWithThinking || null,
+          ownership_status: ownershipPayload?.ownership_status || null,
+          ownership_summary: ownershipPayload?.ownership_summary || null,
+          required_connectors: ownershipPayload?.required_connectors || [],
+          required_capabilities: ownershipPayload?.required_capabilities || [],
+          missing_connectors: ownershipPayload?.missing_connectors || [],
+          missing_capabilities: ownershipPayload?.missing_capabilities || [],
+          ownership_updated_at: ownershipPayload?.ownership_updated_at || null,
+        });
+        await upsertAssignmentStatus(
+          task,
+          targetAgentId,
+          accepted ? 'in_progress' : 'blocked',
+          ownershipPayload,
+        );
+        await insertTaskComment({
+          taskId,
+          taskRunId,
+          agentId: targetAgentId,
+          content: `[AGENT: ${targetAgentName}] [${accepted ? 'ACCEPTED' : 'OUTCOME UNKNOWN'}]\n${response}`,
+        });
+        fetchTasks();
+        return {
+          text: response,
+          disposition: invocationDisposition,
+          taskRunId,
+        };
+      }
 
       if (!result.success) {
         await updateTaskRunRecord(taskRunId || '', {
@@ -1690,22 +2092,69 @@ export function useKanbanData(circleId: string): KanbanData {
         ? { deliverable: openSwanPayload.output.deliverable || response, output: openSwanPayload.output }
         : parseTaskRunEnvelope(response);
       const deliverable = parsed.deliverable || response;
+      const openSwanCompletionVerified = openSwanPayload
+        ? isVerifiedOpenSwanTerminalSuccess(openSwanPayload.terminal)
+        : true;
+      // Preserve the existing synchronous/direct-provider path. For OpenSwan,
+      // however, the typed terminal receipt is the only success authority; the
+      // model's prose and transport success cannot enable completion effects.
+      const allowsSuccessSideEffects = !openSwanPayload || openSwanCompletionVerified;
+      const openSwanTerminalSummary = openSwanPayload
+        ? describeOpenSwanTaskTerminal(openSwanPayload.terminal)
+        : null;
+      const presentedDeliverable = openSwanPayload && !openSwanCompletionVerified
+        ? `${openSwanTerminalSummary}\n\n${deliverable}`
+        : deliverable;
       const attachments = openSwanPayload?.attachments || extractCodeAttachments(deliverable);
       const tokenCount = result.tokenCount || 0;
       const durationMs = result.latencyMs || 0;
       const cost = estimateRunCost(tokenCount);
       const nextStatus = resolveNextStatus(task, parsed.output, mode, targetAgentId);
-      const assignmentStatus = mode === 'plan' ? 'assigned' : parsed.output.mark_complete ? 'completed' : 'in_progress';
       let completionGatePassed = nextStatus === 'done';
+      if (openSwanPayload && !openSwanCompletionVerified) {
+        // The local task acceptance gate cannot repair an unverified runtime
+        // terminal. Keep every later success-only effect closed even when the
+        // provider prose claims that the work finished.
+        completionGatePassed = false;
+      }
+      const assignmentStatus: TaskAgentAssignment['status'] = openSwanPayload && !openSwanCompletionVerified
+        ? openSwanPayload.terminal.state === 'cancelled'
+          ? 'assigned'
+          : 'blocked'
+        : mode === 'plan'
+          ? 'assigned'
+          : parsed.output.mark_complete
+            ? 'completed'
+            : 'in_progress';
+      const taskRunStatus: TaskRunStatus = !openSwanPayload
+        ? 'completed'
+        : openSwanCompletionVerified
+          ? 'completed'
+          : openSwanPayload.terminal.state === 'partial'
+            ? 'blocked'
+            : openSwanPayload.terminal.state === 'cancelled'
+              ? 'cancelled'
+              : 'failed';
+      const taskRunCompletedAt = openSwanPayload?.terminal.state === 'partial'
+        ? null
+        : new Date().toISOString();
 
       await upsertAssignmentStatus(task, targetAgentId, assignmentStatus, ownershipPayload);
       await applyTaskRunMetrics(taskId, cost, tokenCount, durationMs, nextStatus);
       await updateTaskRunRecord(taskRunId || '', {
-        status: 'completed',
+        status: taskRunStatus,
         output_payload: {
           ...parsed.output,
           deliverable,
           openswan_run_id: openSwanPayload?.runId || null,
+          ...(openSwanPayload ? {
+            terminal_state: openSwanPayload.terminal.state,
+            terminal_reason: openSwanPayload.terminal.reason,
+            completion_verified: openSwanPayload.terminal.state === 'succeeded'
+              && openSwanPayload.terminal.completionVerified === true,
+            terminal_resumable: openSwanPayload.terminal.resumable,
+            terminal_checkpoint_available: openSwanPayload.terminal.checkpoint != null,
+          } : {}),
           verification_results: openSwanPayload?.verificationResults.map(result => ({
             label: result.check.label,
             status: result.status,
@@ -1731,14 +2180,19 @@ export function useKanbanData(circleId: string): KanbanData {
         missing_connectors: ownershipPayload?.missing_connectors || [],
         missing_capabilities: ownershipPayload?.missing_capabilities || [],
         ownership_updated_at: ownershipPayload?.ownership_updated_at || null,
-        completed_at: new Date().toISOString(),
+        ...(openSwanPayload?.terminal.state === 'failed'
+          ? { error_message: `OpenSwan terminal failure: ${openSwanPayload.terminal.reason}` }
+          : {}),
+        completed_at: taskRunCompletedAt,
       });
       // Accountability (proof-of-work): make this completed agent run visible to
       // the team in the Feed. buildRunProofPublication composes the secret-safe
       // run-proof card + git references into a proof_of_work row (Feed proof lane)
       // and a realtime agent_activity row. Best-effort / non-fatal — mirrors the
       // resume-snapshot write below; a failure never affects task completion.
-      void (async () => {
+      const shouldPublishRunProof = !openSwanPayload
+        || (openSwanCompletionVerified && parsed.output.mark_complete === true);
+      if (shouldPublishRunProof) void (async () => {
         try {
           const { buildRunProofPublication } = await import('../lib/agentRunProofPublisherCore');
           const { addProofOfWork } = await import('../lib/missions');
@@ -1791,10 +2245,10 @@ export function useKanbanData(circleId: string): KanbanData {
           deliverable,
         }).catch(() => {});
       }
-      if (structuredHandoffs.length > 0) {
+      if (allowsSuccessSideEffects && structuredHandoffs.length > 0) {
         markCollaborativeHandoffsConsumed(structuredHandoffs.map(handoff => handoff.id)).catch(() => {});
       }
-      if (taskRunId && options?.parentRunId && options?.handoffToAgentId) {
+      if (allowsSuccessSideEffects && taskRunId && options?.parentRunId && options?.handoffToAgentId) {
         saveTaskRunHandoff({
           taskId: task.id,
           circleId: task.circle_id,
@@ -1816,19 +2270,29 @@ export function useKanbanData(circleId: string): KanbanData {
       const modelTag = model ? ` | ${model}` : '';
       const thinkTag = thinkingLevel !== 'balanced' ? ` | ${thinkingLevel}` : '';
       const completionTag = parsed.output.mark_complete ? ' | complete' : '';
+      const terminalTag = openSwanPayload && !openSwanCompletionVerified
+        ? ` | ${openSwanPayload.terminal.state}:${openSwanPayload.terminal.reason}`
+        : '';
       const summaryTag = parsed.output.summary ? `\nSummary: ${parsed.output.summary}` : '';
       await insertTaskComment({
         taskId,
         taskRunId,
         agentId: targetAgentId,
         attachments,
-        content: `[AGENT: ${targetAgentName}] ${modeTag}${modelTag}${thinkTag}${completionTag}${summaryTag}\n${deliverable}`,
+        content: `[AGENT: ${targetAgentName}] ${modeTag}${modelTag}${thinkTag}${completionTag}${terminalTag}${summaryTag}\n${presentedDeliverable}`,
       });
 
       // ── Task execution runtime: artifacts, checks, completion gate ────
       if (taskRunId) {
         // Record execution step
-        appendTaskRunStep(taskRunId, task.id, task.circle_id, 'execution', 'Agent execution complete', parsed.output.summary).catch(() => {});
+        const executionStepTitle = !openSwanPayload || openSwanCompletionVerified
+          ? 'Agent execution complete'
+          : openSwanPayload.terminal.state === 'partial'
+            ? 'Agent execution stopped with partial progress'
+            : openSwanPayload.terminal.state === 'cancelled'
+              ? 'Agent execution cancelled'
+              : 'Agent execution failed';
+        appendTaskRunStep(taskRunId, task.id, task.circle_id, 'execution', executionStepTitle, parsed.output.summary).catch(() => {});
 
         // Convert extracted attachments to typed artifacts
         for (const att of attachments) {
@@ -1866,6 +2330,11 @@ export function useKanbanData(circleId: string): KanbanData {
         if (openSwanPayload) {
           appendTaskRunStep(taskRunId, task.id, task.circle_id, 'execution', 'OpenSwan runtime metadata', undefined, {
             openswan_run_id: openSwanPayload.runId,
+            terminal_state: openSwanPayload.terminal.state,
+            terminal_reason: openSwanPayload.terminal.reason,
+            completion_verified: openSwanCompletionVerified,
+            terminal_resumable: openSwanPayload.terminal.resumable,
+            terminal_checkpoint_available: openSwanPayload.terminal.checkpoint != null,
             verification_results: openSwanPayload.verificationResults.map(result => ({
               label: result.check.label,
               status: result.status,
@@ -1896,11 +2365,22 @@ export function useKanbanData(circleId: string): KanbanData {
           }
         }
 
-        // Finalize step
-        appendTaskRunStep(taskRunId, task.id, task.circle_id, 'finalize', 'Run finalized').catch(() => {});
+        // Final-step copy is terminal-aware. In particular, partial/failed/
+        // cancelled turns never receive the success-adjacent "Run finalized"
+        // label merely because their task ledger write finished.
+        const finalizeStepTitle = !openSwanPayload
+          ? 'Run finalized'
+          : openSwanCompletionVerified
+            ? 'Run completed with verified outcome'
+            : openSwanPayload.terminal.state === 'partial'
+              ? 'Run stopped with partial progress'
+              : openSwanPayload.terminal.state === 'cancelled'
+                ? 'Run cancelled before completion'
+                : 'Run failed before verified completion';
+        appendTaskRunStep(taskRunId, task.id, task.circle_id, 'finalize', finalizeStepTitle).catch(() => {});
       }
 
-      if (mode === 'execute' && parsed.output.mark_complete && completionGatePassed) {
+      if (allowsSuccessSideEffects && mode === 'execute' && parsed.output.mark_complete && completionGatePassed) {
         saveTaskCompletionMemory({
           circleId: task.circle_id,
           userId: currentUserId,
@@ -1932,7 +2412,7 @@ export function useKanbanData(circleId: string): KanbanData {
         }).catch(() => {});
       }
 
-      if (nextStatus === 'done' && currentUserId) {
+      if (allowsSuccessSideEffects && nextStatus === 'done' && currentUserId) {
         // Only award XP if completion gate actually passed
         const canComplete = taskRunId ? await canTaskRunMarkComplete(taskRunId, task.id, task.circle_id) : true;
         if (canComplete) {
@@ -1941,7 +2421,13 @@ export function useKanbanData(circleId: string): KanbanData {
       }
 
       fetchTasks();
-      return deliverable;
+      return {
+        text: presentedDeliverable,
+        disposition: openSwanPayload
+          ? invocationDispositionFromOpenSwanTerminal(openSwanPayload.terminal)
+          : 'completed',
+        taskRunId,
+      };
     } catch (err) {
       console.error('runAgentOnTask unexpected:', err);
       await updateTaskRunRecord(taskRunId || '', {
@@ -1976,6 +2462,15 @@ export function useKanbanData(circleId: string): KanbanData {
     upsertAssignmentStatus,
   ]);
 
+  const runAgentOnTask = useCallback(async (
+    taskId: string,
+    agentId?: string,
+    options?: AgentRunOptions,
+  ): Promise<string | null> => {
+    const outcome = await runAgentOnTaskWithOutcome(taskId, agentId, options);
+    return outcome?.text || null;
+  }, [runAgentOnTaskWithOutcome]);
+
   const runAssignedAgentsOnTask = useCallback(async (taskId: string, options?: AgentRunOptions): Promise<string | null> => {
     const task = tasks.find(t => t.id === taskId);
     if (!task || !currentUserId) return null;
@@ -1995,6 +2490,8 @@ export function useKanbanData(circleId: string): KanbanData {
     const orderedAgents = targetAgentIds.length > 0 ? targetAgentIds : ['blackswan-default'];
     const outputs: string[] = [];
     const handoffs: Array<{ agentName: string; summary: string }> = [];
+    let collaborativeDisposition: CollaborativeDisposition = 'completed';
+    let stoppedAtAgent: string | null = null;
     const agentNamesById = new Map(orderedAgents.map(agentId => ([
       agentId,
       agents.find(agent => agent.id === agentId)?.name ||
@@ -2052,7 +2549,7 @@ export function useKanbanData(circleId: string): KanbanData {
         roleObjective: planStep.objective,
       });
 
-      const result = await runAgentOnTask(taskId, targetAgentId, {
+      const result = await runAgentOnTaskWithOutcome(taskId, targetAgentId, {
         ...options,
         parentRunId: orchestratorRunId || undefined,
         triggerSource: 'collaborative',
@@ -2063,16 +2560,33 @@ export function useKanbanData(circleId: string): KanbanData {
       });
 
       if (result) {
-        outputs.push(`## ${agentName}\n${result}`);
-        handoffs.push({
-          agentName,
-          summary: result.slice(0, 320),
-        });
+        outputs.push(`## ${agentName}\n${result.text}`);
         await insertTaskComment({
           taskId,
           taskRunId: orchestratorRunId,
-          content: `[ORCHESTRATOR] Handoff from ${agentName}: ${result.slice(0, 320)}`,
+          content: result.disposition === 'completed'
+            ? `[ORCHESTRATOR] Handoff from ${agentName}: ${result.text.slice(0, 320)}`
+            : `[ORCHESTRATOR] ${agentName} ${describeCollaborativeChildStop(result.disposition)}. The dependent sequence is paused; no downstream agent was dispatched.`,
         });
+        if (result.disposition === 'completed') {
+          handoffs.push({
+            agentName,
+            summary: result.text.slice(0, 320),
+          });
+        } else {
+          collaborativeDisposition = result.disposition;
+          stoppedAtAgent = agentName;
+          break;
+        }
+      } else {
+        collaborativeDisposition = 'no_result';
+        stoppedAtAgent = agentName;
+        await insertTaskComment({
+          taskId,
+          taskRunId: orchestratorRunId,
+          content: `[ORCHESTRATOR] ${agentName} returned no verified result. The dependent sequence is blocked; no downstream agent was dispatched.`,
+        });
+        break;
       }
 
       if (completionPolicy === 'any_assigned') {
@@ -2087,16 +2601,41 @@ export function useKanbanData(circleId: string): KanbanData {
       }
     }
 
-    const collaborativeSummary = outputs.length > 0
-      ? `Collaborative run complete. ${outputs.length} agent output${outputs.length === 1 ? '' : 's'} recorded.`
-      : 'Collaborative run completed with no agent output.';
+    // Keep the legacy no-result/outcome-unknown fallback blocked, while exact
+    // OpenSwan failure and cancellation receipts retain their terminal status.
+    const fallbackOrchestratorStatus: TaskRunStatus = collaborativeDisposition === 'accepted'
+      ? 'running'
+      : 'blocked';
+    const orchestratorStatus: TaskRunStatus = collaborativeDisposition === 'completed'
+      ? 'completed'
+      : collaborativeDisposition === 'failed'
+        ? 'failed'
+        : collaborativeDisposition === 'cancelled'
+          ? 'cancelled'
+          : fallbackOrchestratorStatus;
+    const collaborativeSummary = collaborativeDisposition === 'completed'
+      ? `Collaborative run complete. ${outputs.length} verified agent output${outputs.length === 1 ? '' : 's'} recorded.`
+      : collaborativeDisposition === 'accepted'
+        ? `Collaborative run paused at ${stoppedAtAgent || 'an agent'}: handoff accepted, awaiting a verified result.`
+      : collaborativeDisposition === 'outcome_unknown'
+        ? `Collaborative run blocked at ${stoppedAtAgent || 'an agent'}: dispatch outcome is unknown. Check the connected session before retrying.`
+        : collaborativeDisposition === 'partial'
+          ? `Collaborative run stopped at ${stoppedAtAgent || 'an agent'} with partial progress. Completion is unverified; no downstream agent was dispatched.`
+          : collaborativeDisposition === 'cancelled'
+            ? `Collaborative run cancelled at ${stoppedAtAgent || 'an agent'}. No downstream agent was dispatched.`
+            : collaborativeDisposition === 'failed'
+              ? `Collaborative run failed at ${stoppedAtAgent || 'an agent'} before verified completion. No downstream agent was dispatched.`
+              : `Collaborative run blocked at ${stoppedAtAgent || 'an agent'}: no verified result was returned.`;
 
     if (orchestratorRunId) {
       await updateTaskRunRecord(orchestratorRunId, {
-        status: 'completed',
+        status: orchestratorStatus,
         summary: collaborativeSummary,
         output_payload: {
           summary: collaborativeSummary,
+          disposition: collaborativeDisposition,
+          completion_verified: collaborativeDisposition === 'completed',
+          stopped_at_agent: stoppedAtAgent,
           participating_agents: orderedAgents,
           completion_policy: completionPolicy,
           room_id: task.room_id || null,
@@ -2107,7 +2646,11 @@ export function useKanbanData(circleId: string): KanbanData {
           execution_plan: executionPlan,
           handoffs: handoffs.map(handoff => ({ agent: handoff.agentName, summary: handoff.summary })),
         },
-        completed_at: new Date().toISOString(),
+        ...(collaborativeDisposition === 'completed'
+          || collaborativeDisposition === 'failed'
+          || collaborativeDisposition === 'cancelled'
+          ? { completed_at: new Date().toISOString() }
+          : { completed_at: null }),
       });
     }
 
@@ -2117,8 +2660,8 @@ export function useKanbanData(circleId: string): KanbanData {
       content: `[ORCHESTRATOR] ${collaborativeSummary}`,
     });
 
-    return outputs.length > 0 ? outputs.join('\n\n') : null;
-  }, [agents, createTaskRunRecord, currentUserId, insertTaskComment, runAgentOnTask, tasks, updateTaskRunRecord]);
+    return outputs.length > 0 ? outputs.join('\n\n') : collaborativeSummary;
+  }, [agents, createTaskRunRecord, currentUserId, insertTaskComment, runAgentOnTaskWithOutcome, tasks, updateTaskRunRecord]);
 
   const updateFocusChain = useCallback(async (taskId: string, chain: FocusChainItem[]) => {
     const { error } = await supabase.from('tasks').update({ focus_chain: chain }).eq('id', taskId);
@@ -2166,5 +2709,6 @@ export function useKanbanData(circleId: string): KanbanData {
     toggleTaskMode,
     recordTaskCost,
     refresh,
+    refreshAgents: fetchAgents,
   };
 }

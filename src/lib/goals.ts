@@ -5,13 +5,14 @@
 
 import { supabase } from './supabase';
 import type { OrgGoal, GoalType, GoalStatus } from '../types';
+import { indexSafeProfiles, loadSafeCircleProfiles } from './safeProfiles';
 
 // ─── Read ────────────────────────────────────────────────────────────
 
 export async function getOrgGoals(orgId: string): Promise<OrgGoal[]> {
   const { data } = await supabase
     .from('org_goals')
-    .select('*, owner:profiles!owner_id(id, username, display_name, avatar_url)')
+    .select('*')
     .eq('org_id', orgId)
     .order('goal_type', { ascending: true })
     .order('created_at', { ascending: true });
@@ -19,28 +20,40 @@ export async function getOrgGoals(orgId: string): Promise<OrgGoal[]> {
   if (!data) return [];
 
   // Build tree structure
-  return buildGoalTree(data);
+  // Organization membership is not profile-view authority. Owners remain
+  // intentionally anonymous unless a Circle-scoped caller hydrates them.
+  return buildGoalTree(data.map((goal: any) => ({ ...goal, owner: null })));
 }
 
 export async function getCircleGoals(circleId: string): Promise<OrgGoal[]> {
   const { data } = await supabase
     .from('org_goals')
-    .select('*, owner:profiles!owner_id(id, username, display_name, avatar_url)')
+    .select('*')
     .eq('circle_id', circleId)
     .eq('status', 'active')
     .order('created_at', { ascending: true });
 
-  return data || [];
+  const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+    circleId,
+    userIds: (data || []).map((goal: any) => goal.owner_id),
+  }));
+  return (data || []).map((goal: any) => ({ ...goal, owner: profileById.get(goal.owner_id) || null }));
 }
 
 export async function getGoal(goalId: string): Promise<OrgGoal | null> {
   const { data } = await supabase
     .from('org_goals')
-    .select('*, owner:profiles!owner_id(id, username, display_name, avatar_url)')
+    .select('*')
     .eq('id', goalId)
     .single();
 
-  return data;
+  if (!data) return null;
+  if (!data.circle_id) return { ...data, owner: null };
+  const [owner] = await loadSafeCircleProfiles({
+    circleId: data.circle_id,
+    userIds: data.owner_id ? [data.owner_id] : [],
+  });
+  return { ...data, owner: owner || null };
 }
 
 // ─── Write ───────────────────────────────────────────────────────────
@@ -155,13 +168,29 @@ export async function linkCheckInToGoal(
 }
 
 export async function getGoalCheckInLinks(goalId: string) {
-  const { data } = await supabase
+  const [{ data }, { data: goal }] = await Promise.all([
+    supabase
     .from('goal_check_in_links')
-    .select('*, check_in:check_ins(id, content, created_at, user:profiles!user_id(username, display_name))')
+    .select('*, check_in:check_ins(id, user_id, content, created_at)')
     .eq('goal_id', goalId)
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false }),
+    supabase.from('org_goals').select('circle_id').eq('id', goalId).maybeSingle(),
+  ]);
 
-  return data || [];
+  if (!goal?.circle_id) return (data || []).map((row: any) => ({
+    ...row,
+    check_in: row.check_in ? { ...row.check_in, user: null } : null,
+  }));
+  const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+    circleId: goal.circle_id,
+    userIds: (data || []).map((row: any) => row.check_in?.user_id),
+  }));
+  return (data || []).map((row: any) => ({
+    ...row,
+    check_in: row.check_in
+      ? { ...row.check_in, user: profileById.get(row.check_in.user_id) || null }
+      : null,
+  }));
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────

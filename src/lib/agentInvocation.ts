@@ -5,7 +5,8 @@
 
 import { supabase } from './supabase';
 import { CircleOfficeAgent, BLACKSWAN_AGENT_ID } from './circleOffice';
-import { loadBudgetConfig, checkHardLimit } from './budgetAlerts';
+import { loadBudgetConfig, checkHardLimit, type BudgetConfig } from './budgetAlerts';
+import { loadOfficeUserPreferences } from './officeDashboardPersistence';
 import { getStrictLocalAiModeMessage, shouldBlockExternalAiProvider } from './privacyMode';
 import {
   buildAgentRuntimeSubject,
@@ -14,6 +15,17 @@ import {
   type AgentRuntimeSubjectMetadata,
 } from './agentRuntimeSubject';
 import { fetchBridgeAuthenticated } from './bridgeAuth';
+import { safeGetUserForAccessToken } from './authSession';
+import { buildConnectedAgentHandoffReceipt } from './connectedAgentHandoffCore';
+import { recordConnectedAgentAcceptedRun } from './agentRunSystem';
+import { sendSessionMessage } from './openswanService';
+import {
+  isInvokeAgentV2Unavailable,
+  readOfficeAgentSessionBinding,
+  resolveOfficeAgentSessionBinding,
+  type OfficeSessionSnapshot,
+} from './officeAgentSessionBinding';
+import type { OfficeAgentSessionBinding } from './officeAgentSessionBindingCore';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -44,6 +56,25 @@ export interface TokenBreakdown {
 
 export interface AgentInvocationResult {
   success: boolean;
+  /**
+   * `accepted` proves only that an external runtime took ownership. It is not
+   * a completed task. `outcome_unknown` means one attempt may have crossed the
+   * transport boundary and therefore must not be replayed automatically.
+   */
+  disposition?: 'completed' | 'accepted' | 'failed' | 'outcome_unknown';
+  completionVerified?: boolean;
+  /** Provider-owned correlation. Never substitute this for the local run id. */
+  providerRunId?: string;
+  /** Exact provider session correlation, kept separate from every run id. */
+  sessionId?: string;
+  /** Structured provider phase/status; never parsed from response prose. */
+  providerStatus?: string;
+  externalDispatchKind?: 'sessions_send' | 'sessions_spawn';
+  externalConnectionId?: string;
+  /** Canonical local `agent_runs.id`, populated only after accepted-run persistence. */
+  runId?: string;
+  /** Allowlisted local pre-dispatch failure; never populated from provider prose. */
+  failureCode?: 'openswan_session_binding_required';
   responseId?: string;
   responseText?: string;
   tokenCount?: number;
@@ -51,6 +82,18 @@ export interface AgentInvocationResult {
   error?: string;
   model?: string;
   tokens?: TokenBreakdown;
+}
+
+function resolveInvocationDisposition(
+  result: AgentInvocationResult,
+): NonNullable<AgentInvocationResult['disposition']> {
+  if (
+    result.disposition === 'completed'
+    || result.disposition === 'accepted'
+    || result.disposition === 'failed'
+    || result.disposition === 'outcome_unknown'
+  ) return result.disposition;
+  return result.success ? 'completed' : 'failed';
 }
 
 export interface OfficeInvocationClaim {
@@ -66,7 +109,134 @@ export interface OfficeInvocationClaim {
   agentId: string | null;
   agentSubjectKey: string;
   agentName: string;
+  bindingContractVersion: 1 | null;
+  bindingStatus: 'bound' | 'missing' | null;
+  binding: OfficeAgentSessionBinding | null;
+  /**
+   * The durable response row was claimed, but the caller-owned Office
+   * lifecycle retired before the claim returned. The claim must never be
+   * replayed and no provider dispatch may follow it.
+   */
+  authorityRetiredAfterClaim?: true;
 }
+
+/**
+ * Immutable account/circle authority captured before an Office terminal
+ * dispatch starts. This contract is opt-in so non-Office legacy callers keep
+ * their existing behavior while Office can fence every asynchronous boundary.
+ */
+export type OfficeInvocationExactAuthority = Readonly<{
+  userId: string;
+  circleId: string;
+  accessToken: string;
+  generation: number;
+}>;
+
+export type OfficeInvocationAuthorityGuard = (
+  authority: OfficeInvocationExactAuthority,
+) => boolean;
+
+export type OfficeInvocationExactExecution = Readonly<{
+  authority: OfficeInvocationExactAuthority;
+  isCurrent: OfficeInvocationAuthorityGuard;
+  /** Abort when the owning Office lifecycle is replaced or unmounted. */
+  signal?: AbortSignal;
+}>;
+
+const OFFICE_INVOCATION_AUTHORITY_RETIRED =
+  'Office invocation authority retired after the durable claim. Nothing was replayed.';
+const OFFICE_INVOCATION_AUTHORITY_UNAVAILABLE =
+  'Office invocation authority could not be verified. Nothing was dispatched.';
+const OFFICE_BUDGET_SETTINGS_UNAVAILABLE =
+  'Office budget settings could not be verified. Nothing was dispatched.';
+const OFFICE_BUDGET_USAGE_UNAVAILABLE =
+  'Office budget usage could not be verified. Nothing was dispatched.';
+const OFFICE_BUDGET_USAGE_PAGE_SIZE = 1000;
+const OFFICE_ESTIMATED_COST_PER_TOKEN = 0.0000005;
+
+function normalizeOfficeInvocationExactAuthority(
+  input: OfficeInvocationExactAuthority | null | undefined,
+): OfficeInvocationExactAuthority | null {
+  const userId = String(input?.userId || '').trim();
+  const circleId = String(input?.circleId || '').trim();
+  const accessToken = String(input?.accessToken || '').trim();
+  const generation = Number(input?.generation);
+  if (
+    !isUuidLike(userId)
+    || !isUuidLike(circleId)
+    || !accessToken
+    || accessToken.length > 16_384
+    || !Number.isSafeInteger(generation)
+    || generation <= 0
+  ) return null;
+  return Object.freeze({ userId, circleId, accessToken, generation });
+}
+
+function officeInvocationExecutionIsCurrent(
+  execution: OfficeInvocationExactExecution | null | undefined,
+): boolean {
+  if (!execution) return true;
+  if (execution.signal?.aborted) return false;
+  try {
+    return execution.isCurrent(execution.authority) === true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveOfficeInvocationExactExecution(
+  input: OfficeInvocationExactExecution | null | undefined,
+  req: InvocationRequest,
+): Promise<OfficeInvocationExactExecution | null> {
+  if (!input) return null;
+  const authority = normalizeOfficeInvocationExactAuthority(input.authority);
+  if (
+    !authority
+    || authority.circleId !== req.circleId
+  ) return null;
+  const execution = Object.freeze({
+    authority,
+    isCurrent: input.isCurrent,
+    ...(input.signal ? { signal: input.signal } : {}),
+  });
+  if (!officeInvocationExecutionIsCurrent(execution)) return null;
+  const { value: verifiedUser } = await safeGetUserForAccessToken(authority.accessToken);
+  if (
+    verifiedUser?.id !== authority.userId
+    || !officeInvocationExecutionIsCurrent(execution)
+  ) return null;
+  return execution;
+}
+
+function buildOfficeInvocationAuthorityUnavailableResult(): AgentInvocationResult {
+  return {
+    success: false,
+    disposition: 'failed',
+    completionVerified: false,
+    error: OFFICE_INVOCATION_AUTHORITY_UNAVAILABLE,
+  };
+}
+
+function buildOfficeInvocationRetiredAfterClaimResult(
+  responseId?: string,
+): AgentInvocationResult {
+  return {
+    success: false,
+    disposition: 'outcome_unknown',
+    completionVerified: false,
+    ...(responseId ? { responseId } : {}),
+    responseText: OFFICE_INVOCATION_AUTHORITY_RETIRED,
+    error: OFFICE_INVOCATION_AUTHORITY_RETIRED,
+  };
+}
+
+// invokeAndStream deliberately retains the historical two-argument claimant
+// call for legacy source compatibility. An exact execution is scoped to that
+// request object only and is removed immediately after the claim returns.
+const exactExecutionByInvocationRequest = new WeakMap<
+  InvocationRequest,
+  OfficeInvocationExactExecution
+>();
 
 // ─── DB: Create response row (atomic) ───────────────────────────────────────
 
@@ -75,22 +245,63 @@ export async function invokeAgent(
   agent: CircleOfficeAgent,
 ): Promise<OfficeInvocationClaim | null> {
   try {
+    const exactExecution = exactExecutionByInvocationRequest.get(req);
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) return null;
     const blackSwan = isBlackSwanAgent(agent);
     const durableAgentId = !blackSwan && isUuidLike(agent.id) ? agent.id : null;
     if (!blackSwan && !durableAgentId) return null;
 
-    const { data, error } = await supabase.rpc('invoke_agent', {
+    const claimArgs = {
       p_message_id: req.messageId,
       p_circle_id: req.circleId,
       p_expected_command_text: req.command,
       p_agent_id: durableAgentId,
-    });
+    };
+    const needsOpenSwanBinding = agent.provider === 'openswan' && durableAgentId !== null;
+    let usedBindingClaim = needsOpenSwanBinding;
+    let claimRpc = supabase.rpc(
+      needsOpenSwanBinding ? 'invoke_agent_v2' : 'invoke_agent',
+      claimArgs,
+    );
+    if (exactExecution) {
+      claimRpc = claimRpc.setHeader(
+        'Authorization',
+        `Bearer ${exactExecution.authority.accessToken}`,
+      );
+    }
+    let { data, error } = await claimRpc;
+    let authorityRetiredAfterClaim = Boolean(
+      exactExecution && !officeInvocationExecutionIsCurrent(exactExecution),
+    );
+
+    // §36 is forward-only and may not be deployed yet. A missing v2 RPC did
+    // not execute the claim, so the legacy claim is safe exactly once; the
+    // returned missing binding then prevents provider dispatch.
+    if (error && needsOpenSwanBinding && isInvokeAgentV2Unavailable(error)) {
+      if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) return null;
+      usedBindingClaim = false;
+      let fallbackClaimRpc = supabase.rpc('invoke_agent', claimArgs);
+      if (exactExecution) {
+        fallbackClaimRpc = fallbackClaimRpc.setHeader(
+          'Authorization',
+          `Bearer ${exactExecution.authority.accessToken}`,
+        );
+      }
+      ({ data, error } = await fallbackClaimRpc);
+      authorityRetiredAfterClaim = Boolean(
+        exactExecution && !officeInvocationExecutionIsCurrent(exactExecution),
+      );
+    }
 
     if (error) {
       console.error('[agentInvocation] office_claim_failed');
       return null;
     }
 
+    if (Array.isArray(data) && data.length !== 1) {
+      console.error('[agentInvocation] office_claim_cardinality_rejected');
+      return null;
+    }
     const row = (Array.isArray(data) ? data[0] : data) as Record<string, unknown> | null;
     const responseId = String(row?.response_id || '');
     const messageId = String(row?.canonical_message_id || '');
@@ -116,6 +327,29 @@ export async function invokeAgent(
     const targetAgentName = typeof row?.canonical_target_agent_name === 'string'
       ? row.canonical_target_agent_name
       : '';
+    let bindingContractVersion: 1 | null = null;
+    let bindingStatus: 'bound' | 'missing' | null = null;
+    let binding: OfficeAgentSessionBinding | null = null;
+    if (needsOpenSwanBinding && usedBindingClaim) {
+      bindingContractVersion = row?.binding_contract_version === 1 ? 1 : null;
+      bindingStatus = row?.binding_status === 'bound' || row?.binding_status === 'missing'
+        ? row.binding_status
+        : null;
+      if (bindingStatus === 'bound') {
+        binding = {
+          id: typeof row?.binding_id === 'string' ? row.binding_id : '',
+          officeAgentId: canonicalAgentId || '',
+          agentBotId: typeof row?.binding_agent_bot_id === 'string'
+            ? row.binding_agent_bot_id
+            : '',
+          sessionKey: typeof row?.binding_session_key === 'string'
+            ? row.binding_session_key
+            : '',
+        };
+      }
+    } else if (needsOpenSwanBinding) {
+      bindingStatus = 'missing';
+    }
     const normalizedTargetName = targetAgentName.trim().toLowerCase();
     const canonicalScopeMatches = blackSwan
       ? (
@@ -148,6 +382,9 @@ export async function invokeAgent(
       || circleId !== req.circleId
       || command !== req.command
       || (req.senderId && senderId !== req.senderId)
+      || (exactExecution && (
+        circleId !== exactExecution.authority.circleId
+      ))
       || (!blackSwan && canonicalAgentId !== durableAgentId)
       || (blackSwan && canonicalAgentId !== null)
       || agentSubjectKey !== (
@@ -157,6 +394,16 @@ export async function invokeAgent(
       || !targetAgentName
       || (rawTargetAgentIds !== null && targetAgentIds?.length !== rawTargetAgentIds.length)
       || !canonicalScopeMatches
+      || (usedBindingClaim && (
+        bindingContractVersion !== 1
+        || bindingStatus === null
+        || (bindingStatus === 'bound' && !binding)
+        || (bindingStatus === 'missing' && (
+          row?.binding_id != null
+          || row?.binding_agent_bot_id != null
+          || row?.binding_session_key != null
+        ))
+      ))
     ) {
       console.error('[agentInvocation] office_claim_rejected');
       return null;
@@ -175,6 +422,10 @@ export async function invokeAgent(
       agentId: canonicalAgentId,
       agentSubjectKey,
       agentName,
+      bindingContractVersion,
+      bindingStatus,
+      binding,
+      ...(authorityRetiredAfterClaim ? { authorityRetiredAfterClaim: true as const } : {}),
     };
   } catch {
     console.error('[agentInvocation] office_claim_exception');
@@ -191,10 +442,12 @@ export async function streamResponse(
   tokenCount: number = 0,
   latencyMs?: number,
   model?: string,
-  tokens?: TokenBreakdown
+  tokens?: TokenBreakdown,
+  exactExecution?: OfficeInvocationExactExecution,
 ): Promise<boolean> {
   try {
-    const { data, error } = await supabase.rpc('stream_response', {
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) return false;
+    let responseRpc = supabase.rpc('stream_response', {
       p_response_id: responseId,
       p_text: text,
       p_status: status,
@@ -206,8 +459,19 @@ export async function streamResponse(
       p_cache_creation_tokens: tokens?.cacheCreationTokens ?? 0,
       p_cache_read_tokens: tokens?.cacheReadTokens ?? 0,
     });
+    if (exactExecution) {
+      responseRpc = responseRpc.setHeader(
+        'Authorization',
+        `Bearer ${exactExecution.authority.accessToken}`,
+      );
+    }
+    const { data, error } = await responseRpc;
 
-    if (error || data !== true) {
+    if (
+      error
+      || data !== true
+      || (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution))
+    ) {
       console.error('[agentInvocation] office_response_update_failed');
       return false;
     }
@@ -221,13 +485,24 @@ export async function streamResponse(
 
 // ─── DB: Mark message complete ──────────────────────────────────────────────
 
-export async function markMessageDone(messageId: string): Promise<boolean> {
+export async function markMessageDone(
+  messageId: string,
+  exactExecution?: OfficeInvocationExactExecution,
+): Promise<boolean> {
   try {
-    const { data, error } = await supabase.rpc('mark_message_done', {
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) return false;
+    let completionRpc = supabase.rpc('mark_message_done', {
       p_message_id: messageId,
     });
+    if (exactExecution) {
+      completionRpc = completionRpc.setHeader(
+        'Authorization',
+        `Bearer ${exactExecution.authority.accessToken}`,
+      );
+    }
+    const { data, error } = await completionRpc;
 
-    if (error) {
+    if (error || (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution))) {
       console.error('[agentInvocation] office_completion_failed');
       return false;
     }
@@ -375,6 +650,7 @@ async function invokeBlackSwan(
   model?: string | null,
   targetAgentName?: string,
   agentSubject?: AgentRuntimeSubjectMetadata | null,
+  exactExecution?: OfficeInvocationExactExecution,
 ): Promise<AgentInvocationResult> {
   const start = Date.now();
   if (shouldBlockExternalAiProvider('anthropic')) {
@@ -388,6 +664,9 @@ async function invokeBlackSwan(
   }
 
   try {
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return buildOfficeInvocationRetiredAfterClaimResult();
+    }
     const { data, error } = await supabase.functions.invoke('swanbot-ai', {
       body: {
         message: command,
@@ -400,9 +679,19 @@ async function invokeBlackSwan(
         targetAgentLegacyIds: agentSubject?.legacyAgentIds,
         agentSubject: agentSubject || undefined,
       },
+      ...(exactExecution ? {
+        headers: {
+          Authorization: `Bearer ${exactExecution.authority.accessToken}`,
+        },
+        signal: exactExecution.signal,
+      } : {}),
     });
 
     const latencyMs = Date.now() - start;
+
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return buildOfficeInvocationRetiredAfterClaimResult();
+    }
 
     if (error) {
       return {
@@ -449,13 +738,18 @@ function isGeminiCliAgent(agent: CircleOfficeAgent): boolean {
 async function invokeClaudeCode(
   command: string,
   bridgeUrl: string = 'http://localhost:7778',
+  exactExecution?: OfficeInvocationExactExecution,
 ): Promise<AgentInvocationResult> {
   const start = Date.now();
+  const controller = new AbortController();
+  const retire = () => controller.abort();
+  exactExecution?.signal?.addEventListener('abort', retire, { once: true });
+  const timeout = setTimeout(() => controller.abort(), 35000);
 
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 35000);
-
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return buildOfficeInvocationRetiredAfterClaimResult();
+    }
     const response = await fetchBridgeAuthenticated(`${bridgeUrl}/spawn`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -463,49 +757,103 @@ async function invokeClaudeCode(
       signal: controller.signal,
     });
 
-    clearTimeout(timeout);
     const latencyMs = Date.now() - start;
+
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return buildOfficeInvocationRetiredAfterClaimResult();
+    }
 
     if (!response.ok) {
       return {
         success: false,
+        disposition: 'failed',
+        completionVerified: false,
         error: `Claude Code bridge error: HTTP ${response.status}`,
       };
     }
 
     const data = await response.json();
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return buildOfficeInvocationRetiredAfterClaimResult();
+    }
+    const results = Array.isArray(data?.results) ? data.results : [];
+    const successfulResults = results.filter((item: any) => item && item.ok === true);
+    const safeSuccessfulHandles = successfulResults.filter((item: any) => (
+      typeof item?.spawnId === 'string' && /^[a-f0-9]{36}$/.test(item.spawnId)
+    ));
 
     if (!data.ok) {
+      // A malformed response that simultaneously claims a launched child and
+      // top-level failure cannot prove whether work started. Never replay it.
+      if (successfulResults.length > 0) {
+        return {
+          success: false,
+          disposition: 'outcome_unknown',
+          completionVerified: false,
+          ...(safeSuccessfulHandles.length === 1
+            ? { providerRunId: safeSuccessfulHandles[0].spawnId }
+            : {}),
+          responseText: 'Claude Code may have accepted this task, but the bridge response was inconsistent. The task was not replayed; check the Claude session before retrying.',
+          error: 'Claude Code dispatch outcome is unknown',
+          latencyMs,
+        };
+      }
       return {
         success: false,
+        disposition: 'failed',
+        completionVerified: false,
         error: data.error || data.message || 'Claude Code task could not be started',
       };
     }
 
-    const spawned = Array.isArray(data.results) ? data.results.find((item: any) => item?.ok) : null;
-    const responseText = spawned?.spawnId
-      ? `Claude Code task started (handle ${spawned.spawnId}).`
-      : (data.message || 'Claude Code task started.');
+    const accepted = successfulResults.length === 1
+      && safeSuccessfulHandles.length === 1
+      && results.length === 1
+      && Number(data.spawned) === 1
+      && Number(data.total) === 1
+      ? safeSuccessfulHandles[0]
+      : null;
+    if (!accepted) {
+      return {
+        success: false,
+        disposition: 'outcome_unknown',
+        completionVerified: false,
+        responseText: 'Claude Code may have accepted this task, but the bridge did not return one exact spawn handle. The task was not replayed; check the Claude session before retrying.',
+        error: 'Claude Code dispatch outcome is unknown',
+        latencyMs,
+      };
+    }
+
+    const responseText = `Claude Code accepted the task (handle ${accepted.spawnId}). Completion has not been verified yet.`;
 
     const tokenCount = estimateTokens(command, responseText);
 
     return {
       success: true,
+      disposition: 'accepted',
+      completionVerified: false,
+      providerRunId: accepted.spawnId,
       responseText,
       tokenCount,
       latencyMs,
     };
   } catch (err: any) {
-    if (err.name === 'AbortError') {
-      return {
-        success: false,
-        error: 'Claude Code bridge command timed out (35s)',
-      };
-    }
+    const timedOut = err?.name === 'AbortError';
     return {
       success: false,
-      error: err.message || 'Claude Code bridge not reachable',
+      disposition: 'outcome_unknown',
+      completionVerified: false,
+      responseText: timedOut
+        ? 'Claude Code did not confirm the spawn before the 35-second boundary. The task was not replayed; check the Claude session before retrying.'
+        : 'The Claude Code bridge response was lost after one spawn attempt. The task was not replayed; check the Claude session before retrying.',
+      error: timedOut
+        ? 'Claude Code dispatch outcome is unknown after timeout'
+        : 'Claude Code dispatch outcome is unknown after a transport error',
+      latencyMs: Date.now() - start,
     };
+  } finally {
+    clearTimeout(timeout);
+    exactExecution?.signal?.removeEventListener('abort', retire);
   }
 }
 
@@ -514,12 +862,18 @@ async function invokeClaudeCode(
 async function invokeGeminiCli(
   command: string,
   bridgeUrl: string = 'http://localhost:7780',
+  exactExecution?: OfficeInvocationExactExecution,
 ): Promise<AgentInvocationResult> {
   const start = Date.now();
+  const controller = new AbortController();
+  const retire = () => controller.abort();
+  exactExecution?.signal?.addEventListener('abort', retire, { once: true });
+  const timeout = setTimeout(() => controller.abort(), 35000);
 
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 35000);
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return buildOfficeInvocationRetiredAfterClaimResult();
+    }
 
     const response = await fetchBridgeAuthenticated(`${bridgeUrl}/send`, {
       method: 'POST',
@@ -528,8 +882,11 @@ async function invokeGeminiCli(
       signal: controller.signal,
     });
 
-    clearTimeout(timeout);
     const latencyMs = Date.now() - start;
+
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return buildOfficeInvocationRetiredAfterClaimResult();
+    }
 
     if (!response.ok) {
       return {
@@ -539,6 +896,9 @@ async function invokeGeminiCli(
     }
 
     const data = await response.json();
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return buildOfficeInvocationRetiredAfterClaimResult();
+    }
 
     if (!data.ok) {
       return {
@@ -557,7 +917,7 @@ async function invokeGeminiCli(
       responseText,
       tokenCount,
       latencyMs,
-      model: data.model || 'gemini-2.5-pro',
+      model: data.model || 'gemini-3.6-flash',
     };
   } catch (err: any) {
     if (err.name === 'AbortError') {
@@ -570,6 +930,9 @@ async function invokeGeminiCli(
       success: false,
       error: err.message || 'Gemini CLI bridge not reachable',
     };
+  } finally {
+    clearTimeout(timeout);
+    exactExecution?.signal?.removeEventListener('abort', retire);
   }
 }
 
@@ -582,11 +945,11 @@ function isBYOLLMAgent(agent: CircleOfficeAgent): boolean {
 }
 
 /**
- * Parse a BYO model key like "openai/gpt-4o" into provider + model.
+ * Parse a BYO model key like "openai/gpt-5.6-terra" into provider + model.
  * Falls back to the agent's provider if no prefix found.
  */
 function parseBYOModel(modelKey: string | null | undefined, agentProvider: string): { provider: string; model: string; thinkingLevel?: string } {
-  // Strip thinking level suffix (e.g. "openai/gpt-4o::deep" → thinkingLevel = "deep")
+  // Strip thinking level suffix (e.g. "openai/gpt-5.6-terra::deep" → thinkingLevel = "deep")
   let thinkingLevel: string | undefined;
   let cleanKey = modelKey;
   if (cleanKey && cleanKey.includes('::')) {
@@ -597,17 +960,17 @@ function parseBYOModel(modelKey: string | null | undefined, agentProvider: strin
 
   if (!cleanKey) {
     const defaults: Record<string, string> = {
-      openai: 'gpt-4o',
-      anthropic: 'claude-sonnet-4-6',
-      openrouter: 'anthropic/claude-sonnet-4-6',
-      groq: 'llama-3.3-70b-versatile',
+      openai: 'gpt-5.6-terra',
+      anthropic: 'claude-sonnet-5',
+      openrouter: 'openrouter/auto',
+      groq: 'openai/gpt-oss-120b',
       ollama: 'blackswan',
-      'github-models': 'gpt-4o-mini',
+      'github-models': 'openai/gpt-4.1-mini',
       huggingface: 'Qwen/Qwen3-32B',
-      zai: 'glm-5',
-      minimax: 'MiniMax-M1',
+      zai: 'glm-5.1',
+      minimax: 'MiniMax-M2.7',
     };
-    return { provider: agentProvider, model: defaults[agentProvider] || 'gpt-4o', thinkingLevel };
+    return { provider: agentProvider, model: defaults[agentProvider] || 'gpt-5.6-terra', thinkingLevel };
   }
   const parts = cleanKey.split('/');
   if (parts.length >= 2 && BYO_LLM_PROVIDERS.includes(parts[0])) {
@@ -622,6 +985,7 @@ async function invokeBYOLLM(
   model?: string | null,
   circleId?: string,
   senderId?: string,
+  exactExecution?: OfficeInvocationExactExecution,
 ): Promise<AgentInvocationResult> {
   const start = Date.now();
   const { provider, model: resolvedModel, thinkingLevel } = parseBYOModel(model, agentProvider);
@@ -630,6 +994,9 @@ async function invokeBYOLLM(
   }
 
   try {
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return buildOfficeInvocationRetiredAfterClaimResult();
+    }
     const { data, error } = await supabase.functions.invoke('llm-proxy', {
       body: {
         provider,
@@ -639,9 +1006,19 @@ async function invokeBYOLLM(
         userId: senderId,
         ...(thinkingLevel && thinkingLevel !== 'balanced' ? { thinkingLevel } : {}),
       },
+      ...(exactExecution ? {
+        headers: {
+          Authorization: `Bearer ${exactExecution.authority.accessToken}`,
+        },
+        signal: exactExecution.signal,
+      } : {}),
     });
 
     const latencyMs = Date.now() - start;
+
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return buildOfficeInvocationRetiredAfterClaimResult();
+    }
 
     if (error) {
       return { success: false, error: `LLM Proxy error: ${error.message}` };
@@ -670,14 +1047,30 @@ async function invokeBYOLLM(
 
 // ─── OpenSwan Gateway: Invoke Agent ─────────────────────────────────────────
 
+const EXACT_OPENSWAN_TARGET_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+
+function parseExactOpenSwanSessionTarget(agentId: string): {
+  connectionId: string;
+  sessionKey: string;
+} | null {
+  if (typeof agentId !== 'string' || agentId !== agentId.trim()) return null;
+  const separator = agentId.indexOf('::');
+  if (separator <= 0) return null;
+  const connectionId = agentId.slice(0, separator);
+  const sessionKey = agentId.slice(separator + 2);
+  if (
+    connectionId.length > 160
+    || sessionKey.length > 160
+    || !EXACT_OPENSWAN_TARGET_RE.test(connectionId)
+    || !EXACT_OPENSWAN_TARGET_RE.test(sessionKey)
+  ) return null;
+  return { connectionId, sessionKey };
+}
+
 /**
- * Call the OpenSwan agent via gateway using sessions_send + response polling.
- *
- * Flow:
- * 1. Snapshot the last message timestamp from sessions_history
- * 2. Send the command via sessions_send
- * 3. Poll sessions_history for a new assistant response
- * 4. Return the response text
+ * Send one exact OpenSwan session turn through the canonical structured
+ * sessions_send adapter. A provider turn ending is still only a handoff: no
+ * current OpenSwan status verifies that the user's task itself completed.
  */
 export async function callOpenSwanAgent(
   command: string,
@@ -686,164 +1079,97 @@ export async function callOpenSwanAgent(
   gatewayUrl: string,
   timeoutMs: number = 60000,
   model?: string | null,
-  authToken?: string
+  authToken?: string,
+  exactExecution?: OfficeInvocationExactExecution,
 ): Promise<AgentInvocationResult> {
   if (!gatewayUrl) {
     return {
       success: false,
+      disposition: 'failed',
+      completionVerified: false,
       error: 'No gateway URL configured — add a connection in ⚙️ → Connections',
     };
   }
 
   const start = Date.now();
-
-  // Extract session key from the agent ID (format: "connectionId::sessionKey")
-  // Fall back to "agent:main:main" if we can't parse it
-  let sessionKey = 'agent:main:main';
-  if (agentId.includes('::')) {
-    const parts = agentId.split('::');
-    if (parts.length >= 2 && parts[1].startsWith('agent:')) {
-      sessionKey = parts.slice(1).join('::');
-    }
-  }
-
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-  if (authToken) {
-    headers['Authorization'] = `Bearer ${authToken}`;
-  }
-
-  async function invokeGatewayTool(tool: string, args: Record<string, any>): Promise<any> {
-    const res = await fetch(`${gatewayUrl}/tools/invoke`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ tool, args }),
-    });
-    if (!res.ok) throw new Error(`Gateway HTTP ${res.status}`);
-    return res.json();
+  void timeoutMs;
+  const target = parseExactOpenSwanSessionTarget(agentId);
+  if (!target) {
+    return {
+      success: false,
+      disposition: 'failed',
+      completionVerified: false,
+      failureCode: 'openswan_session_binding_required',
+      error: 'This Office agent is not linked to a live OpenSwan session. Choose a connected session, then send a new command. Nothing was dispatched.',
+    };
   }
 
   try {
-    // Step 1: Snapshot the last assistant message timestamp
-    let lastAssistantTimestamp = 0;
-    try {
-      const histBefore = await invokeGatewayTool('sessions_history', {
-        sessionKey,
-        limit: 3,
-      });
-      const msgs = histBefore?.result?.details?.messages || [];
-      for (const m of msgs) {
-        if (m.role === 'assistant' && m.timestamp) {
-          lastAssistantTimestamp = Math.max(lastAssistantTimestamp, m.timestamp);
-        }
-      }
-    } catch {
-      // OK — we'll just look for any response
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return buildOfficeInvocationRetiredAfterClaimResult();
     }
+    const sent = await sendSessionMessage(
+      { endpoint: gatewayUrl, token: authToken || '' },
+      target.sessionKey,
+      command,
+    );
+    const latencyMs = Date.now() - start;
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return buildOfficeInvocationRetiredAfterClaimResult();
+    }
+    const lineage = {
+      ...(sent.providerRunId ? { providerRunId: sent.providerRunId } : {}),
+      ...(sent.sessionKey ? { sessionId: sent.sessionKey } : {}),
+      ...(sent.providerStatus ? { providerStatus: sent.providerStatus } : {}),
+      externalDispatchKind: 'sessions_send' as const,
+      externalConnectionId: target.connectionId,
+    };
 
-    // Step 2: Send the command via sessions_send
-    const sendResult = await invokeGatewayTool('sessions_send', {
-      sessionKey,
-      message: command,
-    });
-
-    if (!sendResult?.ok) {
+    if (sent.transportAccepted === true) {
+      const responseText = sent.reply
+        || `${agentName} accepted the OpenSwan session turn. Completion has not been verified yet.`;
       return {
-        success: false,
-        error: `Failed to send message to OpenSwan: ${sendResult?.error?.message || 'unknown error'}`,
+        success: true,
+        disposition: 'accepted',
+        completionVerified: false,
+        responseText,
+        tokenCount: estimateTokens(command, responseText),
+        latencyMs,
+        model: model || undefined,
+        ...lineage,
       };
     }
-
-    // Step 3: Poll sessions_history for a new assistant response.
-    // Adaptive interval: start at 400ms so fast responses return quickly, then
-    // ramp to 2s so we don't hammer the gateway for long-running agent turns.
-    // Old loop had a fixed 2s wait before the first check, which meant even
-    // instant completions felt sluggish — this shortens perceived latency by
-    // up to ~1.6s on the common case while keeping total load comparable.
-    const deadline = start + timeoutMs;
-    let pollDelay = 400;
-    const POLL_DELAY_MAX = 2000;
-
-    // Early-exit after N consecutive sessions_history failures. Previously
-    // poll errors were silently swallowed and the loop kept spinning to the
-    // full `timeoutMs` (default 60 s) — which blocks the UI for the full
-    // deadline when the gateway is dead. Hermes-style bounded retries: if
-    // three back-to-back polls fail, surface the error instead of waiting.
-    let consecutiveFailures = 0;
-    const MAX_CONSECUTIVE_POLL_FAILURES = 3;
-    let lastPollError: string | null = null;
-
-    while (Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, pollDelay));
-      // Ramp interval toward the max so we aren't polling at 400ms forever.
-      pollDelay = Math.min(POLL_DELAY_MAX, Math.round(pollDelay * 1.5));
-
-      try {
-        const histAfter = await invokeGatewayTool('sessions_history', {
-          sessionKey,
-          limit: 3,
-        });
-
-        // Reset the failure counter on any successful call — a transient
-        // hiccup shouldn't count against a gateway that just recovered.
-        consecutiveFailures = 0;
-        lastPollError = null;
-
-        const msgs = histAfter?.result?.details?.messages || [];
-
-        // Look for a new assistant message with text content
-        for (const m of msgs) {
-          if (m.role !== 'assistant') continue;
-          if (m.timestamp && m.timestamp <= lastAssistantTimestamp) continue;
-          if (m.stopReason === 'error') continue;
-
-          // Extract text from content array
-          const content = m.content;
-          let text = '';
-          if (typeof content === 'string') {
-            text = content;
-          } else if (Array.isArray(content)) {
-            text = content
-              .filter((c: any) => c.type === 'text')
-              .map((c: any) => c.text)
-              .join('');
-          }
-
-          if (text) {
-            const latencyMs = Date.now() - start;
-            return {
-              success: true,
-              responseText: text,
-              tokenCount: estimateTokens(command, text),
-              latencyMs,
-              model: m.model || model || undefined,
-            };
-          }
-        }
-      } catch (err: any) {
-        consecutiveFailures++;
-        lastPollError = err?.message || String(err);
-        if (consecutiveFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
-          return {
-            success: false,
-            error:
-              `OpenSwan gateway unreachable — ${consecutiveFailures} consecutive ` +
-              `sessions_history failures. Last error: ${lastPollError || 'unknown'}`,
-          };
-        }
-        // Otherwise keep trying — transient network blips recover quickly.
-      }
+    if (sent.transportAccepted === false) {
+      return {
+        success: false,
+        disposition: 'failed',
+        completionVerified: false,
+        error: sent.error || `OpenSwan rejected the session send for ${agentName}.`,
+        latencyMs,
+        ...lineage,
+      };
     }
-
     return {
       success: false,
-      error: `OpenSwan agent did not respond within ${Math.round(timeoutMs / 1000)}s`,
+      disposition: 'outcome_unknown',
+      completionVerified: false,
+      responseText: sent.error
+        || `OpenSwan could not confirm whether ${agentName} received the task. It was not replayed; check the exact session before retrying.`,
+      error: 'OpenSwan dispatch outcome is unknown',
+      latencyMs,
+      ...lineage,
     };
-  } catch (err: any) {
+  } catch {
     return {
       success: false,
-      error: err.message || 'OpenSwan invocation failed',
+      disposition: 'outcome_unknown',
+      completionVerified: false,
+      responseText: `The OpenSwan response was lost after one session-send attempt for ${agentName}. It was not replayed; check the exact session before retrying.`,
+      error: 'OpenSwan dispatch outcome is unknown after a transport error',
+      latencyMs: Date.now() - start,
+      externalDispatchKind: 'sessions_send',
+      externalConnectionId: target.connectionId,
+      sessionId: target.sessionKey,
     };
   }
 }
@@ -866,8 +1192,10 @@ async function createAgentTask(
   command: string,
   messageId: string,
   model?: string | null,
+  exactExecution?: OfficeInvocationExactExecution,
 ): Promise<string | null> {
   try {
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) return null;
     const title = `${agentName}: ${command.slice(0, 80)}${command.length > 80 ? '...' : ''}`;
     const description = [
       `**Prompt**`,
@@ -884,7 +1212,7 @@ async function createAgentTask(
       `*Processing...*`,
     ].filter(Boolean).join('\n');
 
-    const { data, error } = await supabase
+    let insertTask = supabase
       .from('tasks')
       .insert({
         circle_id: circleId,
@@ -897,8 +1225,15 @@ async function createAgentTask(
       })
       .select('id')
       .single();
+    if (exactExecution) {
+      insertTask = insertTask.setHeader(
+        'Authorization',
+        `Bearer ${exactExecution.authority.accessToken}`,
+      );
+    }
+    const { data, error } = await insertTask;
 
-    if (error) {
+    if (error || (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution))) {
       console.warn('[agentInvocation] task_tracking_create_failed');
       return null;
     }
@@ -920,8 +1255,10 @@ async function completeAgentTask(
   success: boolean,
   messageId: string,
   tokens?: TokenBreakdown,
+  exactExecution?: OfficeInvocationExactExecution,
 ): Promise<void> {
   try {
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) return;
     const duration = latencyMs ? `${(latencyMs / 1000).toFixed(1)}s` : 'N/A';
     const tokenStr = tokenCount > 0 ? tokenCount.toLocaleString() : 'N/A';
     const tokenBreakdown = tokens
@@ -951,7 +1288,7 @@ async function completeAgentTask(
       `\`\`\``,
     ].filter(Boolean).join('\n');
 
-    await supabase
+    let updateTask = supabase
       .from('tasks')
       .update({
         description,
@@ -959,6 +1296,66 @@ async function completeAgentTask(
         completed_at: success ? new Date().toISOString() : null,
       })
       .eq('id', taskId);
+    if (exactExecution) {
+      updateTask = updateTask.setHeader(
+        'Authorization',
+        `Bearer ${exactExecution.authority.accessToken}`,
+      );
+    }
+    await updateTask;
+  } catch {}
+}
+
+/**
+ * Persist a provider-owned handoff without terminalizing the tracking task.
+ * Accepted work stays in progress; an uncertain transport moves to review so
+ * the user checks the external session before deciding whether to retry.
+ */
+async function updateAgentTaskHandoff(
+  taskId: string,
+  agentName: string,
+  command: string,
+  result: AgentInvocationResult,
+  messageId: string,
+  exactExecution?: OfficeInvocationExactExecution,
+): Promise<void> {
+  try {
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) return;
+    const disposition = resolveInvocationDisposition(result);
+    if (disposition !== 'accepted' && disposition !== 'outcome_unknown') return;
+    const accepted = disposition === 'accepted';
+    const description = [
+      '**Prompt**',
+      '```',
+      command,
+      '```',
+      '',
+      `**Agent:** ${agentName}`,
+      `**Status:** ${accepted ? 'Accepted — awaiting verified result' : 'Outcome unknown — check external session before retrying'}`,
+      result.providerRunId ? `**Provider Run:** ${result.providerRunId}` : '',
+      result.runId ? `**Office Run:** ${result.runId}` : '',
+      `**Message ID:** ${messageId}`,
+      '',
+      '---',
+      '',
+      result.responseText || result.error || 'The connected-agent result is not verified.',
+    ].filter(Boolean).join('\n');
+
+    let updateTask = supabase
+      .from('tasks')
+      .update({
+        description: description.slice(0, 8000),
+        status: accepted ? 'in_progress' : 'review',
+        completed_at: null,
+      })
+      .eq('id', taskId);
+    if (exactExecution) {
+      updateTask = updateTask.setHeader(
+        'Authorization',
+        `Bearer ${exactExecution.authority.accessToken}`,
+      );
+    }
+    await updateTask;
   } catch {}
 }
 
@@ -969,6 +1366,260 @@ const pendingAgentTasks = new Map<string, string>();
 const OFFICE_PROVIDER_FAILURE = 'Agent invocation failed (provider_error).';
 const OFFICE_RUNTIME_FAILURE = 'Agent invocation failed (runtime_error).';
 const OFFICE_PERSISTENCE_FAILURE = 'Agent response could not be persisted safely.';
+const OFFICE_OPENSWAN_BINDING_REQUIRED = 'This Office agent is not linked to a live OpenSwan session. Choose a connected session, then send a new command. Nothing was dispatched.';
+
+function buildOpenSwanBindingRequiredResult(): AgentInvocationResult {
+  return {
+    success: false,
+    disposition: 'failed',
+    completionVerified: false,
+    failureCode: 'openswan_session_binding_required',
+    error: OFFICE_OPENSWAN_BINDING_REQUIRED,
+  };
+}
+
+function getOfficeProviderFailureCopy(result: AgentInvocationResult): string {
+  return result.failureCode === 'openswan_session_binding_required'
+    ? OFFICE_OPENSWAN_BINDING_REQUIRED
+    : OFFICE_PROVIDER_FAILURE;
+}
+
+type InvocationBudgetConfigRead =
+  | { ok: true; config: BudgetConfig }
+  | { ok: false; reason: 'authority' | 'settings' };
+
+type InvocationBudgetSpend = Readonly<{
+  today: number;
+  week: number;
+  month: number;
+}>;
+
+type InvocationBudgetSpendRead =
+  | { ok: true; spend: InvocationBudgetSpend }
+  | { ok: false; reason: 'authority' | 'usage' };
+
+type InvocationBudgetWindow = Readonly<{
+  todayStartMs: number;
+  weekStartMs: number;
+  monthStartMs: number;
+  monthStartIso: string;
+  snapshotEndMs: number;
+  snapshotEndIso: string;
+}>;
+
+function normalizeInvocationBudgetConfig(value: unknown): BudgetConfig | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  if (typeof row.enabled !== 'boolean') return null;
+  if (row.hardLimit !== undefined && typeof row.hardLimit !== 'boolean') return null;
+
+  const config: BudgetConfig = {
+    enabled: row.enabled,
+    ...(row.hardLimit === undefined ? {} : { hardLimit: row.hardLimit }),
+  };
+  for (const period of ['daily', 'weekly', 'monthly'] as const) {
+    const amount = row[period];
+    if (amount === undefined) continue;
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount < 0) return null;
+    config[period] = amount;
+  }
+  return config;
+}
+
+function readCanonicalOfficeBudgetConfig(
+  preferences: Record<string, unknown> | null,
+): BudgetConfig | null {
+  if (!preferences || !Object.prototype.hasOwnProperty.call(preferences, 'budgetConfig')) {
+    return { enabled: false };
+  }
+  return normalizeInvocationBudgetConfig(preferences.budgetConfig);
+}
+
+async function loadInvocationBudgetConfig(
+  circleId: string,
+  exactExecution?: OfficeInvocationExactExecution,
+): Promise<InvocationBudgetConfigRead> {
+  if (!exactExecution) {
+    // Compatibility callers have no immutable account authority. Retain their
+    // device-local setting without attempting to infer a user or circle.
+    const config = normalizeInvocationBudgetConfig(await loadBudgetConfig());
+    return config
+      ? { ok: true, config }
+      : { ok: false, reason: 'settings' };
+  }
+  if (
+    exactExecution.authority.circleId !== circleId
+    || !officeInvocationExecutionIsCurrent(exactExecution)
+  ) return { ok: false, reason: 'authority' };
+
+  const preferenceResult = await loadOfficeUserPreferences(
+    exactExecution.authority.circleId,
+    {
+      userId: exactExecution.authority.userId,
+      accessToken: exactExecution.authority.accessToken,
+    },
+  );
+  if (!officeInvocationExecutionIsCurrent(exactExecution)) {
+    return { ok: false, reason: 'authority' };
+  }
+  if (!preferenceResult.ok) return { ok: false, reason: 'settings' };
+
+  const config = readCanonicalOfficeBudgetConfig(preferenceResult.preferences);
+  return config
+    ? { ok: true, config }
+    : { ok: false, reason: 'settings' };
+}
+
+function buildInvocationBudgetWindow(nowMs: number): InvocationBudgetWindow | null {
+  if (!Number.isFinite(nowMs) || nowMs <= 0) return null;
+  const snapshotEndMs = Math.floor(nowMs);
+  const snapshotEnd = new Date(snapshotEndMs);
+  const snapshotEndIso = snapshotEnd.toISOString();
+  const todayStart = new Date(
+    snapshotEnd.getFullYear(),
+    snapshotEnd.getMonth(),
+    snapshotEnd.getDate(),
+  );
+  const weekStart = new Date(todayStart);
+  weekStart.setDate(weekStart.getDate() - 6);
+  const monthStart = new Date(snapshotEnd.getFullYear(), snapshotEnd.getMonth(), 1);
+  const todayStartMs = todayStart.getTime();
+  const weekStartMs = weekStart.getTime();
+  const monthStartMs = monthStart.getTime();
+  return {
+    todayStartMs,
+    weekStartMs,
+    monthStartMs,
+    monthStartIso: new Date(monthStartMs).toISOString(),
+    snapshotEndMs,
+    snapshotEndIso,
+  };
+}
+
+function readBudgetTokenCount(value: unknown): number | null {
+  const numeric = typeof value === 'string' && /^\d+$/.test(value)
+    ? Number(value)
+    : value;
+  return typeof numeric === 'number'
+    && Number.isSafeInteger(numeric)
+    && numeric >= 0
+    ? numeric
+    : null;
+}
+
+function accumulateInvocationBudgetUsagePage(
+  rows: unknown,
+  circleId: string,
+  window: InvocationBudgetWindow,
+): InvocationBudgetSpend | null {
+  if (!Array.isArray(rows)) return null;
+  let todayTokens = 0;
+  let weekTokens = 0;
+  let monthTokens = 0;
+
+  for (const value of rows) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const row = value as Record<string, unknown>;
+    const createdAtMs = typeof row.created_at === 'string'
+      ? Date.parse(row.created_at)
+      : Number.NaN;
+    const tokenCount = readBudgetTokenCount(row.token_count);
+    if (
+      !isUuidLike(String(row.id || ''))
+      || row.circle_id !== circleId
+      || !Number.isFinite(createdAtMs)
+      || createdAtMs < window.monthStartMs
+      || createdAtMs >= window.snapshotEndMs
+      || tokenCount === null
+      || !['pending', 'streaming', 'done', 'error'].includes(String(row.status || ''))
+    ) return null;
+    monthTokens += tokenCount;
+    if (createdAtMs >= window.weekStartMs) weekTokens += tokenCount;
+    if (createdAtMs >= window.todayStartMs) todayTokens += tokenCount;
+    if (
+      !Number.isSafeInteger(monthTokens)
+      || !Number.isSafeInteger(weekTokens)
+      || !Number.isSafeInteger(todayTokens)
+    ) return null;
+  }
+
+  return {
+    today: todayTokens * OFFICE_ESTIMATED_COST_PER_TOKEN,
+    week: weekTokens * OFFICE_ESTIMATED_COST_PER_TOKEN,
+    month: monthTokens * OFFICE_ESTIMATED_COST_PER_TOKEN,
+  };
+}
+
+async function loadInvocationBudgetSpend(
+  circleId: string,
+  exactExecution?: OfficeInvocationExactExecution,
+): Promise<InvocationBudgetSpendRead> {
+  const window = buildInvocationBudgetWindow(Date.now());
+  if (!window) return { ok: false, reason: 'usage' };
+
+  let expectedCount: number | null = null;
+  let offset = 0;
+  let spend: InvocationBudgetSpend = { today: 0, week: 0, month: 0 };
+
+  while (expectedCount === null || offset < expectedCount) {
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return { ok: false, reason: 'authority' };
+    }
+    let query = supabase
+      .from('office_terminal_responses')
+      .select('id, circle_id, status, token_count, created_at', { count: 'exact' })
+      .eq('circle_id', circleId)
+      .gte('created_at', window.monthStartIso)
+      .lt('created_at', window.snapshotEndIso)
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+      .range(offset, offset + OFFICE_BUDGET_USAGE_PAGE_SIZE - 1);
+    if (exactExecution) {
+      query = query.setHeader(
+        'Authorization',
+        `Bearer ${exactExecution.authority.accessToken}`,
+      );
+      if (exactExecution.signal) query = query.abortSignal(exactExecution.signal);
+    }
+
+    const { data, error, count } = await query;
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return { ok: false, reason: 'authority' };
+    }
+    if (
+      error
+      || !Number.isSafeInteger(count)
+      || Number(count) < 0
+      || (expectedCount !== null && count !== expectedCount)
+    ) return { ok: false, reason: 'usage' };
+    if (expectedCount === null) expectedCount = Number(count);
+
+    const pageSpend = accumulateInvocationBudgetUsagePage(data, circleId, window);
+    if (!pageSpend || !Array.isArray(data)) return { ok: false, reason: 'usage' };
+    spend = {
+      today: spend.today + pageSpend.today,
+      week: spend.week + pageSpend.week,
+      month: spend.month + pageSpend.month,
+    };
+    offset += data.length;
+    if (offset > expectedCount) return { ok: false, reason: 'usage' };
+    if (offset === expectedCount) break;
+    if (data.length === 0) return { ok: false, reason: 'usage' };
+  }
+
+  return { ok: true, spend };
+}
+
+function buildOfficeBudgetPreflightFailure(
+  error: string,
+): AgentInvocationResult {
+  return {
+    success: false,
+    disposition: 'failed',
+    completionVerified: false,
+    error,
+  };
+}
 
 // ─── Invoke & Stream: Main entry point ──────────────────────────────────────
 
@@ -977,7 +1628,7 @@ const OFFICE_PERSISTENCE_FAILURE = 'Agent response could not be persisted safely
  * 1. Create response row (atomic)
  * 2. Call agent via gateway
  * 3. Stream updates in realtime
- * 4. Mark complete
+ * 4. Persist a verified final, or retain a nonterminal accepted/unknown handoff
  */
 // --- Direct Invoke: Shared routing without terminal rows -------------------
 
@@ -985,7 +1636,8 @@ export async function invokeDirect(
   req: InvocationRequest,
   agent: CircleOfficeAgent,
   gatewayUrl?: string,
-  authToken?: string
+  authToken?: string,
+  officeSessionSnapshot?: OfficeSessionSnapshot,
 ): Promise<AgentInvocationResult> {
   try {
     const budgetConfig = await loadBudgetConfig();
@@ -1015,11 +1667,12 @@ export async function invokeDirect(
   const claudeCode = isClaudeCodeAgent(agent);
   const geminiCli = isGeminiCliAgent(agent);
   const byoLLM = isBYOLLMAgent(agent);
+  const openSwanSessionAgent = agent.provider === 'openswan';
   const agentSubject = buildInvocationAgentSubject(agent, req);
   const swanBotContext = buildInvocationSwanBotContext(agentSubject);
 
   const resolvedUrl = agent.gatewayUrl || gatewayUrl;
-  if (!resolvedUrl && !blackSwan && !claudeCode && !geminiCli && !byoLLM) {
+  if (!resolvedUrl && !blackSwan && !claudeCode && !geminiCli && !byoLLM && !openSwanSessionAgent) {
     return {
       success: false,
       error: `No gateway URL for ${agent.name} - configure one in Connections`,
@@ -1069,6 +1722,27 @@ export async function invokeDirect(
     return invokeBYOLLM(req.command, agent.provider, req.model, req.circleId, req.senderId);
   }
 
+  if (openSwanSessionAgent) {
+    const binding = await readOfficeAgentSessionBinding(agent.id);
+    const resolution = resolveOfficeAgentSessionBinding({
+      officeAgentId: agent.id,
+      binding,
+      connections: officeSessionSnapshot?.connections,
+      sessionsByConnection: officeSessionSnapshot?.sessionsByConnection,
+      sessionFingerprintsByConnection: officeSessionSnapshot?.sessionFingerprintsByConnection,
+    });
+    if (!resolution.ok) return buildOpenSwanBindingRequiredResult();
+    return callOpenSwanAgent(
+      req.command,
+      resolution.target.compositeAgentId,
+      agent.name,
+      resolution.target.config.endpoint,
+      30000,
+      req.model,
+      resolution.target.config.token,
+    );
+  }
+
   return callOpenSwanAgent(
     req.command,
     agent.id,
@@ -1084,31 +1758,63 @@ export async function invokeAndStream(
   req: InvocationRequest,
   agent: CircleOfficeAgent,
   gatewayUrl?: string,
-  authToken?: string
+  authToken?: string,
+  officeSessionSnapshot?: OfficeSessionSnapshot,
+  exactExecutionInput?: OfficeInvocationExactExecution,
 ): Promise<AgentInvocationResult> {
-  // Check hard spending limits before invoking
+  const resolvedExactExecution = exactExecutionInput
+    ? await resolveOfficeInvocationExactExecution(exactExecutionInput, req)
+    : undefined;
+  if (exactExecutionInput && !resolvedExactExecution) {
+    return buildOfficeInvocationAuthorityUnavailableResult();
+  }
+  const exactExecution = resolvedExactExecution || undefined;
+  if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+    return buildOfficeInvocationAuthorityUnavailableResult();
+  }
+
+  // Budget authority is a pre-dispatch gate. Exact Office executions read the
+  // captured account's canonical per-circle preferences; compatibility calls
+  // retain the historical device-local configuration without guessing scope.
+  let budgetConfigRead: InvocationBudgetConfigRead;
   try {
-    const budgetConfig = await loadBudgetConfig();
-    if (budgetConfig.enabled && budgetConfig.hardLimit) {
-      const now = new Date();
-      const todayStr = now.toISOString().split('T')[0];
-      const weekAgo = new Date(now.getTime() - 7 * 86400000).toISOString();
-      const monthAgo = new Date(now.getTime() - 30 * 86400000).toISOString();
-
-      const [todayRes, weekRes, monthRes] = await Promise.all([
-        supabase.from('office_terminal_responses').select('token_count').eq('circle_id', req.circleId).gte('created_at', todayStr).eq('status', 'done'),
-        supabase.from('office_terminal_responses').select('token_count').eq('circle_id', req.circleId).gte('created_at', weekAgo).eq('status', 'done'),
-        supabase.from('office_terminal_responses').select('token_count').eq('circle_id', req.circleId).gte('created_at', monthAgo).eq('status', 'done'),
-      ]);
-
-      const estimateCost = (rows: any[]) => (rows || []).reduce((s: number, r: any) => s + (r.token_count || 0), 0) * 0.0000005;
-      const blocked = checkHardLimit(budgetConfig, estimateCost(todayRes.data || []), estimateCost(weekRes.data || []), estimateCost(monthRes.data || []));
-      if (blocked) {
-        return { success: false, error: blocked };
-      }
-    }
+    budgetConfigRead = await loadInvocationBudgetConfig(req.circleId, exactExecution);
   } catch {
-    console.warn('[agentInvocation] budget_check_unavailable');
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return buildOfficeInvocationAuthorityUnavailableResult();
+    }
+    return buildOfficeBudgetPreflightFailure(OFFICE_BUDGET_SETTINGS_UNAVAILABLE);
+  }
+  if (!budgetConfigRead.ok) {
+    return budgetConfigRead.reason === 'authority'
+      ? buildOfficeInvocationAuthorityUnavailableResult()
+      : buildOfficeBudgetPreflightFailure(OFFICE_BUDGET_SETTINGS_UNAVAILABLE);
+  }
+
+  const budgetConfig = budgetConfigRead.config;
+  if (budgetConfig.enabled && budgetConfig.hardLimit) {
+    let spendRead: InvocationBudgetSpendRead;
+    try {
+      spendRead = await loadInvocationBudgetSpend(req.circleId, exactExecution);
+    } catch {
+      if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+        return buildOfficeInvocationAuthorityUnavailableResult();
+      }
+      return buildOfficeBudgetPreflightFailure(OFFICE_BUDGET_USAGE_UNAVAILABLE);
+    }
+    if (!spendRead.ok) {
+      return spendRead.reason === 'authority'
+        ? buildOfficeInvocationAuthorityUnavailableResult()
+        : buildOfficeBudgetPreflightFailure(OFFICE_BUDGET_USAGE_UNAVAILABLE);
+    }
+
+    const blocked = checkHardLimit(
+      budgetConfig,
+      spendRead.spend.today,
+      spendRead.spend.week,
+      spendRead.spend.month,
+    );
+    if (blocked) return buildOfficeBudgetPreflightFailure(blocked);
   }
 
   // Detect agent type for routing
@@ -1116,13 +1822,14 @@ export async function invokeAndStream(
   const claudeCode = isClaudeCodeAgent(agent);
   const geminiCli = isGeminiCliAgent(agent);
   const byoLLM = isBYOLLMAgent(agent);
+  const openSwanSessionAgent = agent.provider === 'openswan';
 
   // Resolve the actual gateway URL to use:
   // 1. Use agent's stored gatewayUrl if available
   // 2. Fall back to the passed-in gatewayUrl (caller's local)
   // Resolve gateway URL: agent's stored URL > caller's URL > fail
   const resolvedUrl = agent.gatewayUrl || gatewayUrl;
-  if (!resolvedUrl && !blackSwan && !claudeCode && !geminiCli && !byoLLM) {
+  if (!resolvedUrl && !blackSwan && !claudeCode && !geminiCli && !byoLLM && !openSwanSessionAgent) {
     return {
       success: false,
       error: `No gateway URL for ${agent.name} — configure one in ⚙️ → Connections`,
@@ -1142,13 +1849,25 @@ export async function invokeAndStream(
   // The Realtime envelope and local request are only a wake-up hint. Atomically
   // claim the durable row, then execute only the command, scope, sender, model,
   // and agent identity returned by the database.
+  if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+    return buildOfficeInvocationAuthorityUnavailableResult();
+  }
+  if (exactExecution) req = { ...req };
+  if (exactExecution) exactExecutionByInvocationRequest.set(req, exactExecution);
   const claim = await invokeAgent(req, agent);
+  if (exactExecution) exactExecutionByInvocationRequest.delete(req);
   if (!claim) {
     console.error('[agentInvocation] office_claim_unavailable');
     return {
       success: false,
       error: 'Office invocation could not be claimed safely.',
     };
+  }
+  if (
+    claim.authorityRetiredAfterClaim
+    || (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution))
+  ) {
+    return buildOfficeInvocationRetiredAfterClaimResult(claim.responseId);
   }
 
   const responseId = claim.responseId;
@@ -1185,12 +1904,20 @@ export async function invokeAndStream(
     canonicalReq.command,
     canonicalReq.messageId,
     canonicalReq.model,
+    exactExecution,
   );
+  if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+    return buildOfficeInvocationRetiredAfterClaimResult(responseId);
+  }
   if (taskId) pendingAgentTasks.set(responseId, taskId);
 
   try {
     // Call the selected provider with canonical durable inputs.
     let result: AgentInvocationResult;
+
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return buildOfficeInvocationRetiredAfterClaimResult(responseId);
+    }
 
     if (blackSwan) {
       if (canonicalReq.model === 'gemini-flash') {
@@ -1199,6 +1926,9 @@ export async function invokeAndStream(
         const geminiStart = Date.now();
         try {
           const { getSwanBotResponse } = await import('./swanbot');
+          if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+            return buildOfficeInvocationRetiredAfterClaimResult(responseId);
+          }
           const geminiResult = await getSwanBotResponse(canonicalReq.command, {
             userId: canonicalReq.senderId!,
             circleId: canonicalReq.circleId,
@@ -1222,15 +1952,16 @@ export async function invokeAndStream(
           canonicalReq.model,
           agentSubject.displayName,
           agentSubject.metadata,
+          exactExecution,
         );
       }
     } else if (claudeCode) {
       console.log('[agentInvocation] provider_route_claude_code');
-      result = await invokeClaudeCode(canonicalReq.command, resolvedUrl);
+      result = await invokeClaudeCode(canonicalReq.command, resolvedUrl, exactExecution);
     } else if (geminiCli) {
       const geminiUrl = resolvedUrl || 'http://localhost:7780';
       console.log('[agentInvocation] provider_route_gemini_cli');
-      result = await invokeGeminiCli(canonicalReq.command, geminiUrl);
+      result = await invokeGeminiCli(canonicalReq.command, geminiUrl, exactExecution);
     } else if (byoLLM) {
       console.log('[agentInvocation] provider_route_byo_llm');
       result = await invokeBYOLLM(
@@ -1239,9 +1970,30 @@ export async function invokeAndStream(
         canonicalReq.model,
         canonicalReq.circleId,
         canonicalReq.senderId,
+        exactExecution,
       );
-    } else {
+    } else if (openSwanSessionAgent) {
       console.log('[agentInvocation] provider_route_openswan_gateway');
+      const resolution = resolveOfficeAgentSessionBinding({
+        officeAgentId: claim.agentId,
+        binding: claim.binding,
+        connections: officeSessionSnapshot?.connections,
+        sessionsByConnection: officeSessionSnapshot?.sessionsByConnection,
+        sessionFingerprintsByConnection: officeSessionSnapshot?.sessionFingerprintsByConnection,
+      });
+      result = resolution.ok
+        ? await callOpenSwanAgent(
+            canonicalReq.command,
+            resolution.target.compositeAgentId,
+            canonicalAgent.name,
+            resolution.target.config.endpoint,
+            30000,
+            canonicalReq.model,
+            resolution.target.config.token,
+            exactExecution,
+          )
+        : buildOpenSwanBindingRequiredResult();
+    } else {
       result = await callOpenSwanAgent(
         canonicalReq.command,
         canonicalAgent.id,
@@ -1249,18 +2001,128 @@ export async function invokeAndStream(
         resolvedUrl!,
         30000,
         canonicalReq.model,
-        authToken
+        authToken,
+        exactExecution,
       );
+    }
+
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return buildOfficeInvocationRetiredAfterClaimResult(responseId);
+    }
+
+    const disposition = resolveInvocationDisposition(result);
+    if (disposition === 'accepted' || disposition === 'outcome_unknown') {
+      let canonicalRunId: string | undefined;
+      if (disposition === 'accepted') {
+        try {
+          const receipt = buildConnectedAgentHandoffReceipt({
+            status: 'accepted',
+            provider: canonicalAgent.provider || 'connected-agent',
+            actor: canonicalAgent.name,
+            sessionId: result.sessionId || null,
+            providerRunId: result.providerRunId || null,
+            runId: null,
+            message: result.responseText || `${canonicalAgent.name} accepted the task. Completion has not been verified yet.`,
+          });
+          const acceptedRun = await recordConnectedAgentAcceptedRun({
+            circleId: canonicalReq.circleId,
+            userId: canonicalReq.senderId!,
+            task: canonicalReq.command,
+            surface: 'office_terminal',
+            externalDispatchKind: result.externalDispatchKind || null,
+            externalConnectionId: result.externalConnectionId || null,
+            receipt,
+            agentSubjectMetadata: agentSubject.metadata,
+          });
+          if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+            return buildOfficeInvocationRetiredAfterClaimResult(responseId);
+          }
+          canonicalRunId = acceptedRun?.id || undefined;
+        } catch {
+          // The provider already owns the task. A local ledger outage can drop
+          // the deep link, but it must never rewrite acceptance as failure.
+          console.warn('[agentInvocation] accepted_run_persistence_exception');
+        }
+      }
+
+      result = {
+        ...result,
+        completionVerified: false,
+        ...(canonicalRunId ? { runId: canonicalRunId } : {}),
+      };
+      const handoffCopy = result.responseText
+        || (disposition === 'accepted'
+          ? `${canonicalAgent.name} accepted the task. Completion has not been verified yet.`
+          : `${canonicalAgent.name} may have received the task, but dispatch could not be confirmed. It was not replayed; check the external session before retrying.`);
+
+      // `streaming` is the existing durable nonterminal Office response state.
+      // Do not call markMessageDone: no typed provider final result exists yet.
+      const persisted = await streamResponse(
+        responseId,
+        handoffCopy,
+        'streaming',
+        result.tokenCount || 0,
+        result.latencyMs,
+        result.model,
+        result.tokens,
+        exactExecution,
+      );
+      if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+        return buildOfficeInvocationRetiredAfterClaimResult(responseId);
+      }
+      console.log(disposition === 'accepted'
+        ? '[agentInvocation] provider_handoff_accepted'
+        : '[agentInvocation] provider_handoff_outcome_unknown');
+      if (!persisted) {
+        console.warn('[agentInvocation] provider_handoff_tracking_unavailable');
+      }
+
+      const handoffTaskId = pendingAgentTasks.get(responseId);
+      if (handoffTaskId) {
+        pendingAgentTasks.delete(responseId);
+        updateAgentTaskHandoff(
+          handoffTaskId,
+          canonicalAgent.name,
+          canonicalReq.command,
+          result,
+          canonicalReq.messageId,
+          exactExecution,
+        ).catch(() => {});
+      }
+
+      return {
+        ...result,
+        responseId,
+        responseText: handoffCopy,
+      };
     }
 
     if (!result.success) {
       console.error('[agentInvocation] provider_error');
-      const persisted = await streamResponse(
-        responseId,
-        OFFICE_PROVIDER_FAILURE,
-        'error',
-      );
-      if (persisted) await markMessageDone(canonicalReq.messageId);
+      const providerFailureCopy = getOfficeProviderFailureCopy(result);
+      const persisted = exactExecution
+        ? await streamResponse(
+            responseId,
+            providerFailureCopy,
+            'error',
+            0,
+            undefined,
+            undefined,
+            undefined,
+            exactExecution,
+          )
+        : await streamResponse(
+            responseId,
+            providerFailureCopy,
+            'error',
+          );
+      if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+        return buildOfficeInvocationRetiredAfterClaimResult(responseId);
+      }
+      if (persisted) await markMessageDone(canonicalReq.messageId, exactExecution);
+      if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+        return buildOfficeInvocationRetiredAfterClaimResult(responseId);
+      }
       const failedTaskId = pendingAgentTasks.get(responseId);
       if (failedTaskId) {
         pendingAgentTasks.delete(responseId);
@@ -1268,18 +2130,20 @@ export async function invokeAndStream(
           failedTaskId,
           canonicalAgent.name,
           canonicalReq.command,
-          OFFICE_PROVIDER_FAILURE,
+          providerFailureCopy,
           0,
           undefined,
           undefined,
           false,
           canonicalReq.messageId,
+          undefined,
+          exactExecution,
         ).catch(() => {});
       }
       return {
         success: false,
         responseId,
-        error: OFFICE_PROVIDER_FAILURE,
+        error: providerFailureCopy,
       };
     }
 
@@ -1293,8 +2157,12 @@ export async function invokeAndStream(
       result.tokenCount || 0,
       result.latencyMs,
       result.model,
-      result.tokens
+      result.tokens,
+      exactExecution,
     );
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return buildOfficeInvocationRetiredAfterClaimResult(responseId);
+    }
     if (!updated) {
       const failedTaskId = pendingAgentTasks.get(responseId);
       if (failedTaskId) {
@@ -1309,6 +2177,8 @@ export async function invokeAndStream(
           undefined,
           false,
           canonicalReq.messageId,
+          undefined,
+          exactExecution,
         ).catch(() => {});
       }
       return {
@@ -1318,7 +2188,10 @@ export async function invokeAndStream(
       };
     }
 
-    await markMessageDone(canonicalReq.messageId);
+    await markMessageDone(canonicalReq.messageId, exactExecution);
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return buildOfficeInvocationRetiredAfterClaimResult(responseId);
+    }
     console.log('[agentInvocation] office_response_completed');
 
     const completedTaskId = pendingAgentTasks.get(responseId);
@@ -1335,6 +2208,7 @@ export async function invokeAndStream(
         true,
         canonicalReq.messageId,
         result.tokens,
+        exactExecution,
       ).catch(() => {});
     }
 
@@ -1347,12 +2221,26 @@ export async function invokeAndStream(
     };
   } catch {
     console.error('[agentInvocation] runtime_error');
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return buildOfficeInvocationRetiredAfterClaimResult(responseId);
+    }
     const persisted = await streamResponse(
       responseId,
       OFFICE_RUNTIME_FAILURE,
       'error',
+      0,
+      undefined,
+      undefined,
+      undefined,
+      exactExecution,
     );
-    if (persisted) await markMessageDone(canonicalReq.messageId);
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return buildOfficeInvocationRetiredAfterClaimResult(responseId);
+    }
+    if (persisted) await markMessageDone(canonicalReq.messageId, exactExecution);
+    if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+      return buildOfficeInvocationRetiredAfterClaimResult(responseId);
+    }
 
     const failedTaskId = pendingAgentTasks.get(responseId);
     if (failedTaskId) {
@@ -1367,6 +2255,8 @@ export async function invokeAndStream(
         undefined,
         false,
         canonicalReq.messageId,
+        undefined,
+        exactExecution,
       ).catch(() => {});
     }
 
@@ -1384,10 +2274,18 @@ export async function invokeAllAgents(
   req: InvocationRequest,
   agents: CircleOfficeAgent[],
   gatewayUrl?: string,
-  authToken?: string
+  authToken?: string,
+  officeSessionSnapshot?: OfficeSessionSnapshot,
+  exactExecution?: OfficeInvocationExactExecution,
 ): Promise<AgentInvocationResult[]> {
-  // Filter to online agents only
-  const onlineAgents = agents.filter(a => a.status !== 'offline');
+  if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+    return [buildOfficeInvocationAuthorityUnavailableResult()];
+  }
+  // Only connected states are dispatchable. `error` is visible diagnostic
+  // state, not evidence that a provider can accept work.
+  const onlineAgents = agents.filter(a => (
+    a.status === 'active' || a.status === 'building' || a.status === 'idle'
+  ));
 
   if (onlineAgents.length === 0) {
     return [{
@@ -1402,7 +2300,9 @@ export async function invokeAllAgents(
       buildPerAgentInvocationRequest(req, agent),
       agent,
       gatewayUrl,
-      authToken
+      authToken,
+      officeSessionSnapshot,
+      exactExecution,
     )
   );
 
@@ -1416,11 +2316,18 @@ export async function invokeSelectedAgents(
   agents: CircleOfficeAgent[],
   targetIds: string[],
   gatewayUrl?: string,
-  authToken?: string
+  authToken?: string,
+  officeSessionSnapshot?: OfficeSessionSnapshot,
+  exactExecution?: OfficeInvocationExactExecution,
 ): Promise<AgentInvocationResult[]> {
+  if (exactExecution && !officeInvocationExecutionIsCurrent(exactExecution)) {
+    return [buildOfficeInvocationAuthorityUnavailableResult()];
+  }
   // Filter to online agents matching the selected IDs
   const selectedAgents = agents.filter(
-    a => a.status !== 'offline' && targetIds.includes(a.id)
+    a => (
+      a.status === 'active' || a.status === 'building' || a.status === 'idle'
+    ) && targetIds.includes(a.id)
   );
 
   if (selectedAgents.length === 0) {
@@ -1435,7 +2342,9 @@ export async function invokeSelectedAgents(
       buildPerAgentInvocationRequest(req, agent),
       agent,
       gatewayUrl,
-      authToken
+      authToken,
+      officeSessionSnapshot,
+      exactExecution,
     )
   );
 

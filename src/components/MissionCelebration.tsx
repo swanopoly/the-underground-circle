@@ -8,7 +8,7 @@ import { View, Text, StyleSheet, Animated, Pressable, Platform, Dimensions } fro
 const { width: SW, height: SH } = Dimensions.get('window');
 const PARTICLE_COUNT = 30;
 
-const COLORS = ['#22c55e', '#6366f1', '#f59e0b', '#22d3ee', '#a855f7', '#ec4899'];
+const COLORS = ['#22c55e', '#6366f1', '#f59e0b', '#6366f1', '#a855f7', '#ec4899'];
 
 interface Props {
   missionTitle: string;

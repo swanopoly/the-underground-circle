@@ -425,13 +425,20 @@ export function buildOpenSwanObservedEvalSummary(args: {
     toolActions,
   });
 
+  // Strengths are things that HAPPENED, not summaries and not prose-shape
+  // credit. The mode headline was listed here unconditionally, so a failed
+  // run's card read "Strength 1: Run failed before verified completion…" —
+  // the failure sentence itself, presented as an achievement (it also
+  // duplicated the MODE SUMMARY section on success). And responseQuality
+  // grades the response TEXT, which for a failed run is the error notice —
+  // crediting it "appropriately concise answer" graded the crash message.
+  const runFailed = args.run.status === 'failed' || args.run.status === 'cancelled';
   const strengths = uniqueNonEmpty([
     passedVerification > 0 ? `${passedVerification} verification check(s) passed` : null,
     durableArtifacts.length > 0 ? `${durableArtifacts.length} durable artifact(s) produced` : null,
     totalArtifacts > 0 && durableArtifacts.length === 0 ? `${totalArtifacts} artifact(s) produced` : null,
     toolActions.length > 0 && failedTools === 0 && manualTools === 0 && blockedTools === 0 ? `${toolActions.length} tool action(s) completed cleanly` : null,
-    typeof metadata.modeOutcomeSummary?.headline === 'string' ? metadata.modeOutcomeSummary.headline : null,
-    ...responseQuality.met,
+    ...(runFailed ? [] : responseQuality.met),
   ]).slice(0, 6);
 
   let score = 40;

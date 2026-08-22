@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import FlatIcon from '../../components/FlatIcon';
 import {
   View,
@@ -12,8 +12,11 @@ import {
   NativeSyntheticEvent,
   NativeScrollEvent,
 } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { supabase } from '../../lib/supabase';
+import { getSupabaseClientForAccessToken, supabase } from '../../lib/supabase';
+import {
+  createCircleImageSignedUrl,
+  persistedCircleImageValue,
+} from '../../lib/circleImageStorage';
 import type { CircleIntegrationGroupKey } from '../../lib/circleIntegrationCatalog';
 import TutorialController from '../../components/onboarding/TutorialController';
 
@@ -23,6 +26,10 @@ import { LoadingScreen } from '../../components/LoadingWave';
 import { recordWorkspaceTabVisit } from '../../lib/workspaceAdaptation';
 import { ROOM_WORKSPACE_OPEN_EVENT } from '../../lib/roomWorkspaceLauncher';
 import { rememberLastProfileCircle } from '../../lib/profileNavigation';
+import { OWNER_EMAIL } from '../../lib/officeConfig';
+import { decodeEntityHandle, encodeEntityHandle } from '../../lib/entityHandleCore';
+import { normalizeChatAgentFocusDraft } from '../../lib/chatAgentTargets';
+import { useAuth } from '../../hooks/useAuth';
 
 // ─── Inject CSS animation for tab dot pulse (web only) ───────────────────
 if (Platform.OS === 'web' && typeof document !== 'undefined' && !document.getElementById('uc-tab-dot-css')) {
@@ -38,24 +45,95 @@ if (Platform.OS === 'web' && typeof document !== 'undefined' && !document.getEle
   document.head.appendChild(style);
 }
 
-const ChatTab = React.lazy(() => import('./tabs/ChatTab'));
-const OfficeTab = React.lazy(() => import('./tabs/OfficeTab'));
-const FeedTab = React.lazy(() => import('./tabs/FeedTab'));
-const MembersTab = React.lazy(() => import('./tabs/MembersTab'));
-const WalletTab = React.lazy(() => import('./tabs/WalletTab'));
-const ProfileTab = React.lazy(() => import('./tabs/ProfileTab'));
-const RoomsTab = React.lazy(() => import('./tabs/RoomsTab'));
-const AnalyticsTab = React.lazy(() => import('./tabs/AnalyticsTab'));
-const MarketplaceTab = React.lazy(() => import('./tabs/IntegrationsTab'));
-const BackpackTab = React.lazy(() => import('./tabs/BackpackTab'));
-const SiteCredentialVaultPanel = React.lazy(() => import('../../components/vault/SiteCredentialVaultPanel'));
+const loadChatTabModule = () => import('./tabs/ChatTab');
+const loadOfficeTabModule = () => import('./tabs/OfficeTab');
+const loadFeedTabModule = () => import('./tabs/FeedTab');
+const loadBackpackTabModule = () => import('./tabs/BackpackTab');
+const loadMembersTabModule = () => import('./tabs/MembersTab');
+const loadWalletTabModule = () => import('./tabs/WalletTab');
+const loadProfileTabModule = () => import('./tabs/ProfileTab');
+const loadRoomsTabModule = () => import('./tabs/RoomsTab');
+const loadAnalyticsTabModule = () => import('./tabs/AnalyticsTab');
+const loadMarketplaceTabModule = () => import('./tabs/IntegrationsTab');
+const loadVaultPanelModule = () => import('../../components/vault/SiteCredentialVaultPanel');
+
+const ChatTab = React.lazy(loadChatTabModule);
+const OfficeTab = React.lazy(loadOfficeTabModule);
+const FeedTab = React.lazy(loadFeedTabModule);
+const MembersTab = React.lazy(loadMembersTabModule);
+const WalletTab = React.lazy(loadWalletTabModule);
+const ProfileTab = React.lazy(loadProfileTabModule);
+const RoomsTab = React.lazy(loadRoomsTabModule);
+const AnalyticsTab = React.lazy(loadAnalyticsTabModule);
+const MarketplaceTab = React.lazy(loadMarketplaceTabModule);
+const BackpackTab = React.lazy(loadBackpackTabModule);
+const SiteCredentialVaultPanel = React.lazy(loadVaultPanelModule);
 const FloatingChat = React.lazy(() => import('../../components/FloatingChat'));
 const SearchModal = React.lazy(() => import('../../components/SearchModal'));
+
+const DASHBOARD_MODULE_LOADERS: Readonly<Record<string, () => Promise<unknown>>> = Object.freeze({
+  CHAT: loadChatTabModule,
+  ROOMS: loadRoomsTabModule,
+  OFFICE: loadOfficeTabModule,
+  FEED: loadFeedTabModule,
+  BACKPACK: loadBackpackTabModule,
+  INTEGRATIONS: loadMarketplaceTabModule,
+  VAULT: loadVaultPanelModule,
+  MEMBERS: loadMembersTabModule,
+  ANALYTICS: loadAnalyticsTabModule,
+  WALLET: loadWalletTabModule,
+  PROFILE: loadProfileTabModule,
+});
+
+// Keep a single in-flight/resolved preload per dashboard. React.lazy and the
+// browser module cache already avoid re-evaluating modules; this also prevents
+// rapid hover/focus/idle signals from creating duplicate scheduling work.
+const DASHBOARD_MODULE_PREFETCHES = new Map<string, Promise<unknown>>();
+
+const DASHBOARD_IDLE_WARM_ORDER = Object.freeze([
+  'FEED',
+  'BACKPACK',
+  'CHAT',
+  'ROOMS',
+  'OFFICE',
+  'INTEGRATIONS',
+  'VAULT',
+  'MEMBERS',
+  'ANALYTICS',
+  'PROFILE',
+] as const);
+
+function beginDashboardModulePrefetch(tabKey: string, isOwner: boolean): Promise<unknown> | null {
+  if (tabKey === 'BACKPACK' && !isOwner) return null;
+  const existing = DASHBOARD_MODULE_PREFETCHES.get(tabKey);
+  if (existing) return existing;
+
+  const loader = DASHBOARD_MODULE_LOADERS[tabKey];
+  if (!loader) return null;
+  const request = tabKey === 'FEED'
+    ? loadFeedTabModule().then(module => module.preloadFeedDashboardPanels())
+    : loader();
+  DASHBOARD_MODULE_PREFETCHES.set(tabKey, request);
+  void request.catch(() => {
+    if (DASHBOARD_MODULE_PREFETCHES.get(tabKey) === request) {
+      DASHBOARD_MODULE_PREFETCHES.delete(tabKey);
+    }
+  });
+  return request;
+}
+
+function prefetchDashboardModule(tabKey: string, isOwner: boolean): void {
+  void beginDashboardModulePrefetch(tabKey, isOwner);
+}
 
 // Tabs lazy-mount on first visit and now lazy-load their code chunks too.
 
 // Gated tabs — hidden from nav until the feature is complete (see docs/NEXT_LEVEL_PLAN.md Phase 0.3)
 const GATED_TABS = new Set(['WALLET']);
+
+// Owner-only tabs — hidden (nav + content + deep links) for everyone except
+// OWNER_EMAIL. Fail closed: treated as hidden until the auth read resolves.
+const OWNER_ONLY_TABS = new Set(['BACKPACK']);
 
 const TAB_META_ALL: { key: string; label: string; icon: string; flatIcon?: string; color: string }[] = [
   { key: 'CHAT', label: 'Chat', icon: '💬', flatIcon: 'chat', color: '#22c55e' },
@@ -66,7 +144,7 @@ const TAB_META_ALL: { key: string; label: string; icon: string; flatIcon?: strin
   { key: 'INTEGRATIONS', label: 'Marketplace', icon: '🛍️', flatIcon: 'integrations', color: '#3b82f6' },
   { key: 'VAULT', label: 'Vault', icon: '🔐', flatIcon: 'vault', color: '#14b8a6' },
   { key: 'MEMBERS', label: 'Members', icon: '👥', flatIcon: 'members', color: '#14b8a6' },
-  { key: 'ANALYTICS', label: 'Analytics', icon: '📊', flatIcon: 'analytics', color: '#22d3ee' },
+  { key: 'ANALYTICS', label: 'Analytics', icon: '📊', flatIcon: 'analytics', color: '#6366f1' },
   { key: 'WALLET', label: 'Wallet', icon: '💰', flatIcon: 'wallet', color: '#f97316' },
   { key: 'PROFILE', label: 'Profile', icon: '👤', flatIcon: 'profile', color: '#8b5cf6' },
 ];
@@ -75,6 +153,8 @@ const TAB_META = TAB_META_ALL.filter(t => !GATED_TABS.has(t.key));
 
 const TABS = TAB_META.map(t => t.key) as readonly string[];
 type Tab = string;
+const DEFAULT_CIRCLE_TAB: Tab = 'OFFICE';
+
 function normalizeTabKey(value?: string | null): Tab | null {
   const upper = value?.toUpperCase();
   if (!upper) return null;
@@ -87,20 +167,20 @@ type MarketplaceFocus = {
   groupKey?: CircleIntegrationGroupKey | null;
   ts: number;
 } | null;
+type OfficeRunFocusRequest = {
+  runId: string;
+  requestId: number;
+} | null;
+type ChatAgentFocusRequest = {
+  agentId: string;
+  draft: string | null;
+  requestId: number;
+} | null;
 
-// Persist active tab per circle across refreshes.
-//
-// The URL path is the single source of truth. `setActiveTab` rewrites it
-// on every tab change so a refresh always restores exactly where the user
-// was. We intentionally DO NOT fall back to localStorage when the URL has
-// no tab slug — that used to trap users on Profile indefinitely when a
-// stale localStorage entry outlived its session. A bare URL signals "just
-// entered this circle" and should land on CHAT.
-//
-// Native (no URL semantics) still uses AsyncStorage as the persistence
-// layer because there's no web URL to read from.
-const TAB_STORAGE_KEY = 'uc_active_tab';
-function loadSavedTab(circleId: string): Tab {
+// Explicit URL tabs are navigation authority. A bare circle route means the
+// user just entered the workspace, so it always starts in Office instead of
+// restoring stale per-circle state from an earlier visit.
+function loadInitialTab(): Tab {
   try {
     if (Platform.OS === 'web') {
       // 1. Clean URL path /circle/:id/:tab — the sole source of truth.
@@ -116,38 +196,47 @@ function loadSavedTab(circleId: string): Tab {
         const urlTab = normalizeTabKey(new URLSearchParams(window.location.search).get('tab'));
         if (urlTab) return urlTab;
       } catch {}
-      // Bare URL → fresh entry. Default to CHAT. Ignore localStorage here
-      // so a stale previous-session tab can't override the "just entered"
-      // signal the URL is giving us.
-      return 'CHAT';
-    }
-    // Native fallback.
-    // Web never reaches this branch.
-  } catch {}
-  return 'CHAT';
-}
-function saveTab(circleId: string, tab: Tab) {
-  try {
-    const key = `${TAB_STORAGE_KEY}_${circleId}`;
-    if (Platform.OS === 'web') {
-      localStorage.setItem(key, tab);
-    } else {
-      AsyncStorage.setItem(key, tab).catch(() => {});
+      // Bare URL → fresh entry. Office is the workspace landing surface.
+      return DEFAULT_CIRCLE_TAB;
     }
   } catch {}
+  return DEFAULT_CIRCLE_TAB;
 }
 
-// Cache circle data so the screen renders instantly on refresh
+// Cache only a bounded, non-secret Circle shell. The cache is scoped to the
+// authenticated user and is never authorization: the screen does not read or
+// render it until a fresh RLS-protected Circle row proves access.
 const CIRCLE_CACHE_KEY = 'uc_circle_cache';
-const CIRCLE_CACHE_VERSION = 1;
+const CIRCLE_CACHE_VERSION = 2;
 const CIRCLE_CACHE_TTL_MS = 300_000; // 5 minutes
-function loadCachedCircle(circleId: string): { circle: Circle | null; memberCount: number } {
+const CIRCLE_SHELL_READ_COLUMNS = [
+  'id',
+  'name',
+  'description',
+  'max_members',
+  'created_by',
+  'created_at',
+  'circle_type',
+  'icon',
+  'accent_color',
+  'circle_image_url',
+].join(',');
+type CircleAccessState = 'checking' | 'allowed' | 'denied' | 'error';
+
+function circleCacheKey(userId: string, circleId: string): string {
+  return `${CIRCLE_CACHE_KEY}_${userId}_${circleId}`;
+}
+
+function loadCachedCircle(userId: string, circleId: string): { circle: Circle | null; memberCount: number } {
   try {
     if (Platform.OS === 'web') {
-      const raw = localStorage.getItem(`${CIRCLE_CACHE_KEY}_${circleId}`);
+      const raw = localStorage.getItem(circleCacheKey(userId, circleId));
       if (raw) {
         const parsed = JSON.parse(raw);
         if (parsed.version !== CIRCLE_CACHE_VERSION) return { circle: null, memberCount: 0 };
+        if (parsed.userId !== userId || parsed.circleId !== circleId || parsed.circle?.id !== circleId) {
+          return { circle: null, memberCount: 0 };
+        }
         if (!parsed.savedAt || Date.now() - parsed.savedAt > CIRCLE_CACHE_TTL_MS) return { circle: null, memberCount: 0 };
         return { circle: parsed.circle, memberCount: parsed.memberCount };
       }
@@ -155,31 +244,81 @@ function loadCachedCircle(circleId: string): { circle: Circle | null; memberCoun
   } catch {}
   return { circle: null, memberCount: 0 };
 }
-function cacheCircle(circleId: string, circle: Circle, memberCount: number) {
+function cacheCircle(userId: string, circleId: string, circle: Circle, memberCount: number) {
   try {
     if (Platform.OS === 'web') {
-      localStorage.setItem(`${CIRCLE_CACHE_KEY}_${circleId}`, JSON.stringify({ version: CIRCLE_CACHE_VERSION, savedAt: Date.now(), circle, memberCount }));
+      localStorage.setItem(circleCacheKey(userId, circleId), JSON.stringify({
+        version: CIRCLE_CACHE_VERSION,
+        userId,
+        circleId,
+        savedAt: Date.now(),
+        circle,
+        memberCount,
+      }));
     }
   } catch {}
 }
 
 export default function CircleDetailScreen({ route, navigation }: any) {
-  const { circleId, circleName, tab: routeTab } = route.params;
-  useEffect(() => {
-    rememberLastProfileCircle(circleId, circleName);
-  }, [circleId, circleName]);
+  const { session: authSession, user: authUser, loading: authLoading } = useAuth();
+  const { circleId, circleName, tab: routeTab, focus: routeFocus } = route.params;
   const [activeTab, setActiveTabRaw] = useState<Tab>(() => {
     // Route param takes priority (from CMD+K, deep links, programmatic navigation)
     const normalizedRouteTab = normalizeTabKey(routeTab);
     if (normalizedRouteTab) return normalizedRouteTab;
-    return loadSavedTab(circleId);
+    return loadInitialTab();
   });
   // Circle-scoped global search modal state. Effect hooks that depend on
   // setActiveTab are declared below, after setActiveTab itself.
   const [searchOpen, setSearchOpen] = useState(false);
+  const [marketplaceFocus, setMarketplaceFocus] = useState<MarketplaceFocus>(null);
+  const [officeRunFocus, setOfficeRunFocus] = useState<OfficeRunFocusRequest>(null);
+  const [chatAgentFocus, setChatAgentFocus] = useState<ChatAgentFocusRequest>(null);
+  const officeRunFocusSequenceRef = useRef(0);
+  const chatAgentFocusSequenceRef = useRef(0);
+  // Cross-surface focus is deliberately allowlisted. Only a validated
+  // `office:run:<id>` may open Office's run drawer and only a validated
+  // `chat:agent:<id>` may select a Chat target. Malformed, mismatched, or
+  // future entity kinds can still use the existing generic tab navigation but
+  // cannot focus destination UI.
+  const captureCrossSurfaceFocus = useCallback((rawFocus: unknown, target: Tab, rawDraft?: unknown): boolean => {
+    const handle = decodeEntityHandle(rawFocus);
+    if (target === 'OFFICE' && handle?.kind === 'run' && handle.surface === 'office') {
+      officeRunFocusSequenceRef.current += 1;
+      setOfficeRunFocus({
+        runId: handle.id,
+        requestId: officeRunFocusSequenceRef.current,
+      });
+      return true;
+    }
+    if (target === 'CHAT' && handle?.kind === 'agent' && handle.surface === 'chat') {
+      const draft = normalizeChatAgentFocusDraft(rawDraft);
+      chatAgentFocusSequenceRef.current += 1;
+      setChatAgentFocus({
+        agentId: handle.id,
+        draft,
+        requestId: chatAgentFocusSequenceRef.current,
+      });
+      return true;
+    }
+    return false;
+  }, []);
+  useEffect(() => {
+    officeRunFocusSequenceRef.current = 0;
+    setOfficeRunFocus(null);
+    setChatAgentFocus(null);
+  }, [circleId]);
+  // Owner-only tab gate. null = auth read pending (tabs stay hidden), so a
+  // non-owner never sees a Backpack flash while the session resolves.
+  const isOwnerAccount = authLoading
+    ? null
+    : authUser?.email === OWNER_EMAIL;
+  const visibleTabs = useMemo(
+    () => (isOwnerAccount === true ? TAB_META : TAB_META.filter(t => !OWNER_ONLY_TABS.has(t.key))),
+    [isOwnerAccount],
+  );
   const setActiveTab = useCallback((tab: Tab) => {
     setActiveTabRaw(tab);
-    saveTab(circleId, tab);
     // Sync tab to URL — clean path: /circle/:id/:tab
     if (Platform.OS === 'web') {
       try {
@@ -190,12 +329,26 @@ export default function CircleDetailScreen({ route, navigation }: any) {
       } catch {}
     }
   }, [circleId, circleName]);
+  const openOfficeRun = useCallback((runId: string) => {
+    const focus = encodeEntityHandle({ kind: 'run', id: runId, surface: 'office' });
+    if (!focus) return;
+    captureCrossSurfaceFocus(focus, 'OFFICE');
+    setActiveTab('OFFICE');
+  }, [captureCrossSurfaceFocus, setActiveTab]);
+
+  // If a non-owner lands on an owner-only tab, return them to the normal
+  // circle landing surface once the auth read resolves.
+  useEffect(() => {
+    if (isOwnerAccount === false && OWNER_ONLY_TABS.has(activeTab)) {
+      setActiveTab(DEFAULT_CIRCLE_TAB);
+    }
+  }, [isOwnerAccount, activeTab, setActiveTab]);
 
   // On mount, immediately sync the URL to the resolved active tab. Without
   // this, entering a circle via a bare URL (like `/circle/:id/?circleName=…`)
   // would leave the URL bare even though the screen is showing a specific
   // tab. On the next refresh the URL would still be bare, fall through to
-  // CHAT, and the user's session-state would be lost. Rewriting the URL at
+  // Office, and lose the explicit current-tab state. Rewriting the URL at
   // mount time makes the URL always reflect the current tab.
   useEffect(() => {
     if (Platform.OS !== 'web') return;
@@ -227,7 +380,15 @@ export default function CircleDetailScreen({ route, navigation }: any) {
     // correct tab is active before the target modal tries to render.
     const onSwitchTab = (e: any) => {
       const target = normalizeTabKey((e?.detail?.tab || '').toString());
-      if (target) setActiveTab(target);
+      if (!target) return;
+      const marketplaceItemId = typeof e?.detail?.marketplaceItemId === 'string'
+        ? e.detail.marketplaceItemId.trim()
+        : '';
+      if (target === 'INTEGRATIONS' && marketplaceItemId) {
+        setMarketplaceFocus({ itemId: marketplaceItemId, groupKey: null, ts: Date.now() });
+      }
+      captureCrossSurfaceFocus(e?.detail?.focus, target, e?.detail?.draft);
+      setActiveTab(target);
     };
     window.addEventListener('keydown', onKey);
     window.addEventListener('uc:toggle-search', onToggle as any);
@@ -237,49 +398,99 @@ export default function CircleDetailScreen({ route, navigation }: any) {
       window.removeEventListener('uc:toggle-search', onToggle as any);
       window.removeEventListener('uc:switch-tab', onSwitchTab as any);
     };
-  }, [setActiveTab]);
+  }, [captureCrossSurfaceFocus, setActiveTab]);
 
   // When route params change (CMD+K, deep link), switch to the requested tab
   const tabTs = route.params?._tabTs;
+  const focusTs = route.params?._focusTs;
   useEffect(() => {
     if (routeTab) {
       const target = normalizeTabKey(routeTab);
-      if (target) setActiveTab(target);
+      if (target) {
+        captureCrossSurfaceFocus(routeFocus, target);
+        setActiveTab(target);
+      }
     }
-  }, [routeTab, tabTs, setActiveTab]);
-  const cached = loadCachedCircle(circleId);
-  const [circle, setCircle] = useState<Circle | null>(cached.circle);
-  const [memberCount, setMemberCount] = useState(cached.memberCount);
-  const [activeStreakCount, setActiveStreakCount] = useState(Math.max(1, Math.floor((cached.memberCount || 1) * 0.7)));
+  }, [routeTab, routeFocus, tabTs, focusTs, captureCrossSurfaceFocus, setActiveTab]);
+  const [circle, setCircle] = useState<Circle | null>(null);
+  const [memberCount, setMemberCount] = useState(0);
+  const [activeStreakCount, setActiveStreakCount] = useState(0);
+  const [circleAccessState, setCircleAccessState] = useState<CircleAccessState>('checking');
+  const [circleLoadRevision, setCircleLoadRevision] = useState(0);
+  const circleLoadGenerationRef = useRef(0);
   const { width: winW } = useWindowDimensions();
   const isMobile = winW < 700;
-  const [onlineMembers, setOnlineMembers] = useState(Math.max(1, Math.floor((cached.memberCount || 1) * 0.5)));
+  const [onlineMembers, setOnlineMembers] = useState(0);
   // Chat pop-out state — renders FloatingChat overlay that persists across tabs
   const [chatPopout, setChatPopout] = useState(false);
   const [chatMountKey, setChatMountKey] = useState(0);
-  const [marketplaceFocus, setMarketplaceFocus] = useState<MarketplaceFocus>(null);
+  const openAgentInChat = useCallback((focus: string, draft?: string) => {
+    if (!captureCrossSurfaceFocus(focus, 'CHAT', draft)) return;
+    // The full Chat surface owns agent selection and its per-thread composer.
+    // Close a floating chat first so the validated request has one destination.
+    setChatPopout(false);
+    setActiveTab('CHAT');
+  }, [captureCrossSurfaceFocus, setActiveTab]);
 
-  // Loading gate: show the screen as soon as circle data is ready. Do NOT
-  // block on OfficeTab — it runs ~18 queries + realtime subscriptions and
-  // was gating every circle load behind 2-5s of agent/presence setup even
-  // when the user was going to Chat, not Office. Office now mounts lazily
-  // like every other secondary tab and loads in the background on first
-  // visit.
-  const [circleLoaded, setCircleLoaded] = useState(!!cached.circle);
+  // Loading gate: show the Circle shell as soon as its data is ready. Office
+  // is the default tab and handles its own queries, subscriptions, and loading
+  // state without blocking the shell; an explicit link to another tab does not
+  // mount Office until the user visits it.
+  const [circleLoaded, setCircleLoaded] = useState(false);
   const loading = !circleLoaded;
 
-  // Native: load saved tab asynchronously on mount
   useEffect(() => {
-    if (Platform.OS !== 'web') {
-      AsyncStorage.getItem(`${TAB_STORAGE_KEY}_${circleId}`).then(raw => {
-        if (raw && TABS.includes(raw)) setActiveTabRaw(raw);
-      }).catch(() => {});
-    }
-  }, [circleId]);
+    if (Platform.OS !== 'web' || typeof window === 'undefined' || !circleLoaded) return undefined;
+    const network = (window.navigator as Navigator & {
+      connection?: { saveData?: boolean; effectiveType?: string };
+    }).connection;
+    if (network?.saveData || network?.effectiveType?.includes('2g')) return undefined;
+
+    let cancelled = false;
+    const warmQueue = DASHBOARD_IDLE_WARM_ORDER.filter(tabKey => (
+      tabKey !== activeTab && (tabKey !== 'BACKPACK' || isOwnerAccount === true)
+    ));
+    const idleWindow = window as typeof window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    let idleHandle: number | null = null;
+    let timerHandle: ReturnType<typeof setTimeout> | null = null;
+
+    const warmNextDashboard = () => {
+      if (cancelled) return;
+      const nextTab = warmQueue.shift();
+      if (!nextTab) return;
+      prefetchDashboardModule(nextTab, isOwnerAccount === true);
+      scheduleNextDashboard();
+    };
+    const scheduleNextDashboard = () => {
+      if (cancelled || warmQueue.length === 0) return;
+      if (typeof idleWindow.requestIdleCallback === 'function') {
+        idleHandle = idleWindow.requestIdleCallback(warmNextDashboard, { timeout: 3_500 });
+      } else {
+        timerHandle = setTimeout(warmNextDashboard, 1_200);
+      }
+    };
+
+    scheduleNextDashboard();
+    return () => {
+      cancelled = true;
+      if (idleHandle != null) idleWindow.cancelIdleCallback?.(idleHandle);
+      if (timerHandle != null) clearTimeout(timerHandle);
+    };
+  }, [activeTab, circleLoaded, isOwnerAccount]);
 
   useEffect(() => {
     if (!activeTab || !TABS.includes(activeTab)) return;
-    recordWorkspaceTabVisit(circleId, activeTab as any).catch(() => {});
+    // Adaptation telemetry is best-effort. A stale browser chunk must never
+    // turn a non-critical visit counter into a fatal Circle/Chat render error.
+    if (typeof recordWorkspaceTabVisit !== 'function') return;
+    try {
+      void Promise.resolve(recordWorkspaceTabVisit(circleId, activeTab as any)).catch(() => {});
+    } catch {
+      // Synchronous legacy/mixed-chunk implementations are non-fatal too.
+    }
   }, [circleId, activeTab]);
 
   useEffect(() => {
@@ -298,47 +509,108 @@ export default function CircleDetailScreen({ route, navigation }: any) {
   }, [circleId, setActiveTab]);
 
   useEffect(() => {
-    loadCircleData();
-  }, [circleId]);
+    const generation = ++circleLoadGenerationRef.current;
+    const controller = new AbortController();
+    let timedOut = false;
+    const isCurrent = () => generation === circleLoadGenerationRef.current && !controller.signal.aborted;
 
+    setCircleAccessState('checking');
+    setCircleLoaded(false);
+    setCircle(null);
+    setMemberCount(0);
+    setOnlineMembers(0);
+    setActiveStreakCount(0);
+    setChatPopout(false);
 
-  const loadCircleData = async () => {
-    try {
-      const [circleRes, memberRes] = await Promise.allSettled([
-        supabase.from('circles').select('*').eq('id', circleId).single(),
-        supabase.from('circle_members').select('user_id').eq('circle_id', circleId),
-      ]);
-      const circleData = circleRes.status === 'fulfilled' ? circleRes.value.data : null;
-      const memberData = memberRes.status === 'fulfilled' ? memberRes.value.data : [];
-      if (circleData) {
-        setCircle(circleData);
-        const mc = memberData?.length || 0;
-        setMemberCount(mc);
-        setOnlineMembers(Math.max(1, Math.floor(mc * 0.5)));
-        setActiveStreakCount(Math.max(1, Math.floor(mc * 0.7)));
-        cacheCircle(circleId, circleData, mc);
-      }
-      // Smart default: if user has no saved tab and circle has missions, show FEED (missions live in Feed now)
-      try {
-        const hasSavedTab = Platform.OS === 'web' && localStorage.getItem(`${TAB_STORAGE_KEY}_${circleId}`);
-        if (!hasSavedTab && !routeTab) {
-          const { data: missions } = await supabase
-            .from('circle_missions')
-            .select('id', { count: 'exact' })
-            .eq('circle_id', circleId)
-            .eq('status', 'active')
-            .limit(1);
-          if (missions && missions.length > 0) {
-            setActiveTab('FEED');
-          }
-        }
-      } catch {}
-    } catch (error) {
-      console.error('Error loading circle data:', error);
-    } finally {
-      setCircleLoaded(true);
+    if (authLoading) {
+      return () => controller.abort();
     }
-  };
+    const userId = authUser?.id;
+    const accessToken = authSession?.access_token;
+    if (!userId || !accessToken || authSession?.user.id !== userId) {
+      setCircleAccessState('denied');
+      setCircleLoaded(true);
+      return () => controller.abort();
+    }
+    const exactClient = getSupabaseClientForAccessToken(accessToken);
+
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+      if (generation === circleLoadGenerationRef.current) {
+        setCircleAccessState('error');
+        setCircleLoaded(true);
+      }
+    }, 10_000);
+
+    void (async () => {
+      try {
+        const [circleRes, memberRes] = await Promise.all([
+          exactClient
+            .from('circles')
+            .select(CIRCLE_SHELL_READ_COLUMNS)
+            .eq('id', circleId)
+            .abortSignal(controller.signal)
+            .maybeSingle(),
+          exactClient
+            .from('circle_members')
+            .select('user_id')
+            .eq('circle_id', circleId)
+            .abortSignal(controller.signal),
+        ]);
+        if (!isCurrent()) return;
+        if (circleRes.error) {
+          setCircleAccessState('error');
+          return;
+        }
+        // A fresh row returned through circles RLS is the authorization proof.
+        // A device cache, route parameter, or prior Realtime event never is.
+        if (!circleRes.data) {
+          setCircleAccessState('denied');
+          return;
+        }
+
+        const storedCircleData = {
+          ...(circleRes.data as unknown as Circle),
+          circle_image_url: persistedCircleImageValue(
+            (circleRes.data as { circle_image_url?: string | null }).circle_image_url,
+          ) || undefined,
+        };
+        const signedCircleImage = await createCircleImageSignedUrl(
+          exactClient,
+          storedCircleData.circle_image_url,
+        );
+        if (!isCurrent()) return;
+        const circleData = {
+          ...storedCircleData,
+          circle_image_url: signedCircleImage || undefined,
+        };
+        const cached = loadCachedCircle(userId, circleId);
+        const mc = memberRes.error
+          ? cached.memberCount
+          : (memberRes.data?.length || 0);
+        setCircle(circleData);
+        setMemberCount(mc);
+        setOnlineMembers(mc > 0 ? Math.max(1, Math.floor(mc * 0.5)) : 0);
+        setActiveStreakCount(mc > 0 ? Math.max(1, Math.floor(mc * 0.7)) : 0);
+        setCircleAccessState('allowed');
+        rememberLastProfileCircle(circleId, circleData.name);
+        cacheCircle(userId, circleId, storedCircleData, mc);
+      } catch {
+        if (isCurrent() && !timedOut) setCircleAccessState('error');
+      } finally {
+        if (generation === circleLoadGenerationRef.current) {
+          clearTimeout(timeout);
+          setCircleLoaded(true);
+        }
+      }
+    })();
+
+    return () => {
+      clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [authLoading, authSession?.access_token, authUser?.id, circleId, circleLoadRevision]);
 
   const accentColor = circle?.accent_color || '#6366f1';
   const circleIcon = circle?.icon || '⭕';
@@ -351,8 +623,9 @@ export default function CircleDetailScreen({ route, navigation }: any) {
     gaming: 'GAMING', creative: 'CREATIVE', custom: 'CUSTOM',
   };
 
-  // Office used to eagerly mount; now lazy like every other tab so the
-  // circle screen paints in ~200ms instead of 2-5s. `handleOfficeReady` is
+  // Office uses the shared lazy-tab wrapper so explicit links to another tab
+  // do not pay its setup cost. On a bare circle entry it is the active/default
+  // tab and mounts immediately. `handleOfficeReady` is
   // kept as a no-op in case OfficeTab still passes it; the loading gate
   // doesn't depend on it anymore.
   const handleOfficeReady = useCallback(() => { /* no-op — loading gate no longer blocks on Office */ }, []);
@@ -364,6 +637,62 @@ export default function CircleDetailScreen({ route, navigation }: any) {
     });
     setActiveTab('INTEGRATIONS');
   }, [setActiveTab]);
+  const retryCircleAccess = useCallback(() => {
+    setCircleLoadRevision(revision => revision + 1);
+  }, []);
+  const leaveUnavailableCircle = useCallback(() => {
+    if (typeof navigation?.canGoBack === 'function' && navigation.canGoBack()) {
+      navigation.goBack();
+      return;
+    }
+    navigation?.navigate?.('CirclesList');
+  }, [navigation]);
+
+  // No dashboard, cached Circle metadata, tutorial, search, or floating Chat
+  // mounts until a fresh RLS-protected Circle read proves this account can see
+  // the exact Circle. This also fences same-browser account switches.
+  if (circleAccessState !== 'allowed') {
+    const checking = circleAccessState === 'checking';
+    const failed = circleAccessState === 'error';
+    return (
+      <View style={styles.accessGate} accessibilityLiveRegion="polite">
+        <View style={styles.accessGateCard}>
+          <Text style={styles.accessGateTitle}>
+            {checking ? 'VERIFYING CIRCLE ACCESS' : failed ? 'CIRCLE UNAVAILABLE' : 'ACCESS NOT AVAILABLE'}
+          </Text>
+          <Text style={styles.accessGateBody}>
+            {checking
+              ? 'Confirming this account belongs to the Circle.'
+              : failed
+                ? 'Access could not be verified. No cached workspace data was shown.'
+                : 'This workspace is not available for the signed-in account.'}
+          </Text>
+          {!checking && (
+            <View style={styles.accessGateActions}>
+              {failed && (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Retry Circle access"
+                  onPress={retryCircleAccess}
+                  style={styles.accessGatePrimaryButton}
+                >
+                  <Text style={styles.accessGatePrimaryText}>RETRY</Text>
+                </Pressable>
+              )}
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Back to Circles"
+                onPress={leaveUnavailableCircle}
+                style={styles.accessGateSecondaryButton}
+              >
+                <Text style={styles.accessGateSecondaryText}>BACK TO CIRCLES</Text>
+              </Pressable>
+            </View>
+          )}
+        </View>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -384,14 +713,20 @@ export default function CircleDetailScreen({ route, navigation }: any) {
       <View style={styles.header}>
         <View style={styles.headerInner}>
           <TabBarScroller
-            tabs={TAB_META}
+            tabs={visibleTabs}
             activeTab={activeTab}
             accentColor={accentColor}
             isMobile={isMobile}
             onTabPress={setActiveTab}
+            onTabIntent={(tabKey) => prefetchDashboardModule(tabKey, isOwnerAccount === true)}
           />
         </View>
       </View>
+
+      {/* A same-route account replacement must retire every mounted dashboard,
+          ref, subscription, and in-flight callback before the new account is
+          allowed to hydrate this Circle. */}
+      <React.Fragment key={`workspace:${authUser?.id || 'signed-out'}:${circleId}`}>
 
       {/* Pop-out button — visible when Chat tab is active and not already popped out */}
       {activeTab === 'CHAT' && !chatPopout && (
@@ -411,23 +746,49 @@ export default function CircleDetailScreen({ route, navigation }: any) {
           user who opened ANY circle, even if they went straight to Chat.
           Now it only loads when the user actually visits the Office tab. */}
       <LazyTab tabKey="OFFICE" activeTab={activeTab}>
-        <OfficeTab circleId={circleId} accentColor={accentColor} onReady={handleOfficeReady} />
+        <OfficeTab
+          circleId={circleId}
+          accentColor={accentColor}
+          focusRunId={officeRunFocus?.runId || null}
+          focusRunRequestId={officeRunFocus?.requestId || 0}
+          onOpenAgentInChat={openAgentInChat}
+          onReady={handleOfficeReady}
+        />
       </LazyTab>
 
       {/* Other tabs — lazy mount on first visit, stay mounted after */}
       {!chatPopout && (
         <LazyTab key={`chat-${chatMountKey}`} tabKey="CHAT" activeTab={activeTab}>
-          <ChatTab circleId={circleId} accentColor={accentColor} />
+          <ChatTab
+            circleId={circleId}
+            accentColor={accentColor}
+            focusAgentId={chatAgentFocus?.agentId || null}
+            focusAgentDraft={chatAgentFocus?.draft || null}
+            focusAgentRequestId={chatAgentFocus?.requestId || 0}
+          />
         </LazyTab>
       )}
       <LazyTab tabKey="ROOMS" activeTab={activeTab}>
         <RoomsTab circleId={circleId} accentColor={accentColor} />
       </LazyTab>
-      <LazyTab tabKey="BACKPACK" activeTab={activeTab}>
-        <BackpackTab circleId={circleId} accentColor={accentColor} />
-      </LazyTab>
+      {/* BACKPACK — owner-only (OWNER_EMAIL); content never mounts for others */}
+      {isOwnerAccount === true && (
+        <LazyTab tabKey="BACKPACK" activeTab={activeTab}>
+          <BackpackTab
+            key={circleId}
+            circleId={circleId}
+            accentColor={accentColor}
+            onOpenOffice={() => setActiveTab('OFFICE')}
+          />
+        </LazyTab>
+      )}
       <LazyTab tabKey="FEED" activeTab={activeTab}>
-        <FeedTab circleId={circleId} accentColor={accentColor} onOpenMarketplace={openMarketplace} />
+        <FeedTab
+          circleId={circleId}
+          accentColor={accentColor}
+          onOpenMarketplace={openMarketplace}
+          onOpenOfficeRun={openOfficeRun}
+        />
       </LazyTab>
       <LazyTab tabKey="VAULT" activeTab={activeTab}>
         <SiteCredentialVaultPanel circleId={circleId} accentColor={accentColor} fullHeight />
@@ -482,6 +843,7 @@ export default function CircleDetailScreen({ route, navigation }: any) {
           />
         </React.Suspense>
       )}
+      </React.Fragment>
     </View>
   );
 }
@@ -489,8 +851,11 @@ export default function CircleDetailScreen({ route, navigation }: any) {
 // ─── Lazy Tab — mounts on first visit, stays mounted after ──────────────────
 
 function LazyTab({ tabKey, activeTab, children }: { tabKey: string; activeTab: string; children: React.ReactNode }) {
-  const [hasVisited, setHasVisited] = useState(false);
   const isActive = activeTab === tabKey;
+  // Mount the initial dashboard in the first render. Starting at false made
+  // every direct dashboard entry wait for an effect and an extra paint before
+  // React.lazy could even request its chunk.
+  const [hasVisited, setHasVisited] = useState(isActive);
 
   useEffect(() => {
     if (isActive && !hasVisited) setHasVisited(true);
@@ -509,17 +874,19 @@ function LazyTab({ tabKey, activeTab, children }: { tabKey: string; activeTab: s
 
 // ─── Tab Pill ───────────────────────────────────────────────────────
 
-function TabPill({ icon, flatIcon, label, active, accentColor, tabColor, isMobile, onPress }: {
-  icon: string; flatIcon?: string; label: string; active: boolean; accentColor: string; tabColor: string; isMobile: boolean; onPress: () => void;
+function TabPill({ icon, flatIcon, label, active, accentColor, tabColor, isMobile, onPress, onIntent }: {
+  icon: string; flatIcon?: string; label: string; active: boolean; accentColor: string; tabColor: string; isMobile: boolean; onPress: () => void; onIntent?: () => void;
 }) {
   const [hovered, setHovered] = useState(false);
   const color = active ? tabColor : accentColor;
 
   return (
     <Pressable
-      onPress={onPress}
-      onHoverIn={() => setHovered(true)}
+      onPressIn={onIntent}
+      onPress={() => { onIntent?.(); onPress(); }}
+      onHoverIn={() => { setHovered(true); onIntent?.(); }}
       onHoverOut={() => setHovered(false)}
+      onFocus={onIntent}
       style={[
         styles.tabPill,
         active && { backgroundColor: tabColor + '15', borderColor: tabColor + '50' },
@@ -565,12 +932,13 @@ function TabPill({ icon, flatIcon, label, active, accentColor, tabColor, isMobil
 
 // ─── Tab Bar Scroller ────────────────────────────────────────────────────────
 
-function TabBarScroller({ tabs, activeTab, accentColor, isMobile, onTabPress }: {
+function TabBarScroller({ tabs, activeTab, accentColor, isMobile, onTabPress, onTabIntent }: {
   tabs: typeof TAB_META;
   activeTab: string;
   accentColor: string;
   isMobile: boolean;
   onTabPress: (key: string) => void;
+  onTabIntent: (key: string) => void;
 }) {
   const scrollRef = useRef<ScrollView>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
@@ -612,6 +980,7 @@ function TabBarScroller({ tabs, activeTab, accentColor, isMobile, onTabPress }: 
               tabColor={tab.color}
               isMobile={false}
               onPress={() => onTabPress(tab.key)}
+              onIntent={() => onTabIntent(tab.key)}
             />
           ))}
         </View>
@@ -651,6 +1020,7 @@ function TabBarScroller({ tabs, activeTab, accentColor, isMobile, onTabPress }: 
             tabColor={tab.color}
             isMobile={isMobile}
             onPress={() => onTabPress(tab.key)}
+            onIntent={() => onTabIntent(tab.key)}
           />
         ))}
       </ScrollView>
@@ -674,6 +1044,69 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#0A0A0A',
+  },
+  accessGate: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+    backgroundColor: '#0A0A0A',
+  },
+  accessGateCard: {
+    width: '100%',
+    maxWidth: 420,
+    padding: 24,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#2A2F3A',
+    backgroundColor: '#12151B',
+    alignItems: 'center',
+    gap: 12,
+  },
+  accessGateTitle: {
+    color: '#F1F5F9',
+    fontSize: 14,
+    fontWeight: '800',
+    letterSpacing: 1,
+    textAlign: 'center',
+  },
+  accessGateBody: {
+    color: '#94A3B8',
+    fontSize: 13,
+    lineHeight: 19,
+    textAlign: 'center',
+  },
+  accessGateActions: {
+    width: '100%',
+    gap: 10,
+    marginTop: 4,
+  },
+  accessGatePrimaryButton: {
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 9,
+    backgroundColor: '#4F46E5',
+  },
+  accessGatePrimaryText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+  },
+  accessGateSecondaryButton: {
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 9,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  accessGateSecondaryText: {
+    color: '#CBD5E1',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.8,
   },
   loadingOverlay: {
     ...StyleSheet.absoluteFillObject,
@@ -700,7 +1133,7 @@ const styles = StyleSheet.create({
     width: 7,
     height: 7,
     borderRadius: 4,
-    backgroundColor: '#22d3ee',
+    backgroundColor: '#6366f1',
     // RN-Web 0.19+ rejects both `animation` + `animationName` in
     // StyleSheet. The `uc-tab-dot` keyframe is applied at the app
     // level via the global CSS injector (see line ~50 of this file);

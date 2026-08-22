@@ -15,6 +15,30 @@ import { launchClaudeCodeSessions } from './claudeCodeDetector';
 import { launchCodexSessions } from './codexDetector';
 import { launchGeminiCliSessions } from './geminiCliDetector';
 import { launchCursorComposerSessions } from './cursorDetector';
+import {
+  formatVisualBriefsForConnectedAgent,
+  type ChatVisualBriefArtifact,
+} from './chatVisualBriefCore';
+export {
+  buildConnectedAgentAcceptedRunProjection,
+  buildConnectedAgentHandoffReceipt,
+  CONNECTED_AGENT_HANDOFF_RECEIPT_LIMITS,
+  projectConnectedAgentHandoffSnapshot,
+  readConnectedAgentHandoffReceipt,
+  resolveExactOpenSwanConnection,
+} from './connectedAgentHandoffCore';
+export type {
+  ConnectedAgentAcceptedRunProjection,
+  ConnectedAgentAcceptedRunProjectionInput,
+  ConnectedAgentAcceptedRunSurface,
+  ConnectedAgentExternalDispatchKind,
+  ConnectedAgentHandoffReceipt,
+  ConnectedAgentHandoffReceiptInput,
+  ConnectedAgentHandoffSnapshot,
+  ConnectedAgentHandoffStatus,
+  ExactOpenSwanConnectionFailureReason,
+  ExactOpenSwanConnectionResolution,
+} from './connectedAgentHandoffCore';
 
 export type ConnectedAgentProvider = 'codex' | 'claude-code' | 'gemini' | 'cursor';
 
@@ -25,6 +49,7 @@ const DEFAULT_PROVIDER_ORDER: ConnectedAgentProvider[] = ['codex', 'claude-code'
 
 export interface ConnectedAgentDispatchResult {
   ok: boolean;
+  transportAccepted: boolean | null;
   provider: ConnectedAgentProvider | null;
   sessionId?: string;
   launched: boolean;
@@ -56,6 +81,7 @@ async function launchForProvider(provider: ConnectedAgentProvider, input: Common
 
 export async function dispatchConnectedAgentTask(opts: {
   prompt: string;
+  visionArtifacts?: readonly ChatVisualBriefArtifact[];
   sessionName: string;
   sessionId?: string | null;
   preferredProvider?: ConnectedAgentProvider | null;
@@ -70,6 +96,8 @@ export async function dispatchConnectedAgentTask(opts: {
   circleId?: string;
   userId?: string;
 }): Promise<ConnectedAgentDispatchResult> {
+  const visualBlock = formatVisualBriefsForConnectedAgent(opts.visionArtifacts);
+  const dispatchPrompt = visualBlock ? `${opts.prompt}\n\n${visualBlock}` : opts.prompt;
   const allowed = new Set<ConnectedAgentProvider>(
     opts.allowedProviders?.length ? opts.allowedProviders : DEFAULT_PROVIDER_ORDER,
   );
@@ -90,6 +118,15 @@ export async function dispatchConnectedAgentTask(opts: {
   let target = opts.sessionId
     ? manageable.find((session) => session.sessionId === opts.sessionId) || null
     : null;
+  if (opts.sessionId && !target) {
+    return {
+      ok: false,
+      transportAccepted: false,
+      provider: null,
+      launched: false,
+      resultsText: 'The exact managed session is no longer available. Nothing was dispatched; refresh the session list before retrying.',
+    };
+  }
   if (!target) {
     for (const provider of order) {
       const found = manageable.find((session) => session.provider === provider);
@@ -97,22 +134,33 @@ export async function dispatchConnectedAgentTask(opts: {
     }
   }
   if (target && isConnectedAgentProvider(target.provider)) {
-    const sent = await sendTerminalAgentSessionMessage(target.provider, target.sessionId, opts.prompt);
+    const sent = await sendTerminalAgentSessionMessage(target.provider, target.sessionId, dispatchPrompt);
     if (sent.ok) {
       return {
         ok: true,
+        transportAccepted: true,
         provider: target.provider,
         sessionId: sent.sessionId || target.sessionId,
         launched: false,
         resultsText: `Sent the task to the ${target.providerLabel || target.provider} session ${sent.displayName || target.displayName || target.sessionId}.`,
       };
     }
-    // Send failed (stale/closed session) — fall through to a fresh launch.
+    return {
+      ok: false,
+      transportAccepted: sent.transportAccepted,
+      provider: target.provider,
+      sessionId: target.sessionId,
+      launched: false,
+      resultsText: sent.transportAccepted === false
+        ? `The exact ${target.providerLabel || target.provider} session rejected the handoff before dispatch. Nothing else was launched.`
+        : `The exact ${target.providerLabel || target.provider} session did not return trustworthy acceptance evidence. The task was not replayed.`,
+    };
   }
 
   if (opts.launchIfMissing === false) {
     return {
       ok: false,
+      transportAccepted: false,
       provider: null,
       launched: false,
       resultsText: 'No managed connected-agent session is available and launchIfMissing is false.',
@@ -122,11 +170,12 @@ export async function dispatchConnectedAgentTask(opts: {
   // 2. Launch the first provider whose bridge is online (one parallel probe).
   const online = await checkAllBridges().catch(() => ({} as Record<string, boolean>));
   const launchable = order.filter((provider) => online[provider]);
-  for (const provider of launchable) {
+  const provider = launchable[0];
+  if (provider) {
     const launched = await launchForProvider(provider, {
       count: 1,
-      prompt: opts.prompt,
-      prompts: [opts.prompt],
+      prompt: dispatchPrompt,
+      prompts: [dispatchPrompt],
       names: [opts.sessionName],
       circleId: opts.circleId,
       userId: opts.userId,
@@ -135,17 +184,28 @@ export async function dispatchConnectedAgentTask(opts: {
       const session = launched.sessions[0] as { sessionId?: string } | undefined;
       return {
         ok: true,
+        transportAccepted: true,
         provider,
         sessionId: session?.sessionId,
         launched: true,
         resultsText: `Launched a ${provider} session to run the task.`,
       };
     }
+    return {
+      ok: false,
+      transportAccepted: launched?.transportAccepted ?? null,
+      provider,
+      launched: false,
+      resultsText: launched?.transportAccepted === false
+        ? `The ${provider} bridge rejected the launch before dispatch. Nothing was launched through another provider.`
+        : `The ${provider} bridge did not return trustworthy launch acceptance evidence. The task was not replayed through another provider.`,
+    };
   }
 
   const offline = order.filter((provider) => !online[provider]);
   return {
     ok: false,
+    transportAccepted: false,
     provider: null,
     launched: false,
     resultsText: `No connected-agent bridge was reachable${offline.length ? ` (offline: ${offline.join(', ')})` : ''}. Start one — npm run bridge (Claude Code), bridge:codex, bridge:gemini, or bridge:cursor — then retry.`,

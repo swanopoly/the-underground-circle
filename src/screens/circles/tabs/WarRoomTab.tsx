@@ -21,6 +21,7 @@ import {
   Platform,
 } from 'react-native';
 import { supabase } from '../../../lib/supabase';
+import { loadSafeCircleProfiles } from '../../../lib/safeProfiles';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -193,12 +194,16 @@ export default function WarRoomTab({ circleId, accentColor = '#6366f1' }: {
     // Get all members for display names
     const { data: members } = await supabase
       .from('circle_members')
-      .select('user:profiles(id, display_name, username)')
+      .select('user_id')
       .eq('circle_id', circleId);
 
     const map: Record<string, string> = {};
-    (members || []).forEach((m: any) => {
-      if (m.user) map[m.user.id] = m.user.display_name || m.user.username || 'Unknown';
+    const profiles = await loadSafeCircleProfiles({
+      circleId,
+      userIds: (members || []).map((member: any) => member.user_id),
+    });
+    profiles.forEach(profile => {
+      map[profile.id] = profile.display_name || profile.username || 'Unknown';
     });
     setMemberMap(map);
 

@@ -163,7 +163,7 @@ check(
 const approvalArgsBlock = sliceBetween(
   gateway,
   'approvalArgs = {',
-  '};\n          const gate = await maybeRequestToolApproval',
+  '};\n          const gate = await maybeAuthorizeToolWithWorkflowReview',
 );
 check(
   approvalArgsBlock.includes('targetFingerprint')
@@ -212,7 +212,7 @@ check(
 );
 const runtimeIntercept = runtime.indexOf("if (tool === 'desktop.open_path')");
 const genericApproval = runtime.indexOf(
-  'const approvalGate = await maybeRequestToolApproval',
+  'const approvalGate = await maybeAuthorizeToolWithWorkflowReview',
   runtimeIntercept,
 );
 check(

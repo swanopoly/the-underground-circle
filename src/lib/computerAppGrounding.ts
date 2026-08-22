@@ -967,7 +967,6 @@ function canonicalizeFingerprintValue(
 ): unknown | typeof INVALID_FINGERPRINT_VALUE {
   budget.nodes += 1;
   if (budget.nodes > 2_048 || depth > 12) return INVALID_FINGERPRINT_VALUE;
-  if (value === undefined) return null;
   if (typeof value === 'string') {
     budget.chars += value.length;
     return budget.chars <= MAX_FINGERPRINT_CANONICAL_CHARS
@@ -979,50 +978,109 @@ function canonicalizeFingerprintValue(
   if (typeof value !== 'object') return INVALID_FINGERPRINT_VALUE;
   if (seen.has(value)) return INVALID_FINGERPRINT_VALUE;
   seen.add(value);
-  if (Array.isArray(value)) {
-    if (value.length > 1_000) return INVALID_FINGERPRINT_VALUE;
-    const out: unknown[] = [];
-    for (const item of value) {
-      const canonical = canonicalizeFingerprintValue(item, seen, budget, depth + 1);
-      if (canonical === INVALID_FINGERPRINT_VALUE) return INVALID_FINGERPRINT_VALUE;
-      out.push(canonical);
+  try {
+    if (Array.isArray(value)) {
+      if (Object.getPrototypeOf(value) !== Array.prototype) {
+        return INVALID_FINGERPRINT_VALUE;
+      }
+      const ownKeys = Reflect.ownKeys(value);
+      if (ownKeys.some((key) => typeof key === 'symbol')) {
+        return INVALID_FINGERPRINT_VALUE;
+      }
+      const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+      if (
+        !lengthDescriptor
+        || !Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value')
+        || !Number.isSafeInteger(lengthDescriptor.value)
+        || lengthDescriptor.value < 0
+        || lengthDescriptor.value > 1_000
+        || ownKeys.length !== lengthDescriptor.value + 1
+      ) {
+        return INVALID_FINGERPRINT_VALUE;
+      }
+      const out: unknown[] = [];
+      for (let index = 0; index < lengthDescriptor.value; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        if (
+          !descriptor
+          || !descriptor.enumerable
+          || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+        ) {
+          return INVALID_FINGERPRINT_VALUE;
+        }
+        const canonical = canonicalizeFingerprintValue(
+          descriptor.value,
+          seen,
+          budget,
+          depth + 1,
+        );
+        if (canonical === INVALID_FINGERPRINT_VALUE) {
+          return INVALID_FINGERPRINT_VALUE;
+        }
+        out.push(canonical);
+      }
+      return out;
     }
-    seen.delete(value);
-    return out;
-  }
-  const keys = Object.keys(value as Record<string, unknown>).sort();
-  if (keys.length > 200) return INVALID_FINGERPRINT_VALUE;
-  const out: Record<string, unknown> = {};
-  for (const key of keys) {
-    budget.chars += key.length;
-    if (budget.chars > MAX_FINGERPRINT_CANONICAL_CHARS) {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
       return INVALID_FINGERPRINT_VALUE;
     }
-    const canonical = canonicalizeFingerprintValue(
-      (value as Record<string, unknown>)[key],
-      seen,
-      budget,
-      depth + 1,
-    );
-    if (canonical === INVALID_FINGERPRINT_VALUE) return INVALID_FINGERPRINT_VALUE;
-    out[key] = canonical;
+    const ownKeys = Reflect.ownKeys(value);
+    if (ownKeys.some((key) => typeof key === 'symbol')) {
+      return INVALID_FINGERPRINT_VALUE;
+    }
+    const keys = (ownKeys as string[]).sort();
+    if (keys.length > 200) return INVALID_FINGERPRINT_VALUE;
+    const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    for (const key of keys) {
+      budget.chars += key.length;
+      if (budget.chars > MAX_FINGERPRINT_CANONICAL_CHARS) {
+        return INVALID_FINGERPRINT_VALUE;
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (
+        !descriptor
+        || !descriptor.enumerable
+        || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+      ) {
+        return INVALID_FINGERPRINT_VALUE;
+      }
+      const canonical = canonicalizeFingerprintValue(
+        descriptor.value,
+        seen,
+        budget,
+        depth + 1,
+      );
+      if (canonical === INVALID_FINGERPRINT_VALUE) {
+        return INVALID_FINGERPRINT_VALUE;
+      }
+      out[key] = canonical;
+    }
+    return out;
+  } finally {
+    seen.delete(value);
   }
-  seen.delete(value);
-  return out;
 }
 
 function canonicalFingerprintPayload(normalizedArgs: unknown): {
   canonical: unknown;
   json: string;
 } | null {
-  const canonical = canonicalizeFingerprintValue(
-    normalizedArgs,
-    new Set<object>(),
-    { nodes: 0, chars: 0 },
-  );
-  if (canonical === INVALID_FINGERPRINT_VALUE) return null;
   try {
-    return { canonical, json: JSON.stringify(canonical) };
+    const canonical = canonicalizeFingerprintValue(
+      normalizedArgs,
+      new Set<object>(),
+      { nodes: 0, chars: 0 },
+    );
+    if (canonical === INVALID_FINGERPRINT_VALUE) return null;
+    const json = JSON.stringify(canonical);
+    if (
+      typeof json !== 'string'
+      || json.length > MAX_FINGERPRINT_CANONICAL_CHARS
+    ) {
+      return null;
+    }
+    return { canonical, json };
   } catch {
     return null;
   }
@@ -1068,21 +1126,26 @@ export function buildComputerAppToolArgsFingerprint(normalizedArgs: unknown): st
 }
 
 /**
- * Cryptographic exact-argument digest for mutation contracts. Web Crypto and
- * TextEncoder are required; missing platform crypto fails closed with `''`.
+ * Cryptographic exact-argument digest for mutation contracts. Web Crypto,
+ * TextEncoder, and structured clone are required; missing platform support
+ * fails closed with `''`. The structured-clone check rejects otherwise
+ * transparent Proxy inputs, which JavaScript reflection cannot distinguish
+ * portably from their plain-object targets.
  */
 export async function buildComputerAppToolArgsFingerprintAsync(
   normalizedArgs: unknown,
 ): Promise<string> {
-  const payload = canonicalFingerprintPayload(normalizedArgs);
-  if (
-    !payload
-    || typeof globalThis.crypto?.subtle?.digest !== 'function'
-    || typeof TextEncoder !== 'function'
-  ) {
-    return '';
-  }
   try {
+    const payload = canonicalFingerprintPayload(normalizedArgs);
+    if (
+      !payload
+      || typeof globalThis.crypto?.subtle?.digest !== 'function'
+      || typeof TextEncoder !== 'function'
+      || typeof globalThis.structuredClone !== 'function'
+    ) {
+      return '';
+    }
+    globalThis.structuredClone(normalizedArgs);
     const bytes = new TextEncoder().encode(payload.json);
     const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
     const hex = Array.from(new Uint8Array(digest))
@@ -3248,6 +3311,12 @@ export async function dispatchAuthorizedComputerAppMutation<T, TArgs>(args: {
   handler: (
     sealedArgs: ComputerAppSealedMutationArgs<TArgs>,
   ) => T | Promise<T>;
+  /**
+   * Transient final-entry fence (for example Chat STOP). It is evaluated only
+   * after all asynchronous argument binding and immediately before consuming
+   * the authorization/entering the handler. False leaves the app untouched.
+   */
+  shouldEnterHandler?: () => boolean;
   /** Test-only deterministic clock; production callers should omit it. */
   now?: string | number;
 }): Promise<ComputerAppMutationDispatchResult<T>> {
@@ -3338,6 +3407,10 @@ export async function dispatchAuthorizedComputerAppMutation<T, TArgs>(args: {
     || liveClaim.expiresAtMs < handlerEntryMs
   ) {
     throw new Error('Computer app mutation dispatch refused: authorization or idempotency reservation changed while binding handler arguments.');
+  }
+  if (args.shouldEnterHandler && args.shouldEnterHandler() !== true) {
+    releaseUndispatchedClaim();
+    throw new Error('Computer app mutation dispatch refused: transient handler-entry authority was revoked before dispatch.');
   }
   // Consume synchronously before invoking/awaiting the handler so concurrent
   // callers cannot reuse one allowed object to duplicate a side effect.

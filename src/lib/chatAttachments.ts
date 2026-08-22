@@ -19,6 +19,7 @@ const MAX_FILE_SIZE = 50 * 1024 * 1024;     // 50 MB
 const MAX_FILES_PER_MESSAGE = 10;
 const MAX_EXTRACT_CHARS = 10_000;
 const SIGN_URL_EXPIRY_S = 3600;              // 1 hour
+const PERSISTED_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -125,13 +126,61 @@ export async function uploadAttachment(opts: {
 export async function linkAttachmentsToMessage(
   attachmentIds: string[],
   messageId: string,
-): Promise<void> {
-  if (attachmentIds.length === 0) return;
-  const { error } = await supabase
+  expectedScope: Readonly<{
+    circleId: string;
+    threadId: string;
+    userId: string;
+  }>,
+): Promise<readonly string[]> {
+  const uniqueIds = Array.from(new Set(attachmentIds));
+  if (
+    uniqueIds.length > MAX_FILES_PER_MESSAGE
+    || uniqueIds.length !== attachmentIds.length
+    || uniqueIds.some((id) => !PERSISTED_UUID_RE.test(id))
+    || !PERSISTED_UUID_RE.test(messageId)
+    || !PERSISTED_UUID_RE.test(expectedScope.circleId)
+    || !PERSISTED_UUID_RE.test(expectedScope.threadId)
+    || !PERSISTED_UUID_RE.test(expectedScope.userId)
+  ) {
+    throw new Error('Attachment linkage requires unique persisted UUID identities in one exact Chat scope.');
+  }
+  if (uniqueIds.length === 0) return Object.freeze([]);
+
+  // Compare-and-set only unlinked rows (or the same message on a safe retry).
+  // The circle/thread/user filters mirror the expected upload scope, while the
+  // returned rows prove that RLS admitted every requested owned attachment.
+  const { data, error } = await supabase
     .from('message_attachments')
     .update({ message_id: messageId })
-    .in('id', attachmentIds);
-  if (error) console.warn('[chatAttachments] link failed:', error.message);
+    .in('id', uniqueIds)
+    .eq('circle_id', expectedScope.circleId)
+    .eq('thread_id', expectedScope.threadId)
+    .eq('user_id', expectedScope.userId)
+    .or(`message_id.is.null,message_id.eq.${messageId}`)
+    .select('id, message_id, circle_id, thread_id, user_id');
+  if (error) throw new Error(`Attachment linkage failed: ${error.message}`);
+
+  const rows = Array.isArray(data) ? data : [];
+  const returnedIds = new Set<string>();
+  for (const row of rows) {
+    if (
+      !row
+      || typeof row.id !== 'string'
+      || returnedIds.has(row.id)
+      || !uniqueIds.includes(row.id)
+      || row.message_id !== messageId
+      || row.circle_id !== expectedScope.circleId
+      || row.thread_id !== expectedScope.threadId
+      || row.user_id !== expectedScope.userId
+    ) {
+      throw new Error('Attachment linkage returned an ambiguous or cross-scope row.');
+    }
+    returnedIds.add(row.id);
+  }
+  if (returnedIds.size !== uniqueIds.length || uniqueIds.some((id) => !returnedIds.has(id))) {
+    throw new Error('Attachment linkage did not verify every requested attachment.');
+  }
+  return Object.freeze([...uniqueIds]);
 }
 
 // ── List attachments for a message / thread ─────────────────────────────────

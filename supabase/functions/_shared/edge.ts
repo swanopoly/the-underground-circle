@@ -67,10 +67,34 @@ export async function getAuthenticatedUser(req: Request) {
 
 export type ApiKeySource = "request" | "user" | "platform";
 
+/**
+ * Credential source policy for server-side model calls.
+ *
+ * `user_then_platform` preserves the legacy owner/test fallback behavior.
+ * Public BYOK surfaces should opt into `user_required` so an authenticated
+ * user's request can never silently spend a platform credential.
+ */
+export type CredentialPolicy = "user_required" | "user_then_platform";
+
 export interface ResolvedApiKey {
   apiKey: string;
   endpoint?: string | null;
   source: ApiKeySource;
+}
+
+/**
+ * A stored credential row exists or its lookup failed, but the Edge runtime
+ * could not safely read it. Keep this distinct from an absent key so callers
+ * never tell the user to add a duplicate key when the actual problem is
+ * ciphertext/key-version or database health.
+ */
+export class StoredApiKeyLookupError extends Error {
+  readonly code = "credential_unreadable" as const;
+
+  constructor(provider?: string) {
+    super(byokUnreadableMessage(provider));
+    this.name = "StoredApiKeyLookupError";
+  }
 }
 
 function envList(name: string): string[] {
@@ -121,14 +145,21 @@ export function providerDisplayName(provider: string): string {
 }
 
 export function byokMissingMessage(provider: string): string {
-  return `Add your own ${providerDisplayName(provider)} API key in Office > Customize > API Keys to use this model. Platform model keys are reserved for owner/test accounts.`;
+  return `Connect your ${providerDisplayName(provider)} API key in Marketplace → Models, then retry.`;
+}
+
+export function byokUnreadableMessage(provider?: string): string {
+  const credential = provider
+    ? `saved ${providerDisplayName(provider)} API key`
+    : "saved provider API key";
+  return `Your ${credential} could not be read. Replace it in Marketplace → Models, then retry.`;
 }
 
 export async function getUserStoredApiKey(
   supabase: any,
   userId: string,
   provider: string,
-  label = "default",
+  label: string | null = "default",
 ): Promise<{ apiKey: string; endpoint?: string | null } | null> {
   const { data, error } = await supabase.rpc("get_user_api_key", {
     p_user_id: userId,
@@ -136,7 +167,8 @@ export async function getUserStoredApiKey(
     p_label: label,
   });
 
-  if (error || !data) return null;
+  if (error) throw new StoredApiKeyLookupError(provider);
+  if (!data) return null;
   const row = Array.isArray(data) ? data[0] : data;
   if (typeof row === "string" && row.trim()) return { apiKey: row.trim() };
   if (row?.api_key && typeof row.api_key === "string") {
@@ -145,40 +177,100 @@ export async function getUserStoredApiKey(
   return null;
 }
 
+/**
+ * Legacy Marketplace rows used underscored provider names before the hosted
+ * model proxy standardized on the canonical provider ids. Only the
+ * user-required credential path may consult these aliases, and only after a
+ * clean canonical miss. An RPC/decryption error remains terminal.
+ */
+function legacyUserRequiredStorageProvider(provider: string): string | null {
+  if (provider === "huggingface") return "hugging_face";
+  if (provider === "zai") return "z_ai";
+  return null;
+}
+
 export async function resolveUserModelApiKey(opts: {
   supabase: any;
   userId: string;
   provider: string;
   storageProvider?: string;
-  label?: string;
+  /** Omitted selects `default`; explicit null selects the latest active row. */
+  label?: string | null;
   requestApiKey?: string | null;
   envVarName?: string;
+  /** Defaults to the legacy user-first, allowlisted-platform-fallback policy. */
+  credentialPolicy?: CredentialPolicy;
+  /**
+   * Opt-in while callers migrate to a structured credential-health response.
+   * Legacy functions keep their prior null/missing behavior instead of
+   * unexpectedly turning an existing deployment into an unhandled 500.
+   */
+  failOnStoredLookupError?: boolean;
 }): Promise<ResolvedApiKey | null> {
   const requestKey = opts.requestApiKey?.trim();
   if (requestKey) {
     return { apiKey: requestKey, source: "request" };
   }
 
-  const stored = await getUserStoredApiKey(
-    opts.supabase,
-    opts.userId,
-    opts.storageProvider || opts.provider,
-    opts.label || "default",
-  );
+  const credentialPolicy = opts.credentialPolicy ?? "user_then_platform";
+  const lookupLabel = opts.label === undefined ? "default" : opts.label;
+  const storageProvider = opts.storageProvider || opts.provider;
+  let stored: { apiKey: string; endpoint?: string | null } | null = null;
+  let storedLookupError: StoredApiKeyLookupError | null = null;
+  try {
+    stored = await getUserStoredApiKey(
+      opts.supabase,
+      opts.userId,
+      storageProvider,
+      lookupLabel,
+    );
+  } catch (error) {
+    if (!(error instanceof StoredApiKeyLookupError)) throw error;
+    // A user-required call must surface damaged/unreadable ciphertext now. It
+    // must not inspect a platform environment variable or hide the condition
+    // behind an owner/test fallback.
+    if (credentialPolicy === "user_required") throw error;
+    storedLookupError = error;
+  }
   if (stored?.apiKey) {
     return { ...stored, source: "user" };
   }
+
+  // A canonical key always wins. For the two renamed Marketplace providers,
+  // a clean canonical miss may consult the legacy row so existing encrypted
+  // credentials remain executable. Do not enter this branch after a lookup
+  // error: user_required already threw above, and legacy policies keep their
+  // existing platform-fallback behavior without alias expansion.
+  const legacyStorageProvider = credentialPolicy === "user_required"
+    ? legacyUserRequiredStorageProvider(storageProvider)
+    : null;
+  if (legacyStorageProvider) {
+    stored = await getUserStoredApiKey(
+      opts.supabase,
+      opts.userId,
+      legacyStorageProvider,
+      lookupLabel,
+    );
+    if (stored?.apiKey) {
+      return { ...stored, source: "user" };
+    }
+  }
+
+  // This return intentionally precedes every Deno.env/platform-key read.
+  if (credentialPolicy === "user_required") return null;
 
   const platformKey = opts.envVarName ? Deno.env.get(opts.envVarName) : null;
   if (platformKey && canUsePlatformModelKey(opts.userId)) {
     return { apiKey: platformKey, source: "platform" };
   }
 
+  if (storedLookupError && opts.failOnStoredLookupError === true) throw storedLookupError;
+
   return null;
 }
 
 /**
- * True if `userId` belongs to the org and/or circle that owns an integration
+ * True if `userId` belongs to every org/circle that owns an integration
  * connection. Used to authorize outbound actions (Slack/Teams) so a caller
  * cannot drive a connection they don't belong to by guessing connectionId
  * (IDOR → message spoofing into any connected workspace).
@@ -189,23 +281,34 @@ export async function userOwnsConnection(
   orgId: string | null,
   circleId: string | null,
 ): Promise<boolean> {
-  if (circleId) {
-    const { data } = await supabase
-      .from("circle_members")
-      .select("user_id")
-      .eq("circle_id", circleId)
-      .eq("user_id", userId)
-      .maybeSingle();
-    if (data) return true;
-  }
+  if (!orgId && !circleId) return false;
+
   if (orgId) {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("org_members")
       .select("user_id")
       .eq("org_id", orgId)
       .eq("user_id", userId)
       .maybeSingle();
-    if (data) return true;
+    if (error || !data) return false;
   }
-  return false;
+
+  if (circleId) {
+    const { data: circle, error: circleError } = await supabase
+      .from("circles")
+      .select("org_id")
+      .eq("id", circleId)
+      .maybeSingle();
+    if (circleError || !circle || (orgId && circle.org_id !== orgId)) return false;
+
+    const { data, error } = await supabase
+      .from("circle_members")
+      .select("user_id")
+      .eq("circle_id", circleId)
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (error || !data) return false;
+  }
+
+  return true;
 }

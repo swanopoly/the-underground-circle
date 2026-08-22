@@ -362,14 +362,29 @@ export default function LLMBenchmarkPanel({ accentColor = '#6366f1' }: Props) {
         </View>
         <View style={{ flex: 1 }}>
           <Text style={styles.headerTitle}>LLM BENCH</Text>
-          <Text style={styles.headerSub}>Benchmarks & trending models from Hugging Face</Text>
+          <Text style={styles.headerSub}>Curated score reference + live Hugging Face metadata</Text>
         </View>
+      </View>
+
+      <View
+        testID="llm-benchmark-reference-notice"
+        accessible
+        accessibilityLabel="Reference snapshot. Benchmark scores are curated comparisons, not live evaluations or eval receipts. Model Explorer may fetch live Hugging Face metadata, which does not validate benchmark scores."
+        style={styles.provenanceNotice}
+      >
+        <Text accessibilityRole="header" style={styles.provenanceTitle}>REFERENCE SNAPSHOT</Text>
+        <Text style={styles.provenanceText}>
+          Scores are curated comparisons, not live evaluations or eval receipts. Model Explorer may fetch live Hugging Face metadata; that metadata does not validate these scores.
+        </Text>
       </View>
 
       {/* Tab selector */}
       <View style={styles.tabRow}>
         <Pressable
           onPress={() => setActiveTab('benchmarks')}
+          accessibilityRole="tab"
+          accessibilityLabel="Benchmark reference"
+          accessibilityState={{ selected: activeTab === 'benchmarks' }}
           style={[
             styles.tabBtn,
             activeTab === 'benchmarks' && { backgroundColor: accentColor + '15', borderColor: accentColor + '40' },
@@ -382,6 +397,9 @@ export default function LLMBenchmarkPanel({ accentColor = '#6366f1' }: Props) {
         </Pressable>
         <Pressable
           onPress={() => setActiveTab('explorer')}
+          accessibilityRole="tab"
+          accessibilityLabel="Live Hugging Face model metadata explorer"
+          accessibilityState={{ selected: activeTab === 'explorer' }}
           style={[
             styles.tabBtn,
             activeTab === 'explorer' && { backgroundColor: '#f59e0b15', borderColor: '#f59e0b40' },
@@ -479,7 +497,7 @@ export default function LLMBenchmarkPanel({ accentColor = '#6366f1' }: Props) {
               <View style={styles.barTrack}>
                 {isTBD ? (
                   <View style={styles.barTBD}>
-                    <Text style={styles.barTBDText}>TRAINING...</Text>
+                    <Text style={styles.barTBDText}>NOT EVALUATED</Text>
                   </View>
                 ) : (
                   <View
@@ -555,17 +573,17 @@ export default function LLMBenchmarkPanel({ accentColor = '#6366f1' }: Props) {
         </View>
       </View>
 
-      {/* Training progress note */}
+      {/* Illustrative roadmap note */}
       <View style={styles.noteCard}>
-        <Text style={styles.noteTitle}>BLACKSWAN ROADMAP</Text>
+        <Text style={styles.noteTitle}>ILLUSTRATIVE BLACKSWAN ROADMAP</Text>
         <Text style={styles.noteText}>
-          {'v3 — Qwen2.5-3B QLoRA (12K examples) ✓ deployed\n'}
-          {'Mini — Qwen2.5-7B QLoRA (43K examples) ⏳ training\n'}
-          {'BlackSwan — Qwen3.5-27B QLoRA (43K+ examples) 🔜 planned\n\n'}
-          {'Mini = fast, lightweight, runs on any hardware\n'}
-          {'BlackSwan = full power, needs 56GB+ VRAM (Mac w/ unified memory)\n\n'}
+          {'v3 — Qwen2.5-3B QLoRA (12K sample examples)\n'}
+          {'Mini — Qwen2.5-7B QLoRA (43K sample examples)\n'}
+          {'BlackSwan — Qwen3.5-27B QLoRA (planned reference target)\n\n'}
+          {'Mini target = lightweight deployment; validate on the intended hardware\n'}
+          {'BlackSwan target = higher-capacity deployment; resource needs are estimates\n\n'}
           {'Base model: Qwen3.5-27B (dense, Apache 2.0)\n'}
-          {'Scores update after each training round + benchmark eval.'}
+          {'Reference scores are manually curated. This screen does not run or ingest benchmark eval receipts.'}
         </Text>
       </View>
 
@@ -795,7 +813,7 @@ function ModelExplorer({ accentColor }: { accentColor: string }) {
 
                 {model.lastModified && (
                   <View style={explorerStyles.detailRow}>
-                    <Text style={explorerStyles.detailKey}>Updated</Text>
+                    <Text style={explorerStyles.detailKey}>Hub updated</Text>
                     <Text style={explorerStyles.detailVal}>
                       {new Date(model.lastModified).toLocaleDateString()}
                     </Text>
@@ -852,7 +870,7 @@ function ModelExplorer({ accentColor }: { accentColor: string }) {
       {!loading && models.length > 0 && (
         <View style={explorerStyles.footer}>
           <Text style={explorerStyles.footerText}>
-            {models.length} models :: data from Hugging Face Hub API
+            {models.length} models :: live Hub metadata, not benchmark results
           </Text>
         </View>
       )}
@@ -907,6 +925,28 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: PIXEL_COLORS.text2,
     marginTop: 2,
+  },
+  provenanceNotice: {
+    backgroundColor: PIXEL_COLORS.bg2,
+    borderWidth: 1,
+    borderColor: '#f59e0b55',
+    borderRadius: 2,
+    padding: GRID.md,
+    marginBottom: GRID.lg,
+  },
+  provenanceTitle: {
+    fontFamily: 'monospace',
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#f59e0b',
+    letterSpacing: 1,
+  },
+  provenanceText: {
+    fontFamily: 'monospace',
+    fontSize: 10,
+    lineHeight: 15,
+    color: PIXEL_COLORS.text1,
+    marginTop: GRID.xs,
   },
 
   // Tab selector

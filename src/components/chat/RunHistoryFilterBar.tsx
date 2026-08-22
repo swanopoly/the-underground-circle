@@ -5,7 +5,7 @@
  * the stats line so it stays smoke-pinnable).
  *
  * Styling mirrors RunHistoryDrawer's idiom (dark #0b1220 surfaces, #1e293b
- * borders, monospace 9pt pill text, #38bdf8/#22d3ee accents).
+ * borders, monospace 9pt pill text, #38bdf8/#6366f1 accents).
  */
 
 import React from 'react';
@@ -26,7 +26,7 @@ type Props = {
 
 const STATUS_PILLS: Array<{ key: RunStatusFilter; label: string }> = [
   { key: 'all', label: 'ALL' },
-  { key: 'running', label: 'RUNNING' },
+  { key: 'running', label: 'ACTIVE' },
   { key: 'succeeded', label: 'DONE' },
   { key: 'failed', label: 'FAILED' },
   { key: 'other', label: 'OTHER' },

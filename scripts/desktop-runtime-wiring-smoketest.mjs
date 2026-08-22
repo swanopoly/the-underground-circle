@@ -379,10 +379,20 @@ assert(Boolean(files.pkg.scripts['smoke:direct-image-conversion-runtime']), 'pac
 assert(Boolean(files.pkg.scripts['smoke:desktop-task-ai-need']), 'package script: smoke:desktop-task-ai-need');
 assert(Boolean(files.pkg.scripts['smoke:computer-use-backend']), 'package script: smoke:computer-use-backend');
 assert(Boolean(files.pkg.scripts['build:input-helper']), 'package script: build:input-helper');
-assert(files.pkg.scripts['smoke:all'].includes('smoke:direct-local-file-runtime'), 'smoke:all includes direct local file runtime');
-assert(files.pkg.scripts['smoke:all'].includes('smoke:direct-image-conversion-runtime'), 'smoke:all includes direct image conversion runtime');
-assert(files.pkg.scripts['smoke:all'].includes('smoke:desktop-task-ai-need'), 'smoke:all includes desktop task AI-need smoke');
-assert(files.pkg.scripts['smoke:all'].includes('smoke:computer-grant-gate'), 'smoke:all includes computer grant gate smoke');
+const smokeAllUsesDiscovery = files.pkg.scripts['smoke:all'].includes('scripts/run-smokes.mjs');
+for (const [smokeName, label] of [
+  ['smoke:direct-local-file-runtime', 'direct local file runtime'],
+  ['smoke:direct-image-conversion-runtime', 'direct image conversion runtime'],
+  ['smoke:desktop-task-ai-need', 'desktop task AI-need smoke'],
+  ['smoke:computer-grant-gate', 'computer grant gate smoke'],
+]) {
+  assert(
+    smokeAllUsesDiscovery
+      ? Boolean(files.pkg.scripts[smokeName])
+      : files.pkg.scripts['smoke:all'].includes(smokeName),
+    `smoke:all discovers ${label}`,
+  );
+}
 assert(files.bridge.includes('ensureInputHelper();'), 'bridge boot auto-builds input helper');
 assert(
   !files.computerUse.includes('localBrowserOpenUrl')
@@ -429,7 +439,16 @@ assert(
 );
 assert(files.chatTab.includes('startMainChatFailureRecovery') && files.chatTab.includes('startChatFailureRecovery') && files.chatTab.includes('Chat failure recovery'), 'ChatTab: chat/computer failures hand off to bounded connected-agent recovery');
 assert(files.chatTab.includes('addRecoverableChatErrorMessage') && files.chatTab.includes('terminal_agent_control_error') && files.chatTab.includes('memory_bank_command_error') && files.chatTab.includes('desktop_diag_error') && files.chatTab.includes('agent_plan_mode_error'), 'ChatTab: first-pass command errors use shared recovery handoff');
-assert(files.chatTab.includes('bridge_probe_command_error') && files.chatTab.includes('assign_agent_command_error') && files.chatTab.includes('schedule_command_error') && files.chatTab.includes('github_command_error') && files.chatTab.includes('web_search_failure') && files.chatTab.includes('pair_desktop_bridge_error'), 'ChatTab: command/bridge/provider exceptions use shared recovery handoff');
+assert(
+  files.chatTab.includes('bridge_probe_command_error')
+  && files.chatTab.includes('assign_agent_command_error')
+  && files.chatTab.includes('schedule_command_error')
+  && files.chatTab.includes('github_command_error')
+  && files.chatTab.includes('pair_desktop_bridge_error')
+  && files.chatTab.includes('runOptionalWebSearchLane')
+  && files.chatTab.includes('webSearchDegradationContext'),
+  'ChatTab: command/bridge exceptions use recovery while optional web search degrades without a false terminal failure',
+);
 assert(files.chatFailureRecovery.includes('buildChatFailureRecoveryFingerprint') && files.chatFailureRecovery.includes('shouldSuppressDuplicateChatFailureHandoff') && files.chatFailureRecovery.includes('lastSuccessfulHandoffAt') && files.chatTab.includes('CHAT_FAILURE_RECOVERY_REPEAT_WINDOW_MS'), 'ChatTab: repeated chat failures are fingerprinted and duplicate handoffs are success-aware');
 assert(files.chatTab.includes('Resolved send model:') && files.chatTab.includes('Connected providers:') && files.chatTab.includes('Route intent:'), 'ChatTab: recovery prompt includes route, model, and provider context');
 assert(files.chatTab.includes('Recovery could not start automatically. Try again, or open the details for support.') && !files.chatTab.includes('Chat failure recovery: handoff failed: ${recoveryError'), 'ChatTab: recovery-handoff failures use customer-safe copy');
@@ -438,8 +457,8 @@ assert(files.chatTab.includes('Recovery could not start automatically. Try again
 assert(files.chatTab.includes('sanitizeVisibleComputerTaskMessage') && files.chatRecoveryDisplayCore.includes('I could not finish that app or file action. Technical details were saved for recovery.'), 'ChatTab: computer-task output has a customer-safe raw-error sanitizer');
 assert(files.chatTab.includes('rawWarnings: rawOutcomeWarnings') && files.chatTab.includes('visibleWarnings: outcomeWarnings'), 'ChatTab: raw computer-task warnings are separated from visible warnings');
 assert(files.chatTab.includes('I could not finish the page build stream. Try again in a moment.') && !files.chatTab.includes('Build-page stream failed: ${msg}'), 'ChatTab: build-page stream failures hide raw stream errors');
-assert(files.chatTab.includes('I could not clear this thread. Try again in a moment.') && !files.chatTab.includes('Could not clear this thread: ${error.message}'), 'ChatTab: clear-thread failures hide raw Supabase errors');
-assert(files.chatTab.includes('I could not connect the wallet. Check the wallet popup and try again.') && files.chatTab.includes('I could not finish the transaction. Check your wallet and try again.') && !files.chatTab.includes('Wallet connection failed: ${e.message}') && !files.chatTab.includes('Transaction failed: ${result.error}'), 'ChatTab: wallet failures use customer-safe copy');
+assert(files.chatTab.includes('Your messages were not deleted. Check access and try again.') && !files.chatTab.includes('Could not clear this thread: ${error.message}'), 'ChatTab: clear-thread failures hide raw Supabase errors');
+assert(files.chatTab.includes('The wallet operation did not complete. Check the wallet popup and try again.') && files.chatTab.includes('The transaction was not completed. Check the wallet notice and try again.') && !files.chatTab.includes('Wallet connection failed: ${e.message}') && !files.chatTab.includes('Transaction failed: ${result.error}'), 'ChatTab: wallet failures use customer-safe copy');
 assert(files.chatTab.includes('did not upload cleanly. Remove it or upload it again') && !files.chatTab.includes('did not upload cleanly: ${failed.error}'), 'ChatTab: attachment upload failures hide raw upload errors');
 assert(files.chatTab.includes('I could not spawn those agents. Check the bridge connection and try again.') && !files.chatTab.includes('Agent spawn failed: ${result.message}'), 'ChatTab: agent-spawn failures hide raw bridge errors');
 assert(files.chatTab.includes('I could not record that confirmation. Try again in a moment.') && !files.chatTab.includes('Confirmation could not be recorded: ${err'), 'ChatTab: confirmation failures hide raw errors');
@@ -522,9 +541,11 @@ assert(
   && files.computerTaskRuntime.includes('isDirectLocalImageFormatConversionTask(args.task)')
   && files.computerTaskRuntime.includes("requiredCapabilities.includes('file_write')")
   && files.computerTaskRuntime.includes('shouldRunDeterministicReadOnlyFileAdapter')
+  && files.computerTaskRuntime.includes('isExplicitDesktopBridgeReadOnlyFileTask(args.task)')
+  && files.computerTaskRuntime.includes('isDesktopBridgeReadOnlyFileTaskResultVerified')
   && files.computerTaskRuntime.includes('result = await executeAgentRun({')
-  && (files.computerTaskRuntime.match(/await executeComputerFileTask\(/g) || []).length === 1,
-  'computer task runtime preserves deterministic reads while all file mutations enter authenticated agent execution',
+  && (files.computerTaskRuntime.match(/await executeDesktopBridgeFileTask\(args\.task\)/g) || []).length === 1,
+  'computer task runtime preserves exact desktop reads while all semantic/file mutation work enters authenticated agent execution',
 );
 assert(files.fileAdapter.includes('selectUnambiguousFileMatchForMutation') && files.fileAdapter.includes('Ambiguous local file mutation target'), 'file adapter: rename/copy/trash fail closed on ambiguous search matches');
 assert(files.client.includes("focusMode?: 'require' | 'best_effort' | 'skip'"), 'desktopBridge: paste supports focus modes');
@@ -663,11 +684,11 @@ const localAwarenessBlock = files.chatTab.slice(
   files.chatTab.indexOf('// ─── Send Crypto'),
 );
 const computerTaskBranch = files.chatTab.slice(
-  files.chatTab.indexOf("if (plan.execution.kind === 'run_computer_task') {"),
-  files.chatTab.indexOf("if (plan.execution.kind === 'run_openswan') {"),
+  files.chatTab.indexOf("if (!providerFreeTurn && plan.execution.kind === 'run_computer_task') {"),
+  files.chatTab.indexOf("if (!providerFreeTurn && plan.execution.kind === 'run_openswan'"),
 );
 const openSwanBranch = files.chatTab.slice(
-  files.chatTab.indexOf("if (plan.execution.kind === 'run_openswan') {"),
+  files.chatTab.indexOf("if (!providerFreeTurn && plan.execution.kind === 'run_openswan'"),
   files.chatTab.indexOf('// R7 — apply handler state requests'),
 );
 assert(
@@ -679,7 +700,8 @@ assert(
   && localAwarenessBlock.includes('desktop.list_running_apps')
   && localAwarenessBlock.includes('desktop.window_state')
   && localAwarenessBlock.includes('desktop.clipboard')
-  && computerTaskBranch.includes('executeSharedComputerTask(content)')
+  && computerTaskBranch.includes('executeSharedComputerTask(content, {')
+  && computerTaskBranch.includes('requestIdentity: userMessage.id')
   && !computerTaskBranch.includes('executeLocalComputerAwarenessRequest')
   && openSwanBranch.includes('executeLocalComputerAwarenessRequest(content)'),
   'ChatTab routes launch/focus through authenticated computer-task execution and keeps only read-only desktop awareness shortcuts',

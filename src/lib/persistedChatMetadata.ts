@@ -13,14 +13,38 @@ import type { OpenSwanObservedEvalSummary } from './openswanObservedEvals';
 import type { OpenSwanTaskPlan } from './openswanTaskPlanner';
 import type { OpenSwanToolEvent } from './openswanToolRuntime';
 import type { OpenSwanVerificationResult } from './openswanVerificationRuntime';
+import type { OpenSwanTerminalReceipt } from './openswanSessionRuntimeAdapters';
+import {
+  projectOpenSwanResumeLocator,
+  type OpenSwanResumeLocator,
+} from './toolLoopResume';
 import type { ResearchDocumentReference } from './researchControl';
 import type { SwanBotStructuredArtifact, SwanBotStructuredResponse } from './swanbot';
+import {
+  projectGeneratedChatImageArtifactForPersistence,
+  readGeneratedChatImageMetadata,
+} from './generatedChatImageArtifactCore';
 import type { WikiArticleReference } from './wikiData';
 import type { AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
+import type { IntentConnective } from './chatMultiIntentCore';
+import type {
+  OpenSwanMultiActionCompletionActionStatus,
+  OpenSwanMultiActionCompletionDisposition,
+  OpenSwanMultiActionCompletionIssueCode,
+  OpenSwanMultiActionCompletionOutcome,
+  OpenSwanMultiActionId,
+} from './openSwanMultiActionCompletionCore';
 import {
+  buildComputerTaskRequestedActionCoverage,
+  normalizeDeterministicReadOnlyFileRequestedActionProgress,
   normalizeComputerTaskOutcomeStatus,
   type ComputerTaskOutcomeStatus,
 } from './computerTaskOutcome';
+import { sanitizeComputerTaskRootPointer } from './computerTaskRootStore';
+import {
+  projectConnectedAgentHandoffSnapshot,
+  type ConnectedAgentHandoffSnapshot,
+} from './connectedAgentHandoffCore';
 
 const LEGACY_CROWN_PREFIX = /^👑 \*\*OpenSwan:\*\* /u;
 const BOT_PREFIX = /^(🦢|🤖) \*\*[^*]{1,80}:\*\* /u;
@@ -32,6 +56,31 @@ const AGENT_SUBJECT_NAME_MAX = 120;
 const AGENT_SUBJECT_PROVIDER_MAX = 80;
 const AGENT_SUBJECT_ALIAS_MAX = 160;
 const AGENT_SUBJECT_ALIAS_LIMIT = 8;
+
+function preserveInertComputerTaskRootPointer<T extends Record<string, unknown>>(value: T): T {
+  const pointer = sanitizeComputerTaskRootPointer(value.computerTaskRootPointer);
+  const { computerTaskRootPointer: _discarded, ...rest } = value;
+  return (pointer
+    ? { ...rest, computerTaskRootPointer: pointer }
+    : rest) as T;
+}
+
+function preserveInertBrowserRootPointers(
+  metadata: PersistedChatBotMetadata,
+): Pick<PersistedChatBotMetadata, 'browserPlans' | 'browserSessions'> {
+  return {
+    browserPlans: Array.isArray(metadata.browserPlans)
+      ? metadata.browserPlans.map((plan) => preserveInertComputerTaskRootPointer(
+          plan as unknown as Record<string, unknown>,
+        )) as unknown as BrowserPlanCardData[]
+      : undefined,
+    browserSessions: Array.isArray(metadata.browserSessions)
+      ? metadata.browserSessions.map((session) => preserveInertComputerTaskRootPointer(
+          session as unknown as Record<string, unknown>,
+        )) as unknown as BrowserSessionRecord[]
+      : undefined,
+  };
+}
 
 export type PersistedChatRecoveryOption = {
   id: string;
@@ -130,14 +179,28 @@ export type PersistedChatBotMetadata = {
   requestId?: string | null;
   /** Stable human requester for shared-thread ownership reconciliation. */
   requestAuthorId?: string | null;
+  /** Exact persisted user-message row that originated this bot run. This is
+   * value-free lineage and must never be reconstructed from transcript order. */
+  requestSourceMessageId?: string | null;
   source?: {
     actor?: string;
     surface?: string;
     selectedModel?: string | null;
     effectiveModel?: string | null;
     provider?: string | null;
+    showRouteChips?: boolean;
   };
   agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
+  /** Durable nonterminal bridge/session lineage; never contains response copy. */
+  connectedAgentHandoff?: ConnectedAgentHandoffSnapshot | null;
+  /** Prose-independent OpenSwan terminal truth. Checkpoint payload stays local;
+   * this status/presence alone never authorizes a Continue action. */
+  openSwanTerminal?: PersistedOpenSwanTerminal | null;
+  /** Value-free exact pointer; the checkpoint payload remains device-local. */
+  openSwanResumeLocator?: OpenSwanResumeLocator | null;
+  /** Bounded A1-A3 completion accounting. No action text, tool input/output,
+   * evidence ids, or provider prose crosses this persistence boundary. */
+  openSwanMultiActionCompletion?: PersistedOpenSwanMultiActionCompletion | null;
   usage?: SwanBotStructuredResponse['usage'] | null;
   commandDecisions?: ChatCommandDecision[];
   artifacts?: SwanBotStructuredArtifact[];
@@ -180,6 +243,39 @@ export type PersistedChatBotMetadata = {
   verificationReceipt?: PersistedVerificationReceipt | null;
 };
 
+export type PersistedOpenSwanTerminal = {
+  state: OpenSwanTerminalReceipt['state'];
+  reason: OpenSwanTerminalReceipt['reason'];
+  completionVerified: boolean;
+  resumable: boolean;
+  checkpointAvailable: boolean;
+};
+
+export type PersistedOpenSwanMultiActionCompletionIssue = Readonly<{
+  code: OpenSwanMultiActionCompletionIssueCode;
+  actionId?: OpenSwanMultiActionId;
+}>;
+
+export type PersistedOpenSwanMultiActionCompletion = Readonly<{
+  schemaVersion: 1;
+  disposition: OpenSwanMultiActionCompletionDisposition;
+  completionVerified: boolean;
+  inputValid: boolean;
+  actions: ReadonlyArray<Readonly<{
+    actionId: OpenSwanMultiActionId;
+    status: OpenSwanMultiActionCompletionActionStatus;
+    evidenceCount: number;
+  }>>;
+  unresolvedActionIds: ReadonlyArray<OpenSwanMultiActionId>;
+  issues: ReadonlyArray<PersistedOpenSwanMultiActionCompletionIssue>;
+}>;
+
+export function projectPersistedOpenSwanResumeLocator(
+  locator?: OpenSwanResumeLocator | null,
+): OpenSwanResumeLocator | undefined {
+  return projectOpenSwanResumeLocator(locator) || undefined;
+}
+
 export type PersistedVerificationReceipt = {
   verdict: 'verified' | 'unverified' | 'failed';
   editedFiles: string[];
@@ -204,6 +300,283 @@ const OUTCOME_VERDICTS = ['completed', 'partial', 'blocked', 'failed', 'unknown'
 const OUTCOME_SIGNALS = ['accept', 'reject', 'edit_resend', 'steer', 'retry', 'abandon'] as const;
 const OUTCOME_LANE_MAX = 48;
 const OUTCOME_MODEL_MAX = 80;
+
+const OPENSWAN_TERMINAL_REASONS_BY_STATE = {
+  succeeded: new Set(['clean_end_turn']),
+  partial: new Set(['step_cap', 'verification_blocked', 'verification_unverified', 'delegation_incomplete', 'action_coverage_incomplete']),
+  failed: new Set(['runtime_guard', 'edge_failure', 'verification_failed', 'action_coverage_failed', 'persistence_unverified']),
+  cancelled: new Set(['user_cancelled']),
+} as const;
+
+const OPENSWAN_MULTI_ACTION_MAX_ACTIONS = 3;
+const OPENSWAN_MULTI_ACTION_MAX_EVIDENCE_PER_ACTION = 8;
+const OPENSWAN_MULTI_ACTION_MAX_SOURCE_ISSUES = 128;
+const OPENSWAN_MULTI_ACTION_MAX_PERSISTED_ISSUES = 12;
+const OPENSWAN_MULTI_ACTION_IDS = {
+  A1: true,
+  A2: true,
+  A3: true,
+} as const satisfies Record<OpenSwanMultiActionId, true>;
+const OPENSWAN_MULTI_ACTION_STATUSES = {
+  completed: true,
+  pending: true,
+  missing: true,
+  blocked: true,
+  failed: true,
+  invalid: true,
+} as const satisfies Record<OpenSwanMultiActionCompletionActionStatus, true>;
+const OPENSWAN_MULTI_ACTION_DISPOSITIONS = {
+  verified: true,
+  incomplete: true,
+  blocked: true,
+  failed: true,
+} as const satisfies Record<OpenSwanMultiActionCompletionDisposition, true>;
+const OPENSWAN_MULTI_ACTION_ISSUE_CODES = {
+  invalid_input: true,
+  invalid_ledger: true,
+  invalid_evidence: true,
+  duplicate_evidence_id: true,
+  invalid_report: true,
+  unknown_report_action: true,
+  duplicate_report_action: true,
+  duplicate_evidence_ref: true,
+  unknown_evidence_ref: true,
+  evidence_cross_owned: true,
+  future_evidence_ref: true,
+  status_evidence_mismatch: true,
+  evidence_not_relevant: true,
+  evidence_not_mutating: true,
+  evidence_target_mismatch: true,
+  artifact_content_missing: true,
+  artifact_persistence_unverified: true,
+  completion_evidence_unavailable: true,
+  dependency_inversion: true,
+  missing_action_report: true,
+  pending_action: true,
+} as const satisfies Record<OpenSwanMultiActionCompletionIssueCode, true>;
+const OPENSWAN_MULTI_ACTION_INVALID_ISSUE_CODES = new Set<OpenSwanMultiActionCompletionIssueCode>([
+  'invalid_input',
+  'invalid_ledger',
+  'invalid_evidence',
+  'duplicate_evidence_id',
+  'invalid_report',
+  'unknown_report_action',
+  'duplicate_report_action',
+  'duplicate_evidence_ref',
+  'unknown_evidence_ref',
+  'evidence_cross_owned',
+  'future_evidence_ref',
+  'status_evidence_mismatch',
+  'evidence_not_relevant',
+  'evidence_not_mutating',
+  'evidence_target_mismatch',
+  'artifact_content_missing',
+  'artifact_persistence_unverified',
+  'completion_evidence_unavailable',
+  'dependency_inversion',
+]);
+
+function isOpenSwanMultiActionRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isOpenSwanMultiActionId(value: unknown): value is OpenSwanMultiActionId {
+  return typeof value === 'string'
+    && Object.prototype.hasOwnProperty.call(OPENSWAN_MULTI_ACTION_IDS, value);
+}
+
+function isOpenSwanMultiActionStatus(
+  value: unknown,
+): value is OpenSwanMultiActionCompletionActionStatus {
+  return typeof value === 'string'
+    && Object.prototype.hasOwnProperty.call(OPENSWAN_MULTI_ACTION_STATUSES, value);
+}
+
+function isOpenSwanMultiActionDisposition(
+  value: unknown,
+): value is OpenSwanMultiActionCompletionDisposition {
+  return typeof value === 'string'
+    && Object.prototype.hasOwnProperty.call(OPENSWAN_MULTI_ACTION_DISPOSITIONS, value);
+}
+
+function isOpenSwanMultiActionIssueCode(
+  value: unknown,
+): value is OpenSwanMultiActionCompletionIssueCode {
+  return typeof value === 'string'
+    && Object.prototype.hasOwnProperty.call(OPENSWAN_MULTI_ACTION_ISSUE_CODES, value);
+}
+
+function expectedMultiActionDisposition(
+  inputValid: boolean,
+  statuses: readonly OpenSwanMultiActionCompletionActionStatus[],
+): OpenSwanMultiActionCompletionDisposition {
+  if (!inputValid || statuses.includes('invalid')) return 'incomplete';
+  if (statuses.includes('failed')) return 'failed';
+  if (statuses.includes('blocked')) return 'blocked';
+  if (statuses.length > 0 && statuses.every((status) => status === 'completed')) return 'verified';
+  return 'incomplete';
+}
+
+/**
+ * Project a runtime outcome or untrusted saved snapshot into the only
+ * multi-action shape Chat may persist. Contradictory completion claims fail
+ * closed. Runtime-only evidence ids are counted and discarded.
+ */
+export function projectPersistedOpenSwanMultiActionCompletion(
+  outcome?: OpenSwanMultiActionCompletionOutcome | PersistedOpenSwanMultiActionCompletion | unknown,
+): PersistedOpenSwanMultiActionCompletion | undefined {
+  try {
+    if (!isOpenSwanMultiActionRecord(outcome) || outcome.schemaVersion !== 1) return undefined;
+    if (!isOpenSwanMultiActionDisposition(outcome.disposition)) return undefined;
+    if (typeof outcome.completionVerified !== 'boolean' || typeof outcome.inputValid !== 'boolean') {
+      return undefined;
+    }
+    if (!Array.isArray(outcome.actions) || outcome.actions.length > OPENSWAN_MULTI_ACTION_MAX_ACTIONS) {
+      return undefined;
+    }
+    if (
+      outcome.actions.length !== 0
+      && outcome.actions.length !== 1
+      && outcome.actions.length !== 2
+      && outcome.actions.length !== 3
+    ) {
+      return undefined;
+    }
+
+    const actions: Array<PersistedOpenSwanMultiActionCompletion['actions'][number]> = [];
+    for (let index = 0; index < outcome.actions.length; index += 1) {
+      const rawAction = outcome.actions[index];
+      if (!isOpenSwanMultiActionRecord(rawAction)) return undefined;
+      const expectedActionId = `A${index + 1}` as OpenSwanMultiActionId;
+      if (rawAction.actionId !== expectedActionId || !isOpenSwanMultiActionStatus(rawAction.status)) {
+        return undefined;
+      }
+
+      const hasEvidenceCount = Object.prototype.hasOwnProperty.call(rawAction, 'evidenceCount');
+      const hasEvidenceIds = Object.prototype.hasOwnProperty.call(rawAction, 'evidenceIds');
+      if (hasEvidenceCount === hasEvidenceIds) return undefined;
+      const evidenceCount = hasEvidenceCount
+        ? rawAction.evidenceCount
+        : Array.isArray(rawAction.evidenceIds)
+          ? rawAction.evidenceIds.length
+          : -1;
+      if (
+        !Number.isSafeInteger(evidenceCount)
+        || (evidenceCount as number) < 0
+        || (evidenceCount as number) > OPENSWAN_MULTI_ACTION_MAX_EVIDENCE_PER_ACTION
+      ) return undefined;
+
+      actions.push(Object.freeze({
+        actionId: expectedActionId,
+        status: rawAction.status,
+        evidenceCount: evidenceCount as number,
+      }));
+    }
+
+    if (outcome.inputValid) {
+      if (actions.length < 1 || actions.some((action) => action.status === 'invalid')) return undefined;
+      if (actions.some((action) => (
+        action.status === 'completed' || action.status === 'failed'
+          ? action.evidenceCount === 0
+          : action.status === 'blocked'
+            // A dependent action may be causally blocked before it is
+            // attempted when an earlier prerequisite blocks/fails. That
+            // truthful zero-evidence status is valid and value-free.
+            ? false
+            : action.evidenceCount !== 0
+      ))) return undefined;
+    } else if (actions.length > 0 && actions.some((action) => action.status !== 'invalid')) {
+      return undefined;
+    }
+
+    if (!Array.isArray(outcome.unresolvedActionIds) || outcome.unresolvedActionIds.length > actions.length) {
+      return undefined;
+    }
+    const unresolvedActionIds: OpenSwanMultiActionId[] = [];
+    for (const rawActionId of outcome.unresolvedActionIds) {
+      if (!isOpenSwanMultiActionId(rawActionId) || unresolvedActionIds.includes(rawActionId)) return undefined;
+      unresolvedActionIds.push(rawActionId);
+    }
+    const expectedUnresolvedActionIds = actions
+      .filter((action) => action.status !== 'completed')
+      .map((action) => action.actionId);
+    if (
+      unresolvedActionIds.length !== expectedUnresolvedActionIds.length
+      || unresolvedActionIds.some((actionId, index) => actionId !== expectedUnresolvedActionIds[index])
+    ) return undefined;
+
+    if (!Array.isArray(outcome.issues) || outcome.issues.length > OPENSWAN_MULTI_ACTION_MAX_SOURCE_ISSUES) {
+      return undefined;
+    }
+    const issues: PersistedOpenSwanMultiActionCompletionIssue[] = [];
+    const seenIssues = new Set<string>();
+    let containsInvalidIssue = false;
+    for (const rawIssue of outcome.issues) {
+      if (!isOpenSwanMultiActionRecord(rawIssue) || !isOpenSwanMultiActionIssueCode(rawIssue.code)) {
+        return undefined;
+      }
+      if (rawIssue.actionId !== undefined && !isOpenSwanMultiActionId(rawIssue.actionId)) return undefined;
+      containsInvalidIssue ||= OPENSWAN_MULTI_ACTION_INVALID_ISSUE_CODES.has(rawIssue.code);
+      const issueKey = `${rawIssue.code}:${rawIssue.actionId || ''}`;
+      if (seenIssues.has(issueKey)) continue;
+      seenIssues.add(issueKey);
+      if (issues.length < OPENSWAN_MULTI_ACTION_MAX_PERSISTED_ISSUES) {
+        issues.push(Object.freeze({
+          code: rawIssue.code,
+          ...(rawIssue.actionId ? { actionId: rawIssue.actionId } : {}),
+        }));
+      }
+    }
+
+    const expectedDisposition = expectedMultiActionDisposition(
+      outcome.inputValid,
+      actions.map((action) => action.status),
+    );
+    if (outcome.disposition !== expectedDisposition) return undefined;
+    if (outcome.completionVerified !== (outcome.inputValid && outcome.disposition === 'verified')) {
+      return undefined;
+    }
+    if (!outcome.inputValid && !containsInvalidIssue) return undefined;
+    if (outcome.inputValid && containsInvalidIssue) return undefined;
+    if (outcome.disposition === 'verified' && issues.length > 0) return undefined;
+
+    return Object.freeze({
+      schemaVersion: 1,
+      disposition: outcome.disposition,
+      completionVerified: outcome.completionVerified,
+      inputValid: outcome.inputValid,
+      actions: Object.freeze(actions),
+      unresolvedActionIds: Object.freeze(unresolvedActionIds),
+      issues: Object.freeze(issues),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+/** Clamp a runtime or round-tripped terminal receipt to tiny enum-only state. */
+export function projectPersistedOpenSwanTerminal(
+  terminal?: OpenSwanTerminalReceipt | PersistedOpenSwanTerminal | null,
+): PersistedOpenSwanTerminal | undefined {
+  if (!terminal || typeof terminal !== 'object' || Array.isArray(terminal)) return undefined;
+  const raw = terminal as unknown as Record<string, unknown>;
+  const state = raw.state;
+  if (state !== 'succeeded' && state !== 'partial' && state !== 'failed' && state !== 'cancelled') {
+    return undefined;
+  }
+  const reason = raw.reason;
+  if (typeof reason !== 'string' || !OPENSWAN_TERMINAL_REASONS_BY_STATE[state].has(reason as never)) {
+    return undefined;
+  }
+  return {
+    state,
+    reason: reason as OpenSwanTerminalReceipt['reason'],
+    completionVerified: state === 'succeeded' && raw.completionVerified === true,
+    resumable: state !== 'succeeded' && raw.resumable === true,
+    checkpointAvailable: raw.checkpointAvailable === true
+      || (!!raw.checkpoint && typeof raw.checkpoint === 'object'),
+  };
+}
 
 // Internal compaction reused by every persistence tier so the field is always
 // bounded identically (mirrors compactComputerFindings). Hard id clamps keep
@@ -716,6 +1089,66 @@ function compactComputerTaskEvidenceContract(
   };
 }
 
+function compactComputerRequestedActionContract(
+  contract?: ChatComputerHandoffMetadata['requestedActionContract'] | null,
+  mode: 'full' | 'minimal' | 'tiny' = 'full',
+): ChatComputerHandoffMetadata['requestedActionContract'] | null {
+  if (!contract || contract.schemaVersion !== 1 || contract.mode !== 'all_actions_required') return null;
+  const textLimit = mode === 'full' ? 240 : mode === 'minimal' ? 120 : 80;
+  const rawActions = Array.isArray(contract.actions) ? contract.actions : [];
+  const rawActionIdentityMismatch = rawActions.some((action, index) => (
+    action?.id !== `A${index + 1}` || !String(action?.text || '').trim()
+  ));
+  const actionLedgerShapeMismatch = rawActions.length > 8
+    || !Number.isInteger(contract.actionCount)
+    || contract.actionCount !== rawActions.length
+    || rawActionIdentityMismatch;
+  const actions = rawActions
+    .slice(0, 8)
+    .map((action, index) => {
+      const id = `A${index + 1}`;
+      const rawVerb = String(action?.verb || '').trim().toLowerCase();
+      const connective: IntentConnective = action?.connective === 'then'
+        || action?.connective === 'also'
+        || action?.connective === 'comma'
+        || action?.connective === 'enumerated'
+        || action?.connective === 'newline'
+        || action?.connective === 'semicolon'
+        ? action.connective
+        : index === 0 ? 'lead' : 'also';
+      const rawDependencies: unknown[] = Array.isArray(action?.dependsOnActionIds)
+        ? [...action.dependsOnActionIds]
+        : [];
+      const dependsOnActionIds: string[] = Array.from(new Set(
+        rawDependencies
+          .map((value: unknown) => String(value || '').trim())
+          .filter((value: string) => {
+            const match = value.match(/^A([1-8])$/);
+            return Boolean(match && Number(match[1]) < index + 1);
+          }),
+      )).slice(0, 7);
+      return {
+        id,
+        text: truncateText(String(action?.text || ''), textLimit),
+        verb: /^[a-z][a-z-]{0,31}$/.test(rawVerb) ? rawVerb : 'act',
+        connective: index === 0 ? 'lead' as const : connective,
+        dependsOnActionIds,
+      };
+    })
+    .filter((action) => Boolean(action.text));
+  if (actions.length < 2 && contract.requiresDecompositionBeforeMutation !== true) return null;
+  return {
+    schemaVersion: 1,
+    mode: 'all_actions_required',
+    actionCount: actions.length,
+    capped: contract.capped === true || rawActions.length > 8,
+    requiresDecompositionBeforeMutation: contract.requiresDecompositionBeforeMutation === true
+      || actionLedgerShapeMismatch
+      || actions.length !== Math.min(rawActions.length, 8),
+    actions,
+  };
+}
+
 function compactComputerAppRouteDecision(
   decision?: ChatComputerAppRouteDecisionSummary | null,
   mode: 'full' | 'minimal' | 'tiny' = 'full',
@@ -750,8 +1183,13 @@ function hasPersistedMetadata(metadata?: PersistedChatBotMetadata): boolean {
     !!metadata.runId ||
     !!metadata.requestId ||
     !!metadata.requestAuthorId ||
+    !!metadata.requestSourceMessageId ||
     !!metadata.source ||
     !!compactAgentSubjectMetadata(metadata.agentSubjectMetadata) ||
+    !!projectConnectedAgentHandoffSnapshot(metadata.connectedAgentHandoff) ||
+    !!projectPersistedOpenSwanTerminal(metadata.openSwanTerminal) ||
+    !!projectPersistedOpenSwanResumeLocator(metadata.openSwanResumeLocator) ||
+    !!projectPersistedOpenSwanMultiActionCompletion(metadata.openSwanMultiActionCompletion) ||
     !!metadata.usage ||
     (metadata.commandDecisions?.length || 0) > 0 ||
     (metadata.artifacts?.length || 0) > 0 ||
@@ -851,11 +1289,62 @@ function sortDesignRunbooksByRisk<T extends { risk?: unknown; operation?: unknow
   });
 }
 
+function compactComputerVerificationTarget(
+  target?: ChatComputerHandoffMetadata['verificationTarget'] | null,
+): ChatComputerHandoffMetadata['verificationTarget'] | null {
+  if (!target) return null;
+  const exact = (value: unknown, max: number): string | null => {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    return trimmed && trimmed.length <= max && !/[\u0000-\u001f\u007f]/.test(trimmed) ? trimmed : null;
+  };
+  const dimension = (value: unknown): number | null => {
+    const number = Number(value);
+    return Number.isInteger(number) && number > 0 && number <= 100_000 ? number : null;
+  };
+  const expectedWidthPx = dimension(target.expectedWidthPx);
+  const expectedHeightPx = dimension(target.expectedHeightPx);
+  const dimensionsArePaired = expectedWidthPx != null && expectedHeightPx != null;
+  const browserProcessId = exact(target.browserIdentity?.browserProcessId, 160);
+  const browserContextId = exact(target.browserIdentity?.browserContextId, 160);
+  const pageId = exact(target.browserIdentity?.pageId, 160);
+  const opaqueUrl = typeof target.browserIdentity?.url === 'string'
+    && /^uc_browser_url_[a-f0-9]{64}$/.test(target.browserIdentity.url)
+    ? target.browserIdentity.url
+    : null;
+  const browserIdentity = browserProcessId && browserContextId && pageId && opaqueUrl
+    ? { browserProcessId, browserContextId, pageId, url: opaqueUrl }
+    : null;
+  const compacted = {
+    appName: exact(target.appName, 160),
+    browserIdentity,
+    expectedDocumentName: exact(target.expectedDocumentName, 240),
+    expectedWidthPx: dimensionsArePaired ? expectedWidthPx : null,
+    expectedHeightPx: dimensionsArePaired ? expectedHeightPx : null,
+    filePath: exact(target.filePath, 4_096),
+  };
+  return Object.values(compacted).some((value) => value != null) ? compacted : null;
+}
+
 function compactComputerHandoff(
   handoff?: ChatComputerHandoffMetadata | null,
   mode: 'full' | 'minimal' | 'tiny' = 'full',
 ): ChatComputerHandoffMetadata | undefined {
   if (!handoff) return undefined;
+  const requestedActionContract = compactComputerRequestedActionContract(
+    handoff.requestedActionContract,
+    mode,
+  );
+  const requestedActionProgress = normalizeDeterministicReadOnlyFileRequestedActionProgress(
+    handoff.requestedActionProgress,
+  );
+  const requestedActionCoverage = buildComputerTaskRequestedActionCoverage({
+    contract: requestedActionContract,
+    outcomeStatus: handoff.outcomeStatus,
+    taskCompletionVerified: handoff.taskCompletionVerified,
+    mutationDispatched: handoff.mutationDispatched,
+    requestedActionProgress,
+  });
   if (mode === 'tiny') {
     return {
       surface: handoff.surface,
@@ -872,6 +1361,10 @@ function compactComputerHandoff(
       replayPolicy: handoff.replayPolicy === 'manual_verify_only' ? 'manual_verify_only' : 'normal',
       mutationDispatched: handoff.mutationDispatched === true,
       verificationOnlyTools: (handoff.verificationOnlyTools || []).slice(0, 4).map((value) => truncateText(String(value), 120)),
+      verificationBridgeInstanceId: handoff.verificationBridgeInstanceId
+        ? truncateText(String(handoff.verificationBridgeInstanceId), 128)
+        : null,
+      verificationTarget: compactComputerVerificationTarget(handoff.verificationTarget),
       preflightStatus: handoff.preflightStatus || null,
       preflightSummary: handoff.preflightSummary ? truncateText(String(handoff.preflightSummary), 120) : null,
       groundingStatus: handoff.groundingStatus || null,
@@ -1000,6 +1493,10 @@ function compactComputerHandoff(
         : null,
       designObjectManifestArtifact: null,
       requestNotice: compactComputerRequestNotice(handoff.requestNotice, 'tiny'),
+      requestedActionContract,
+      requestedActionCoverage,
+      requestedActionProgress,
+      taskCompletionVerified: handoff.taskCompletionVerified === true,
       evidenceContract: compactComputerTaskEvidenceContract(handoff.evidenceContract, 'tiny'),
       appRouteDecision: compactComputerAppRouteDecision(handoff.appRouteDecision, 'tiny'),
       designProofReview: handoff.designProofReview
@@ -1048,6 +1545,10 @@ function compactComputerHandoff(
     replayPolicy: handoff.replayPolicy === 'manual_verify_only' ? 'manual_verify_only' : 'normal',
     mutationDispatched: handoff.mutationDispatched === true,
     verificationOnlyTools: (handoff.verificationOnlyTools || []).slice(0, 4).map((value) => truncateText(String(value), 120)),
+    verificationBridgeInstanceId: handoff.verificationBridgeInstanceId
+      ? truncateText(String(handoff.verificationBridgeInstanceId), 128)
+      : null,
+    verificationTarget: compactComputerVerificationTarget(handoff.verificationTarget),
     preflightStatus: handoff.preflightStatus || null,
     preflightSummary: handoff.preflightSummary ? truncateText(String(handoff.preflightSummary), mode === 'minimal' ? 160 : 360) : null,
     groundingStatus: handoff.groundingStatus || null,
@@ -1232,6 +1733,10 @@ function compactComputerHandoff(
         }))
       : null,
     requestNotice: compactComputerRequestNotice(handoff.requestNotice, mode),
+    requestedActionContract,
+    requestedActionCoverage,
+    requestedActionProgress,
+    taskCompletionVerified: handoff.taskCompletionVerified === true,
     evidenceContract: compactComputerTaskEvidenceContract(handoff.evidenceContract, mode),
     appRouteDecision: compactComputerAppRouteDecision(handoff.appRouteDecision, mode),
     designProofReview: handoff.designProofReview
@@ -1256,14 +1761,36 @@ function compactPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
     runId: metadata.runId,
     requestId: metadata.requestId,
     requestAuthorId: metadata.requestAuthorId,
+    requestSourceMessageId: metadata.requestSourceMessageId,
     source: metadata.source,
     agentSubjectMetadata: compactAgentSubjectMetadata(metadata.agentSubjectMetadata),
+    connectedAgentHandoff: projectConnectedAgentHandoffSnapshot(metadata.connectedAgentHandoff) || undefined,
+    openSwanTerminal: projectPersistedOpenSwanTerminal(metadata.openSwanTerminal),
+    openSwanResumeLocator: projectPersistedOpenSwanResumeLocator(metadata.openSwanResumeLocator),
+    openSwanMultiActionCompletion: projectPersistedOpenSwanMultiActionCompletion(
+      metadata.openSwanMultiActionCompletion,
+    ),
     usage: metadata.usage,
     commandDecisions: metadata.commandDecisions?.slice(0, 8),
-    artifacts: metadata.artifacts?.slice(0, 8).map((artifact) => ({
-      ...artifact,
-      content: artifact.content ? truncateText(artifact.content, 1200) : artifact.content,
-    })),
+    artifacts: metadata.artifacts?.slice(0, 8).map((rawArtifact) => {
+      const artifact = projectGeneratedChatImageArtifactForPersistence(rawArtifact);
+      const content = artifact.content ? truncateText(artifact.content, 1200) : artifact.content;
+      const isCanonicalActionArtifact = artifact.metadata?.source === 'openswan_action_artifact'
+        && typeof artifact.metadata?.canonicalArtifactId === 'string';
+      return {
+        ...artifact,
+        content,
+        ...(isCanonicalActionArtifact
+          ? {
+              metadata: {
+                ...artifact.metadata,
+                contentTruncated: typeof artifact.content === 'string'
+                  && artifact.content.length > (content?.length || 0),
+              },
+            }
+          : {}),
+      };
+    }),
     wikiRefs: metadata.wikiRefs?.slice(0, 5),
     researchRefs: metadata.researchRefs?.slice(0, 5),
     memoriesUsed: metadata.memoriesUsed?.slice(0, 12),
@@ -1349,6 +1876,8 @@ function compactPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
       completedAt: plan.completedAt,
       backendSessionId: plan.backendSessionId,
       backendLiveUrl: plan.backendLiveUrl,
+      computerTaskRootPointer:
+        sanitizeComputerTaskRootPointer(plan.computerTaskRootPointer) || undefined,
       actions: Array.isArray(plan.actions)
         ? plan.actions.slice(0, 10).map((action: any) => ({
             id: action.id,
@@ -1375,6 +1904,8 @@ function compactPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
       currentUrl: session.currentUrl,
       backendSessionId: session.backendSessionId,
       backendLiveUrl: session.backendLiveUrl,
+      computerTaskRootPointer:
+        sanitizeComputerTaskRootPointer(session.computerTaskRootPointer) || undefined,
       recommendedPermission: session.recommendedPermission,
       actions: Array.isArray(session.actions) ? session.actions.slice(0, 10) : [],
     })) as any,
@@ -1400,15 +1931,27 @@ function minimalPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
     runId: metadata.runId,
     requestId: metadata.requestId,
     requestAuthorId: metadata.requestAuthorId,
+    requestSourceMessageId: metadata.requestSourceMessageId,
     source: metadata.source,
     agentSubjectMetadata: compactAgentSubjectMetadata(metadata.agentSubjectMetadata),
+    connectedAgentHandoff: projectConnectedAgentHandoffSnapshot(metadata.connectedAgentHandoff) || undefined,
+    openSwanTerminal: projectPersistedOpenSwanTerminal(metadata.openSwanTerminal),
+    openSwanResumeLocator: projectPersistedOpenSwanResumeLocator(metadata.openSwanResumeLocator),
+    openSwanMultiActionCompletion: projectPersistedOpenSwanMultiActionCompletion(
+      metadata.openSwanMultiActionCompletion,
+    ),
     usage: metadata.usage,
-    artifacts: metadata.artifacts?.slice(0, 4).map((artifact) => ({
-      kind: artifact.kind,
-      title: artifact.title,
-      url: artifact.url,
-      metadata: artifact.metadata,
-    })),
+    artifacts: metadata.artifacts?.slice(0, 4).map((rawArtifact) => {
+      const artifact = projectGeneratedChatImageArtifactForPersistence(rawArtifact);
+      return {
+        kind: artifact.kind,
+        title: artifact.title,
+        url: artifact.url,
+        metadata: artifact.metadata?.source === 'openswan_action_artifact'
+          ? { ...artifact.metadata, contentTruncated: !!artifact.content }
+          : artifact.metadata,
+      };
+    }),
     wikiRefs: metadata.wikiRefs?.slice(0, 3),
     researchRefs: metadata.researchRefs?.slice(0, 3),
     memoriesUsed: metadata.memoriesUsed?.slice(0, 6),
@@ -1462,6 +2005,8 @@ function minimalPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
       status: plan.status,
       backendSessionId: plan.backendSessionId,
       backendLiveUrl: plan.backendLiveUrl,
+      computerTaskRootPointer:
+        sanitizeComputerTaskRootPointer(plan.computerTaskRootPointer) || undefined,
       actions: Array.isArray(plan.actions)
         ? plan.actions.slice(0, 5).map((action: any) => ({
             id: action.id,
@@ -1482,6 +2027,8 @@ function minimalPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
       status: session.status,
       backendSessionId: session.backendSessionId,
       backendLiveUrl: session.backendLiveUrl,
+      computerTaskRootPointer:
+        sanitizeComputerTaskRootPointer(session.computerTaskRootPointer) || undefined,
     })) as any,
     recoveryOptions: compactRecoveryOptions(metadata.recoveryOptions, 3),
     recoveryReliability: compactRecoveryReliability(metadata.recoveryReliability, 'minimal'),
@@ -1535,10 +2082,19 @@ export function readPersistedChatBotMetadata(content: string | null | undefined)
     const parsed = JSON.parse(raw) as PersistedChatBotMetadata;
     if (!parsed || typeof parsed !== 'object') return null;
     const agentSubjectMetadata = compactAgentSubjectMetadata(parsed.agentSubjectMetadata);
+    const browserRootPointers = preserveInertBrowserRootPointers(parsed);
     return {
       ...parsed,
+      ...browserRootPointers,
       requestAuthorId: boundedLegacyValue(parsed.requestAuthorId, 160) || undefined,
+      requestSourceMessageId: boundedLegacyValue(parsed.requestSourceMessageId, 160) || undefined,
       agentSubjectMetadata: agentSubjectMetadata || undefined,
+      connectedAgentHandoff: projectConnectedAgentHandoffSnapshot(parsed.connectedAgentHandoff) || undefined,
+      openSwanTerminal: projectPersistedOpenSwanTerminal(parsed.openSwanTerminal),
+      openSwanResumeLocator: projectPersistedOpenSwanResumeLocator(parsed.openSwanResumeLocator),
+      openSwanMultiActionCompletion: projectPersistedOpenSwanMultiActionCompletion(
+        parsed.openSwanMultiActionCompletion,
+      ),
       computerTaskStatus: normalizeComputerTaskOutcomeStatus(parsed.computerTaskStatus),
       computerHandoff: parsed.computerHandoff
         ? compactComputerHandoff(parsed.computerHandoff)
@@ -1607,6 +2163,10 @@ function buildLegacyMetadataEnvelope(
     metadata.requestAuthorId,
     LEGACY_LINEAGE_ID_MAX,
   );
+  const requestSourceMessageId = boundedLegacyValue(
+    metadata.requestSourceMessageId,
+    LEGACY_LINEAGE_ID_MAX,
+  );
   const sourceSurface = boundedLegacyValue(metadata.source?.surface, LEGACY_SOURCE_VALUE_MAX);
   const handoffSurface = metadata.computerHandoff?.surface;
   const safeHandoffSurface = handoffSurface === 'browser'
@@ -1640,6 +2200,7 @@ function buildLegacyMetadataEnvelope(
         surface: safeHandoffSurface,
         runId: runId || null,
         outcomeStatus: handoffStatus || computerTaskStatus,
+        taskCompletionVerified: metadata.computerHandoff?.taskCompletionVerified === true,
         replayPolicy: handoffReplayPolicy,
         mutationDispatched: handoffMutationDispatched,
         verificationOnlyTools: handoffVerificationOnlyTools,
@@ -1659,7 +2220,14 @@ function buildLegacyMetadataEnvelope(
     runId: runId || undefined,
     requestId: requestId || undefined,
     requestAuthorId: requestAuthorId || undefined,
+    requestSourceMessageId: requestSourceMessageId || undefined,
     source,
+    connectedAgentHandoff: projectConnectedAgentHandoffSnapshot(metadata.connectedAgentHandoff) || undefined,
+    openSwanTerminal: projectPersistedOpenSwanTerminal(metadata.openSwanTerminal),
+    openSwanResumeLocator: projectPersistedOpenSwanResumeLocator(metadata.openSwanResumeLocator),
+    openSwanMultiActionCompletion: projectPersistedOpenSwanMultiActionCompletion(
+      metadata.openSwanMultiActionCompletion,
+    ),
     computerTaskStatus,
     computerHandoff: handoff,
     outcomeSignal: compactSignal ? { verdict: compactSignal.verdict } : undefined,
@@ -1695,6 +2263,7 @@ export function buildLegacyPersistedChatFallback(
       const expectedRunId = envelope.runId || envelope.computerHandoff?.runId || null;
       const expectedRequestId = envelope.requestId || null;
       const expectedRequestAuthorId = envelope.requestAuthorId || null;
+      const expectedRequestSourceMessageId = envelope.requestSourceMessageId || null;
       if (
         candidate.length <= cap
         && roundTrip
@@ -1703,6 +2272,7 @@ export function buildLegacyPersistedChatFallback(
         && (!expectedRunId || roundTrip.runId === expectedRunId || roundTrip.computerHandoff?.runId === expectedRunId)
         && (!expectedRequestId || roundTrip.requestId === expectedRequestId)
         && (!expectedRequestAuthorId || roundTrip.requestAuthorId === expectedRequestAuthorId)
+        && (!expectedRequestSourceMessageId || roundTrip.requestSourceMessageId === expectedRequestSourceMessageId)
       ) {
         return {
           content: candidate,
@@ -1773,12 +2343,29 @@ export function canReleasePendingAfterPersistedChatRoundTrip(input: {
   const mutationDispatched = (metadata: PersistedChatBotMetadata): boolean | null => (
     metadata.computerHandoff?.mutationDispatched === true ? true : null
   );
+  const openSwanTerminal = (metadata: PersistedChatBotMetadata): string | null => {
+    const terminal = projectPersistedOpenSwanTerminal(metadata.openSwanTerminal);
+    return terminal
+      ? `${terminal.state}:${terminal.reason}:${terminal.completionVerified ? 1 : 0}:${terminal.resumable ? 1 : 0}:${terminal.checkpointAvailable ? 1 : 0}`
+      : null;
+  };
+  const openSwanResumeLocator = (metadata: PersistedChatBotMetadata): string | null => {
+    const locator = projectPersistedOpenSwanResumeLocator(metadata.openSwanResumeLocator);
+    return locator ? JSON.stringify(locator) : null;
+  };
+  const openSwanMultiActionCompletion = (metadata: PersistedChatBotMetadata): string | null => {
+    const completion = projectPersistedOpenSwanMultiActionCompletion(
+      metadata.openSwanMultiActionCompletion,
+    );
+    return completion ? JSON.stringify(completion) : null;
+  };
   const matchesWhenPresent = <T,>(expectedValue: T | null, actualValue: T | null): boolean => (
     expectedValue === null || actualValue === expectedValue
   );
   const expectedTopLevelRunId = asPresentString(expected.runId);
   const expectedTopLevelRequestId = asPresentString(expected.requestId);
   const expectedRequestAuthorId = asPresentString(expected.requestAuthorId);
+  const expectedRequestSourceMessageId = asPresentString(expected.requestSourceMessageId);
   const expectedTopLevelStatus = normalizeComputerTaskOutcomeStatus(expected.computerTaskStatus);
 
   return matchesWhenPresent(asPresentString(expected.localMessageId), asPresentString(actual.localMessageId))
@@ -1795,6 +2382,10 @@ export function canReleasePendingAfterPersistedChatRoundTrip(input: {
       asPresentString(actual.requestAuthorId),
     )
     && matchesWhenPresent(
+      expectedRequestSourceMessageId,
+      asPresentString(actual.requestSourceMessageId),
+    )
+    && matchesWhenPresent(
       expectedTopLevelStatus || status(expected),
       expectedTopLevelStatus
         ? normalizeComputerTaskOutcomeStatus(actual.computerTaskStatus)
@@ -1805,7 +2396,13 @@ export function canReleasePendingAfterPersistedChatRoundTrip(input: {
       asPresentString(actual.source?.surface),
     )
     && matchesWhenPresent(replayPolicy(expected), replayPolicy(actual))
-    && matchesWhenPresent(mutationDispatched(expected), mutationDispatched(actual));
+    && matchesWhenPresent(mutationDispatched(expected), mutationDispatched(actual))
+    && matchesWhenPresent(openSwanTerminal(expected), openSwanTerminal(actual))
+    && matchesWhenPresent(openSwanResumeLocator(expected), openSwanResumeLocator(actual))
+    && matchesWhenPresent(
+      openSwanMultiActionCompletion(expected),
+      openSwanMultiActionCompletion(actual),
+    );
 }
 
 export function formatPersistedChatBotMessage(
@@ -1813,14 +2410,30 @@ export function formatPersistedChatBotMessage(
   content: string,
   metadata?: PersistedChatBotMetadata,
 ): string {
-  const visibleContent = truncateText(content || '', MAX_PERSISTED_RESPONSE_CHARS);
+  // Visible provider/tool/file text is untrusted. Never allow it to inject the
+  // reserved delimiter that separates the readable answer from our canonical
+  // metadata envelope; otherwise the first hostile marker would shadow the
+  // real suffix during reload.
+  const visibleContent = truncateText(
+    String(content || '').replace(/\[\[UC_CHAT_META\]\]/g, '[UC_CHAT_META]'),
+    MAX_PERSISTED_RESPONSE_CHARS,
+  );
   const base = `🦢 **${normalizeChatAgentName(agentName)}:** ${visibleContent}`;
   if (!hasPersistedMetadata(metadata)) return base;
   const normalizedMetadata = metadata
     ? {
         ...metadata,
+        ...preserveInertBrowserRootPointers(metadata),
+        artifacts: metadata.artifacts?.map(projectGeneratedChatImageArtifactForPersistence),
         requestAuthorId: boundedLegacyValue(metadata.requestAuthorId, 160) || undefined,
+        requestSourceMessageId: boundedLegacyValue(metadata.requestSourceMessageId, 160) || undefined,
         agentSubjectMetadata: compactAgentSubjectMetadata(metadata.agentSubjectMetadata),
+        connectedAgentHandoff: projectConnectedAgentHandoffSnapshot(metadata.connectedAgentHandoff) || undefined,
+        openSwanTerminal: projectPersistedOpenSwanTerminal(metadata.openSwanTerminal),
+        openSwanResumeLocator: projectPersistedOpenSwanResumeLocator(metadata.openSwanResumeLocator),
+        openSwanMultiActionCompletion: projectPersistedOpenSwanMultiActionCompletion(
+          metadata.openSwanMultiActionCompletion,
+        ),
         recoveryOptions: compactRecoveryOptions(metadata.recoveryOptions, 5),
         recoveryReliability: compactRecoveryReliability(metadata.recoveryReliability),
         computerTaskStatus: normalizeComputerTaskOutcomeStatus(metadata.computerTaskStatus),
@@ -1874,6 +2487,9 @@ export function formatPersistedChatBotMessage(
     if (message.length <= MAX_PERSISTED_BOT_MESSAGE_CHARS) return message;
   }
 
+  const generatedImageArtifacts = normalizedMetadata?.artifacts
+    ?.filter((artifact) => Boolean(readGeneratedChatImageMetadata(artifact)))
+    .slice(0, 8);
   // WI-4/WI-5 last-ditch: nothing above fit with metadata attached, but the
   // findings are the anchor for "book option 2" and must survive. Persist ONLY
   // the findings (+ ids), trimming the visible body if needed to make room, so
@@ -1883,11 +2499,38 @@ export function formatPersistedChatBotMessage(
     const findingsMeta: PersistedChatBotMetadata = {
       localMessageId: normalizedMetadata?.localMessageId,
       requestAuthorId: normalizedMetadata?.requestAuthorId,
+      requestSourceMessageId: normalizedMetadata?.requestSourceMessageId,
       source: normalizedMetadata?.source,
       agentSubjectMetadata: normalizedMetadata?.agentSubjectMetadata,
+      openSwanTerminal: normalizedMetadata?.openSwanTerminal,
+      openSwanResumeLocator: normalizedMetadata?.openSwanResumeLocator,
+      openSwanMultiActionCompletion: normalizedMetadata?.openSwanMultiActionCompletion,
       computerFindings: findingsOnly,
     };
     const suffix = `${BOT_META_MARKER}${JSON.stringify(findingsMeta)}`;
+    const bodyBudget = MAX_PERSISTED_BOT_MESSAGE_CHARS - suffix.length;
+    if (bodyBudget > 0) {
+      const trimmedBase = base.length <= bodyBudget ? base : truncateText(base, bodyBudget);
+      const message = `${trimmedBase}${suffix}`;
+      if (message.length <= MAX_PERSISTED_BOT_MESSAGE_CHARS) return message;
+    }
+  }
+
+  // Generated media is durable only through its small opaque reference. Once
+  // proof-critical findings have had their existing dedicated fallback, keep
+  // verified image ids/provenance with basic lineage before text-only recovery.
+  // Transient URLs were already stripped from normalizedMetadata above.
+  if (generatedImageArtifacts?.length) {
+    const generatedImagesMeta: PersistedChatBotMetadata = {
+      localMessageId: normalizedMetadata?.localMessageId,
+      runId: normalizedMetadata?.runId,
+      requestId: normalizedMetadata?.requestId,
+      requestAuthorId: normalizedMetadata?.requestAuthorId,
+      requestSourceMessageId: normalizedMetadata?.requestSourceMessageId,
+      source: normalizedMetadata?.source,
+      artifacts: generatedImageArtifacts,
+    };
+    const suffix = `${BOT_META_MARKER}${JSON.stringify(generatedImagesMeta)}`;
     const bodyBudget = MAX_PERSISTED_BOT_MESSAGE_CHARS - suffix.length;
     if (bodyBudget > 0) {
       const trimmedBase = base.length <= bodyBudget ? base : truncateText(base, bodyBudget);

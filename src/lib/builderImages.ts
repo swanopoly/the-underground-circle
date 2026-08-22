@@ -9,6 +9,10 @@
  */
 
 import { storage } from './storage';
+import {
+  chatPersonalThreadStorageKey,
+  type ChatPersonalStorageScope,
+} from './chatSessionStatePersistence';
 
 export const BUILDER_IMAGES_STORAGE_KEY = 'uc_builder_images';
 
@@ -41,14 +45,26 @@ export interface BuilderImage {
   addedAt: string;
 }
 
-function imagesKey(threadId: string): string {
+export type BuilderImagesStorageScope = ChatPersonalStorageScope & {
+  threadId: string | null | undefined;
+};
+
+function legacyImagesKey(threadId: string): string {
   return `${BUILDER_IMAGES_STORAGE_KEY}_${threadId}`;
 }
 
-export async function loadBuilderImages(threadId: string | null | undefined): Promise<BuilderImage[]> {
-  if (!threadId) return [];
+function imagesKey(scope: BuilderImagesStorageScope): string | null {
+  return chatPersonalThreadStorageKey('builder_images', scope, scope.threadId);
+}
+
+export async function loadBuilderImages(scope: BuilderImagesStorageScope): Promise<BuilderImage[]> {
+  const key = imagesKey(scope);
+  if (!key || !scope.threadId) return [];
   try {
-    const raw = await storage.getItem(imagesKey(threadId));
+    // URLs and alt text are user-authored scratch data. Never import the old
+    // thread-only envelope on a shared-browser/shared-Circle login.
+    await storage.removeItem(legacyImagesKey(scope.threadId));
+    const raw = await storage.getItem(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -63,12 +79,14 @@ export async function loadBuilderImages(threadId: string | null | undefined): Pr
 }
 
 export async function addBuilderImage(
-  threadId: string,
+  scope: BuilderImagesStorageScope,
   input: { url: string; role?: ImageRole; alt?: string },
 ): Promise<BuilderImage[]> {
+  const key = imagesKey(scope);
+  if (!key) return [];
   const url = input.url.trim();
-  if (!url) return loadBuilderImages(threadId);
-  const existing = await loadBuilderImages(threadId);
+  if (!url) return loadBuilderImages(scope);
+  const existing = await loadBuilderImages(scope);
   const dedup = existing.find(e => e.url === url);
   if (dedup) return existing;
   const next: BuilderImage[] = [
@@ -81,28 +99,32 @@ export async function addBuilderImage(
       addedAt: new Date().toISOString(),
     },
   ].slice(-20); // cap at 20 per thread to avoid prompt bloat
-  try { await storage.setItem(imagesKey(threadId), JSON.stringify(next)); } catch {}
+  try { await storage.setItem(key, JSON.stringify(next)); } catch {}
   return next;
 }
 
 export async function removeBuilderImage(
-  threadId: string,
+  scope: BuilderImagesStorageScope,
   id: string,
 ): Promise<BuilderImage[]> {
-  const existing = await loadBuilderImages(threadId);
+  const key = imagesKey(scope);
+  if (!key) return [];
+  const existing = await loadBuilderImages(scope);
   const next = existing.filter(i => i.id !== id);
-  try { await storage.setItem(imagesKey(threadId), JSON.stringify(next)); } catch {}
+  try { await storage.setItem(key, JSON.stringify(next)); } catch {}
   return next;
 }
 
 export async function updateBuilderImage(
-  threadId: string,
+  scope: BuilderImagesStorageScope,
   id: string,
   patch: Partial<Pick<BuilderImage, 'role' | 'alt'>>,
 ): Promise<BuilderImage[]> {
-  const existing = await loadBuilderImages(threadId);
+  const key = imagesKey(scope);
+  if (!key) return [];
+  const existing = await loadBuilderImages(scope);
   const next = existing.map(i => i.id === id ? { ...i, ...patch } : i);
-  try { await storage.setItem(imagesKey(threadId), JSON.stringify(next)); } catch {}
+  try { await storage.setItem(key, JSON.stringify(next)); } catch {}
   return next;
 }
 

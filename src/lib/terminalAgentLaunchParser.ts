@@ -2,6 +2,7 @@ export type TerminalAgentProvider = 'claude-code' | 'codex' | 'gemini' | 'cursor
 
 export type TerminalAgentLaunchResult = {
   ok: boolean;
+  transportAccepted: boolean | null;
   launchId?: string;
   sessions: unknown[];
   launched: number;

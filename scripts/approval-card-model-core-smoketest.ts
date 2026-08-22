@@ -118,15 +118,15 @@ function main() {
     '3.9 credential fill tool → suppressed',
   );
   assertEq(shouldOfferRememberAutoApprove('password_entry', 'browser.type'), false, '3.10 password-ish category → suppressed');
-  // Benign categories/tools keep the checkbox.
+  // Only positively identified non-interrupting effects keep the checkbox.
   assertEq(shouldOfferRememberAutoApprove('memory_read', 'memory.search'), true, '3.11 memory_read/memory.search → offered');
-  assertEq(shouldOfferRememberAutoApprove('memory_write', 'save_memory'), true, '3.12 memory_write/save_memory → offered');
-  assertEq(shouldOfferRememberAutoApprove('browser_click', 'browser.click'), true, '3.13 browser_click → offered');
-  assertEq(shouldOfferRememberAutoApprove('desktop_action', 'desktop.focus_app'), true, '3.14 desktop focus → offered');
+  assertEq(shouldOfferRememberAutoApprove('memory_write', 'save_memory'), false, '3.12 persistent memory write → exact only');
+  assertEq(shouldOfferRememberAutoApprove('browser_click', 'browser.click'), false, '3.13 ambiguous browser click → exact only');
+  assertEq(shouldOfferRememberAutoApprove('desktop_action', 'desktop.focus_app'), false, '3.14 broad desktop category cannot mint a standing grant');
   // Hostile input suppresses rather than throwing (fail-closed).
-  assertEq(shouldOfferRememberAutoApprove(null, null), true, '3.15 null/null → offered (no floor signal, caller already had a category)');
+  assertEq(shouldOfferRememberAutoApprove(null, null), false, '3.15 null/null → suppressed');
   assertEq(shouldOfferRememberAutoApprove(undefined, 'desktop.delete'), false, '3.16 undefined category, floor tool → suppressed');
-  assertEq(shouldOfferRememberAutoApprove(42 as unknown, {} as unknown), true, '3.17 non-string inputs → no throw');
+  assertEq(shouldOfferRememberAutoApprove(42 as unknown, {} as unknown), false, '3.17 non-string inputs → suppressed without throwing');
   assertEq(shouldOfferRememberAutoApprove('DELETE_ALL', 'x'), false, '3.18 case-insensitive floor match → suppressed');
 
   // ── Group 4: RISK_TIER_CHIP_COLORS completeness ────────────────────────────
@@ -157,13 +157,21 @@ function main() {
     risk?: string;
     noPreview?: boolean;
     externalSideEffect?: boolean;
+    runId?: string | null;
+    requestedBy?: string | null;
   } = {}): Record<string, unknown> => {
     const payload: Record<string, unknown> = {};
-    if (!opts.noTool) payload.tool = opts.tool ?? 'desktop.write_file';
+    if (!opts.noTool) payload.tool = opts.tool ?? 'browser.fill_field';
     if (!opts.noKey) payload.toolApprovalKey = opts.key ?? 'key-1';
     if (!opts.noPreview) payload.approvalPreview = { risk: opts.risk ?? 'write' };
     if (opts.externalSideEffect) payload.externalSideEffect = true;
-    return { approval_kind: opts.kind ?? 'tool_use', title: 't', payload };
+    return {
+      approval_kind: opts.kind ?? 'tool_use',
+      title: 't',
+      run_id: opts.runId === undefined ? '11111111-1111-4111-8111-111111111111' : opts.runId,
+      requested_by: opts.requestedBy === undefined ? '22222222-2222-4222-8222-222222222222' : opts.requestedBy,
+      payload,
+    };
   };
   // Coverage helper: every index in [0, n) appears in exactly one entry.
   const coveredIndices = (plan: RunApprovalCardPlanEntry[]): number[] =>
@@ -180,7 +188,7 @@ function main() {
   assert(p1[0].kind === 'batch', '5.1b entry is a batch');
   if (p1[0].kind === 'batch') {
     assertEq(JSON.stringify(p1[0].indices), '[0,1,2]', '5.1c batch covers all three rows');
-    assertEq(p1[0].tool, 'desktop.write_file', '5.1d batch carries the shared tool');
+    assertEq(p1[0].tool, 'browser.fill_field', '5.1d batch carries the shared tool');
     assertEq(p1[0].combinedRisk, 'medium', '5.1e write tier → medium bucket');
     assertEq(p1[0].tier, 'reversible', '5.1f write batch chip tier reversible');
   }
@@ -201,6 +209,29 @@ function main() {
     assertEq(JSON.stringify(p2[1].indices), '[2,3]', '5.2f write batch covers writes only');
     assertEq(p2[1].combinedRisk, 'medium', '5.2g write batch is medium bucket');
   }
+
+  // 5.2g matching tool/risk still cannot combine different durable origins.
+  assert(
+    allSingles(planRunApprovalBatchCards([
+      mkRow(),
+      mkRow({ runId: '33333333-3333-4333-8333-333333333333' }),
+    ])),
+    '5.2g different source runs stay separate',
+  );
+  assert(
+    allSingles(planRunApprovalBatchCards([
+      mkRow(),
+      mkRow({ requestedBy: '44444444-4444-4444-8444-444444444444' }),
+    ])),
+    '5.2h different requesters stay separate',
+  );
+  assert(
+    allSingles(planRunApprovalBatchCards([
+      mkRow({ runId: null }),
+      mkRow({ runId: null }),
+    ])),
+    '5.2i missing source-run identity fails closed to solo cards',
+  );
 
   // 5.3 destructive preview → always solo (critical never batches).
   const p3 = planRunApprovalBatchCards([
@@ -262,15 +293,15 @@ function main() {
 
   // 5.8 no cross-tool merge: different tools never share a batch.
   const p8 = planRunApprovalBatchCards([
-    mkRow({ tool: 'tool.a' }),
-    mkRow({ tool: 'tool.b' }),
+    mkRow({ tool: 'browser.fill_field' }),
+    mkRow({ tool: 'browser.set_toggle' }),
   ]);
   assertEq(p8.length, 2, '5.8a two tools → two entries');
   assert(allSingles(p8), '5.8b singles, never a cross-tool batch');
   const p8b = planRunApprovalBatchCards([
-    mkRow({ tool: 'tool.a' }),
-    mkRow({ tool: 'tool.a' }),
-    mkRow({ tool: 'tool.b' }),
+    mkRow({ tool: 'browser.fill_field' }),
+    mkRow({ tool: 'browser.fill_field' }),
+    mkRow({ tool: 'browser.set_toggle' }),
   ]);
   assertEq(
     JSON.stringify(p8b.map((e) => e.kind)),
@@ -320,9 +351,9 @@ function main() {
 
   // 5.13 ordering + full coverage on an interleaved queue.
   const p13 = planRunApprovalBatchCards([
-    mkRow({ tool: 'tool.a' }),                 // 0 ┐ batch (medium, tool.a)
+    mkRow({ tool: 'browser.fill_field' }),     // 0 ┐ batch (medium, exact reversible tool)
     mkRow({ risk: 'destructive' }),            // 1   solo
-    mkRow({ tool: 'tool.a' }),                 // 2 ┘
+    mkRow({ tool: 'browser.fill_field' }),     // 2 ┘
     mkRow({ tool: 'gdrive.list', risk: 'read' }), // 3   single (lone read)
   ]);
   assertEq(
@@ -340,11 +371,11 @@ function main() {
     '5.14 deterministic plan',
   );
 
-  // 5.15 same tool across two batchable kinds still batches (partition key is
-  // the tool, per spec — the kind pill just shows the first row's kind).
+  // 5.15 same exact reversible tool across two generic container kinds still
+  // batches (partition key is the tool + durable origin).
   const p15 = planRunApprovalBatchCards([
     mkRow({ kind: 'tool_use' }),
-    mkRow({ kind: 'file_write' }),
+    mkRow({ kind: 'browser_action' }),
   ]);
   assertEq(p15.length, 1, '5.15a same-tool cross-kind pair → one entry');
   assert(p15[0].kind === 'batch', '5.15b entry is a batch');

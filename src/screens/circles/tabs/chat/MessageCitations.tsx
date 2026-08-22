@@ -15,7 +15,7 @@ interface Props {
   accentColor?: string;
 }
 
-export default function MessageCitations({ userId, messageTimestamp, nextMessageTimestamp, accentColor = '#22d3ee' }: Props) {
+export default function MessageCitations({ userId, messageTimestamp, nextMessageTimestamp, accentColor = '#6366f1' }: Props) {
   const [citations, setCitations] = useState<MemoryCitation[] | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [decayed, setDecayed] = useState<Set<string>>(new Set());

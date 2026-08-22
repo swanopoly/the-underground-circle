@@ -71,8 +71,10 @@ function main() {
 
   const selected = resolveChatAgentTarget(targets, cursor!.id);
   assert(selected.provider === 'cursor', 'selected Cursor target resolves by id');
-  const fallback = resolveChatAgentTarget(targets, 'missing');
-  assert(fallback.id === DEFAULT_CHAT_AGENT_TARGET_ID, 'missing selection falls back to OpenSwan');
+  const unavailable = resolveChatAgentTarget(targets, 'missing');
+  assert(unavailable.connected === false && unavailable.provider === 'unavailable', 'stale exact selection becomes unavailable');
+  const fallback = resolveChatAgentTarget(targets, null);
+  assert(fallback.id === DEFAULT_CHAT_AGENT_TARGET_ID, 'empty selection uses default OpenSwan');
 
   const setupMessage = buildChatAgentSetupMessage(findProvider(defaults, 'cursor')!);
   assert(setupMessage.includes('node scripts/cursor-bridge.js'), 'Cursor setup message names bridge command');

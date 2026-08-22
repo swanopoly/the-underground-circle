@@ -1,4 +1,5 @@
-import { supabase } from './supabase';
+import { safeGetUserForAccessToken } from './authSession';
+import { getSupabaseClientForAccessToken, supabase } from './supabase';
 import { deleteLocalSecret, readLocalSecret, writeLocalSecret } from './localSecrets';
 import { buildWordPressPostBody } from './wordpressRestPayload';
 import { redactRestError } from './wordpressRestError';
@@ -36,6 +37,36 @@ export interface SiteCredential {
   secretKind?: string;
   updatedAt?: string | null;
   lastUsedAt?: string | null;
+}
+
+export interface SiteCredentialExactReadAuthority {
+  userId: string;
+  circleId: string;
+  accessToken: string;
+  generation: number;
+}
+
+export type SiteCredentialExactReadResult =
+  | { readOk: true; credentials: SiteCredential[] }
+  | { readOk: false; error: string };
+
+function normalizeSiteCredentialExactReadAuthority(
+  circleId: string,
+  authority: SiteCredentialExactReadAuthority | null | undefined,
+): SiteCredentialExactReadAuthority | null {
+  const userId = authority?.userId?.trim();
+  const authorityCircleId = authority?.circleId?.trim();
+  const accessToken = authority?.accessToken?.trim();
+  const generation = Number(authority?.generation);
+  if (
+    !circleId
+    || !userId
+    || authorityCircleId !== circleId
+    || !accessToken
+    || !Number.isSafeInteger(generation)
+    || generation <= 0
+  ) return null;
+  return { userId, circleId: authorityCircleId, accessToken, generation };
 }
 
 interface CredentialRow {
@@ -729,6 +760,128 @@ export async function storeCircleSiteCredential(
 }
 
 // ─── 2. Load Credentials ───────────────────────────────────────────────────
+
+/**
+ * Strict credential summaries for read-side status UI. Unlike the legacy
+ * helpers below, these APIs bind one captured bearer, verify its owner, and
+ * return a tagged error instead of converting a failed read into `[]`.
+ */
+export async function loadCircleSiteCredentialsExact(
+  circleId: string,
+  platform: string | undefined,
+  capturedAuthority: SiteCredentialExactReadAuthority,
+): Promise<SiteCredentialExactReadResult> {
+  const authority = normalizeSiteCredentialExactReadAuthority(circleId, capturedAuthority);
+  if (!authority) return { readOk: false, error: 'invalid_authority' };
+  const { value: verifiedUser } = await safeGetUserForAccessToken(authority.accessToken);
+  if (!verifiedUser || verifiedUser.id !== authority.userId) {
+    return { readOk: false, error: 'authority_mismatch' };
+  }
+
+  try {
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+    const bearer = `Bearer ${authority.accessToken}`;
+    const normalizedPlatform = platform?.trim().toLowerCase() || '';
+    const vaultResult = await exactClient
+      .rpc('list_circle_site_credentials', {
+        p_circle_id: authority.circleId,
+        p_platform: normalizedPlatform || null,
+      })
+      .setHeader('Authorization', bearer);
+
+    if (!vaultResult.error) {
+      const payload = normalizeRpcPayload(vaultResult.data);
+      if (!Array.isArray(payload)) return { readOk: false, error: 'invalid_vault_response' };
+      const entries = payload.map(normalizeVaultEntry);
+      if (entries.some(entry => (
+        entry.circleId !== authority.circleId
+        || (normalizedPlatform && entry.platform !== normalizedPlatform)
+      ))) return { readOk: false, error: 'mismatched_vault_response' };
+      const credentials = entries
+        .map((entry) => ({
+          id: entry.id,
+          platform: entry.platform,
+          siteUrl: entry.siteUrl,
+          loginUrl: entry.loginUrl,
+          username: entry.username,
+          label: entry.label,
+          isActive: entry.isActive,
+          metadata: entry.metadata,
+          secretKind: entry.secretKind,
+          updatedAt: entry.updatedAt || null,
+          lastUsedAt: entry.lastUsedAt || null,
+        }));
+      return { readOk: true, credentials };
+    }
+
+    if (!isSiteCredentialVaultMissing(vaultResult.error)) {
+      return { readOk: false, error: vaultResult.error.message || 'vault_read_failed' };
+    }
+
+    let legacyQuery = exactClient
+      .from('circle_site_credentials')
+      .select('id, circle_id, platform, site_url, username, label, is_active, metadata')
+      .eq('circle_id', authority.circleId)
+      .eq('is_active', true)
+      .order('created_at', { ascending: false });
+    if (normalizedPlatform) legacyQuery = legacyQuery.eq('platform', normalizedPlatform);
+    const { data, error } = await legacyQuery.setHeader('Authorization', bearer);
+    if (error) return { readOk: false, error: error.message || 'legacy_circle_read_failed' };
+    if (!Array.isArray(data)) return { readOk: false, error: 'invalid_legacy_circle_response' };
+    if (data.some(row => String((row as any)?.circle_id || '') !== authority.circleId)) {
+      return { readOk: false, error: 'mismatched_legacy_circle_response' };
+    }
+    const credentials = data.map((row: CredentialRow) => toSiteCredential(row));
+    return { readOk: true, credentials };
+  } catch (error: any) {
+    return { readOk: false, error: error?.message || 'credential_read_failed' };
+  }
+}
+
+export async function loadSiteCredentialsExact(
+  platform: string | undefined,
+  capturedAuthority: SiteCredentialExactReadAuthority,
+): Promise<SiteCredentialExactReadResult> {
+  const authority = normalizeSiteCredentialExactReadAuthority(capturedAuthority.circleId, capturedAuthority);
+  if (!authority) return { readOk: false, error: 'invalid_authority' };
+  const { value: verifiedUser } = await safeGetUserForAccessToken(authority.accessToken);
+  if (!verifiedUser || verifiedUser.id !== authority.userId) {
+    return { readOk: false, error: 'authority_mismatch' };
+  }
+  // This legacy table is optional after the circle vault migration. A known
+  // missing relation is a verified absence of this fallback source, not a
+  // network/auth success signal for any actual query.
+  if (userSiteCredentialsUnavailable) return { readOk: true, credentials: [] };
+
+  try {
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+    const normalizedPlatform = platform?.trim().toLowerCase() || '';
+    let query = exactClient
+      .from('user_site_credentials')
+      .select('id, user_id, platform, site_url, username, label, is_active, metadata')
+      .eq('user_id', authority.userId)
+      .eq('is_active', true)
+      .order('created_at', { ascending: false });
+    if (normalizedPlatform) query = query.eq('platform', normalizedPlatform);
+    const { data, error } = await query
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+    if (error) {
+      if (isMissingRelationError(error, 'user_site_credentials')) {
+        userSiteCredentialsUnavailable = true;
+        return { readOk: true, credentials: [] };
+      }
+      return { readOk: false, error: error.message || 'user_credential_read_failed' };
+    }
+    if (!Array.isArray(data)) return { readOk: false, error: 'invalid_user_credential_response' };
+    if (data.some(row => String((row as any)?.user_id || '') !== authority.userId)) {
+      return { readOk: false, error: 'mismatched_user_credential_response' };
+    }
+    const credentials = data.map((row: CredentialRow) => toSiteCredential(row));
+    return { readOk: true, credentials };
+  } catch (error: any) {
+    return { readOk: false, error: error?.message || 'credential_read_failed' };
+  }
+}
 
 export async function loadSiteCredentials(
   platform?: string,

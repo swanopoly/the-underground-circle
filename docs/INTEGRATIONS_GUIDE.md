@@ -232,7 +232,13 @@ The `circle_integrations` and `circle_site_credentials` tables originally had `C
 
 If you bypass the registry and insert an unknown provider directly into the DB, nothing will crash, but the UI won't render it (no metadata), and connector lookup will return `undefined`. **Always go through `isValidProvider(id)` before insert.**
 
-Encryption: `circle_integration_secrets.value_encrypted` is encrypted at rest by Supabase. For application-level encryption (defense in depth — protects against compromised DB credentials), wrap secrets through a key in `vault.secrets` before storage. That's a separate (planned) hardening step.
+Encryption: circle integration secrets are stored in the private
+`integration_secrets_private.circle_integration_secret_ciphertexts` table as a
+versioned pgcrypto envelope. Browser callers receive only bounded metadata and
+manager RPC results; plaintext and ciphertext are not directly selectable.
+The envelope currently resolves `app_encryption_key()`, so any future Vault-key
+rotation must inventory, rewrap, and verify this domain before replacing the
+old key. New work should move it onto a dedicated versioned domain key.
 
 ---
 

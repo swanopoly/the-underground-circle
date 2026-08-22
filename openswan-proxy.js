@@ -13,6 +13,12 @@ const os   = require('os');
 const WebSocket = require('./node_modules/ws');
 const WebSocketServer = WebSocket.Server;
 const { URL } = require('url');
+const {
+  OPENSWAN_TOOL_UNAVAILABLE_MAX_BYTES,
+  isAllowedBridgeHostHeader,
+  isExactOpenSwanToolUnavailableResponse,
+  isLoopbackRequest,
+} = require('./scripts/desktop-bridge-security');
 
 const GATEWAY_HOST = 'localhost';
 const GATEWAY_PORT = 18789;
@@ -77,6 +83,32 @@ function corsHeadersFor(origin) {
   };
 }
 
+// ─── Request source gate ───────────────────────────────────────────────────
+//
+// The Origin allowlist alone is NOT sufficient, because it only inspects a
+// header the attacker can simply omit:
+//
+//   * A same-origin GET carries no Origin at all. A page on evil.com whose DNS
+//     re-resolves to 127.0.0.1 (classic DNS rebinding) therefore reaches this
+//     proxy as a same-origin request, passes the `origin &&` gate by having no
+//     Origin, and gets the real gateway token attached. Verified reachable
+//     2026-08-06: `Host: evil.com:18790` with no Origin returned HTTP 200.
+//   * Any non-browser client sends no Origin either.
+//
+// Validating the Host header is what actually stops rebinding: the browser
+// sends the name the page was loaded from, and only a genuine
+// localhost/127.0.0.1/[::1] address can name this listener. This mirrors
+// `isBridgeRequestSourceAllowed`, which the four bridges already use.
+function checkProxyRequestSource(req) {
+  if (!isLoopbackRequest(req)) return { ok: false, code: 'proxy_non_loopback_source' };
+  if (!isAllowedBridgeHostHeader(req?.headers?.host, PROXY_PORT)) {
+    return { ok: false, code: 'proxy_host_blocked' };
+  }
+  const origin = req?.headers?.origin || '';
+  if (origin && !isAllowedOrigin(origin)) return { ok: false, code: 'proxy_origin_blocked' };
+  return { ok: true };
+}
+
 // ─── HTTP server ───────────────────────────────────────────────────────────────
 
 const server = http.createServer((req, res) => {
@@ -85,7 +117,7 @@ const server = http.createServer((req, res) => {
 
   // Preflight
   if (req.method === 'OPTIONS') {
-    if (origin && !isAllowedOrigin(origin)) {
+    if (!checkProxyRequestSource(req).ok) {
       res.writeHead(403);
       res.end();
       return;
@@ -95,12 +127,14 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Refuse cross-origin browser requests from non-allow-listed sites BEFORE
-  // the trusted gateway token is attached — this is the CSRF/SSRF gate.
-  if (origin && !isAllowedOrigin(origin)) {
-    console.warn(`[proxy] HTTP rejected disallowed origin: ${origin}`);
+  // Refuse anything that is not a genuine loopback request naming this
+  // listener BEFORE the trusted gateway token is attached — this is the
+  // CSRF/SSRF/DNS-rebinding gate.
+  const sourceCheck = checkProxyRequestSource(req);
+  if (!sourceCheck.ok) {
+    console.warn(`[proxy] HTTP rejected (${sourceCheck.code}) origin=${origin || '(none)'} host=${req.headers.host || '(none)'}`);
     res.writeHead(403, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'origin_not_allowed' }));
+    res.end(JSON.stringify({ error: sourceCheck.code }));
     return;
   }
 
@@ -125,6 +159,71 @@ const server = http.createServer((req, res) => {
 
   const proxyReq = http.request(options, (proxyRes) => {
     const headers = { ...proxyRes.headers, ...cors };
+
+    // OpenSwan documents an exact JSON 404 for a tool hidden by the active
+    // gateway policy. In a browser, expected misses for the known cron and
+    // agent-list probes are rendered as failed resources even though the
+    // shared /tools/invoke route is healthy. Buffer only a small candidate
+    // response and translate only those exact probe misses; mutation-capable
+    // tools plus route-level/non-JSON/oversized 404s keep their original status
+    // so direct HTTP-status callers and connection diagnostics fail closed.
+    const shouldInspectToolUnavailable = req.url === '/tools/invoke'
+      && proxyRes.statusCode === 404
+      && /^application\/json(?:\s*;|$)/i.test(String(proxyRes.headers['content-type'] || '').trim());
+    if (shouldInspectToolUnavailable) {
+      let buffered = [];
+      let bufferedBytes = 0;
+      let forwardingOriginal = false;
+
+      const beginOriginalForward = () => {
+        if (forwardingOriginal) return;
+        forwardingOriginal = true;
+        res.writeHead(proxyRes.statusCode || 404, headers);
+        for (const chunk of buffered) res.write(chunk);
+        buffered = [];
+      };
+
+      proxyRes.on('data', (rawChunk) => {
+        const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+        if (forwardingOriginal) {
+          res.write(chunk);
+          return;
+        }
+        if (bufferedBytes + chunk.length > OPENSWAN_TOOL_UNAVAILABLE_MAX_BYTES) {
+          beginOriginalForward();
+          res.write(chunk);
+          return;
+        }
+        buffered.push(chunk);
+        bufferedBytes += chunk.length;
+      });
+      proxyRes.on('end', () => {
+        if (forwardingOriginal) {
+          res.end();
+          return;
+        }
+        const body = Buffer.concat(buffered, bufferedBytes);
+        const applicationLevelUnsupported = isExactOpenSwanToolUnavailableResponse({
+          requestMethod: req.method,
+          requestUrl: req.url,
+          statusCode: proxyRes.statusCode,
+          contentType: proxyRes.headers['content-type'],
+          body,
+        });
+        res.writeHead(applicationLevelUnsupported ? 200 : (proxyRes.statusCode || 404), headers);
+        res.end(body);
+      });
+      proxyRes.on('error', (err) => {
+        console.error('[proxy] HTTP response error:', err.message);
+        if (res.headersSent) {
+          res.destroy(err);
+          return;
+        }
+        res.writeHead(502, { ...cors, 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Gateway response failed' }));
+      });
+      return;
+    }
     res.writeHead(proxyRes.statusCode || 200, headers);
     proxyRes.pipe(res, { end: true });
   });
@@ -147,10 +246,13 @@ const wss = new WebSocketServer({
   // Reject WS upgrades from non-allow-listed browser origins before the gateway
   // token is injected. Native clients send no Origin and pass through.
   verifyClient: (info, done) => {
-    const origin = info.req.headers.origin || '';
-    if (origin && !isAllowedOrigin(origin)) {
-      console.warn(`[proxy] WS rejected disallowed origin: ${origin}`);
-      return done(false, 403, 'origin_not_allowed');
+    // Same gate as the HTTP path. A WebSocket upgrade from a browser always
+    // carries Origin, but a non-browser client (or a rebound page reaching a
+    // raw socket) does not — Host validation is what closes that.
+    const sourceCheck = checkProxyRequestSource(info.req);
+    if (!sourceCheck.ok) {
+      console.warn(`[proxy] WS rejected (${sourceCheck.code}) origin=${info.req.headers.origin || '(none)'} host=${info.req.headers.host || '(none)'}`);
+      return done(false, 403, sourceCheck.code);
     }
     return done(true);
   },
@@ -225,8 +327,24 @@ server.on('error', (err) => {
 process.on('uncaughtException', (err) => console.error('[proxy] Uncaught:', err.message));
 process.on('unhandledRejection', (r) => console.error('[proxy] Unhandled rejection:', r));
 
-server.listen(PROXY_PORT, () => {
-  console.log(`🦢 OpenSwan CORS+WS Proxy → http://localhost:${PROXY_PORT}`);
+// SECURITY: bind LOOPBACK ONLY.
+//
+// `server.listen(PORT)` with no host binds 0.0.0.0/:: — every network
+// interface. This proxy injects the real gateway bearer token into every
+// forwarded request, and the Origin allowlist is its only gate. A browser
+// always sends Origin (so a malicious page is blocked), but any NON-browser
+// client sends none and was therefore forwarded WITH FULL GATEWAY
+// CREDENTIALS. Verified exploitable 2026-08-06: an unauthenticated POST to
+// http://<this-machine-LAN-IP>:18790/tools/invoke from the local network
+// returned live session data. Anyone on the same Wi-Fi (coffee shop, office,
+// hotel) had credentialed access to the coding/file tool surface.
+//
+// The four bridges already hardcode 127.0.0.1; this was the one listener that
+// did not. The app connects via http://localhost:18790, so loopback binding
+// is behavior-identical for every legitimate caller.
+const PROXY_BIND_HOST = '127.0.0.1';
+server.listen(PROXY_PORT, PROXY_BIND_HOST, () => {
+  console.log(`🦢 OpenSwan CORS+WS Proxy → http://localhost:${PROXY_PORT} (loopback only)`);
   console.log(`   Forwarding to ws://${GATEWAY_HOST}:${GATEWAY_PORT}`);
   console.log(`   Use http://localhost:${PROXY_PORT} as your endpoint in the app`);
 });

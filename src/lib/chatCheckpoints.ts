@@ -26,10 +26,32 @@
 import { supabase } from './supabase';
 import { safeGetUserId } from './authSession';
 
+const PERSISTED_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 // automationService + agentMemory are lazy-imported inside each handler
 // so the core `chatCheckpoints` module can be smoke-tested in Node
 // without react-native getting pulled into the dependency graph.
 type CreateAutomationInput = any;
+
+/**
+ * supabase-js RESOLVES with `{ error }` — it does not throw. So a bare
+ * `await supabase.from(...).update(...)` inside a restore handler cannot
+ * fail: RLS denial, constraint violation and missing-column all look
+ * exactly like success. `restoreCheckpoint` would then stamp `restored_at`,
+ * which it treats as terminal ("checkpoint already restored"), spending the
+ * user's ONE-SHOT undo on a restore that never happened.
+ *
+ * The `automation.*` handlers were already correct because automationService
+ * hands back a Result they check. Every direct-supabase write in a handler
+ * must go through this so it fails the same way.
+ */
+async function mustWrite<T extends { error: any }>(op: PromiseLike<T>, what: string): Promise<T> {
+  const res = await op;
+  if (res.error) {
+    throw new Error(`${what} failed: ${res.error.message || String(res.error)}`);
+  }
+  return res;
+}
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -46,6 +68,7 @@ export type CheckpointToolKind =
 export interface ChatCheckpointRow {
   id: string;
   circle_id: string;
+  chat_thread_id: string | null;
   session_key: string | null;
   plan_id: string | null;
   tool_kind: CheckpointToolKind;
@@ -65,6 +88,8 @@ export interface ChatCheckpointRow {
 
 export interface WithCheckpointOptions<TResult, TBefore, TAfter> {
   circleId: string;
+  /** Canonical Chat thread authority. Omit only for genuinely Circle-wide work. */
+  threadId?: string | null;
   toolKind: CheckpointToolKind;
   /** FK-ish target identifiers — help the UI group by target row. */
   targetKind?: string;
@@ -96,6 +121,10 @@ export interface WithCheckpointResult<TResult> {
 export async function withCheckpoint<TResult, TBefore = unknown, TAfter = unknown>(
   opts: WithCheckpointOptions<TResult, TBefore, TAfter>,
 ): Promise<WithCheckpointResult<TResult>> {
+  const chatThreadId = opts.threadId == null ? null : String(opts.threadId).trim();
+  if (chatThreadId && !PERSISTED_UUID_RE.test(chatThreadId)) {
+    throw new Error('A persisted Chat thread is required for a thread-scoped checkpoint.');
+  }
   const before = await opts.readBefore().catch(() => null);
 
   let result: TResult;
@@ -120,6 +149,7 @@ export async function withCheckpoint<TResult, TBefore = unknown, TAfter = unknow
       .from('chat_checkpoints')
       .insert({
         circle_id: opts.circleId,
+        chat_thread_id: chatThreadId,
         session_key: opts.sessionKey ?? null,
         plan_id: opts.planId ?? null,
         tool_kind: opts.toolKind,
@@ -191,10 +221,21 @@ export async function restoreCheckpoint(id: string): Promise<RestoreOutcome> {
     await handler.apply(row);
 
     const userId = await safeGetUserId().catch(() => null);
-    await supabase
+    // The inverse is already applied at this point, so a failed stamp is NOT
+    // a failed restore — report the truth rather than either extreme. Calling
+    // it ok:true silently would let a retry re-apply (memory_bank archives and
+    // bumps version again); calling it ok:false would claim the user's data
+    // wasn't restored when it was.
+    const { error: stampError } = await supabase
       .from('chat_checkpoints')
       .update({ restored_at: new Date().toISOString(), restored_by: userId, restore_error: null })
       .eq('id', id);
+    if (stampError) {
+      return {
+        ok: true,
+        error: `restored, but recording it failed (${stampError.message}) — do not restore again`,
+      };
+    }
     return { ok: true };
   } catch (err: any) {
     const msg = err?.message || 'restore failed';
@@ -210,7 +251,7 @@ export async function restoreCheckpoint(id: string): Promise<RestoreOutcome> {
 
 export async function listCheckpoints(
   circleId: string,
-  opts?: { planId?: string; limit?: number },
+  opts?: { planId?: string; threadId?: string | null; limit?: number },
 ): Promise<ChatCheckpointRow[]> {
   const limit = Math.min(opts?.limit ?? 50, 200);
   let query = supabase
@@ -220,6 +261,11 @@ export async function listCheckpoints(
     .order('created_at', { ascending: false })
     .limit(limit);
   if (opts?.planId) query = query.eq('plan_id', opts.planId);
+  if (opts?.threadId != null) {
+    const threadId = String(opts.threadId).trim();
+    if (!PERSISTED_UUID_RE.test(threadId)) return [];
+    query = query.eq('chat_thread_id', threadId);
+  }
   const { data, error } = await query;
   if (error) return [];
   return (data || []) as ChatCheckpointRow[];
@@ -255,30 +301,39 @@ export const CHECKPOINT_RESTORE_HANDLERS: Record<CheckpointToolKind, RestoreHand
       if (!hasBefore && hasAfter) {
         // Create → hard-delete since we synthesised this row.
         if (row.target_id) {
-          await supabase.from('memory_entries').delete().eq('id', row.target_id);
+          await mustWrite(
+            supabase.from('memory_entries').delete().eq('id', row.target_id),
+            'memory_entries delete',
+          );
         }
         return;
       }
       if (hasBefore && hasAfter) {
         // Update → write before back. Whitelist of columns to avoid
         // accidentally re-writing system-managed fields.
-        await supabase
-          .from('memory_entries')
-          .update({
-            title: before.title,
-            content: before.content,
-            memory_kind: before.memory_kind,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', before.id);
+        await mustWrite(
+          supabase
+            .from('memory_entries')
+            .update({
+              title: before.title,
+              content: before.content,
+              memory_kind: before.memory_kind,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', before.id),
+          'memory_entries update',
+        );
         return;
       }
       if (hasBefore && !hasAfter) {
         // Delete → undelete by setting is_active true.
-        await supabase
-          .from('memory_entries')
-          .update({ is_active: true, updated_at: new Date().toISOString() })
-          .eq('id', before.id);
+        await mustWrite(
+          supabase
+            .from('memory_entries')
+            .update({ is_active: true, updated_at: new Date().toISOString() })
+            .eq('id', before.id),
+          'memory_entries undelete',
+        );
         return;
       }
       throw new Error('memory.write checkpoint has neither before nor after');
@@ -328,33 +383,42 @@ export const CHECKPOINT_RESTORE_HANDLERS: Record<CheckpointToolKind, RestoreHand
         .maybeSingle();
       if (existing) {
         // Archive the row we're about to overwrite into history.
-        await supabase.from('circle_memory_history').insert({
-          circle_id: circleId,
-          doc_kind: docKind,
-          content: (existing as any).content,
-          edited_by: (existing as any).last_edited_by,
-          edited_at: (existing as any).last_edited_at,
-          version: (existing as any).version,
-        });
-        await supabase
-          .from('circle_memory')
-          .update({
+        await mustWrite(
+          supabase.from('circle_memory_history').insert({
+            circle_id: circleId,
+            doc_kind: docKind,
+            content: (existing as any).content,
+            edited_by: (existing as any).last_edited_by,
+            edited_at: (existing as any).last_edited_at,
+            version: (existing as any).version,
+          }),
+          'circle_memory_history archive',
+        );
+        await mustWrite(
+          supabase
+            .from('circle_memory')
+            .update({
+              content: restoredContent,
+              last_edited_by: userId,
+              last_edited_at: new Date().toISOString(),
+              version: ((existing as any).version || 0) + 1,
+            })
+            .eq('circle_id', circleId)
+            .eq('doc_kind', docKind),
+          'circle_memory update',
+        );
+      } else {
+        await mustWrite(
+          supabase.from('circle_memory').insert({
+            circle_id: circleId,
+            doc_kind: docKind,
             content: restoredContent,
             last_edited_by: userId,
             last_edited_at: new Date().toISOString(),
-            version: ((existing as any).version || 0) + 1,
-          })
-          .eq('circle_id', circleId)
-          .eq('doc_kind', docKind);
-      } else {
-        await supabase.from('circle_memory').insert({
-          circle_id: circleId,
-          doc_kind: docKind,
-          content: restoredContent,
-          last_edited_by: userId,
-          last_edited_at: new Date().toISOString(),
-          version: 1,
-        });
+            version: 1,
+          }),
+          'circle_memory insert',
+        );
       }
     },
   },
@@ -377,17 +441,23 @@ export const CHECKPOINT_RESTORE_HANDLERS: Record<CheckpointToolKind, RestoreHand
       const hasAfter = after && Object.keys(after).length > 0;
       if (!hasBefore && hasAfter) {
         if (row.target_id) {
-          await supabase.from('circle_skills').delete().eq('id', row.target_id);
+          await mustWrite(
+            supabase.from('circle_skills').delete().eq('id', row.target_id),
+            'circle_skills delete',
+          );
         }
         return;
       }
       if (hasBefore) {
         // Update → write before back. Only whitelisted columns.
         const { name, content, description, meta } = before;
-        await supabase
-          .from('circle_skills')
-          .update({ name, content, description, meta, updated_at: new Date().toISOString() })
-          .eq('id', before.id);
+        await mustWrite(
+          supabase
+            .from('circle_skills')
+            .update({ name, content, description, meta, updated_at: new Date().toISOString() })
+            .eq('id', before.id),
+          'circle_skills update',
+        );
         return;
       }
       throw new Error('skill.write checkpoint has neither before nor after');

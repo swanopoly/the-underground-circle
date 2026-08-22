@@ -10,9 +10,14 @@
 
 import { OfficeAgent, AgentStatus } from './officeAgents';
 import { ProviderType } from './connectionManager';
-import { publishAgentToCircle, PROVIDER_DISPLAY } from './circleOffice';
-import { supabase } from './supabase';
+import {
+  publishAgentToCircle,
+  PROVIDER_DISPLAY,
+  type CircleOfficeAuthScope,
+} from './circleOffice';
+import { getSupabaseClientForAccessToken, supabase } from './supabase';
 import { saveAgentSessionsToMemory, type AgentSessionForMemory } from './agentSessionMemory';
+import { isBenignAuthAbort } from './authSession';
 
 import { fetchBridgeAuthenticated } from './bridgeAuth';
 import { getBridgeUrl } from './bridgeEnvironment';
@@ -169,8 +174,12 @@ export const CURSOR_AGENT_NAME = 'Cursor';
 export async function publishCursorAgent(
   circleId: string,
   sessionCount: number,
+  capturedScope?: CircleOfficeAuthScope,
 ): Promise<{ agentId?: string; error?: string }> {
   const display = PROVIDER_DISPLAY['cursor'] || { color: '#8b5cf6', icon: '🎯' };
+  const db = capturedScope
+    ? getSupabaseClientForAccessToken(capturedScope.accessToken)
+    : supabase;
   const result = await publishAgentToCircle({
     circleId,
     provider: 'cursor',
@@ -179,15 +188,17 @@ export async function publishCursorAgent(
     toolIcon: display.icon || '🎯',
     gatewayUrl: getCursorBridgeUrl() || 'http://localhost:7781',
     isPublic: false,
-  });
+  }, capturedScope);
 
   if (result.error) {
-    console.error('[cursorDetector] Failed to publish agent:', result.error);
+    if (!isBenignAuthAbort(result.error)) {
+      console.error('[cursorDetector] Failed to publish agent:', result.error);
+    }
     return { error: result.error };
   }
 
   if (result.agent) {
-    await supabase
+    let update = db
       .from('circle_office_agents')
       .update({
         status: sessionCount > 0 ? 'building' : 'idle',
@@ -198,6 +209,10 @@ export async function publishCursorAgent(
         updated_at: new Date().toISOString(),
       })
       .eq('id', result.agent.id);
+    if (capturedScope) {
+      update = update.setHeader('Authorization', `Bearer ${capturedScope.accessToken}`);
+    }
+    await update;
   }
 
   return { agentId: result.agent?.id };
@@ -206,10 +221,15 @@ export async function publishCursorAgent(
 export async function updateCursorAgentStatus(
   circleId: string,
   sessions: CursorSession[],
+  capturedScope?: CircleOfficeAuthScope,
 ): Promise<void> {
   try {
-    const { data: auth } = await supabase.auth.getUser();
-    if (!auth.user) return;
+    const db = capturedScope
+      ? getSupabaseClientForAccessToken(capturedScope.accessToken)
+      : supabase;
+    const ownerId = capturedScope?.userId
+      || (await supabase.auth.getUser()).data.user?.id;
+    if (!ownerId) return;
 
     const activeSessions = sessions.filter(s => inferStatus(s) === 'active');
     const status = activeSessions.length > 0 ? 'building' : 'idle';
@@ -220,7 +240,7 @@ export async function updateCursorAgentStatus(
         : 'Bridge connected — no active sessions';
 
     // Token syncing is centralized in OfficeTab's 30s sync loop via syncAgentTokenSnapshot()
-    await supabase
+    let update = db
       .from('circle_office_agents')
       .update({
         status,
@@ -229,8 +249,12 @@ export async function updateCursorAgentStatus(
         updated_at: new Date().toISOString(),
       })
       .eq('circle_id', circleId)
-      .eq('owner_id', auth.user.id)
+      .eq('owner_id', ownerId)
       .eq('name', CURSOR_AGENT_NAME);
+    if (capturedScope) {
+      update = update.setHeader('Authorization', `Bearer ${capturedScope.accessToken}`);
+    }
+    await update;
   } catch {}
 }
 
@@ -246,6 +270,7 @@ export interface CursorComposerLaunchRequest {
 
 export interface CursorComposerLaunchResult {
   ok: boolean;
+  transportAccepted: boolean | null;
   launchId?: string;
   sessions: CursorSession[];
   launched: number;
@@ -259,6 +284,7 @@ export async function launchCursorComposerSessions(input: CursorComposerLaunchRe
   if (!bridgeUrl) {
     return {
       ok: false,
+      transportAccepted: false,
       sessions: [],
       launched: 0,
       failed: [{ error: 'Cursor bridge URL is unavailable in this runtime.' }],
@@ -281,6 +307,9 @@ export async function launchCursorComposerSessions(input: CursorComposerLaunchRe
       const error = data?.error || `Cursor bridge launch failed with HTTP ${res.status}`;
       return {
         ok: false,
+        transportAccepted: res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 409
+          ? false
+          : null,
         sessions: [],
         launched: 0,
         failed: [{ error }],
@@ -296,6 +325,11 @@ export async function launchCursorComposerSessions(input: CursorComposerLaunchRe
 
     return {
       ok: Boolean(data?.ok),
+      transportAccepted: data?.ok === true || Number(data?.launched || 0) > 0
+        ? true
+        : data?.ok === false
+          ? false
+          : null,
       launchId: data?.launchId,
       sessions,
       launched: Number(data?.launched || 0),
@@ -309,6 +343,7 @@ export async function launchCursorComposerSessions(input: CursorComposerLaunchRe
       : e?.message || 'Cursor bridge launch failed.';
     return {
       ok: false,
+      transportAccepted: null,
       sessions: [],
       launched: 0,
       failed: [{ error: message }],

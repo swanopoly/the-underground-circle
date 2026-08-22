@@ -1,7 +1,7 @@
 /**
  * Smoke: openswanApprovalBatchCore — batch compatible pending approvals into
- * ONE card (fewer hoops) WITHOUT ever sweeping a floor (pay/delete/login/grant)
- * action under a single yes.
+ * ONE card (fewer hoops) WITHOUT ever sweeping a canonical exact-floor action
+ * under a single yes.
  *
  * Pins the UX contract the approval UI depends on:
  *   - non-floor low/medium items of the SAME risk → one shared card
@@ -54,8 +54,8 @@ function noThrow(fn: () => any, m: string): any {
 }
 
 // Shared fixtures -------------------------------------------------------------
-const readLow = (n: string = 'file') => ({ tool: 'desktop.read_file', risk: 'low', category: n });
-const editMed = (n: string = 'edit') => ({ tool: 'gdocs.append', risk: 'medium', category: n });
+const readLow = (n: string = 'observe') => ({ tool: 'browser.dom_snapshot', risk: 'low', category: n });
+const editMed = (n: string = 'reversible_non_secret') => ({ tool: 'desktop.set_element_value', risk: 'medium', category: n });
 const floorDelete = { tool: 'desktop.delete_file', risk: 'medium', category: 'delete' };
 const floorPay = { tool: 'browser.checkout', risk: 'high', category: 'pay' };
 const floorLogin = { tool: 'browser.fill_credential_field', risk: 'low', category: 'login' };
@@ -233,14 +233,15 @@ function main() {
   assertEq(only({ tool: 't', risk: 'low', category: 'read', floor: 1 }).requiresSeparate, true, '7.flag number');
   assertEq(only({ tool: 't', risk: 'low', category: 'read', floor: [1] }).requiresSeparate, true, '7.flag array');
   // NON-floor falsy flags stay batchable
-  assertEq(only({ tool: 't', risk: 'low', category: 'read', floor: false }).requiresSeparate, false, '7.flag false');
-  assertEq(only({ tool: 't', risk: 'low', category: 'read', floor: 0 }).requiresSeparate, false, '7.flag 0');
-  assertEq(only({ tool: 't', risk: 'low', category: 'read', floor: '' }).requiresSeparate, false, '7.flag empty str');
-  assertEq(only({ tool: 't', risk: 'low', category: 'read', floor: [] }).requiresSeparate, false, '7.flag empty arr');
-  assertEq(only({ tool: 't', risk: 'low', category: 'read', floor: NaN }).requiresSeparate, false, '7.flag NaN');
-  // benign categories that merely resemble words do NOT trip the floor
-  assertEq(only({ tool: 'ui.display', risk: 'low', category: 'display' }).requiresSeparate, false, '7.display not pay');
-  assertEq(only({ tool: 'read', risk: 'low', category: 'file_read' }).requiresSeparate, false, '7.file_read benign');
+  assertEq(only({ tool: 'browser.dom_snapshot', risk: 'low', category: 'observe', floor: false }).requiresSeparate, false, '7.flag false');
+  assertEq(only({ tool: 'browser.dom_snapshot', risk: 'low', category: 'observe', floor: 0 }).requiresSeparate, false, '7.flag 0');
+  assertEq(only({ tool: 'browser.dom_snapshot', risk: 'low', category: 'observe', floor: '' }).requiresSeparate, false, '7.flag empty str');
+  assertEq(only({ tool: 'browser.dom_snapshot', risk: 'low', category: 'observe', floor: [] }).requiresSeparate, false, '7.flag empty arr');
+  assertEq(only({ tool: 'browser.dom_snapshot', risk: 'low', category: 'observe', floor: NaN }).requiresSeparate, false, '7.flag NaN');
+  // Unclassified and private-file signals stay exact; `display` is not a raw
+  // substring false positive for payment, but it is still unknown.
+  assertEq(only({ tool: 'ui.display', risk: 'low', category: 'display' }).requiresSeparate, true, '7.display unknown → exact');
+  assertEq(only({ tool: 'read', risk: 'low', category: 'file_read' }).requiresSeparate, true, '7.file_read private → exact');
 
   // ── Group 8: determinism + first-index ordering ───────────────────────────
   {
@@ -357,9 +358,9 @@ function main() {
   // ── Group 11: mixed realistic queue end-to-end ────────────────────────────
   {
     const queue = [
-      readLow('list_dir'),        // 0 low
-      readLow('read_file'),       // 1 low
-      editMed('append_doc'),      // 2 medium
+      readLow('observe'),         // 0 low
+      readLow('inspection'),      // 1 low
+      editMed('reversible'),      // 2 medium
       floorLogin,                 // 3 floor (login)
       readLow('search'),          // 4 low
       floorPay,                   // 5 floor (pay)

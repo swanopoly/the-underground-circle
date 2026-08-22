@@ -261,8 +261,13 @@ assert.match(
 );
 assert.match(
   agentRuntimeSource,
-  /executionSurfaceGuard: resolveTaskExecutionSurfaceGuard\(inferredProfileKey\)/,
+  /const executionSurfaceGuard = resolveTaskExecutionSurfaceGuard\(inferredProfileKey\)/,
   'AgentRuntime derives the hard ceiling from the selected task profile',
+);
+assert.match(
+  agentRuntimeSource,
+  /const swanContext: SwanBotContext = \{[\s\S]*?executionSurfaceGuard,/,
+  'AgentRuntime threads the derived hard ceiling into SwanBot context',
 );
 assert.match(
   swanbotSource,

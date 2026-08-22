@@ -5,6 +5,7 @@
  */
 
 import { supabase } from "./supabase";
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 export interface ClaudeUsageSummary {
   total_cost: number;
@@ -42,40 +43,57 @@ function toNum(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+function parseUsageSummary(data: unknown): ClaudeUsageSummary {
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row || typeof row !== 'object') return { ...EMPTY_SUMMARY };
+  const record = row as Record<string, unknown>;
+  return {
+    total_cost:           toNum(record.total_cost),
+    total_input:          toNum(record.total_input),
+    total_output:         toNum(record.total_output),
+    total_cache_creation: toNum(record.total_cache_creation),
+    total_cache_read:     toNum(record.total_cache_read),
+    request_count:        toNum(record.request_count),
+    cache_hit_rate:       toNum(record.cache_hit_rate),
+  };
+}
+
+/**
+ * Strict reader for persistent dashboards. Transient auth/network failures
+ * throw so a caller can retain its last known server snapshot instead of
+ * replacing it with a convincing-looking $0 value.
+ */
+export async function getClaudeUsageSummaryStrict(
+  circleId: string | null,
+  days: number = 7,
+  client: SupabaseClient = supabase,
+): Promise<ClaudeUsageSummary> {
+  const { data, error } = await client.rpc("get_claude_usage_summary", {
+    p_circle_id: circleId,
+    p_days: days,
+  });
+  if (error) throw error;
+  if (!data || (Array.isArray(data) && data.length === 0)) {
+    throw new Error('Claude usage summary returned no aggregate row.');
+  }
+  return parseUsageSummary(data);
+}
+
 export async function getClaudeUsageSummary(
   circleId: string | null,
   days: number = 7,
 ): Promise<ClaudeUsageSummary> {
-  const { data, error } = await supabase.rpc("get_claude_usage_summary", {
-    p_circle_id: circleId,
-    p_days: days,
-  });
-  if (error || !data || (Array.isArray(data) && data.length === 0)) {
+  try {
+    return await getClaudeUsageSummaryStrict(circleId, days);
+  } catch {
     return { ...EMPTY_SUMMARY };
   }
-  const row = Array.isArray(data) ? data[0] : data;
-  return {
-    total_cost:           toNum(row.total_cost),
-    total_input:          toNum(row.total_input),
-    total_output:         toNum(row.total_output),
-    total_cache_creation: toNum(row.total_cache_creation),
-    total_cache_read:     toNum(row.total_cache_read),
-    request_count:        toNum(row.request_count),
-    cache_hit_rate:       toNum(row.cache_hit_rate),
-  };
 }
 
-export async function getClaudeUsageByModel(
-  circleId: string | null,
-  days: number = 7,
-): Promise<ClaudeUsageByModel[]> {
-  const { data, error } = await supabase.rpc("get_claude_usage_by_model", {
-    p_circle_id: circleId,
-    p_days: days,
-  });
-  if (error || !data) return [];
-  return (data as any[]).map((r) => ({
-    model:          r.model ?? "unknown",
+function parseUsageByModel(data: unknown): ClaudeUsageByModel[] {
+  if (!Array.isArray(data)) return [];
+  return data.map((r: Record<string, unknown>) => ({
+    model:          typeof r.model === 'string' ? r.model : "unknown",
     request_count:  toNum(r.request_count),
     total_cost:     toNum(r.total_cost),
     cache_read:     toNum(r.cache_read),
@@ -83,6 +101,31 @@ export async function getClaudeUsageByModel(
     input_tokens:   toNum(r.input_tokens),
     output_tokens:  toNum(r.output_tokens),
   }));
+}
+
+export async function getClaudeUsageByModelStrict(
+  circleId: string | null,
+  days: number = 7,
+  client: SupabaseClient = supabase,
+): Promise<ClaudeUsageByModel[]> {
+  const { data, error } = await client.rpc("get_claude_usage_by_model", {
+    p_circle_id: circleId,
+    p_days: days,
+  });
+  if (error) throw error;
+  if (!data) throw new Error('Claude usage model breakdown returned no rows.');
+  return parseUsageByModel(data);
+}
+
+export async function getClaudeUsageByModel(
+  circleId: string | null,
+  days: number = 7,
+): Promise<ClaudeUsageByModel[]> {
+  try {
+    return await getClaudeUsageByModelStrict(circleId, days);
+  } catch {
+    return [];
+  }
 }
 
 export function formatTokens(n: number): string {
@@ -95,4 +138,43 @@ export function formatCost(n: number): string {
   if (n < 0.01) return `$${n.toFixed(4)}`;
   if (n < 1) return `$${n.toFixed(3)}`;
   return `$${n.toFixed(2)}`;
+}
+
+
+// ─── Running-cost counter (Office trip meter) ────────────────────────────────
+
+/**
+ * Sum of `claude_api_usage.estimated_cost` for a circle since an exact
+ * timestamp (or all-time when `sinceIso` is null). The Office running-cost
+ * counter needs an exact bound because its reset is user-initiated mid-day,
+ * while `get_claude_usage_summary` only takes whole days. Reads the table
+ * directly under the existing `usage_read_circle_members` RLS policy and sums
+ * client-side in pages — PostgREST aggregates are disabled on this project,
+ * and the table is small (hundreds of rows; the 50-page ceiling is years of
+ * headroom at current volume).
+ *
+ * Strict like `getClaudeUsageSummaryStrict`: transport failures throw so the
+ * dashboard retains its last snapshot instead of showing a convincing $0.
+ */
+export async function getClaudeUsageCostSinceStrict(
+  circleId: string,
+  sinceIso: string | null,
+): Promise<number> {
+  const PAGE = 1000;
+  let total = 0;
+  for (let page = 0; page < 50; page += 1) {
+    let query = supabase
+      .from('claude_api_usage')
+      .select('estimated_cost')
+      .eq('circle_id', circleId)
+      .order('created_at', { ascending: true })
+      .range(page * PAGE, page * PAGE + PAGE - 1);
+    if (sinceIso) query = query.gte('created_at', sinceIso);
+    const { data, error } = await query;
+    if (error) throw error;
+    const rows = (data || []) as Array<{ estimated_cost: unknown }>;
+    for (const row of rows) total += Math.max(0, toNum(row.estimated_cost));
+    if (rows.length < PAGE) break;
+  }
+  return total;
 }

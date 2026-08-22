@@ -1,7 +1,8 @@
 /**
  * credentials-get-policy-smoketest — asserts the runtime tool policy for the
- * secret-returning `credentials.get` tool is approval-gated, while redacted
- * vault reads stay auto-approved (regression guard against over-gating).
+ * disabled model-side `credentials.get` name retains an ask policy backstop,
+ * while redacted vault reads stay auto-approved (regression guard against
+ * both secret exposure and over-gating).
  *
  * Bootstrap mirrors tool-description-lint-smoketest: openswanToolRuntime
  * transitively imports react-native via the supabase singleton, which
@@ -43,12 +44,30 @@ async function main(): Promise<void> {
   assert(creds.mutatesState === false, 'credentials.get reports mutatesState false (honest read)', String(creds.mutatesState));
   assert(creds.family === 'vault', 'credentials.get groups under the vault family', creds.family);
 
+  const blockedCredentialRead = await runtime.executeOpenSwanRuntimeTool(
+    'credentials.get',
+    { item: 'Synthetic Login', vault: 'Test', fields: ['username'] },
+    {
+      circleId: '11111111-1111-4111-8111-111111111111',
+      userId: '22222222-2222-4222-8222-222222222222',
+      surface: 'main_chat',
+      toolName: 'credentials.get',
+      toolUseId: 'credential-policy-smoke',
+    },
+  );
+  assert(blockedCredentialRead.ok === false, 'credentials.get direct runtime invocation fails closed');
+  assert(
+    blockedCredentialRead.resultsText.includes('no secret was fetched'),
+    'credentials.get direct runtime invocation stops before secret retrieval',
+    blockedCredentialRead.resultsText,
+  );
+
   const fillSaved = getOpenSwanToolPolicy('browser.fill_credential_field');
   assert(fillSaved.approvalMode === 'ask', 'browser.fill_credential_field is approval-gated (ask)', fillSaved.approvalMode);
   assert(fillSaved.approvalKind === 'browser_action', 'browser.fill_credential_field uses browser_action approval kind', String(fillSaved.approvalKind));
   assert(fillSaved.mutatesState === true, 'browser.fill_credential_field mutates browser page state', String(fillSaved.mutatesState));
   assert(fillSaved.externalSideEffect === true, 'browser.fill_credential_field is an external side effect', String(fillSaved.externalSideEffect));
-  assert(fillSaved.summary.includes('without returning raw secret values'), 'browser.fill_credential_field summary documents no raw secret return');
+  assert(fillSaved.summary.includes('temporarily unavailable'), 'browser.fill_credential_field summary documents the fail-closed target-binding stop');
 
   // Regression guard: redacted vault reads must NOT be over-gated.
   const find = getOpenSwanToolPolicy('vault.find');

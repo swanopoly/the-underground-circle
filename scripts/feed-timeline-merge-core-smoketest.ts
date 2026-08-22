@@ -5,8 +5,8 @@
  *   npx tsx scripts/feed-timeline-merge-core-smoketest.ts
  *
  * Covers: chronological merge ordering, cross-lane run dedupe (proof >
- * activity > task_run), weak task-id proximity dedupe, no-overmerge
- * guards, bounds + truncation count, the lane retry policy
+ * activity > task_run), weak task-id proximity dedupe with nonterminal
+ * task-run guards, no-overmerge, bounds + truncation count, the lane retry policy
  * (schema-permanent vs transient backoff schedule + attempt cap), and
  * totality on malformed/cyclic rows.
  */
@@ -45,13 +45,21 @@ const activityRow = (id: string, at: number, meta?: Record<string, unknown>) => 
   metadata: meta ?? {},
   created_at: iso(at),
 });
-const taskRunRow = (id: string, at: number, opts?: { runId?: string | null; taskId?: string | null }) => ({
+const taskRunRow = (
+  id: string,
+  at: number,
+  opts?: {
+    runId?: string | null;
+    taskId?: string | null;
+    status?: 'running' | 'blocked' | 'completed' | 'failed';
+  },
+) => ({
   id,
   task_id: opts?.taskId ?? null,
   agent_id: 'agent-1',
   openswan_run_id: opts?.runId ?? null,
   run_kind: 'chat',
-  status: 'completed',
+  status: opts?.status ?? 'completed',
   summary: `task run ${id}`,
   model_used: null,
   token_count: null,
@@ -120,9 +128,10 @@ const automationRow = (id: string, at: number) => ({
   assert(res.items.length === 1 && res.items[0].kind === 'activity', 'dedupe: activity wins over task_run');
 }
 
-// ─── 2c. Weak key: task_id + timestamp proximity ─────────────────────
+// ─── 2c. Completed weak key: task_id + timestamp proximity ───────────
 {
-  // Proof lacks run_id but shares task_id with a task_run 60s away → merge.
+  // A completed task_run may still collapse into its richer proof when neither
+  // lane has a run id but their task id and timestamp correlate.
   const res = buildFeedTimeline({
     proofs: [proofRow('p1', 0, { task_id: 'task-W' })],
     taskRuns: [taskRunRow('t1', -60_000, { taskId: 'task-W' })],
@@ -131,6 +140,50 @@ const automationRow = (id: string, at: number) => ({
   });
   assert(res.items.length === 1 && res.items[0].kind === 'proof', 'weak key: task_id within proximity merges, proof wins');
   assert(res.items[0].dedupeKey === 'task:task-W', 'weak key: task dedupeKey when no run id');
+}
+
+// ─── 2d. Nonterminal task runs never weak-merge into completion lanes ─
+{
+  // A prior proof for the same task is not evidence that this newer accepted
+  // handoff completed. With no exact run identity, both rows must remain.
+  const res = buildFeedTimeline({
+    proofs: [proofRow('p-old', -60_000, { task_id: 'task-pending' })],
+    taskRuns: [taskRunRow('t-running', 0, { taskId: 'task-pending', status: 'running' })],
+    activity: [],
+    automationRuns: [],
+  });
+  assert(res.items.length === 2, 'nonterminal weak key: running task_run survives older same-task proof');
+  assert(res.items.some((item) => item.kind === 'task_run'), 'nonterminal weak key: running task_run remains visible');
+  assert(res.dedupedCount === 0, 'nonterminal weak key: running task_run is not counted as deduped');
+}
+{
+  // The same rule applies to outcome-unknown/blocked rows versus a prior
+  // completion activity entry for the task.
+  const res = buildFeedTimeline({
+    activity: [activityRow('a-old', -30_000, { task_id: 'task-unknown' })],
+    taskRuns: [taskRunRow('t-blocked', 0, { taskId: 'task-unknown', status: 'blocked' })],
+    proofs: [],
+    automationRuns: [],
+  });
+  assert(res.items.length === 2, 'nonterminal weak key: blocked task_run survives older same-task activity');
+  assert(res.items.some((item) => item.kind === 'task_run'), 'nonterminal weak key: blocked task_run remains visible');
+  assert(res.dedupedCount === 0, 'nonterminal weak key: blocked task_run is not counted as deduped');
+}
+{
+  // Exact identity remains authoritative even for a nonterminal row: two
+  // representations of the very same run still collapse to the richer proof.
+  const res = buildFeedTimeline({
+    proofs: [proofRow('p-exact', 0, { run_id: 'run-exact', task_id: 'task-exact' })],
+    taskRuns: [taskRunRow('t-exact', -10_000, {
+      runId: 'run-exact',
+      taskId: 'task-exact',
+      status: 'running',
+    })],
+    activity: [],
+    automationRuns: [],
+  });
+  assert(res.items.length === 1 && res.items[0].kind === 'proof', 'strong key: exact run id still collapses a nonterminal duplicate');
+  assert(res.dedupedCount === 1, 'strong key: exact nonterminal duplicate increments dedupedCount');
 }
 
 // ─── 3. No-overmerge ─────────────────────────────────────────────────

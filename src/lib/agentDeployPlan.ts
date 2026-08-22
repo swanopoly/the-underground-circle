@@ -10,7 +10,8 @@
  *   - 'uniform'    — every agent runs the same `model`.
  *   - 'individual' — agent i runs `perAgentModels[i]`, falling back to
  *                    `model` (then the safe default) when the per-agent
- *                    list is short.
+ *                    list is short. Specialty roles follow the same exact
+ *                    per-agent contract through `perAgentRoles`.
  *   - 'max'        — fan out to MAX_AGENTS_PER_DEPLOY agents on `model`,
  *                    ignoring the requested count (the explicit "give me
  *                    the whole ceiling" mode). Still clamped by policy.
@@ -45,12 +46,13 @@ export function buildAgentDeployPlan(input: {
   count: number;
   model?: string;
   perAgentModels?: string[];
+  perAgentRoles?: Array<string | null | undefined>;
   role?: string | null;
   prompt?: string | null;
 }): AgentDeployPlan {
   const mode: AgentDeployMode = input.mode;
   const fallbackModel = nonEmpty(input.model) || DEFAULT_DEPLOY_MODEL;
-  const role = input.role ?? null;
+  const role = nonEmpty(input.role);
   const prompt = input.prompt ?? null;
   const requestedCount = Number(input.count) || 0;
 
@@ -60,6 +62,7 @@ export function buildAgentDeployPlan(input: {
   const { count: cappedCount, truncated } = capDeployCount(targetCount);
 
   const perAgentModels = Array.isArray(input.perAgentModels) ? input.perAgentModels : [];
+  const perAgentRoles = Array.isArray(input.perAgentRoles) ? input.perAgentRoles : [];
 
   const specs: AgentDeploySpec[] = [];
   for (let index = 0; index < cappedCount; index += 1) {
@@ -70,7 +73,10 @@ export function buildAgentDeployPlan(input: {
       // 'uniform' and 'max' both run the same model on every agent.
       model = fallbackModel;
     }
-    specs.push({ index, model, role, prompt });
+    const specRole = mode === 'individual'
+      ? nonEmpty(perAgentRoles[index]) || role
+      : role;
+    specs.push({ index, model, role: specRole, prompt });
   }
 
   return {

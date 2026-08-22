@@ -15,11 +15,11 @@ import { User, Achievement } from '../../types';
 import Card from '../../components/Card';
 import Button from '../../components/Button';
 import { getAllAchievements, getUserAchievements } from '../../lib/gamification';
+import { secureSignOut } from '../../lib/authLogout';
 
 const THEME_COLORS = [
   '#6366f1', // Indigo
   '#a855f7', // Purple
-  '#22d3ee', // Cyan
   '#22c55e', // Green
   '#f43f5e', // Rose
   '#f59e0b', // Amber
@@ -107,14 +107,14 @@ export default function EditProfileScreen({ navigation }: any) {
   const handleSignOut = async () => {
     if (Platform.OS === 'web') {
       if (window.confirm('Sign out now?')) {
-        await supabase.auth.signOut({ scope: 'local' });
+        await secureSignOut({ scope: 'local', userId: profile?.id });
       }
       return;
     }
 
     Alert.alert('Sign Out', 'Sign out now?', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Sign Out', style: 'destructive', onPress: () => { void supabase.auth.signOut({ scope: 'local' }); } },
+      { text: 'Sign Out', style: 'destructive', onPress: () => { void secureSignOut({ scope: 'local', userId: profile?.id }); } },
     ]);
   };
 
@@ -449,6 +449,5 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
   },
 });
-
 
 

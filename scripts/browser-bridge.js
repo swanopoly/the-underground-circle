@@ -54,6 +54,44 @@ let launchError = null;
 let launchPromise = null;
 
 /**
+ * Synchronous, value-free restart authority for the owning Claude bridge.
+ * A persistent context can outlive every HTTP request, so an idle request
+ * counter alone must never authorize a bridge restart.
+ */
+function inspectRestartSafetyState(runtime = {}) {
+  const snapshot = {
+    contextOpen: false,
+    launchInProgress: Boolean(runtime.launchPromise),
+    livePages: 0,
+    unknown: false,
+  };
+  try {
+    if (!runtime.context) return snapshot;
+    snapshot.contextOpen = true;
+    const pages = runtime.context.pages();
+    if (!Array.isArray(pages)) {
+      snapshot.unknown = true;
+      return snapshot;
+    }
+    for (const candidate of pages) {
+      if (!candidate || typeof candidate.isClosed !== 'function') {
+        snapshot.unknown = true;
+        continue;
+      }
+      if (!candidate.isClosed()) snapshot.livePages += 1;
+    }
+    return snapshot;
+  } catch {
+    snapshot.unknown = true;
+    return snapshot;
+  }
+}
+
+function inspectRestartSafety() {
+  return inspectRestartSafetyState({ context, launchPromise });
+}
+
+/**
  * Browser identities are capabilities issued by this bridge process, not
  * browser indices or OS process ids. The process nonce changes on every
  * bridge restart, and the monotonic suffix prevents reuse even if a test
@@ -636,6 +674,50 @@ function checkExpectedBrowserToggleIdentity(registry, ctx, pageRef, body, active
     return { ok: false, code: 'browser_identity_mismatch' };
   }
   return checkExpectedBrowserFillIdentity(registry, ctx, pageRef, body, activePageRef);
+}
+
+/**
+ * Strict opaque-URL variant used by semantic wait/scroll. Compatibility
+ * mutation handlers may still accept an older exact raw URL, but these newer
+ * primitives can only be targeted with the HMAC identity from dom_snapshot.
+ */
+function checkExpectedBrowserSemanticPageIdentity(registry, ctx, pageRef, body, activePageRef) {
+  if (!isBrowserUrlIdentity(body && body.expectedUrl)) {
+    return { ok: false, code: 'browser_identity_required' };
+  }
+  return checkExpectedBrowserToggleIdentity(registry, ctx, pageRef, body, activePageRef);
+}
+
+function captureBrowserSemanticPageIdentityReceipt(registry, ctx, pageRef, body, activePageRef) {
+  const check = checkExpectedBrowserSemanticPageIdentity(
+    registry,
+    ctx,
+    pageRef,
+    body,
+    activePageRef,
+  );
+  if (!check.ok) return check;
+  const identity = registry.observe(ctx, pageRef, pageUrl(pageRef));
+  if (
+    !isCoherentBrowserPageIdentity(identity)
+    || identity.browserProcessId !== body.expectedBrowserProcessId
+    || identity.browserContextId !== body.expectedBrowserContextId
+    || identity.pageId !== body.expectedPageId
+    || !browserOpaqueUrlIdentityMatches(body.expectedUrl, identity.url)
+  ) {
+    return { ok: false, code: 'browser_identity_mismatch' };
+  }
+  return {
+    ok: true,
+    receipt: {
+      browserProcessId: identity.browserProcessId,
+      browserContextId: identity.browserContextId,
+      pageId: identity.pageId,
+      observedAt: identity.observedAt,
+      evidenceId: identity.evidenceId,
+      urlMatchesExpected: true,
+    },
+  };
 }
 
 function isCredentialFillSemantics(body) {
@@ -5824,10 +5906,195 @@ async function handleScreenshot(req, res, CORS) {
 // These mirror the pure shapes in src/lib/browserPrimitives.ts. That TS
 // module can't be `require`d from this plain-JS bridge, so the normalizers
 // are duplicated here — keep the two in sync (tab-list dedupe, download
-// proof, wait spec, scroll clamp).
+// proof, semantic wait, and semantic scroll normalization).
 
 const MAX_TRACKED_TABS = 50;
-const SCROLL_DELTA_MAX = 5_000;
+
+const BROWSER_SEMANTIC_WAIT_CONDITIONS = new Set([
+  'page_loaded',
+  'dom_ready',
+  'network_idle',
+  'element_visible',
+  'element_hidden',
+  'delay',
+]);
+const BROWSER_SEMANTIC_SCROLL_DIRECTIONS = new Set(['up', 'down', 'left', 'right']);
+const BROWSER_SEMANTIC_SCROLL_AMOUNTS = new Set(['small', 'medium', 'large']);
+const BROWSER_SEMANTIC_SCROLL_PIXELS = { small: 300, medium: 600, large: 1200 };
+
+function isPlainBridgePrimitiveObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function bridgePrimitiveHasOnlyFields(value, allowed) {
+  return Reflect.ownKeys(value).every((key) => typeof key === 'string' && allowed.has(key));
+}
+
+function normalizeBridgeBoundedTimeout(value, fallback, min, max) {
+  if (value == null) return { ok: true, value: fallback };
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) {
+    return { ok: false, error: `timeoutMs must be an integer from ${min} to ${max}` };
+  }
+  return { ok: true, value };
+}
+
+function normalizeBridgeSemanticPageIdentity(input) {
+  const expectedBrowserProcessId = input && input.expectedBrowserProcessId;
+  const expectedBrowserContextId = input && input.expectedBrowserContextId;
+  const expectedPageId = input && input.expectedPageId;
+  const expectedUrl = input && input.expectedUrl;
+  if (
+    !isBoundedIdentity(expectedBrowserProcessId)
+    || !isBoundedIdentity(expectedBrowserContextId)
+    || !isBoundedIdentity(expectedPageId)
+    || !isBrowserUrlIdentity(expectedUrl)
+  ) {
+    return {
+      ok: false,
+      error: 'a complete opaque browser process, context, page, and URL identity is required',
+    };
+  }
+  return {
+    ok: true,
+    value: {
+      expectedBrowserProcessId,
+      expectedBrowserContextId,
+      expectedPageId,
+      expectedUrl,
+    },
+  };
+}
+
+// Mirrors normalizeBrowserSemanticWait in src/lib/browserPrimitives.ts.
+// This is intentionally stricter than the legacy selector/state parser: the
+// public route accepts only named lifecycle states or an exact role/name pair.
+function normalizeBridgeSemanticWait(input) {
+  const allowed = new Set([
+    'condition',
+    'role',
+    'name',
+    'exact',
+    'timeoutMs',
+    'expectedBrowserProcessId',
+    'expectedBrowserContextId',
+    'expectedPageId',
+    'expectedUrl',
+  ]);
+  if (!isPlainBridgePrimitiveObject(input) || !bridgePrimitiveHasOnlyFields(input, allowed)) {
+    return { ok: false, error: 'wait request must contain only semantic wait fields' };
+  }
+  const identity = normalizeBridgeSemanticPageIdentity(input);
+  if (!identity.ok) return identity;
+  const condition = typeof input.condition === 'string' ? input.condition.trim().toLowerCase() : '';
+  if (!BROWSER_SEMANTIC_WAIT_CONDITIONS.has(condition)) {
+    return { ok: false, error: 'condition must be a supported semantic wait condition' };
+  }
+  if (condition === 'delay') {
+    if ('role' in input || 'name' in input || 'exact' in input || input.timeoutMs == null) {
+      return { ok: false, error: 'delay waits require only an explicit timeoutMs' };
+    }
+    const timeout = normalizeBridgeBoundedTimeout(input.timeoutMs, 1000, 0, 30000);
+    return timeout.ok
+      ? {
+          ok: true,
+          value: {
+            ...identity.value,
+            mode: 'delay',
+            condition,
+            timeoutMs: timeout.value,
+          },
+        }
+      : timeout;
+  }
+  const elementCondition = condition === 'element_visible' || condition === 'element_hidden';
+  if (elementCondition) {
+    const role = typeof input.role === 'string' ? input.role.trim().toLowerCase() : '';
+    const name = typeof input.name === 'string' ? input.name.trim() : '';
+    if (!role || role.length > 100 || !name || name.length > 500) {
+      return { ok: false, error: 'element waits require a bounded ARIA role and accessible name' };
+    }
+    if (input.exact !== undefined && input.exact !== true) {
+      return { ok: false, error: 'semantic element waits must use exact matching' };
+    }
+    const timeout = normalizeBridgeBoundedTimeout(input.timeoutMs, 15000, 100, 60000);
+    if (!timeout.ok) return timeout;
+    return {
+      ok: true,
+      value: {
+        ...identity.value,
+        mode: 'element',
+        condition,
+        role,
+        name,
+        exact: true,
+        state: condition === 'element_visible' ? 'visible' : 'hidden',
+        timeoutMs: timeout.value,
+      },
+    };
+  }
+  if ('role' in input || 'name' in input || 'exact' in input) {
+    return { ok: false, error: 'page lifecycle waits do not accept an element target' };
+  }
+  const timeout = normalizeBridgeBoundedTimeout(input.timeoutMs, 15000, 100, 60000);
+  if (!timeout.ok) return timeout;
+  const stateByCondition = {
+    page_loaded: 'load',
+    dom_ready: 'domcontentloaded',
+    network_idle: 'networkidle',
+  };
+  return {
+    ok: true,
+    value: {
+      ...identity.value,
+      mode: 'state',
+      condition,
+      state: stateByCondition[condition],
+      timeoutMs: timeout.value,
+    },
+  };
+}
+
+// Mirrors normalizeBrowserSemanticScroll in src/lib/browserPrimitives.ts.
+function normalizeBridgeSemanticScroll(input) {
+  const allowed = new Set([
+    'direction',
+    'amount',
+    'expectedBrowserProcessId',
+    'expectedBrowserContextId',
+    'expectedPageId',
+    'expectedUrl',
+  ]);
+  if (!isPlainBridgePrimitiveObject(input) || !bridgePrimitiveHasOnlyFields(input, allowed)) {
+    return { ok: false, error: 'scroll request must contain only direction, amount, and exact page identity' };
+  }
+  const identity = normalizeBridgeSemanticPageIdentity(input);
+  if (!identity.ok) return identity;
+  const direction = typeof input.direction === 'string' ? input.direction.trim().toLowerCase() : '';
+  const amount = input.amount == null
+    ? 'medium'
+    : typeof input.amount === 'string'
+      ? input.amount.trim().toLowerCase()
+      : '';
+  if (!BROWSER_SEMANTIC_SCROLL_DIRECTIONS.has(direction)) {
+    return { ok: false, error: 'direction must be up, down, left, or right' };
+  }
+  if (!BROWSER_SEMANTIC_SCROLL_AMOUNTS.has(amount)) {
+    return { ok: false, error: 'amount must be small, medium, or large' };
+  }
+  const pixels = BROWSER_SEMANTIC_SCROLL_PIXELS[amount];
+  return {
+    ok: true,
+    value: {
+      ...identity.value,
+      direction,
+      amount,
+      dx: direction === 'left' ? -pixels : direction === 'right' ? pixels : 0,
+      dy: direction === 'up' ? -pixels : direction === 'down' ? pixels : 0,
+    },
+  };
+}
 
 // tabs_list — enumerate every tab in the persistent context with a stable
 // 0-based index, marking the active one. Titles/urls are page-derived
@@ -6016,77 +6283,307 @@ async function handleDownload(req, res, CORS) {
   }
 }
 
-// wait_for — explicit, bounded waits so the model can synchronize on
-// dynamic content instead of polling screenshots. Supports {selector}
-// (waitForSelector with state), {state} (waitForLoadState), or a plain
-// {timeoutMs} delay. Mirrors parseWaitForSpec in browserPrimitives.ts.
+// wait_for — strict semantic synchronization. The public route accepts a
+// named lifecycle condition, an exact ARIA role/name element condition, or an
+// explicit bounded delay. It never accepts/echoes selectors, URLs, titles, or
+// page status. Every request is bound to one existing opaque process/context/
+// page/URL identity and fails closed if that identity changes before or during
+// the wait. It never launches or adopts a different current tab.
 async function handleWaitFor(req, res, CORS) {
   const { body, err } = await readJsonBody(req);
   if (err) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: err })); return; }
-  const launched = await ensureContext();
-  if (!launched.ok) { writeBrowserFailure(res, CORS, launched.error, undefined, 'browser_bridge_offline', 503); return; }
-  const clampTimeout = (value, fallback, max) => {
-    const n = Number(value);
-    if (!Number.isFinite(n)) return fallback;
-    return Math.max(0, Math.min(max, Math.round(n)));
-  };
-  const LOAD_STATES = ['load', 'domcontentloaded', 'networkidle'];
-  const SELECTOR_STATES = ['attached', 'detached', 'visible', 'hidden'];
+  const normalized = normalizeBridgeSemanticWait(body);
+  if (!normalized.ok) {
+    writeBrowserFailure(res, CORS, normalized.error, undefined, 'invalid_input', 400);
+    return;
+  }
+  const spec = normalized.value;
+  if (browserIdentities.browserProcessId !== spec.expectedBrowserProcessId) {
+    writeBrowserFailure(res, CORS, 'browser process identity changed before wait', undefined, 'browser_identity_mismatch');
+    return;
+  }
+  const contextRef = context;
+  let pageRef = null;
+  try { pageRef = contextRef ? activePage(contextRef) : null; } catch {}
+  if (!contextRef || !pageRef) {
+    writeBrowserFailure(res, CORS, 'observed browser page is no longer available', undefined, 'browser_identity_mismatch');
+    return;
+  }
+  const entryIdentity = checkExpectedBrowserSemanticPageIdentity(
+    browserIdentities,
+    contextRef,
+    pageRef,
+    spec,
+    pageRef,
+  );
+  if (!entryIdentity.ok) {
+    writeBrowserFailure(res, CORS, 'browser page identity changed before wait', undefined, entryIdentity.code);
+    return;
+  }
+  let operationError = null;
   try {
-    const selector = typeof body.selector === 'string' ? body.selector.trim() : '';
-    if (selector) {
-      const rawState = String(body.state || '').toLowerCase();
-      const state = SELECTOR_STATES.includes(rawState) ? rawState : 'visible';
-      const timeout = clampTimeout(body.timeoutMs, 15000, 60000);
-      await launched.page.waitForSelector(selector, { state, timeout });
-      res.writeHead(200, CORS);
-      res.end(JSON.stringify({ ok: true, mode: 'selector', selector, state, timeoutMs: timeout, awaited: `selector ${selector} (${state})` }));
-      return;
+    if (spec.mode === 'element') {
+      // This lane is semantic-only. Do not call the compatibility resolver:
+      // it deliberately interprets CSS-looking `name` values for older
+      // mutation callers, which would turn an accessible name such as
+      // "#save" into selector authority. The exact ARIA role/name pair from
+      // the normalized request is the only locator contract here.
+      const locator = pageRef.getByRole(spec.role, {
+        name: spec.name,
+        exact: true,
+      });
+      await locator.waitFor({ state: spec.state, timeout: spec.timeoutMs });
+    } else if (spec.mode === 'state') {
+      await pageRef.waitForLoadState(spec.state, { timeout: spec.timeoutMs });
+    } else {
+      await pageRef.waitForTimeout(spec.timeoutMs);
     }
-    const rawState = String(body.state || '').toLowerCase();
-    if (LOAD_STATES.includes(rawState)) {
-      const timeout = clampTimeout(body.timeoutMs, 15000, 60000);
-      await launched.page.waitForLoadState(rawState, { timeout });
-      res.writeHead(200, CORS);
-      res.end(JSON.stringify({ ok: true, mode: 'state', state: rawState, timeoutMs: timeout, awaited: `page state ${rawState}` }));
-      return;
-    }
-    // Plain bounded delay (fail-closed default). Capped lower than the
-    // selector/state budget — a bare sleep should not hold for a minute.
-    const hasTimeout = body.timeoutMs != null && Number.isFinite(Number(body.timeoutMs));
-    const timeout = clampTimeout(hasTimeout ? body.timeoutMs : 1000, 1000, 30000);
-    await launched.page.waitForTimeout(timeout);
-    res.writeHead(200, CORS);
-    res.end(JSON.stringify({ ok: true, mode: 'timeout', timeoutMs: timeout, awaited: `${timeout}ms delay` }));
   } catch (e) {
-    writeBrowserFailure(res, CORS, e, 'wait failed');
+    operationError = e;
+  }
+  let activeAfter = null;
+  try { activeAfter = activePage(contextRef); } catch {}
+  const afterProof = captureBrowserSemanticPageIdentityReceipt(
+    browserIdentities,
+    contextRef,
+    pageRef,
+    spec,
+    activeAfter,
+  );
+  if (!afterProof.ok) {
+    writeBrowserFailure(res, CORS, 'browser page identity changed during wait', undefined, afterProof.code);
+    return;
+  }
+  if (operationError) {
+    const errorCode = spec.mode === 'element' ? 'selector_not_found' : 'timeout';
+    const safeError = spec.mode === 'element'
+      ? 'Browser element wait did not reach the requested condition.'
+      : 'Browser page wait did not reach the requested condition.';
+    writeBrowserFailure(res, CORS, safeError, undefined, errorCode);
+    return;
+  }
+  try {
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({
+      ok: true,
+      ...afterProof.receipt,
+      condition: spec.condition,
+      timeoutMs: spec.timeoutMs,
+      completed: true,
+    }));
+  } catch {
+    writeBrowserFailure(res, CORS, 'Browser wait receipt could not be returned.', undefined, 'unknown');
   }
 }
 
-// scroll — real mouse-wheel scroll (page.mouse.wheel) so infinite-scroll
-// and lazy-loaded content actually advances. Deltas clamped to sane
-// bounds; a bare call nudges the page down. Mirrors normalizeScrollDelta.
+// Capture only numeric viewport-scroll state inside the bridge. These values
+// are used to verify the requested-axis movement and are never returned to the
+// caller, keeping the public receipt privacy-bounded.
+function normalizeBrowserViewportScrollPosition(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const x = value.x;
+  const y = value.y;
+  const maxX = value.maxX;
+  const maxY = value.maxY;
+  if (
+    !Number.isFinite(x)
+    || !Number.isFinite(y)
+    || !Number.isFinite(maxX)
+    || !Number.isFinite(maxY)
+    || x < 0
+    || y < 0
+    || maxX < 0
+    || maxY < 0
+    || x > 1_000_000_000
+    || y > 1_000_000_000
+    || maxX > 1_000_000_000
+    || maxY > 1_000_000_000
+  ) return null;
+  return { x, y, maxX, maxY };
+}
+
+async function captureBrowserViewportScrollPosition(pageRef) {
+  const value = await pageRef.evaluate(() => {
+    const root = document.scrollingElement || document.documentElement;
+    const x = Number.isFinite(window.scrollX) ? window.scrollX : Number(root?.scrollLeft || 0);
+    const y = Number.isFinite(window.scrollY) ? window.scrollY : Number(root?.scrollTop || 0);
+    const scrollWidth = Math.max(
+      Number(root?.scrollWidth || 0),
+      Number(document.documentElement?.scrollWidth || 0),
+      Number(document.body?.scrollWidth || 0),
+    );
+    const scrollHeight = Math.max(
+      Number(root?.scrollHeight || 0),
+      Number(document.documentElement?.scrollHeight || 0),
+      Number(document.body?.scrollHeight || 0),
+    );
+    return {
+      x,
+      y,
+      maxX: Math.max(0, scrollWidth - Number(window.innerWidth || 0)),
+      maxY: Math.max(0, scrollHeight - Number(window.innerHeight || 0)),
+    };
+  });
+  return normalizeBrowserViewportScrollPosition(value);
+}
+
+const BROWSER_SCROLL_VERIFICATION_MAX_SAMPLES = 3;
+const BROWSER_SCROLL_VERIFICATION_SETTLE_MS = Object.freeze([40, 80, 160]);
+
+function browserSemanticScrollMovementVerified(direction, before, after) {
+  const start = normalizeBrowserViewportScrollPosition(before);
+  const finish = normalizeBrowserViewportScrollPosition(after);
+  if (!start || !finish) return false;
+  const epsilon = 0.5;
+  switch (direction) {
+    case 'up': return finish.y < start.y - epsilon;
+    case 'down': return finish.y > start.y + epsilon;
+    case 'left': return finish.x < start.x - epsilon;
+    case 'right': return finish.x > start.x + epsilon;
+    default: return false;
+  }
+}
+
+/**
+ * Dispatch exactly one bounded gesture, then prove that the requested viewport
+ * axis moved. The read-only verification poll tolerates a short smooth-scroll
+ * settle without ever replaying the gesture.
+ */
+async function performVerifiedBrowserSemanticScroll(pageRef, spec, beforeDispatchGuard) {
+  let before = null;
+  try {
+    before = await captureBrowserViewportScrollPosition(pageRef);
+  } catch {}
+  if (!before) {
+    return {
+      ok: false,
+      error: 'Browser viewport position could not be observed before scroll.',
+      errorCode: 'browser_scroll_verification_failed',
+    };
+  }
+
+  if (typeof beforeDispatchGuard === 'function') {
+    let guard = null;
+    try { guard = await beforeDispatchGuard(); } catch {}
+    if (!guard || guard.ok !== true) {
+      return {
+        ok: false,
+        error: 'Browser page identity changed before scroll dispatch.',
+        errorCode: guard?.code || 'browser_identity_mismatch',
+      };
+    }
+  }
+
+  try {
+    await pageRef.mouse.wheel(spec.dx, spec.dy);
+  } catch {
+    return {
+      ok: false,
+      error: 'Browser scroll gesture could not be dispatched.',
+      errorCode: 'unknown',
+    };
+  }
+
+  // One gesture only. Polling below is observation, never mutation/replay.
+  for (const settleMs of BROWSER_SCROLL_VERIFICATION_SETTLE_MS.slice(
+    0,
+    BROWSER_SCROLL_VERIFICATION_MAX_SAMPLES,
+  )) {
+    try { await pageRef.waitForTimeout(settleMs); } catch {}
+    let after = null;
+    try { after = await captureBrowserViewportScrollPosition(pageRef); } catch {}
+    if (browserSemanticScrollMovementVerified(spec.direction, before, after)) {
+      return { ok: true, movementVerified: true };
+    }
+  }
+  return {
+    ok: false,
+    error: 'Browser viewport did not move in the requested direction.',
+    errorCode: 'browser_scroll_verification_failed',
+  };
+}
+
+// scroll — one coarse semantic wheel gesture. Direction + amount become a
+// bounded internal delta; neither raw coordinates nor page data are returned.
+// The gesture is executed only against the exact already-observed document and
+// succeeds only when requested-axis viewport movement is observed afterward.
 async function handleScroll(req, res, CORS) {
   const { body, err } = await readJsonBody(req);
   if (err) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: err })); return; }
-  const launched = await ensureContext();
-  if (!launched.ok) { writeBrowserFailure(res, CORS, launched.error, undefined, 'browser_bridge_offline', 503); return; }
+  const normalized = normalizeBridgeSemanticScroll(body);
+  if (!normalized.ok) {
+    writeBrowserFailure(res, CORS, normalized.error, undefined, 'invalid_input', 400);
+    return;
+  }
+  const spec = normalized.value;
+  if (browserIdentities.browserProcessId !== spec.expectedBrowserProcessId) {
+    writeBrowserFailure(res, CORS, 'browser process identity changed before scroll', undefined, 'browser_identity_mismatch');
+    return;
+  }
+  const contextRef = context;
+  let pageRef = null;
+  try { pageRef = contextRef ? activePage(contextRef) : null; } catch {}
+  if (!contextRef || !pageRef) {
+    writeBrowserFailure(res, CORS, 'observed browser page is no longer available', undefined, 'browser_identity_mismatch');
+    return;
+  }
+  const entryIdentity = checkExpectedBrowserSemanticPageIdentity(
+    browserIdentities,
+    contextRef,
+    pageRef,
+    spec,
+    pageRef,
+  );
+  if (!entryIdentity.ok) {
+    writeBrowserFailure(res, CORS, 'browser page identity changed before scroll', undefined, entryIdentity.code);
+    return;
+  }
+  const scrollProof = await performVerifiedBrowserSemanticScroll(
+    pageRef,
+    spec,
+    () => checkExpectedBrowserSemanticPageIdentity(
+      browserIdentities,
+      contextRef,
+      pageRef,
+      spec,
+      pageRef,
+    ),
+  );
+  let activeAfter = null;
+  try { activeAfter = activePage(contextRef); } catch {}
+  const afterProof = captureBrowserSemanticPageIdentityReceipt(
+    browserIdentities,
+    contextRef,
+    pageRef,
+    spec,
+    activeAfter,
+  );
+  if (!afterProof.ok) {
+    writeBrowserFailure(res, CORS, 'browser page identity changed during scroll', undefined, afterProof.code);
+    return;
+  }
+  if (!scrollProof.ok || scrollProof.movementVerified !== true) {
+    writeBrowserFailure(
+      res,
+      CORS,
+      scrollProof.error || 'Browser viewport movement could not be verified.',
+      undefined,
+      scrollProof.errorCode || 'browser_scroll_verification_failed',
+    );
+    return;
+  }
   try {
-    const clampAxis = (value) => {
-      const n = Number(value);
-      if (!Number.isFinite(n)) return 0;
-      return Math.max(-SCROLL_DELTA_MAX, Math.min(SCROLL_DELTA_MAX, Math.round(n)));
-    };
-    const hasDx = body.dx != null && Number.isFinite(Number(body.dx));
-    const hasDy = body.dy != null && Number.isFinite(Number(body.dy));
-    const dx = hasDx ? clampAxis(body.dx) : 0;
-    let dy = hasDy ? clampAxis(body.dy) : 0;
-    if (!hasDx && !hasDy) dy = 600; // bare scroll → downward nudge
-    await launched.page.mouse.wheel(dx, dy);
     res.writeHead(200, CORS);
-    res.end(JSON.stringify({ ok: true, dx, dy }));
-  } catch (e) {
-    writeBrowserFailure(res, CORS, e, 'scroll failed');
+    res.end(JSON.stringify({
+      ok: true,
+      ...afterProof.receipt,
+      direction: spec.direction,
+      amount: spec.amount,
+      movementVerified: true,
+      completed: true,
+    }));
+  } catch {
+    writeBrowserFailure(res, CORS, 'Browser scroll receipt could not be returned.', undefined, 'unknown');
   }
 }
 
@@ -6116,6 +6613,7 @@ process.on('SIGINT', async () => { await shutdownOnExit(); process.exit(0); });
 process.on('SIGTERM', async () => { await shutdownOnExit(); process.exit(0); });
 
 module.exports = {
+  inspectRestartSafety,
   handleHealth,
   handleOpenUrl,
   handleDomSnapshot,
@@ -6140,10 +6638,16 @@ module.exports = {
   handleScroll,
   handleClose,
   // Exposed for the smoke test.
+  _inspectRestartSafetyState: inspectRestartSafetyState,
   _prune: prune,
   _PROFILE_DIR: PROFILE_DIR,
   _DOWNLOADS_DIR: DOWNLOADS_DIR,
   _buildBridgeDownloadProof: buildBridgeDownloadProof,
+  _normalizeBridgeSemanticWait: normalizeBridgeSemanticWait,
+  _normalizeBridgeSemanticScroll: normalizeBridgeSemanticScroll,
+  _normalizeBrowserViewportScrollPosition: normalizeBrowserViewportScrollPosition,
+  _browserSemanticScrollMovementVerified: browserSemanticScrollMovementVerified,
+  _performVerifiedBrowserSemanticScroll: performVerifiedBrowserSemanticScroll,
   _createBrowserIdentityRegistry: createBrowserIdentityRegistry,
   _createGuardedTargetCapabilityStore: createGuardedTargetCapabilityStore,
   _PAGE_WALKER: PAGE_WALKER,
@@ -6155,6 +6659,8 @@ module.exports = {
   _sanitizeBrowserSnapshotText: sanitizeBrowserSnapshotText,
   _captureCoherentBrowserDomSnapshot: captureCoherentBrowserDomSnapshot,
   _checkExpectedBrowserFillIdentity: checkExpectedBrowserFillIdentity,
+  _checkExpectedBrowserSemanticPageIdentity: checkExpectedBrowserSemanticPageIdentity,
+  _captureBrowserSemanticPageIdentityReceipt: captureBrowserSemanticPageIdentityReceipt,
   _hasExactlyOneLocatorActionabilityTarget: hasExactlyOneLocatorActionabilityTarget,
   _isNonPositionalNativeCssSelector: isNonPositionalNativeCssSelector,
   _locatorBoxesAreStable: locatorBoxesAreStable,

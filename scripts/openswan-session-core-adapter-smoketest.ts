@@ -39,6 +39,7 @@ import {
   buildCapExhaustionFinalizationBody,
   buildLegacyToolEventFromResult,
   buildLegacyToolLoopResult,
+  buildOpenSwanTerminalReceipt,
   buildSwanbotToolTurnBody,
   CAP_EXHAUSTION_FINALIZATION_NOTE,
   createLegacyApprovalGateAdapter,
@@ -46,6 +47,7 @@ import {
   createLoopUsageAccumulator,
   deriveLegacyDispatchStatus,
   finalizeLoopUsage,
+  hasSwanbotRoutingFallback,
   LEGACY_EVENT_TEXT_KEY,
   LEGACY_GATE_REJECTION_TEXT,
   LEGACY_RUNTIME_STATUS_KEY,
@@ -486,6 +488,44 @@ async function main() {
   assertEqual(parsedNoBlocks.turn.content, [{ type: 'text', text: 'plain answer' }],
     'data.response fallback becomes a text block');
   assertEqual(parseSwanbotToolTurnData({}).turn.stop_reason, 'end_turn', 'empty payload → end_turn');
+
+  // `swanbot-ai` intentionally returns its provider-routing failure envelope
+  // with HTTP 200 so the recovery copy survives the relay boundary. The typed
+  // parent and delegated-child providers must still terminalize it as an edge
+  // failure rather than accepting the synthetic `end_turn` as verified work.
+  const parsedRoutingFallback = parseSwanbotToolTurnData({
+    response: 'Provider unavailable. Choose another connected model.',
+    content: [{ type: 'text', text: 'Provider unavailable. Choose another connected model.' }],
+    stop_reason: 'end_turn',
+    routing_fallback: { provider: 'anthropic', reason: 'api_key_not_configured' },
+  });
+  assert(hasSwanbotRoutingFallback(parsedRoutingFallback.routing),
+    'HTTP-200 routing_fallback is classified as a failed provider turn');
+  assert(!hasSwanbotRoutingFallback(parsedToolTurn.routing),
+    'ordinary provider_routed metadata is not classified as a failure');
+  const routingFallbackResult = buildLegacyToolLoopResult({
+    runResult: {
+      text: 'Provider unavailable. Choose another connected model.',
+      messages: [], iterations: 1, stopReason: parsedRoutingFallback.turn.stop_reason,
+      hitMaxIterations: false,
+    },
+    toolEvents: [],
+    routing: parsedRoutingFallback.routing,
+    maxRounds: 4,
+    edgeFailed: hasSwanbotRoutingFallback(parsedRoutingFallback.routing),
+  });
+  assert(routingFallbackResult.incomplete === true
+      && routingFallbackResult.incompleteReason === 'edge_failure',
+    'routing_fallback cannot map to a clean legacy loop result');
+  const routingFallbackTerminal = buildOpenSwanTerminalReceipt({
+    cancelled: false,
+    incomplete: routingFallbackResult.incomplete === true,
+    incompleteReason: routingFallbackResult.incompleteReason,
+  });
+  assert(routingFallbackTerminal.state === 'failed'
+      && routingFallbackTerminal.reason === 'edge_failure'
+      && routingFallbackTerminal.completionVerified === false,
+    'routing_fallback cannot become a verified-success terminal receipt');
 
   assertEqual(
     toAnthropicToolShapes([{ name: 'a', description: 'b', input_schema: { type: 'object' } }]),

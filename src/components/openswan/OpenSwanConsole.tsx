@@ -1,11 +1,11 @@
 /**
  * OpenSwanConsole — the OpenSwan Control Panel. Before the user launches a turn,
- * this surface helps them choose what they want done and shows what access
- * the agent has:
+ * this surface starts with the smallest useful launch flow, then exposes
+ * operator detail through progressive disclosure:
  *
  *   1. Task — the free-text prompt the user is sending.
  *   2. Mode — picks the response contract (talk / plan / build / ...).
- *   3. Diagnostics — for the chosen mode, we show how many tools the
+ *   3. Advanced diagnostics — for the chosen mode, we show how many tools the
  *      model will actually see, how many memories will be loaded, and
  *      whether subagents are likely to spawn. This is the "control"
  *      part — the user can see the system's posture before committing.
@@ -16,8 +16,8 @@
  *   5. Launch — dispatches task + mode to the caller, which runs it
  *      through the normal planner / tool-use loop.
  *
- * Every section maps to a specific user need or a specific OpenSwan
- * failure mode we've seen in logs. Nothing here is decorative.
+ * The task, selected agent, route, approval posture, mode, readiness headline,
+ * and launch action are the default view. Everything else is optional detail.
  */
 
 import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
@@ -52,6 +52,7 @@ import { cronToHuman, relTime } from '../../lib/automationCadenceFormat';
 import { rageForget } from '../../lib/memoryActions';
 import { supabase } from '../../lib/supabase';
 import { useClaudeSpendBreakdown } from '../../lib/circleCostTelemetry';
+import { getCircleBudgetSnapshot } from '../../lib/circleBudgetSnapshot';
 import { listRuns, mergeRunMetadata, reapRun, updateRunStatus, type AgentRun } from '../../lib/agentRunSystem';
 import { planRunReap } from '../../lib/runStallPolicyCore';
 import { subscribeWithReconnect } from '../../lib/subscribeWithReconnect';
@@ -90,6 +91,7 @@ import {
   buildIntentTaskDraft,
   normalizeGuardrailPrefs,
   buildGuardrailedTask,
+  shouldRequireLiveCapabilityPreflight,
   type HelperIntentKey,
   type HelperIntent,
   type GuardrailWatchMode,
@@ -128,7 +130,7 @@ const BASE_INPUT_TOKENS = 4500;
 // stable so the same source gets the same color across renders.
 const SPEND_SOURCE_COLORS: ReadonlyArray<string> = [
   '#a78bfa',  // violet — primary
-  '#22d3ee',  // cyan
+  '#6366f1',  // cyan
   '#22c55e',  // green
   '#f59e0b',  // amber
   '#ec4899',  // pink
@@ -242,27 +244,7 @@ type ControlPanelSectionKey =
   | 'maintenance';
 type ControlPanelOpenState = Partial<Record<ControlPanelSectionKey, boolean>>;
 
-const DEFAULT_OPEN_SECTIONS: ControlPanelOpenState = { intent: true, taskMode: true };
-const ALL_CONTROL_PANEL_SECTIONS: ReadonlyArray<ControlPanelSectionKey> = [
-  'intent',
-  'taskMode',
-  'readiness',
-  'automations',
-  'bridge',
-  'guardrails',
-  'templates',
-  'recent',
-  'plan',
-  'posture',
-  'maintenance',
-];
-
-function openSectionsFor(keys: ReadonlyArray<ControlPanelSectionKey>): ControlPanelOpenState {
-  return keys.reduce<ControlPanelOpenState>((acc, key) => {
-    acc[key] = true;
-    return acc;
-  }, {});
-}
+const DEFAULT_OPEN_SECTIONS: ControlPanelOpenState = { taskMode: true };
 
 const OPENSWAN_GATEWAY_TUNNEL_COMMAND = 'cloudflared tunnel --url http://localhost:18789';
 const OPENSWAN_PROXY_TUNNEL_COMMAND = 'cloudflared tunnel --url http://localhost:18790';
@@ -335,6 +317,7 @@ export default function OpenSwanConsole({
       ? (currentMode as OpenSwanChatMode)
       : 'plan',
   );
+  const [modeManuallySelected, setModeManuallySelected] = useState(false);
   const [memoryCount, setMemoryCount] = useState<number | null>(null);
   const [memoryPreview, setMemoryPreview] = useState<Array<{ title: string; scope: string }>>([]);
   const [memoryDrawerOpen, setMemoryDrawerOpen] = useState(false);
@@ -352,6 +335,7 @@ export default function OpenSwanConsole({
   const [pruneMessage, setPruneMessage] = useState<string | null>(null);
   const [showHiddenTools, setShowHiddenTools] = useState(false);
   const [budgetCap, setBudgetCap] = useState<number | null>(null);
+  const [budgetSpent, setBudgetSpent] = useState(0);
   const [recentRuns, setRecentRuns] = useState<AgentRun[]>([]);
   // Run-reaper wire: 'running' runs whose heartbeat (updated_at) is aging —
   // flagged "stalled?" and excluded from the live pulse, but not yet reaped.
@@ -375,10 +359,16 @@ export default function OpenSwanConsole({
   const [automationReadiness, setAutomationReadiness] = useState<SiteAgentReadinessSnapshot | null>(null);
   const [automationReadinessLoading, setAutomationReadinessLoading] = useState(false);
   const [automationReadinessError, setAutomationReadinessError] = useState<string | null>(null);
+  // The default surface is intentionally task-first. Diagnostics, history,
+  // setup, and maintenance stay mounted only after explicit disclosure so an
+  // ordinary launch does not read like an operator dashboard.
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [modeOptionsOpen, setModeOptionsOpen] = useState(false);
   // Saved automations for this circle (live-subscribed). Only attached while
-  // the panel is open so a closed panel doesn't hold a realtime channel.
+  // advanced controls are open so the essential composer has no background
+  // automation subscription cost.
   const { automations, isLoading: automationsLoading, refresh: refreshAutomations } =
-    useCircleAutomations(visible ? (circleId || null) : null);
+    useCircleAutomations(visible && advancedOpen ? (circleId || null) : null);
   const [automationActionId, setAutomationActionId] = useState<string | null>(null);
   const [automationActionError, setAutomationActionError] = useState<string | null>(null);
   const [runFeedback, setRunFeedback] = useState<string | null>(null);
@@ -420,7 +410,7 @@ export default function OpenSwanConsole({
   // Live 24h Claude spend for this circle — the umbrella cap across
   // every agent. Control Panel shows this so the user knows whether a
   // new turn will push them past the ceiling before they launch.
-  const spend = useClaudeSpendBreakdown(visible ? circleId || null : null, 24);
+  const spend = useClaudeSpendBreakdown(visible && advancedOpen ? circleId || null : null, 24);
   const bridgeEnv = useMemo(() => getBridgeEnvironment(), [visible, bridgeEnvTick]);
   const connectInstallCommand = useMemo(
     () => connectToken
@@ -435,8 +425,13 @@ export default function OpenSwanConsole({
     const inferredIntent = inferIntentFromTask(seededTask);
     setTask(seededTask);
     setPruneMessage(null);
-    setSelectedIntent(inferredIntent?.key || null);
+    // Seeded and typed tasks stay on automatic routing until the user chooses
+    // a workflow explicitly. The inferred intent still tunes mode/readiness.
+    setSelectedIntent(null);
+    setModeManuallySelected(false);
     setOpenSections({ ...DEFAULT_OPEN_SECTIONS });
+    setAdvancedOpen(false);
+    setModeOptionsOpen(false);
     setLaunchFixMessage(null);
     setMaintenanceOpen(false);
     setBridgeError(null);
@@ -448,7 +443,7 @@ export default function OpenSwanConsole({
   }, [visible, initialTask, currentMode]);
 
   useEffect(() => {
-    if (!visible || !circleId) {
+    if (!visible || !advancedOpen || !circleId) {
       setConnectToken(null);
       return;
     }
@@ -461,7 +456,7 @@ export default function OpenSwanConsole({
         if (!cancelled) setConnectToken(null);
       });
     return () => { cancelled = true; };
-  }, [visible, circleId]);
+  }, [visible, advancedOpen, circleId]);
 
   // Load saved templates for this user+circle. localStorage is the
   // source of truth — no DB round-trip for the cold path. Templates
@@ -475,7 +470,10 @@ export default function OpenSwanConsole({
     [userId, circleId],
   );
   useEffect(() => {
-    if (!visible || !templatesKey) return;
+    if (!visible || !advancedOpen || !templatesKey) {
+      setTemplates([]);
+      return;
+    }
     try {
       const raw = (typeof window !== 'undefined' && window.localStorage)
         ? window.localStorage.getItem(templatesKey)
@@ -495,7 +493,7 @@ export default function OpenSwanConsole({
     } catch {
       setTemplates([]);
     }
-  }, [visible, templatesKey]);
+  }, [visible, advancedOpen, templatesKey]);
 
   useEffect(() => {
     if (!visible) return;
@@ -695,7 +693,7 @@ export default function OpenSwanConsole({
   // (onCatchUp → loadRecentRuns) instead of silently freezing every live
   // indicator until the user reopens the panel. Only attaches while open.
   useEffect(() => {
-    if (!visible || !circleId || !userId) return;
+    if (!visible || !advancedOpen || !circleId || !userId) return;
     recentRunsMountedRef.current = true;
 
     // Initial fetch — subscribeWithReconnect deliberately does NOT fire
@@ -785,7 +783,7 @@ export default function OpenSwanConsole({
       handle.unsubscribe();
       setRealtimeHealthLabel(null);
     };
-  }, [visible, circleId, userId, loadRecentRuns]);
+  }, [visible, advancedOpen, circleId, userId, loadRecentRuns]);
 
   // Keep the latest-committed recentRuns snapshot fresh for the liveness tick
   // (read via ref so the interval never lists recentRuns in its deps).
@@ -795,7 +793,7 @@ export default function OpenSwanConsole({
   // running-status dots so we don't fan out N animations.
   const livePulse = useRef(new Animated.Value(0.4)).current;
   useEffect(() => {
-    const hasLiveRun = visible && recentRuns.some((r) =>
+    const hasLiveRun = visible && advancedOpen && recentRuns.some((r) =>
       (r.status === 'running' || r.status === 'planning' || r.status === 'queued') &&
       !staleRunIds.has(r.id),
     );
@@ -811,7 +809,7 @@ export default function OpenSwanConsole({
     );
     loop.start();
     return () => loop.stop();
-  }, [livePulse, recentRuns, staleRunIds, visible]);
+  }, [advancedOpen, livePulse, recentRuns, staleRunIds, visible]);
 
   const liveRunsCount = useMemo(() =>
     recentRuns.filter((r) =>
@@ -827,7 +825,7 @@ export default function OpenSwanConsole({
   // reaped) without waiting for the next realtime write. Gated on visibility +
   // live count and cleared on unmount so an idle/closed panel holds no timer.
   useEffect(() => {
-    if (!visible || liveRunsCount <= 0) return;
+    if (!visible || !advancedOpen || liveRunsCount <= 0) return;
     const interval = setInterval(() => {
       // (a) Re-render so liveElapsedMs recomputes vs a fresh now().
       setNowTick((t) => t + 1);
@@ -862,18 +860,18 @@ export default function OpenSwanConsole({
       }
     }, 1_000);
     return () => clearInterval(interval);
-  }, [visible, liveRunsCount]);
+  }, [visible, advancedOpen, liveRunsCount]);
 
   // ── Tool + subagent + memory previews (live on mode / task changes) ──
 
   const toolPreview = useMemo(
-    () => previewOpenSwanToolsForSurface(surface as any, mode),
-    [surface, mode],
+    () => advancedOpen ? previewOpenSwanToolsForSurface(surface as any, mode) : [],
+    [advancedOpen, surface, mode],
   );
 
   const hiddenByMode = useMemo(
-    () => listToolsHiddenByMode(surface as any, mode),
-    [surface, mode],
+    () => advancedOpen ? listToolsHiddenByMode(surface as any, mode) : [],
+    [advancedOpen, surface, mode],
   );
 
   const capabilityById = useMemo(() => {
@@ -884,9 +882,30 @@ export default function OpenSwanConsole({
     return map;
   }, [capabilityAudit]);
 
-  const selectedIntentMeta = useMemo(
+  const explicitIntentMeta = useMemo(
     () => HELPER_INTENTS.find((intent) => intent.key === selectedIntent) || null,
     [selectedIntent],
+  );
+  const inferredIntentMeta = useMemo(
+    () => selectedIntent ? null : inferIntentFromTask(task),
+    [selectedIntent, task],
+  );
+  const selectedIntentMeta = explicitIntentMeta || inferredIntentMeta;
+  const requiresLiveCapabilityPreflight = shouldRequireLiveCapabilityPreflight(selectedIntentMeta, mode);
+  const hasTaskForPreflight = task.trim().length > 0;
+
+  // Auto route should do what its label promises. A task typed into an empty
+  // panel such as "open Adobe Illustrator" moves to Computer + Execute without
+  // making the user discover the advanced workflow picker first. Once the user
+  // chooses a mode or workflow explicitly, their choice wins.
+  useEffect(() => {
+    if (!visible || selectedIntent || modeManuallySelected || !inferredIntentMeta) return;
+    setMode((current) => current === inferredIntentMeta.mode ? current : inferredIntentMeta.mode);
+  }, [inferredIntentMeta, modeManuallySelected, selectedIntent, visible]);
+
+  const selectedAgentSummary = useMemo(
+    () => getAgentSubjectSummary(agentSubjectMetadata),
+    [agentSubjectMetadata],
   );
 
   const readinessItems = useMemo(() => {
@@ -950,6 +969,10 @@ export default function OpenSwanConsole({
 
   const controlRecommendation = useMemo(() => {
     if (!selectedIntentMeta) return null;
+    // A diagnostic that has not run is not evidence that every capability is
+    // missing. The launch gate separately holds concrete live-work intents in
+    // a short "checking" state while their task-specific audit starts.
+    if (!capabilityLoading && !capabilityAudit && !capabilityError) return null;
     const required = selectedIntentMeta.capabilityIds.map((id) => capabilityById.get(id));
     const missing = required.filter((finding) => !capabilityLoading && (!finding || finding.status === 'missing'));
     const partial = required.filter((finding) => !capabilityLoading && finding?.status === 'partial');
@@ -980,7 +1003,7 @@ export default function OpenSwanConsole({
       summary,
       steps: INTENT_CONTROL_STEPS[selectedIntentMeta.key],
     };
-  }, [capabilityById, capabilityLoading, selectedIntentMeta]);
+  }, [capabilityAudit, capabilityById, capabilityError, capabilityLoading, selectedIntentMeta]);
 
   // Build the task plan once per (task, surface) and reuse it for
   // both the subagent-delegation preview and the new PLAN PREVIEW
@@ -1035,7 +1058,7 @@ export default function OpenSwanConsole({
     // estimate. Better signal than "this run alone vs cap" since
     // multi-run sessions can blow through caps without any single
     // run being expensive.
-    const spentToday = spend?.totalCost || 0;
+    const spentToday = budgetSpent;
     const projected24h = spentToday + cost;
     return {
       cost,
@@ -1046,7 +1069,7 @@ export default function OpenSwanConsole({
       spentToday,
       projected24h,
     };
-  }, [budgetCap, currentModel, mode, subagentPlan.specs.length, deferredTask.length, taskPlan, spend?.totalCost]);
+  }, [budgetCap, budgetSpent, currentModel, mode, subagentPlan.specs.length, deferredTask.length, taskPlan]);
 
   // Memory count probe — counts active memory_entries for this circle so
   // the user sees how much context the agent will scan. Cheap query, runs
@@ -1055,7 +1078,7 @@ export default function OpenSwanConsole({
   // number that would only be true after full retrieval runs.
   const memoryProbeRef = useRef(0);
   useEffect(() => {
-    if (!visible || !circleId) {
+    if (!visible || !advancedOpen || !circleId) {
       setMemoryCount(null);
       setMemoryPreview([]);
       return;
@@ -1092,7 +1115,7 @@ export default function OpenSwanConsole({
         }
       }
     })();
-  }, [visible, circleId]);
+  }, [visible, advancedOpen, circleId]);
 
   // Memory drawer probe — pulls a richer batch (id, title, scope,
   // content, updated_at) when the drawer is open so the user can
@@ -1100,7 +1123,7 @@ export default function OpenSwanConsole({
   // closed to keep the panel boot fast.
   const memoryFullProbeRef = useRef(0);
   useEffect(() => {
-    if (!visible || !memoryDrawerOpen || !circleId) return;
+    if (!visible || !advancedOpen || !memoryDrawerOpen || !circleId) return;
     const token = ++memoryFullProbeRef.current;
     (async () => {
       try {
@@ -1118,40 +1141,41 @@ export default function OpenSwanConsole({
         setMemoryFull([]);
       }
     })();
-  }, [visible, memoryDrawerOpen, circleId]);
+  }, [visible, advancedOpen, memoryDrawerOpen, circleId]);
 
-  // Budget cap probe — read the circle's umbrella 24h Claude cap from
-  // circles.settings. Default $10 when unset. Runs once per open.
+  // Budget preflight reuses the canonical 60s cached snapshot instead of
+  // issuing a second circle query plus a full usage-table scan on every panel
+  // open. With no task there is no budget work; the richer spend telemetry
+  // remains independently gated behind Advanced.
   const budgetProbeRef = useRef(0);
   useEffect(() => {
-    if (!visible || !circleId) {
+    if (!visible || !circleId || !hasTaskForPreflight) {
+      budgetProbeRef.current += 1;
       setBudgetCap(null);
+      setBudgetSpent(0);
       return;
     }
     const token = ++budgetProbeRef.current;
-    (async () => {
-      try {
-        const { data } = await supabase
-          .from('circles')
-          .select('settings')
-          .eq('id', circleId)
-          .single();
-        const cap = (data?.settings as any)?.claude_total_max_cost_usd;
-        if (budgetProbeRef.current === token) {
-          setBudgetCap(typeof cap === 'number' && cap > 0 ? cap : 10);
-        }
-      } catch {
-        if (budgetProbeRef.current === token) setBudgetCap(10);
-      }
-    })();
-  }, [visible, circleId]);
+    getCircleBudgetSnapshot(circleId)
+      .then((snapshot) => {
+        if (budgetProbeRef.current !== token) return;
+        setBudgetCap(snapshot?.capUsd ?? null);
+        setBudgetSpent(snapshot?.spentUsd ?? 0);
+      })
+      .catch(() => {
+        if (budgetProbeRef.current !== token) return;
+        setBudgetCap(null);
+        setBudgetSpent(0);
+      });
+  }, [circleId, hasTaskForPreflight, visible]);
 
   // Access readiness probe — this is the front-door preflight for
   // browser/desktop/files/app automation. It reuses the shared registry so
   // the Control Panel shows the same capability truth the planner uses.
   const capabilityProbeRef = useRef(0);
   useEffect(() => {
-    if (!visible || !circleId) {
+    if (!visible || !circleId || (!advancedOpen && !requiresLiveCapabilityPreflight)) {
+      capabilityProbeRef.current += 1;
       setCapabilityAudit(null);
       setCapabilityLoading(false);
       setCapabilityError(null);
@@ -1173,16 +1197,27 @@ export default function OpenSwanConsole({
       .finally(() => {
         if (capabilityProbeRef.current === token) setCapabilityLoading(false);
       });
-  }, [visible, circleId]);
+  }, [advancedOpen, circleId, requiresLiveCapabilityPreflight, visible]);
 
   // Site-wide automation readiness belongs inside the Control Panel, not as
   // a persistent page bar. It combines the capability audit above with vault
   // posture and observability so launch decisions happen in one place.
   const automationReadinessProbeRef = useRef(0);
   useEffect(() => {
-    if (!visible || !circleId) {
+    if (!visible || !advancedOpen || !circleId) {
+      automationReadinessProbeRef.current += 1;
       setAutomationReadiness(null);
       setAutomationReadinessLoading(false);
+      setAutomationReadinessError(null);
+      return;
+    }
+    // Capability and vault evidence belong to one snapshot. Waiting for the
+    // capability probe avoids an immediate vault RPC with null evidence
+    // followed by a second RPC when that audit resolves.
+    if (capabilityLoading || (!capabilityAudit && !capabilityError)) {
+      automationReadinessProbeRef.current += 1;
+      setAutomationReadiness(null);
+      setAutomationReadinessLoading(true);
       setAutomationReadinessError(null);
       return;
     }
@@ -1215,7 +1250,7 @@ export default function OpenSwanConsole({
       .finally(() => {
         if (automationReadinessProbeRef.current === token) setAutomationReadinessLoading(false);
       });
-  }, [visible, circleId, capabilityAudit, capabilityError]);
+  }, [advancedOpen, visible, circleId, capabilityAudit, capabilityError, capabilityLoading]);
 
   // Stale-memory dry-run probe — runs rageForget in dryRun=true for each
   // known biasing phrase so the "Prune" button has a candidate count to
@@ -1399,17 +1434,20 @@ export default function OpenSwanConsole({
     // the core's own fields below.)
     const extraBlockers: string[] = [];
     if (!trimmed) extraBlockers.push('Add a task before launch.');
-    if (selectedIntentMeta && capabilityLoading) {
+    if (requiresLiveCapabilityPreflight && (capabilityLoading || (!capabilityAudit && !capabilityError))) {
       extraBlockers.push('Access check still running — waiting before launch.');
     }
-    if (controlRecommendation?.label === 'Setup needed') {
+    if (requiresLiveCapabilityPreflight && controlRecommendation?.label === 'Setup needed') {
       extraBlockers.push(controlRecommendation.summary || 'Setup needed before launch.');
     }
 
     // Non-blocking review warnings, kept in the original inline push order.
     const extraWarnings: string[] = [];
-    if (automationReadinessError) extraWarnings.push(`Automation readiness check failed: ${automationReadinessError}`);
+    if (advancedOpen && automationReadinessError) extraWarnings.push(`Automation readiness check failed: ${automationReadinessError}`);
     if (controlRecommendation?.label === 'Can try with checks') extraWarnings.push(controlRecommendation.summary);
+    if (!requiresLiveCapabilityPreflight && advancedOpen && controlRecommendation?.label === 'Setup needed') {
+      extraWarnings.push(`${controlRecommendation.summary} Planning can continue; live execution will re-check access.`);
+    }
 
     let budgetOverCap: string | undefined;
     if (planCostPreview?.overBudget && budgetCap !== null) {
@@ -1432,8 +1470,11 @@ export default function OpenSwanConsole({
     // be stricter than the old inline gate: every inline blocker maps to a core input here.
     const readiness = resolveLaunchReadiness({
       hasBracketPlaceholder: /\[[^\]]+\]/.test(trimmed),
-      capabilityAuditFailed: capabilityError,
-      automationBlockers: automationReadiness?.blockers,
+      capabilityAuditFailed: requiresLiveCapabilityPreflight ? capabilityError : null,
+      // Site-wide readiness is an advanced diagnostic, not authority to block
+      // an unrelated plan/research turn. Task-specific live capabilities are
+      // enforced above and the execution runtime verifies exact authority.
+      automationBlockers: null,
       budgetOverCap,
       extraBlockers,
       extraWarnings,
@@ -1480,13 +1521,14 @@ export default function OpenSwanConsole({
       runLabel: selectedIntentMeta?.title || modePolicy?.label || 'OpenSwan task',
     };
   }, [
-    automationReadiness,
     automationReadinessError,
+    advancedOpen,
     bridgeEnv.available,
     bridgeResult,
     budgetCap,
     capabilityError,
     capabilityLoading,
+    capabilityAudit,
     controlRecommendation,
     guardrailIsolatedBrowser,
     guardrailLiveTrace,
@@ -1494,6 +1536,7 @@ export default function OpenSwanConsole({
     guardrailWatchOption.title,
     modePolicy?.label,
     planCostPreview,
+    requiresLiveCapabilityPreflight,
     selectedIntentMeta,
     subagentPlan.specs.length,
     subagentPlan.willSpawn,
@@ -1512,25 +1555,41 @@ export default function OpenSwanConsole({
 
   const applyIntent = useCallback((intent: HelperIntent) => {
     setSelectedIntent(intent.key);
+    setModeManuallySelected(true);
     setMode(intent.mode);
     setTask((current) => buildIntentTaskDraft(intent, current));
     setOpenSections((prev) => ({ ...prev, intent: true, taskMode: true }));
   }, []);
 
+  const resetIntentToAuto = useCallback(() => {
+    setSelectedIntent(null);
+    setModeManuallySelected(false);
+    const inferred = inferIntentFromTask(task);
+    if (inferred) {
+      setMode(inferred.mode);
+      return;
+    }
+    if ((MODE_KEYS as string[]).includes(String(currentMode || ''))) {
+      setMode(currentMode as OpenSwanChatMode);
+    }
+  }, [currentMode, task]);
+
   const toggleSection = useCallback((key: ControlPanelSectionKey) => {
     setOpenSections((prev) => ({ ...prev, [key]: !prev[key] }));
   }, []);
-  const expandAllSections = useCallback(() => {
-    setOpenSections(openSectionsFor(ALL_CONTROL_PANEL_SECTIONS));
-    setRecentRunsExpanded(true);
-    setMaintenanceOpen(true);
-  }, []);
-  const collapseToLaunchSections = useCallback(() => {
-    setOpenSections({ ...DEFAULT_OPEN_SECTIONS });
-    setRecentRunsExpanded(false);
-    setMaintenanceOpen(false);
+  const toggleAdvancedOptions = useCallback(() => {
+    setAdvancedOpen((current) => {
+      const next = !current;
+      if (!next) {
+        setOpenSections({ ...DEFAULT_OPEN_SECTIONS });
+        setRecentRunsExpanded(false);
+        setMaintenanceOpen(false);
+      }
+      return next;
+    });
   }, []);
   const openLaunchFixSections = useCallback(() => {
+    setAdvancedOpen(true);
     setOpenSections((prev) => ({
       ...prev,
       taskMode: true,
@@ -1729,7 +1788,9 @@ export default function OpenSwanConsole({
         setSaveAutomationMessage(
           saveAutomationCadence === 'manual'
             ? 'Saved as a manual automation — run it any time from the list.'
-            : 'Scheduled. It now lives in this circle’s automations.',
+            : selectedAgentSummary && !['blackswan', 'default::blackswan'].includes(String(selectedAgentSummary.subjectKey || '').toLowerCase())
+              ? `Scheduled in OpenSwan with ${selectedAgentSummary.label} retained as the accountable agent identity.`
+              : 'Scheduled. It now lives in this circle’s automations.',
         );
         setSaveAutomationOpen(false);
         await refreshAutomations();
@@ -1739,7 +1800,7 @@ export default function OpenSwanConsole({
     } finally {
       setSavingAutomation(false);
     }
-  }, [savingAutomation, circleId, launchTask, mode, saveAutomationCadence, saveAutomationCron, saveAutomationName, currentModel, agentSubjectMetadata, refreshAutomations]);
+  }, [savingAutomation, circleId, launchTask, mode, saveAutomationCadence, saveAutomationCron, saveAutomationName, currentModel, agentSubjectMetadata, refreshAutomations, selectedAgentSummary]);
 
   // Clear the transient run-now feedback timer on unmount.
   useEffect(() => () => {
@@ -1819,10 +1880,7 @@ export default function OpenSwanConsole({
             <View style={{ flex: 1 }}>
               <Text style={styles.headerTitle} nativeID="openswan-console-title">OpenSwan Control Panel</Text>
               <Text style={styles.headerSub}>
-                Tell it what to do, confirm access, then let the agent use chat, browser, desktop, files, and saved logins. Currently:{' '}
-                <Text style={{ color: modeAccent }}>
-                  {modePolicy?.label?.toUpperCase() || mode.toUpperCase()}
-                </Text>.
+                Describe the outcome. OpenSwan routes the right tools and asks only when an action needs approval.
               </Text>
             </View>
           </View>
@@ -1841,131 +1899,18 @@ export default function OpenSwanConsole({
           style={{ maxHeight: Platform.OS === 'web' ? ('76vh' as any) : 680 }}
           contentContainerStyle={styles.scrollContent}
         >
-          <LaunchReadinessPanel
-            readiness={launchReadiness}
-            accentColor={modeAccent}
-            fixBusy={launchFixBusy}
-            fixMessage={launchFixMessage}
-            onFixBlockers={handleFixLaunchBlockers}
-            onShowAll={expandAllSections}
-            onCollapse={collapseToLaunchSections}
-          />
-
-          <GroupHeader label="LAUNCH" hint="What to run and how" accentColor={modeAccent} />
-
-          {/* ── Intent launcher ──────────────────────────────────────── */}
-          <AccordionSection
-            title="Work Type"
-            meta={selectedIntentMeta?.label || modePolicy?.label || 'Pick work'}
-            accentColor={modeAccent}
-            expanded={!!openSections.intent}
-            onToggle={() => toggleSection('intent')}
-          >
-          <View style={styles.helperHero}>
-            <View style={styles.helperHeroHeader}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.helperEyebrow}>WHAT SHOULD OPENSWAN DO?</Text>
-                <Text style={styles.helperHeroTitle}>
-                  Pick the kind of work. The Control Panel will route the tools.
-                </Text>
-              </View>
-              <View style={[styles.helperModeBadge, { borderColor: `${modeAccent}66`, backgroundColor: `${modeAccent}16` }]}>
-                <Text style={[styles.helperModeBadgeText, { color: modeAccent }]}>
-                  {selectedIntentMeta?.label || modePolicy?.label || 'Auto'}
-                </Text>
-              </View>
-            </View>
-            <View style={styles.intentGrid}>
-              {HELPER_INTENTS.map((intent) => {
-                const active = selectedIntent === intent.key;
-                const intentReady = capabilityLoading
-                  ? 'loading'
-                  : intent.capabilityIds.some((id) => capabilityById.get(id)?.status === 'ready')
-                    ? 'ready'
-                    : intent.capabilityIds.some((id) => capabilityById.get(id)?.status === 'partial')
-                      ? 'partial'
-                      : 'missing';
-                const intentColor =
-                  intentReady === 'ready' ? SUCCESS :
-                  intentReady === 'partial' ? '#f59e0b' :
-                  intentReady === 'loading' ? '#38bdf8' :
-                  MUTED;
-                return (
-                  <Pressable
-                    key={intent.key}
-                    onPress={() => applyIntent(intent)}
-                    style={({ hovered, pressed }: any) => [
-                      styles.intentCard,
-                      {
-                        borderColor: active ? `${modeAccent}88` : CARD_BORDER,
-                        backgroundColor: active ? `${modeAccent}12` : FIELD_BG,
-                      },
-                      hovered && { borderColor: `${modeAccent}66`, backgroundColor: `${modeAccent}0d` },
-                      pressed && { transform: [{ scale: 0.99 }] },
-                    ]}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Choose ${intent.title}`}
-                  >
-                    <View style={styles.intentCardTop}>
-                      <Text style={[styles.intentLabel, { color: active ? modeAccent : TEXT }]}>{intent.label}</Text>
-                      <View style={[styles.intentStatusDot, { backgroundColor: intentColor }]} />
-                    </View>
-                    <Text style={styles.intentTitle}>{intent.title}</Text>
-                    <Text style={styles.intentDesc} numberOfLines={2}>{intent.description}</Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-            {selectedIntentMeta ? (
-              <View style={styles.intentDetailPanel}>
-                <View style={styles.intentDetailHeader}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.intentDetailKicker}>SELECTED WORKFLOW</Text>
-                    <Text style={styles.intentDetailTitle}>{selectedIntentMeta.title}</Text>
-                  </View>
-                  <View style={[styles.intentDetailModePill, { borderColor: `${modeAccent}66`, backgroundColor: `${modeAccent}14` }]}>
-                    <Text style={[styles.intentDetailModeText, { color: modeAccent }]}>
-                      {modePolicy?.label || selectedIntentMeta.mode}
-                    </Text>
-                  </View>
-                </View>
-                <Text style={styles.intentDetailBody}>
-                  {selectedIntentMeta.description} Picking a Work Type rewrites the Task box into that workflow while preserving the details you already typed.
-                </Text>
-                <View style={styles.intentCapabilityRow}>
-                  {selectedIntentMeta.capabilityIds.map((id) => {
-                    const finding = capabilityById.get(id);
-                    const status = capabilityLoading ? 'loading' : finding?.status || 'missing';
-                    const statusColor =
-                      status === 'ready' ? SUCCESS :
-                      status === 'partial' ? '#f59e0b' :
-                      status === 'loading' ? '#38bdf8' :
-                      DANGER;
-                    return (
-                      <View key={id} style={[styles.intentCapabilityPill, { borderColor: `${statusColor}44` }]}>
-                        <View style={[styles.intentCapabilityDot, { backgroundColor: statusColor }]} />
-                        <Text style={styles.intentCapabilityText}>
-                          {finding?.label || id.replace(/_/g, ' ')}
-                        </Text>
-                      </View>
-                    );
-                  })}
-                </View>
-              </View>
-            ) : null}
-          </View>
-          </AccordionSection>
+          <GroupHeader label="LAUNCH" hint="Describe the task, confirm the route, then run" accentColor={modeAccent} />
 
           {/* ── Task + mode ────────────────────────────────────────── */}
           <AccordionSection
-            title="Task + Mode"
+            title="Task"
             meta={trimmed ? `${trimmed.length} chars · ${modePolicy?.label || mode}` : modePolicy?.label || mode}
             accentColor={modeAccent}
             expanded={!!openSections.taskMode}
             onToggle={() => toggleSection('taskMode')}
           >
           <View style={styles.section}>
-            <Text style={styles.label}>TASK TO AUTOMATE</Text>
+            <Text style={styles.label}>WHAT SHOULD OPENSWAN DO?</Text>
             <TextInput
               value={task}
               onChangeText={setTask}
@@ -1978,11 +1923,48 @@ export default function OpenSwanConsole({
             <View style={styles.inputFooter}>
               <Text style={styles.inputHint}>
                 {trimmed.length === 0
-                  ? `${modePolicy?.responseContract?.directive || modePolicy?.outcome || 'OpenSwan response contract will shape the output.'}`
-                  : `${trimmed.length} chars · mode "${mode}" contract will apply`}
+                  ? 'Describe the complete outcome in plain language. OpenSwan will route each action to the right tool.'
+                  : `${trimmed.length} chars · ready to route in ${modePolicy?.label || mode} mode`}
               </Text>
             </View>
-            {selectedIntentMeta ? (
+            <View style={styles.essentialContextRow}>
+              <View style={styles.essentialContextItem}>
+                <Text style={styles.essentialContextLabel}>AGENT</Text>
+                <Text style={styles.essentialContextValue} numberOfLines={1}>
+                  {selectedAgentSummary?.label || 'OpenSwan'}
+                </Text>
+                <Text style={styles.essentialContextDetail} numberOfLines={1}>
+                  {selectedAgentSummary ? 'selected in Chat' : 'default chat runtime'}
+                </Text>
+              </View>
+              <View style={styles.essentialContextItem}>
+                <Text style={styles.essentialContextLabel}>WORK TYPE</Text>
+                <Text style={styles.essentialContextValue} numberOfLines={1}>
+                  {selectedIntent
+                    ? selectedIntentMeta?.label || 'Chosen workflow'
+                    : selectedIntentMeta
+                      ? `Auto · ${selectedIntentMeta.label}`
+                      : 'Auto route'}
+                </Text>
+                <Text style={styles.essentialContextDetail} numberOfLines={1}>
+                  {selectedIntent
+                    ? selectedIntentMeta?.title || 'chosen workflow'
+                    : selectedIntentMeta
+                      ? 'detected from your task'
+                      : 'inferred when you type'}
+                </Text>
+              </View>
+              <View style={styles.essentialContextItem}>
+                <Text style={styles.essentialContextLabel}>APPROVALS</Text>
+                <Text style={styles.essentialContextValue} numberOfLines={1}>
+                  {guardrailWatchOption.label}
+                </Text>
+                <Text style={styles.essentialContextDetail} numberOfLines={1}>
+                  asks before sensitive actions
+                </Text>
+              </View>
+            </View>
+            {advancedOpen && selectedIntentMeta ? (
               <View style={styles.taskRecipePanel}>
                 <View style={styles.taskRecipeHeader}>
                   <View style={{ flex: 1 }}>
@@ -2042,44 +2024,239 @@ export default function OpenSwanConsole({
             ) : null}
 
             <View style={styles.modeBlock}>
-              <Text style={styles.label}>MODE</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, paddingVertical: 2 }}>
-                {modeDescriptors.map((policy) => {
-                  const isActive = policy.key === mode;
-                  const color = policy.color || accentColor;
-                  return (
-                    <Pressable
-                      key={policy.key}
-                      onPress={() => setMode(policy.key as OpenSwanChatMode)}
-                      style={({ hovered }: any) => [
-                        styles.modeChip,
-                        {
-                          borderColor: isActive ? color : CARD_BORDER,
-                          backgroundColor: isActive ? `${color}18` : FIELD_BG,
-                        },
-                        hovered && !isActive && { borderColor: `${color}66`, backgroundColor: `${color}0a` } as any,
-                      ]}
-                    >
-                      <View style={[styles.modeDot, { backgroundColor: color }]} />
-                      <Text style={[styles.modeLabel, { color: isActive ? color : TEXT }]}>
-                        {policy.label}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </ScrollView>
-              <Text style={styles.modeDesc}>
-                {modePolicy?.description || 'Pick the response contract that best fits the task.'}
-              </Text>
-              {modePolicy?.responseContract ? (
-                <View style={{ gap: 3, marginTop: 2 }}>
-                  <Text style={styles.contractLabel}>STRUCTURE</Text>
-                  {modePolicy.responseContract.structure.slice(0, 3).map((s, i) => (
-                    <Text key={i} style={styles.contractLine}>• {s}</Text>
-                  ))}
+              <Pressable
+                onPress={() => setModeOptionsOpen((current) => !current)}
+                accessibilityRole="button"
+                accessibilityLabel={modeOptionsOpen ? 'Hide OpenSwan mode choices' : 'Change OpenSwan mode'}
+                accessibilityState={{ expanded: modeOptionsOpen }}
+                style={({ hovered, pressed }: any) => [
+                  styles.modeSummaryButton,
+                  { borderColor: `${modeAccent}55` },
+                  hovered && { backgroundColor: `${modeAccent}0d`, borderColor: `${modeAccent}88` },
+                  pressed && { transform: [{ scale: 0.995 }] },
+                ]}
+              >
+                <View style={[styles.modeDot, { backgroundColor: modeAccent }]} />
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.essentialContextLabel}>MODE</Text>
+                  <Text style={[styles.essentialContextValue, { color: modeAccent }]} numberOfLines={1}>
+                    {modePolicy?.label || mode}
+                  </Text>
+                </View>
+                <Text style={styles.modeSummaryAction}>{modeOptionsOpen ? 'DONE' : 'CHANGE'}</Text>
+                <Text style={[styles.accordionChevron, { color: modeAccent }]}>{modeOptionsOpen ? 'v' : '>'}</Text>
+              </Pressable>
+              {modeOptionsOpen ? (
+                <View style={styles.modeOptionsPanel}>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, paddingVertical: 2 }}>
+                    {modeDescriptors.map((policy) => {
+                      const isActive = policy.key === mode;
+                      const color = policy.color || accentColor;
+                      return (
+                        <Pressable
+                          key={policy.key}
+                          onPress={() => {
+                            setModeManuallySelected(true);
+                            setMode(policy.key as OpenSwanChatMode);
+                            setModeOptionsOpen(false);
+                          }}
+                          accessibilityRole="button"
+                          accessibilityState={{ selected: isActive }}
+                          style={({ hovered }: any) => [
+                            styles.modeChip,
+                            {
+                              borderColor: isActive ? color : CARD_BORDER,
+                              backgroundColor: isActive ? `${color}18` : FIELD_BG,
+                            },
+                            hovered && !isActive && { borderColor: `${color}66`, backgroundColor: `${color}0a` } as any,
+                          ]}
+                        >
+                          <View style={[styles.modeDot, { backgroundColor: color }]} />
+                          <Text style={[styles.modeLabel, { color: isActive ? color : TEXT }]}>
+                            {policy.label}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+                  <Text style={styles.modeDesc}>
+                    {modePolicy?.description || 'Pick the response contract that best fits the task.'}
+                  </Text>
+                  {advancedOpen && modePolicy?.responseContract ? (
+                    <View style={{ gap: 3, marginTop: 2 }}>
+                      <Text style={styles.contractLabel}>STRUCTURE</Text>
+                      {modePolicy.responseContract.structure.slice(0, 3).map((s, i) => (
+                        <Text key={i} style={styles.contractLine}>• {s}</Text>
+                      ))}
+                    </View>
+                  ) : null}
                 </View>
               ) : null}
             </View>
+          </View>
+          </AccordionSection>
+
+          {trimmed ? (
+            <LaunchReadinessPanel
+              readiness={launchReadiness}
+              fixBusy={launchFixBusy}
+              fixMessage={launchFixMessage}
+              onFixBlockers={handleFixLaunchBlockers}
+              detailed={advancedOpen}
+            />
+          ) : null}
+
+          <Pressable
+            onPress={toggleAdvancedOptions}
+            accessibilityRole="button"
+            accessibilityLabel={advancedOpen ? 'Hide OpenSwan advanced options' : 'Show OpenSwan advanced options'}
+            accessibilityState={{ expanded: advancedOpen }}
+            style={({ hovered, pressed }: any) => [
+              styles.advancedDisclosure,
+              advancedOpen && { borderColor: `${modeAccent}66`, backgroundColor: `${modeAccent}0d` },
+              hovered && { borderColor: `${modeAccent}66`, backgroundColor: `${modeAccent}0d` },
+              pressed && { transform: [{ scale: 0.995 }] },
+            ]}
+          >
+            <View style={styles.advancedDisclosureCopy}>
+              <Text style={styles.advancedDisclosureTitle}>Advanced options</Text>
+              <Text style={styles.advancedDisclosureText} numberOfLines={2}>
+                Work type, connections, guardrails, automations, templates, run history, tools, and maintenance.
+              </Text>
+            </View>
+            <Text style={[styles.advancedDisclosureMeta, { color: modeAccent }]}>
+              {advancedOpen ? 'HIDE' : 'SHOW'}
+            </Text>
+            <Text style={[styles.accordionChevron, { color: modeAccent }]}>{advancedOpen ? 'v' : '>'}</Text>
+          </Pressable>
+
+          {advancedOpen ? (
+            <>
+          <GroupHeader label="ADVANCED OPTIONS" hint="Configure only when the task needs it" accentColor={modeAccent} />
+
+          {/* ── Intent launcher ──────────────────────────────────────── */}
+          <AccordionSection
+            title="Work Type"
+            meta={selectedIntent
+              ? selectedIntentMeta?.label || 'Chosen'
+              : selectedIntentMeta
+                ? `Auto · ${selectedIntentMeta.label}`
+                : 'Auto route'}
+            accentColor={modeAccent}
+            expanded={!!openSections.intent}
+            onToggle={() => toggleSection('intent')}
+          >
+          <View style={styles.helperHero}>
+            <View style={styles.helperHeroHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.helperEyebrow}>CHOOSE A WORKFLOW</Text>
+                <Text style={styles.helperHeroTitle}>
+                  Optional presets tune the mode, task recipe, and readiness checks.
+                </Text>
+              </View>
+              <View style={styles.helperHeaderActions}>
+                <View style={[styles.helperModeBadge, { borderColor: `${modeAccent}66`, backgroundColor: `${modeAccent}16` }]}>
+                  <Text style={[styles.helperModeBadgeText, { color: modeAccent }]}>
+                    {selectedIntent ? selectedIntentMeta?.label || 'Chosen' : selectedIntentMeta ? `Auto · ${selectedIntentMeta.label}` : 'Auto'}
+                  </Text>
+                </View>
+                <Pressable
+                  onPress={resetIntentToAuto}
+                  accessibilityRole="button"
+                  accessibilityLabel="Use automatic OpenSwan workflow routing"
+                  accessibilityState={{ selected: selectedIntent === null }}
+                  style={({ hovered, pressed }: any) => [
+                    styles.taskRecipeBtn,
+                    selectedIntent === null && { borderColor: `${modeAccent}66`, backgroundColor: `${modeAccent}12` },
+                    hovered && { borderColor: `${modeAccent}88` },
+                    pressed && { transform: [{ scale: 0.985 }] },
+                  ]}
+                >
+                  <Text style={[styles.taskRecipeBtnText, { color: modeAccent }]}>AUTO ROUTE</Text>
+                </Pressable>
+              </View>
+            </View>
+            <View style={styles.intentGrid}>
+              {HELPER_INTENTS.map((intent) => {
+                const active = selectedIntent === intent.key;
+                const intentReady = capabilityLoading
+                  ? 'loading'
+                  : intent.capabilityIds.some((id) => capabilityById.get(id)?.status === 'ready')
+                    ? 'ready'
+                    : intent.capabilityIds.some((id) => capabilityById.get(id)?.status === 'partial')
+                      ? 'partial'
+                      : 'missing';
+                const intentColor =
+                  intentReady === 'ready' ? SUCCESS :
+                  intentReady === 'partial' ? '#f59e0b' :
+                  intentReady === 'loading' ? '#38bdf8' :
+                  MUTED;
+                return (
+                  <Pressable
+                    key={intent.key}
+                    onPress={() => applyIntent(intent)}
+                    style={({ hovered, pressed }: any) => [
+                      styles.intentCard,
+                      {
+                        borderColor: active ? `${modeAccent}88` : CARD_BORDER,
+                        backgroundColor: active ? `${modeAccent}12` : FIELD_BG,
+                      },
+                      hovered && { borderColor: `${modeAccent}66`, backgroundColor: `${modeAccent}0d` },
+                      pressed && { transform: [{ scale: 0.99 }] },
+                    ]}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: active }}
+                    accessibilityLabel={`Choose ${intent.title}`}
+                  >
+                    <View style={styles.intentCardTop}>
+                      <Text style={[styles.intentLabel, { color: active ? modeAccent : TEXT }]}>{intent.label}</Text>
+                      <View style={[styles.intentStatusDot, { backgroundColor: intentColor }]} />
+                    </View>
+                    <Text style={styles.intentTitle}>{intent.title}</Text>
+                    <Text style={styles.intentDesc} numberOfLines={2}>{intent.description}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+            {selectedIntentMeta ? (
+              <View style={styles.intentDetailPanel}>
+                <View style={styles.intentDetailHeader}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.intentDetailKicker}>SELECTED WORKFLOW</Text>
+                    <Text style={styles.intentDetailTitle}>{selectedIntentMeta.title}</Text>
+                  </View>
+                  <View style={[styles.intentDetailModePill, { borderColor: `${modeAccent}66`, backgroundColor: `${modeAccent}14` }]}>
+                    <Text style={[styles.intentDetailModeText, { color: modeAccent }]}>
+                      {modePolicy?.label || selectedIntentMeta.mode}
+                    </Text>
+                  </View>
+                </View>
+                <Text style={styles.intentDetailBody}>
+                  {selectedIntentMeta.description} {selectedIntent
+                    ? 'This workflow was chosen explicitly and keeps its mode until you return to automatic routing.'
+                    : 'OpenSwan detected this from the task and will keep adjusting the route as the request changes.'}
+                </Text>
+                <View style={styles.intentCapabilityRow}>
+                  {selectedIntentMeta.capabilityIds.map((id) => {
+                    const finding = capabilityById.get(id);
+                    const status = capabilityLoading ? 'loading' : finding?.status || 'missing';
+                    const statusColor =
+                      status === 'ready' ? SUCCESS :
+                      status === 'partial' ? '#f59e0b' :
+                      status === 'loading' ? '#38bdf8' :
+                      DANGER;
+                    return (
+                      <View key={id} style={[styles.intentCapabilityPill, { borderColor: `${statusColor}44` }]}>
+                        <View style={[styles.intentCapabilityDot, { backgroundColor: statusColor }]} />
+                        <Text style={styles.intentCapabilityText}>
+                          {finding?.label || id.replace(/_/g, ' ')}
+                        </Text>
+                      </View>
+                    );
+                  })}
+                </View>
+              </View>
+            ) : null}
           </View>
           </AccordionSection>
 
@@ -2234,6 +2411,12 @@ export default function OpenSwanConsole({
             onToggle={() => toggleSection('automations')}
           >
           <View style={styles.section}>
+            <View style={styles.automationBoundaryNote}>
+              <Text style={styles.automationBoundaryTitle}>SCHEDULE OWNER · OPENSWAN</Text>
+              <Text style={styles.automationBoundaryText}>
+                Hosted OpenSwan owns unattended schedules. A selected Office or connected-agent identity is retained for accountability; local Claude, Codex, Gemini, Cursor, and OpenSwan sessions are dispatched live from Chat or Office only while their exact connection is available.
+              </Text>
+            </View>
             {automationActionError ? (
               <Text style={[styles.inputHint, { color: DANGER }]} accessibilityLiveRegion="assertive" aria-live={'assertive' as any}>{automationActionError}</Text>
             ) : null}
@@ -2246,6 +2429,7 @@ export default function OpenSwanConsole({
               <View style={styles.automationList}>
                 {automations.slice(0, showAllAutomations ? undefined : 6).map((automation) => {
                   const busy = automationActionId === automation.id;
+                  const savedSubject = getAgentSubjectSummary(automation.eventConfig);
                   const cadence = automation.triggerType === 'schedule'
                     ? cronToHuman(automation.cronExpression)
                     : automation.triggerType.toUpperCase();
@@ -2263,6 +2447,7 @@ export default function OpenSwanConsole({
                           {automation.enabled ? cadence : `PAUSED · ${cadence}`}
                           {automation.runCount > 0 ? ` · ${automation.runCount} runs` : ''}
                           {timing ? ` · ${timing}` : ''}
+                          {savedSubject ? ` · identity ${savedSubject.label}` : ''}
                         </Text>
                         {automation.lastError ? (
                           <Text style={[styles.automationItemMeta, { color: DANGER }]} numberOfLines={2}>
@@ -3272,7 +3457,7 @@ export default function OpenSwanConsole({
                           // naming in the tool registry.
                           const family = t.name.split('.')[0] || 'misc';
                           const familyColor =
-                            family === 'browser'   ? '#22d3ee' :
+                            family === 'browser'   ? '#6366f1' :
                             family === 'desktop'   ? '#a78bfa' :
                             family === 'workspace' ? '#f59e0b' :
                             family === 'rooms'     ? '#6366f1' :
@@ -3616,6 +3801,8 @@ export default function OpenSwanConsole({
               </Text>
             </View>
           ) : null}
+            </>
+          ) : null}
         </ScrollView>
 
         {/* ── Footer ──────────────────────────────────────────────── */}
@@ -3655,22 +3842,23 @@ export default function OpenSwanConsole({
 
 function LaunchReadinessPanel({
   readiness,
-  accentColor,
   fixBusy,
   fixMessage,
   onFixBlockers,
-  onShowAll,
-  onCollapse,
+  detailed,
 }: {
   readiness: LaunchReadinessSnapshot;
-  accentColor: string;
   fixBusy: boolean;
   fixMessage?: string | null;
   onFixBlockers: () => void;
-  onShowAll: () => void;
-  onCollapse: () => void;
+  detailed: boolean;
 }) {
   const hasIssues = readiness.blockers.length > 0 || readiness.warnings.length > 0;
+  const hasTask = !readiness.blockers.includes('Add a task before launch.');
+  const hasFixableIssues = hasTask && (
+    readiness.warnings.length > 0
+    || readiness.blockers.some((issue) => issue !== 'Add a task before launch.')
+  );
   return (
     <View style={[styles.launchReadinessPanel, { borderColor: `${readiness.color}66` }]}>
       <View style={styles.launchReadinessHeader}>
@@ -3685,7 +3873,7 @@ function LaunchReadinessPanel({
           <Text style={styles.launchReadinessSummary} numberOfLines={2}>{readiness.summary}</Text>
         </View>
         <View style={styles.launchReadinessActions}>
-          {hasIssues ? (
+          {hasFixableIssues ? (
             <Pressable
               onPress={onFixBlockers}
               disabled={fixBusy}
@@ -3704,34 +3892,11 @@ function LaunchReadinessPanel({
               </Text>
             </Pressable>
           ) : null}
-          <Pressable
-            onPress={onShowAll}
-            style={({ hovered, pressed }: any) => [
-              styles.launchReadinessAction,
-              { borderColor: `${accentColor}44` },
-              hovered && { backgroundColor: `${accentColor}0d` },
-              pressed && { transform: [{ scale: 0.985 }] },
-            ]}
-            accessibilityRole="button"
-            accessibilityLabel="Open every Control Panel section"
-          >
-            <Text style={[styles.launchReadinessActionText, { color: accentColor }]}>SHOW ALL</Text>
-          </Pressable>
-          <Pressable
-            onPress={onCollapse}
-            style={({ hovered, pressed }: any) => [
-              styles.launchReadinessAction,
-              hovered && { backgroundColor: '#ffffff08' },
-              pressed && { transform: [{ scale: 0.985 }] },
-            ]}
-            accessibilityRole="button"
-            accessibilityLabel="Collapse to launch-critical Control Panel sections"
-          >
-            <Text style={styles.launchReadinessActionText}>FOCUS</Text>
-          </Pressable>
         </View>
       </View>
 
+      {detailed ? (
+        <>
       <View style={styles.launchReadinessMetricGrid}>
         <View style={styles.launchReadinessMetric}>
           <Text style={styles.launchReadinessMetricLabel}>WORKFLOW</Text>
@@ -3781,6 +3946,8 @@ function LaunchReadinessPanel({
             {readiness.approvals.join(' · ')}
           </Text>
         </View>
+      ) : null}
+        </>
       ) : null}
     </View>
   );

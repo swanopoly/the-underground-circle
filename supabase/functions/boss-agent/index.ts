@@ -23,11 +23,13 @@ const TELEGRAM_API = "https://api.telegram.org/bot";
 
 const MODEL_MAP: Record<string, string> = {
   "claude-haiku":  "claude-haiku-4-5",
-  "claude-sonnet": "claude-sonnet-4-6",
+  "claude-sonnet": "claude-sonnet-5",
+  "claude-sonnet-5": "claude-sonnet-5",
   "claude-fable":  "claude-fable-5",
   "claude-fable-5": "claude-fable-5",
-  // Opus points at the latest Opus per canonical model IDs.
-  "claude-opus":   "claude-opus-4-8",
+  // Floating Opus points at the current stable tier.
+  "claude-opus":   "claude-opus-5",
+  "claude-opus-5": "claude-opus-5",
   "claude-opus-4-8": "claude-opus-4-8",
   "claude-opus-4-7": "claude-opus-4-7",
 };
@@ -434,6 +436,7 @@ async function modelCouncil(supabase: any, circleId: string, taskId: string) {
     .from("tasks")
     .select("id, title, description, status, goal_id, peer_approvals")
     .eq("id", taskId)
+    .eq("circle_id", circleId)
     .single();
 
   if (!task) return { error: "Task not found" };
@@ -446,6 +449,7 @@ async function modelCouncil(supabase: any, circleId: string, taskId: string) {
       .from("goals")
       .select("assigned_agent_ids")
       .eq("id", task.goal_id)
+      .eq("circle_id", circleId)
       .single();
     reviewerAgentIds = goal?.assigned_agent_ids || [];
   }

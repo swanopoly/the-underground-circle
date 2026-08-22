@@ -18,6 +18,34 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+// Shared builds are untrusted, user-authored HTML. Keep them on an opaque
+// sandboxed origin even though this public renderer must permit inline assets
+// and scripts used by generated previews. In particular, do not grant
+// allow-same-origin or top-navigation: a published page must never inherit the
+// Supabase function origin or navigate its viewer without an explicit click.
+const publishedPageCsp = [
+  "sandbox allow-scripts allow-forms allow-modals allow-popups",
+  "default-src 'none'",
+  "script-src 'unsafe-inline' 'unsafe-eval' https:",
+  "style-src 'unsafe-inline' https:",
+  "img-src https: data: blob:",
+  "font-src https: data:",
+  "media-src https: blob:",
+  "connect-src https:",
+  "frame-src https:",
+  "worker-src blob:",
+  "form-action https:",
+  "base-uri 'none'",
+].join("; ");
+
+const errorPageCsp = [
+  "default-src 'none'",
+  "style-src 'unsafe-inline'",
+  "frame-ancestors 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+].join("; ");
+
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, "&amp;")
@@ -59,7 +87,7 @@ function errorPage(title: string, message: string, status: number): Response {
   .w{max-width:540px;margin:15vh auto;padding:0 24px;text-align:center;}
   h1{font-size:22px;font-weight:800;margin:0 0 12px;}
   p{color:#94a3b8;line-height:1.5;}
-  a{color:#22d3ee;text-decoration:none;border-bottom:1px solid #22d3ee55;}
+  a{color:#6366f1;text-decoration:none;border-bottom:1px solid #6366f155;}
   </style></head><body><div class="w"><h1>${safeTitle}</h1><p>${safeMessage}</p>
   <p style="margin-top:24px;"><a href="https://app.chrisswanson.xyz">The Underground Circle</a></p></div></body></html>`;
   return new Response(body, {
@@ -69,6 +97,8 @@ function errorPage(title: string, message: string, status: number): Response {
       "Content-Type": "text/html; charset=utf-8",
       "X-Content-Type-Options": "nosniff",
       "Referrer-Policy": "no-referrer",
+      "Content-Security-Policy": errorPageCsp,
+      "X-Frame-Options": "DENY",
     },
   });
 }
@@ -119,8 +149,8 @@ Deno.serve(async (req) => {
       "X-Content-Type-Options": "nosniff",
       "Referrer-Policy": "no-referrer",
       "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
-      // Content Security Policy — the iframe runs the shared author's code,
-      // so we keep it permissive but isolate cookies
+      "Content-Security-Policy": publishedPageCsp,
+      "Cross-Origin-Resource-Policy": "cross-origin",
       "X-Frame-Options": "SAMEORIGIN",
     },
   });

@@ -1,19 +1,32 @@
 // progression.ts — Core progression logic: award XP, evaluate thresholds, create unlocks
 
 import { supabase } from './supabase';
+import { safeGetUserForAccessToken } from './authSession';
+import type {
+  OfficeConnectionAuthorityFence,
+  OfficeConnectionExactAuthority,
+} from './connectionManager';
 
-// Per-session flags. Once PostgREST reports PGRST205 (table missing from
-// schema cache) for a progression table we stop hitting it — no migration
-// has been run yet, so every call would otherwise emit a 404 on each page
-// load.
-let progressionEventsMissing = false;
-let agentMasteryMissing = false;
+// A missing migration may make high-frequency award hooks noisy, but a
+// process-lifetime boolean turned a later migration into a permanent false
+// zero. Non-strict background writers use only a short cooldown; strict panel
+// reads always probe and surface unavailable storage as an error.
+const MISSING_TABLE_RETRY_MS = 30_000;
+let progressionEventsUnavailableUntil = 0;
+let agentMasteryUnavailableUntil = 0;
+const onMissingTableCooldown = (until: number) => until > Date.now();
 const isTableMissing = (err: unknown, relation?: string) => {
   const error = err as any;
   const message = `${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`.toLowerCase();
+  const normalizedRelation = String(relation || '').toLowerCase();
+  const namedMissingSignature = !!normalizedRelation && (
+    message.includes(`could not find the table 'public.${normalizedRelation}' in the schema cache`)
+    || message.includes(`relation "public.${normalizedRelation}" does not exist`)
+    || message.includes(`relation "${normalizedRelation}" does not exist`)
+  );
   return error?.code === 'PGRST205'
-    || error?.status === 404
-    || (!!relation && (message.includes(`'public.${relation.toLowerCase()}'`) || message.includes(relation.toLowerCase())));
+    || error?.code === '42P01'
+    || (error?.status === 404 && namedMissingSignature);
 };
 import {
   BOND_XP_AMOUNTS,
@@ -68,6 +81,51 @@ export interface AgentEvolutionUnlock {
   unlocked_at: string;
 }
 
+export type AgentProgressionReadOptions = Readonly<{
+  authority: OfficeConnectionExactAuthority;
+  isAuthorityCurrent: OfficeConnectionAuthorityFence;
+  strict?: boolean;
+}>;
+
+type VerifiedProgressionRead = Readonly<{
+  authority: OfficeConnectionExactAuthority;
+  strict: boolean;
+}>;
+
+async function verifyProgressionRead(
+  userId: string,
+  circleId: string | undefined,
+  options?: AgentProgressionReadOptions,
+): Promise<VerifiedProgressionRead | null> {
+  if (!options) return null;
+  const authority = options.authority;
+  const valid = !!authority
+    && authority.userId === userId
+    && !!circleId
+    && authority.circleId === circleId
+    && !!authority.accessToken
+    && authority.accessToken.length <= 16_384
+    && Number.isSafeInteger(authority.generation)
+    && authority.generation > 0
+    && typeof options.isAuthorityCurrent === 'function'
+    && options.isAuthorityCurrent(authority);
+  if (!valid) throw new Error('Progression is unavailable for this retired Office session.');
+  const { value: verifiedUser } = await safeGetUserForAccessToken(authority.accessToken);
+  if (verifiedUser?.id !== userId || !options.isAuthorityCurrent(authority)) {
+    throw new Error('Progression is unavailable because the Office account changed.');
+  }
+  return { authority, strict: options.strict === true };
+}
+
+function assertProgressionReadCurrent(
+  read: VerifiedProgressionRead | null,
+  options?: AgentProgressionReadOptions,
+): void {
+  if (read && (!options || !options.isAuthorityCurrent(read.authority))) {
+    throw new Error('Progression is unavailable for this retired Office session.');
+  }
+}
+
 export interface AgentProgression {
   bondXP: number;
   bondLevel: BondLevel;
@@ -79,7 +137,7 @@ export interface AgentProgression {
 // ─── Anti-Spam: Repeat Count ────────────────────────────────────────────────
 
 async function getRepeatCount(userId: string, agentId: string, eventKind: string): Promise<number> {
-  if (progressionEventsMissing) return 0;
+  if (onMissingTableCooldown(progressionEventsUnavailableUntil)) return 0;
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   const { count, error } = await supabase
     .from('progression_events')
@@ -91,7 +149,7 @@ async function getRepeatCount(userId: string, agentId: string, eventKind: string
 
   if (error) {
     if (isTableMissing(error, 'progression_events')) {
-      progressionEventsMissing = true;
+      progressionEventsUnavailableUntil = Date.now() + MISSING_TABLE_RETRY_MS;
       return 0;
     }
     console.warn('[progression] getRepeatCount error:', error.message);
@@ -112,7 +170,7 @@ export async function awardBondXP(
   comboBonus: number = 0,
   metadata: Record<string, unknown> = {},
 ): Promise<{ effectiveAmount: number; totalBondXP: number } | null> {
-  if (progressionEventsMissing) return null;
+  if (onMissingTableCooldown(progressionEventsUnavailableUntil)) return null;
   const baseAmount = BOND_XP_AMOUNTS[eventKind];
   if (baseAmount === undefined) {
     console.warn(`[progression] Unknown bond event_kind: ${eventKind}`);
@@ -140,14 +198,14 @@ export async function awardBondXP(
 
   if (insertError) {
     if (isTableMissing(insertError, 'progression_events')) {
-      progressionEventsMissing = true;
+      progressionEventsUnavailableUntil = Date.now() + MISSING_TABLE_RETRY_MS;
       return null;
     }
     console.error('[progression] awardBondXP insert error:', insertError.message);
     return null;
   }
 
-  const totalBondXP = await getBondXP(userId, agentId);
+  const totalBondXP = await getBondXP(userId, agentId, circleId);
 
   // Check for level-up and emit RPG event
   const prevBondLevel = getBondLevel(totalBondXP - effectiveAmount);
@@ -178,7 +236,7 @@ export async function awardMasteryXP(
   quality: QualityTier = 'normal',
   metadata: Record<string, unknown> = {},
 ): Promise<{ effectiveAmount: number; masteryXP: number; masteryLevel: MasteryLevel } | null> {
-  if (progressionEventsMissing || agentMasteryMissing) return null;
+  if (onMissingTableCooldown(progressionEventsUnavailableUntil) || onMissingTableCooldown(agentMasteryUnavailableUntil)) return null;
   const baseAmount = MASTERY_XP_AMOUNTS[eventKind];
   if (baseAmount === undefined) {
     console.warn(`[progression] Unknown mastery event_kind: ${eventKind}`);
@@ -206,7 +264,7 @@ export async function awardMasteryXP(
 
   if (insertError) {
     if (isTableMissing(insertError, 'progression_events')) {
-      progressionEventsMissing = true;
+      progressionEventsUnavailableUntil = Date.now() + MISSING_TABLE_RETRY_MS;
       return null;
     }
     console.error('[progression] awardMasteryXP insert error:', insertError.message);
@@ -222,7 +280,7 @@ export async function awardMasteryXP(
     .eq('spirit', spirit)
     .single();
   if (isTableMissing(existingError, 'agent_mastery')) {
-    agentMasteryMissing = true;
+    agentMasteryUnavailableUntil = Date.now() + MISSING_TABLE_RETRY_MS;
     return null;
   }
 
@@ -240,9 +298,13 @@ export async function awardMasteryXP(
       })
       .eq('id', existing.id);
     if (isTableMissing(updateError, 'agent_mastery')) {
-      agentMasteryMissing = true;
+      agentMasteryUnavailableUntil = Date.now() + MISSING_TABLE_RETRY_MS;
       return null;
     }
+    // Any OTHER error (RLS denial, constraint) also means the XP was not
+    // written. Falling through emitted a real LEVEL UP popup for a level the
+    // user does not have and will not have next session.
+    if (updateError) return null;
   } else {
     const { error: insertMasteryError } = await supabase.from('agent_mastery').insert({
       circle_id: circleId,
@@ -254,9 +316,10 @@ export async function awardMasteryXP(
       mastery_title: newLevel.title,
     });
     if (isTableMissing(insertMasteryError, 'agent_mastery')) {
-      agentMasteryMissing = true;
+      agentMasteryUnavailableUntil = Date.now() + MISSING_TABLE_RETRY_MS;
       return null;
     }
+    if (insertMasteryError) return null;
   }
 
   // Check for mastery level-up and emit RPG event
@@ -278,22 +341,43 @@ export async function awardMasteryXP(
 
 // ─── Get Bond XP Total ──────────────────────────────────────────────────────
 
-export async function getBondXP(userId: string, agentId: string): Promise<number> {
-  if (progressionEventsMissing) return 0;
-  const { data, error } = await supabase
+export async function getBondXP(
+  userId: string,
+  agentId: string,
+  circleId?: string,
+  agentAliases: string[] = [],
+  readOptions?: AgentProgressionReadOptions,
+): Promise<number> {
+  const read = await verifyProgressionRead(userId, circleId, readOptions);
+  if (!read?.strict && onMissingTableCooldown(progressionEventsUnavailableUntil)) return 0;
+  const agentIds = Array.from(new Set([agentId, ...agentAliases].map(value => String(value || '').trim()).filter(Boolean)));
+  let query = supabase
     .from('progression_events')
     .select('effective_amount')
     .eq('user_id', userId)
-    .eq('agent_id', agentId)
     .eq('xp_type', 'bond');
+  if (circleId) query = query.eq('circle_id', circleId);
+  if (agentIds.length === 1) query = query.eq('agent_id', agentIds[0]);
+  else if (agentIds.length > 1) query = query.in('agent_id', agentIds);
+  if (read) query = query.setHeader('Authorization', `Bearer ${read.authority.accessToken}`);
+  const { data, error } = await query;
+  assertProgressionReadCurrent(read, readOptions);
 
   if (error) {
     if (isTableMissing(error, 'progression_events')) {
-      progressionEventsMissing = true;
+      if (read?.strict) throw new Error('Agent bond progression storage is unavailable.');
+      progressionEventsUnavailableUntil = Date.now() + MISSING_TABLE_RETRY_MS;
       return 0;
     }
     console.warn('[progression] getBondXP error:', error.message);
+    if (read?.strict) throw new Error('Agent bond progression could not be loaded.');
     return 0;
+  }
+
+  progressionEventsUnavailableUntil = 0;
+
+  if (read?.strict && (data || []).some(row => !Number.isFinite(Number(row?.effective_amount)))) {
+    throw new Error('Agent bond progression returned an invalid response.');
   }
 
   return (data ?? []).reduce((sum, row) => sum + (row.effective_amount ?? 0), 0);
@@ -350,29 +434,62 @@ export async function evaluateBondUnlocks(
 export async function getAgentProgression(
   userId: string,
   agentId: string,
+  circleId?: string,
+  agentAliases: string[] = [],
+  readOptions?: AgentProgressionReadOptions,
 ): Promise<AgentProgression> {
-  const bondXP = await getBondXP(userId, agentId);
+  const read = await verifyProgressionRead(userId, circleId, readOptions);
+  const agentIds = Array.from(new Set([agentId, ...agentAliases].map(value => String(value || '').trim()).filter(Boolean)));
+  const bondXP = await getBondXP(userId, agentId, circleId, agentAliases, readOptions);
+  assertProgressionReadCurrent(read, readOptions);
   const bondLevel = getBondLevel(bondXP);
 
   let masteryEntries: any[] = [];
-  if (!agentMasteryMissing) {
-    const { data, error } = await supabase
+  if (read?.strict || !onMissingTableCooldown(agentMasteryUnavailableUntil)) {
+    let masteryQuery = supabase
       .from('agent_mastery')
       .select('*')
-      .eq('user_id', userId)
-      .eq('agent_id', agentId);
+      .eq('user_id', userId);
+    if (circleId) masteryQuery = masteryQuery.eq('circle_id', circleId);
+    if (agentIds.length === 1) masteryQuery = masteryQuery.eq('agent_id', agentIds[0]);
+    else if (agentIds.length > 1) masteryQuery = masteryQuery.in('agent_id', agentIds);
+    if (read) masteryQuery = masteryQuery.setHeader('Authorization', `Bearer ${read.authority.accessToken}`);
+    const { data, error } = await masteryQuery;
+    assertProgressionReadCurrent(read, readOptions);
     if (isTableMissing(error, 'agent_mastery')) {
-      agentMasteryMissing = true;
+      if (read?.strict) throw new Error('Agent mastery progression storage is unavailable.');
+      agentMasteryUnavailableUntil = Date.now() + MISSING_TABLE_RETRY_MS;
+    } else if (error) {
+      if (read?.strict) throw new Error('Agent mastery progression could not be loaded.');
     } else {
+      agentMasteryUnavailableUntil = 0;
       masteryEntries = data ?? [];
     }
   }
 
-  const { data: unlocks } = await supabase
+  let unlockQuery = supabase
     .from('agent_evolution_unlocks')
     .select('*')
-    .eq('user_id', userId)
-    .eq('agent_id', agentId);
+    .eq('user_id', userId);
+  if (circleId) unlockQuery = unlockQuery.eq('circle_id', circleId);
+  if (agentIds.length === 1) unlockQuery = unlockQuery.eq('agent_id', agentIds[0]);
+  else if (agentIds.length > 1) unlockQuery = unlockQuery.in('agent_id', agentIds);
+  if (read) unlockQuery = unlockQuery.setHeader('Authorization', `Bearer ${read.authority.accessToken}`);
+  const { data: unlocks, error: unlockError } = await unlockQuery;
+  assertProgressionReadCurrent(read, readOptions);
+  if (unlockError && read?.strict) {
+    throw new Error(isTableMissing(unlockError, 'agent_evolution_unlocks')
+      ? 'Agent evolution unlock storage is unavailable.'
+      : 'Agent evolution unlocks could not be loaded.');
+  }
+  if (read?.strict) {
+    const rows = [...masteryEntries, ...(unlocks || [])];
+    if (rows.some(row => (
+      String(row?.user_id || '') !== userId
+      || (!!circleId && String(row?.circle_id || '') !== circleId)
+      || (agentIds.length > 0 && !agentIds.includes(String(row?.agent_id || '')))
+    ))) throw new Error('Agent progression returned an invalid identity receipt.');
+  }
 
   return {
     bondXP,

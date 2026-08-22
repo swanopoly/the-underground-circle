@@ -27,6 +27,12 @@ export type SwanbotV2EdgeClientApprovalGate = (
   call: { name: string; input: unknown },
 ) => Promise<'approve' | 'reject'>;
 
+export type SwanbotV2EdgeClientToolApprovalMode =
+  | 'auto'
+  | 'ask'
+  | 'blocked'
+  | 'unknown';
+
 export type SwanbotV2EdgeClientPreDispatchResult =
   | { allowed: true }
   | {
@@ -50,6 +56,10 @@ export type SwanbotV2BatchStopConditionMatch = {
 const SWANBOT_V2_ADDITIONAL_READ_ONLY_APP_TOOLS = new Set([
   'browser.plan_task',
   'browser.wp_admin_source_intelligence',
+  // Both are non-mutating base-policy tools. They stay out of the edge
+  // client's parallel-read allowlist so each remains a sequential barrier.
+  'browser.wait_for',
+  'browser.scroll',
   'desktop.cad_inspect_file',
   'desktop.illustrator_document_status',
   'desktop.illustrator_text_inventory',
@@ -297,6 +307,9 @@ export function createSwanbotV2BatchToolConstraintGuard(
 export async function authorizeSwanbotV2EdgeClientToolCall(
   context: Omit<SwanbotV2BatchToolPolicyContext, 'hasApprovalGate'> & {
     toolApprovalGate?: SwanbotV2EdgeClientApprovalGate;
+    /** Current canonical catalog policy for this exact tool name. Missing or
+     * unclassified policy fails closed before any handler can enter. */
+    toolApprovalMode?: SwanbotV2EdgeClientToolApprovalMode;
   },
   call: {
     toolName: string;
@@ -308,7 +321,11 @@ export async function authorizeSwanbotV2EdgeClientToolCall(
   const guard = createSwanbotV2BatchToolConstraintGuard({
     userConstraints: context.userConstraints,
     alwaysConfirmFloor: context.alwaysConfirmFloor,
-    hasApprovalGate: Boolean(context.toolApprovalGate),
+    // Ask the guard to report direct-surface confirmation requirements. A
+    // named canonical runtime owner remains allowed to enforce its own
+    // durable exact-call boundary; the mere existence of a UI callback must
+    // not make every read look reviewed or suppress the requirement signal.
+    hasApprovalGate: false,
     runtimeApprovalToolNames: context.runtimeApprovalToolNames,
   });
 
@@ -331,17 +348,39 @@ export async function authorizeSwanbotV2EdgeClientToolCall(
   );
   if (blocked || approvalRequired) {
     const reason = verdict && 'reason' in verdict ? verdict.reason : undefined;
+    if (blocked) {
+      return {
+        allowed: false,
+        kind: 'constraint',
+        reason: reason || 'This tool call was blocked by the user constraint policy.',
+      };
+    }
+  }
+
+  const approvalMode = context.toolApprovalMode || 'unknown';
+  if (approvalMode === 'unknown' || approvalMode === 'blocked') {
     return {
       allowed: false,
-      kind: approvalRequired ? 'approval_required' : 'constraint',
-      reason: reason
-        || (approvalRequired
-          ? 'This tool call requires explicit confirmation and was not performed.'
-          : 'This tool call was blocked by the user constraint policy.'),
+      kind: 'policy_error',
+      reason: approvalMode === 'blocked'
+        ? 'This tool is disabled for model-side execution and was not performed.'
+        : 'This tool call was not performed because it has no current canonical approval policy.',
     };
   }
 
-  if (context.toolApprovalGate) {
+  const runtimeOwnsExactApproval = context.runtimeApprovalToolNames?.has(call.toolName) === true;
+  const needsSurfaceApproval = approvalRequired
+    || (approvalMode === 'ask' && !runtimeOwnsExactApproval);
+  if (needsSurfaceApproval && !context.toolApprovalGate) {
+    const reason = verdict && 'reason' in verdict ? verdict.reason : undefined;
+    return {
+      allowed: false,
+      kind: 'approval_required',
+      reason: reason || 'This exact tool call requires explicit confirmation and was not performed.',
+    };
+  }
+
+  if (needsSurfaceApproval && context.toolApprovalGate) {
     let decision: 'approve' | 'reject' = 'reject';
     try {
       decision = await context.toolApprovalGate({

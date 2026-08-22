@@ -7,23 +7,64 @@ import {
   PlatformConfig, MessagingPlatform, UnifiedChat, UnifiedMessage,
   PLATFORM_INFO, saveConfig, loadConfig, clearConfig,
   testConnection, getChats, getMessages, sendMsg, formatMessageTime,
+  normalizePhoneMessengerExactAuthority, phoneMessengerExactAuthorityMatches,
+  PhoneMessengerAuthorityError,
+  type PhoneMessengerExactAuthority, type PhoneMessengerAuthorityFence,
 } from '../lib/imessageService';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 type Screen = 'picker' | 'setup' | 'chats' | 'thread';
 
-interface Props {
+export interface PhoneMessengerUnreadStatus {
+  unreadCount: number;
+  platform: MessagingPlatform;
+  providerLabel: string;
+  userId: string;
+  circleId: string;
+  generation: number;
+}
+
+export interface PhoneMessengerProps {
   visible: boolean;
   onClose: () => void;
-  onUnreadCount?: (count: number) => void;
+  onUnreadCount?: (status: PhoneMessengerUnreadStatus) => void;
+  exactAuthority: PhoneMessengerExactAuthority | null;
+  isExactAuthorityCurrent: PhoneMessengerAuthorityFence;
 }
 
 const PLATFORMS: MessagingPlatform[] = ['imessage', 'android', 'telegram', 'discord'];
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
-export default function PhoneMessenger({ visible, onClose, onUnreadCount }: Props) {
+export default function PhoneMessenger(props: PhoneMessengerProps) {
+  const authority = normalizePhoneMessengerExactAuthority(props.exactAuthority);
+  let authorityIsCurrent = false;
+  if (authority) {
+    try { authorityIsCurrent = props.isExactAuthorityCurrent(authority) === true; } catch {}
+  }
+
+  // The authority-scoped child owns every credential, contact, message, and
+  // draft state. Retiring or replacing the authority synchronously unmounts
+  // that state before a different account/circle can render it.
+  if (!props.visible || !authority || !authorityIsCurrent) return null;
+  const scopeKey = `${encodeURIComponent(authority.userId)}:${encodeURIComponent(authority.circleId)}:${authority.generation}`;
+  return (
+    <PhoneMessengerAuthoritySession
+      key={scopeKey}
+      {...props}
+      exactAuthority={authority}
+    />
+  );
+}
+
+function PhoneMessengerAuthoritySession({
+  visible,
+  onClose,
+  onUnreadCount,
+  exactAuthority,
+  isExactAuthorityCurrent,
+}: PhoneMessengerProps & { exactAuthority: PhoneMessengerExactAuthority }) {
   const [screen, setScreen] = useState<Screen>('picker');
   const [config, setConfig] = useState<PlatformConfig | null>(null);
   const [loading, setLoading] = useState(false);
@@ -42,6 +83,33 @@ export default function PhoneMessenger({ visible, onClose, onUnreadCount }: Prop
   const [compose, setCompose] = useState('');
   const [sending, setSending] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
+  const authorityRef = useRef<PhoneMessengerExactAuthority>(exactAuthority);
+  authorityRef.current = exactAuthority;
+  const lifecycleController = useRef(new AbortController()).current;
+  const requestControllers = useRef<Record<string, AbortController | undefined>>({});
+
+  const authorityIsCurrent = useCallback((captured: PhoneMessengerExactAuthority) => {
+    if (
+      lifecycleController.signal.aborted
+      || !phoneMessengerExactAuthorityMatches(captured, authorityRef.current)
+    ) return false;
+    try { return isExactAuthorityCurrent(captured) === true; } catch { return false; }
+  }, [isExactAuthorityCurrent, lifecycleController]);
+
+  const beginRequest = useCallback((slot: string) => {
+    requestControllers.current[slot]?.abort();
+    const controller = new AbortController();
+    requestControllers.current[slot] = controller;
+    if (lifecycleController.signal.aborted) controller.abort();
+    else lifecycleController.signal.addEventListener('abort', () => controller.abort(), { once: true });
+    return controller;
+  }, [lifecycleController]);
+
+  useEffect(() => () => {
+    lifecycleController.abort();
+    Object.values(requestControllers.current).forEach(controller => controller?.abort());
+    requestControllers.current = {};
+  }, [lifecycleController]);
 
   // Animations
   const phonePulse = useRef(new Animated.Value(0)).current;
@@ -50,26 +118,48 @@ export default function PhoneMessenger({ visible, onClose, onUnreadCount }: Prop
 
   useEffect(() => {
     if (!visible) return;
+    const capturedAuthority = exactAuthority;
+    const controller = beginRequest('init');
     (async () => {
-      const saved = await loadConfig();
-      if (saved) {
-        setConfig(saved);
-        setSelectedPlatform(saved.platform);
-        setLoading(true);
-        const ok = await testConnection(saved).catch(() => false);
-        setLoading(false);
-        if (ok) {
-          setScreen('chats');
-          loadChatList(saved);
+      try {
+        const saved = await loadConfig(
+          capturedAuthority,
+          authorityIsCurrent,
+          controller.signal,
+        );
+        if (!authorityIsCurrent(capturedAuthority) || controller.signal.aborted) return;
+        if (saved) {
+          setConfig(saved);
+          setSelectedPlatform(saved.platform);
+          setLoading(true);
+          const ok = await testConnection(
+            saved,
+            capturedAuthority,
+            authorityIsCurrent,
+            controller.signal,
+          );
+          if (!authorityIsCurrent(capturedAuthority) || controller.signal.aborted) return;
+          setLoading(false);
+          if (ok) {
+            setScreen('chats');
+            void loadChatList(saved);
+          } else {
+            setScreen('setup');
+            setError('Could not reach server. Check your connection.');
+          }
         } else {
-          setScreen('setup');
-          setError('Could not reach server. Check your connection.');
+          setScreen('picker');
         }
-      } else {
-        setScreen('picker');
+      } catch (error: any) {
+        if (
+          authorityIsCurrent(capturedAuthority)
+          && !controller.signal.aborted
+          && !(error instanceof PhoneMessengerAuthorityError)
+        ) setError(error?.message || 'Could not load Messages.');
       }
     })();
-  }, [visible]);
+    return () => controller.abort();
+  }, [authorityIsCurrent, beginRequest, exactAuthority, visible]);
 
   // Phone pulse animation
   useEffect(() => {
@@ -94,6 +184,9 @@ export default function PhoneMessenger({ visible, onClose, onUnreadCount }: Prop
   }, []);
 
   const handleConnect = useCallback(async () => {
+    const capturedAuthority = exactAuthority;
+    const controller = beginRequest('connect');
+    if (!authorityIsCurrent(capturedAuthority)) return;
     const info = PLATFORM_INFO[selectedPlatform];
     // Validate required fields (first field is always required)
     const firstField = info.setupFields[0];
@@ -112,61 +205,126 @@ export default function PhoneMessenger({ visible, onClose, onUnreadCount }: Prop
     } as PlatformConfig;
 
     try {
-      const ok = await testConnection(cfg);
+      const ok = await testConnection(
+        cfg,
+        capturedAuthority,
+        authorityIsCurrent,
+        controller.signal,
+      );
+      if (!authorityIsCurrent(capturedAuthority) || controller.signal.aborted) return;
       if (!ok) throw new Error('Connection failed — check your credentials');
-      await saveConfig(cfg);
+      await saveConfig(cfg, capturedAuthority, authorityIsCurrent, controller.signal);
+      if (!authorityIsCurrent(capturedAuthority) || controller.signal.aborted) return;
       setConfig(cfg);
       setScreen('chats');
-      loadChatList(cfg);
+      void loadChatList(cfg);
     } catch (e: any) {
-      setError(e.message || 'Could not connect');
+      if (
+        authorityIsCurrent(capturedAuthority)
+        && !controller.signal.aborted
+        && !(e instanceof PhoneMessengerAuthorityError)
+      ) setError(e.message || 'Could not connect');
     } finally {
-      setLoading(false);
+      if (authorityIsCurrent(capturedAuthority) && !controller.signal.aborted) setLoading(false);
     }
-  }, [selectedPlatform, formValues]);
+  }, [authorityIsCurrent, beginRequest, exactAuthority, formValues, selectedPlatform]);
 
   const handleDisconnect = useCallback(async () => {
-    await clearConfig();
-    setConfig(null);
-    setChats([]);
-    setMessages([]);
-    setActiveChat(null);
-    setFormValues({});
-    setScreen('picker');
-  }, []);
+    const capturedAuthority = exactAuthority;
+    const controller = beginRequest('disconnect');
+    try {
+      await clearConfig(capturedAuthority, authorityIsCurrent, controller.signal);
+      if (!authorityIsCurrent(capturedAuthority) || controller.signal.aborted) return;
+      setConfig(null);
+      setChats([]);
+      setMessages([]);
+      setActiveChat(null);
+      setFormValues({});
+      setCompose('');
+      setScreen('picker');
+    } catch (error: any) {
+      if (
+        authorityIsCurrent(capturedAuthority)
+        && !controller.signal.aborted
+        && !(error instanceof PhoneMessengerAuthorityError)
+      ) setError(error?.message || 'Could not disconnect.');
+    }
+  }, [authorityIsCurrent, beginRequest, exactAuthority]);
 
   const loadChatList = useCallback(async (cfg: PlatformConfig) => {
+    const capturedAuthority = exactAuthority;
+    const controller = beginRequest('chats');
+    if (!authorityIsCurrent(capturedAuthority)) return;
     setLoading(true);
     try {
-      const data = await getChats(cfg);
+      const data = await getChats(
+        cfg,
+        capturedAuthority,
+        authorityIsCurrent,
+        controller.signal,
+      );
+      if (!authorityIsCurrent(capturedAuthority) || controller.signal.aborted) return;
       setChats(data);
-      onUnreadCount?.(data.reduce((n, c) => n + (c.unread || 0), 0) || data.length);
+      const unreadCount = data.reduce((count, chat) => count + (chat.unread ?? 0), 0);
+      onUnreadCount?.({
+        unreadCount,
+        platform: cfg.platform,
+        providerLabel: PLATFORM_INFO[cfg.platform].name,
+        userId: capturedAuthority.userId,
+        circleId: capturedAuthority.circleId,
+        generation: capturedAuthority.generation,
+      });
     } catch (e: any) {
-      setError(e.message || 'Failed to load chats');
+      if (
+        authorityIsCurrent(capturedAuthority)
+        && !controller.signal.aborted
+        && !(e instanceof PhoneMessengerAuthorityError)
+      ) setError(e.message || 'Failed to load chats');
     } finally {
-      setLoading(false);
+      if (authorityIsCurrent(capturedAuthority) && !controller.signal.aborted) setLoading(false);
     }
-  }, [onUnreadCount]);
+  }, [authorityIsCurrent, beginRequest, exactAuthority, onUnreadCount]);
 
   const openChat = useCallback(async (chat: UnifiedChat) => {
     if (!config) return;
+    const capturedAuthority = exactAuthority;
+    const controller = beginRequest('thread');
+    if (!authorityIsCurrent(capturedAuthority)) return;
     setActiveChat(chat);
     setScreen('thread');
     setLoading(true);
     setMessages([]);
     try {
-      const msgs = await getMessages(config, chat.id);
+      const msgs = await getMessages(
+        config,
+        chat.id,
+        capturedAuthority,
+        authorityIsCurrent,
+        controller.signal,
+      );
+      if (!authorityIsCurrent(capturedAuthority) || controller.signal.aborted) return;
       setMessages(msgs);
-      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: false }), 100);
+      setTimeout(() => {
+        if (authorityIsCurrent(capturedAuthority) && !controller.signal.aborted) {
+          scrollRef.current?.scrollToEnd({ animated: false });
+        }
+      }, 100);
     } catch (e: any) {
-      setError(e.message || 'Failed to load messages');
+      if (
+        authorityIsCurrent(capturedAuthority)
+        && !controller.signal.aborted
+        && !(e instanceof PhoneMessengerAuthorityError)
+      ) setError(e.message || 'Failed to load messages');
     } finally {
-      setLoading(false);
+      if (authorityIsCurrent(capturedAuthority) && !controller.signal.aborted) setLoading(false);
     }
-  }, [config]);
+  }, [authorityIsCurrent, beginRequest, config, exactAuthority]);
 
   const handleSend = useCallback(async () => {
     if (!config || !activeChat || !compose.trim()) return;
+    const capturedAuthority = exactAuthority;
+    const controller = beginRequest('send');
+    if (!authorityIsCurrent(capturedAuthority)) return;
     const text = compose.trim();
     setCompose('');
     setSending(true);
@@ -180,27 +338,59 @@ export default function PhoneMessenger({ visible, onClose, onUnreadCount }: Prop
       platform: config.platform,
     };
     setMessages(prev => [...prev, optimistic]);
-    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+    setTimeout(() => {
+      if (authorityIsCurrent(capturedAuthority) && !controller.signal.aborted) {
+        scrollRef.current?.scrollToEnd({ animated: true });
+      }
+    }, 50);
 
     try {
-      await sendMsg(config, activeChat.id, text);
+      await sendMsg(
+        config,
+        activeChat.id,
+        text,
+        capturedAuthority,
+        authorityIsCurrent,
+        controller.signal,
+      );
+      if (!authorityIsCurrent(capturedAuthority) || controller.signal.aborted) return;
     } catch (e: any) {
-      setError('Failed to send: ' + (e.message || 'Unknown error'));
+      if (
+        authorityIsCurrent(capturedAuthority)
+        && !controller.signal.aborted
+        && !(e instanceof PhoneMessengerAuthorityError)
+      ) setError('Failed to send: ' + (e.message || 'Unknown error'));
     } finally {
-      setSending(false);
+      if (authorityIsCurrent(capturedAuthority) && !controller.signal.aborted) setSending(false);
     }
-  }, [config, activeChat, compose]);
+  }, [activeChat, authorityIsCurrent, beginRequest, compose, config, exactAuthority]);
 
   const refreshMessages = useCallback(async () => {
     if (!config || !activeChat) return;
+    const capturedAuthority = exactAuthority;
+    const controller = beginRequest('thread');
+    if (!authorityIsCurrent(capturedAuthority)) return;
     setLoading(true);
     try {
-      const msgs = await getMessages(config, activeChat.id);
+      const msgs = await getMessages(
+        config,
+        activeChat.id,
+        capturedAuthority,
+        authorityIsCurrent,
+        controller.signal,
+      );
+      if (!authorityIsCurrent(capturedAuthority) || controller.signal.aborted) return;
       setMessages(msgs);
-      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100);
+      setTimeout(() => {
+        if (authorityIsCurrent(capturedAuthority) && !controller.signal.aborted) {
+          scrollRef.current?.scrollToEnd({ animated: true });
+        }
+      }, 100);
     } catch { /* silent */ }
-    finally { setLoading(false); }
-  }, [config, activeChat]);
+    finally {
+      if (authorityIsCurrent(capturedAuthority) && !controller.signal.aborted) setLoading(false);
+    }
+  }, [activeChat, authorityIsCurrent, beginRequest, config, exactAuthority]);
 
   // ─── Render ────────────────────────────────────────────────────────────────
 

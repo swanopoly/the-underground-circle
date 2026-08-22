@@ -33,7 +33,7 @@ interface Props {
   accentColor?: string;
 }
 
-export default function BridgeDiagCard({ results, onRefresh, refreshing, accentColor = '#22d3ee' }: Props) {
+export default function BridgeDiagCard({ results, onRefresh, refreshing, accentColor = '#6366f1' }: Props) {
   const [copiedFor, setCopiedFor] = useState<string | null>(null);
   const healthyCount = results.filter(r => r.status === 'healthy').length;
 

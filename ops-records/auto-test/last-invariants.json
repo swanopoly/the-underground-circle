@@ -1,17 +1,37 @@
 {
-  "generatedAt": "2026-08-01T08:51:15.197Z",
+  "schemaVersion": 2,
+  "runId": "1887f3e3-c7aa-407a-8ed7-15d2daf4230d",
+  "status": "complete",
+  "startedAt": "2026-08-21T19:17:00.535Z",
+  "generatedAt": "2026-08-21T19:17:12.745Z",
+  "summary": {
+    "total": 13,
+    "pass": 10,
+    "warn": 3,
+    "fail": 0
+  },
   "results": [
     {
       "level": "PASS",
       "name": "no unreachable private rows (private + user_id IS NULL)",
-      "detail": "private_no_owner=0 of 0 active",
-      "data": null
+      "detail": "private_no_owner=0 of 3568 active",
+      "data": {
+        "agent_no_key": 0,
+        "no_circle": 0,
+        "private_no_owner": 0,
+        "total": 3568
+      }
     },
     {
       "level": "PASS",
       "name": "agent-scope rows carry an agent_id",
       "detail": "agent rows with no key=0 — these are invisible to the agent that earned them",
-      "data": null
+      "data": {
+        "agent_no_key": 0,
+        "no_circle": 0,
+        "private_no_owner": 0,
+        "total": 3568
+      }
     },
     {
       "level": "PASS",
@@ -20,72 +40,114 @@
       "data": null
     },
     {
-      "level": "PASS",
+      "level": "WARN",
       "name": "recent memories are traceable to the run that produced them",
-      "detail": "no run-attributable memories written since the writer was wired (2026-07-29T11:40:00Z) — nothing to grade yet | all-time 0/0 (0.0%) | 0 session-scope rollup(s) excluded (no single source run)",
-      "data": null
+      "detail": "since wiring: 5/2879 (0.2%) carry source_run_id | all-time 5/3568 (0.1%) — pre-2026-07-29 rows cannot be backfilled | 6 session-scope rollup(s) excluded (no single source run)",
+      "data": {
+        "distinct_surfaces": 9,
+        "recent": 2879,
+        "recent_session_scoped": 6,
+        "recent_with_run": 5,
+        "stamped_feed_task": 5,
+        "total": 3568,
+        "with_run": 5
+      }
     },
     {
       "level": "PASS",
       "name": "source_surface distribution",
-      "detail": "feed_task=0, distinct surfaces=0 (a high feed_task share is the known hardcode)",
-      "data": null
+      "detail": "feed_task=5, distinct surfaces=9 (a high feed_task share is the known hardcode)",
+      "data": {
+        "distinct_surfaces": 9,
+        "recent": 2879,
+        "recent_session_scoped": 6,
+        "recent_with_run": 5,
+        "stamped_feed_task": 5,
+        "total": 3568,
+        "with_run": 5
+      }
     },
     {
-      "level": "FAIL",
+      "level": "WARN",
       "name": "memories are reachable by semantic search",
-      "detail": "embedded 0/0 (0.0%) — un-embedded rows are invisible to match_memories",
-      "data": null
+      "detail": "embedded 874/3568 (24.5%) — un-embedded rows are invisible to match_memories",
+      "data": {
+        "embedded": 874,
+        "total": 3568
+      }
     },
     {
       "level": "PASS",
       "name": "no orphaned satellite rows",
       "detail": "soul_links=0 sources=0 access=0",
-      "data": null
+      "data": {
+        "orphan_access": 0,
+        "orphan_soul_links": 0,
+        "orphan_sources": 0
+      }
     },
     {
       "level": "PASS",
       "name": "memory_access_log is being written",
-      "detail": "rows=0 null_user=0 newest=never",
-      "data": null
+      "detail": "rows=733 null_user=0 newest=2026-08-18 17:44:19.998558+00",
+      "data": {
+        "newest": "2026-08-18 17:44:19.998558+00",
+        "null_user": 0,
+        "total": 733
+      }
     },
     {
-      "level": "PASS",
+      "level": "WARN",
       "name": "no exact-content duplicate rows",
-      "detail": "0 redundant rows across 0 exact-content groups",
-      "data": null
+      "detail": "124 redundant rows across 119 exact-content groups",
+      "data": {
+        "active": 3568,
+        "distinct_content": 3443,
+        "exact_dup_groups": 119,
+        "redundant_rows": "124"
+      }
     },
     {
       "level": "PASS",
       "name": "content diversity (informational, NOT a defect)",
-      "detail": "0 distinct contents across 0 active rows — a shared title with many distinct contents is a category bucket, not duplication",
-      "data": null
+      "detail": "3443 distinct contents across 3568 active rows — a shared title with many distinct contents is a category bucket, not duplication",
+      "data": {
+        "active": 3568,
+        "distinct_content": 3443,
+        "exact_dup_groups": 119,
+        "redundant_rows": "124"
+      }
     },
     {
       "level": "PASS",
       "name": "no SELECT policy exposes private rows without an owner check",
-      "detail": "0 SELECT policies, all owner-checked where private",
-      "data": []
+      "detail": "2 SELECT policies, all owner-checked where private",
+      "data": [
+        {
+          "policyname": "memory_select_private",
+          "q": "((visibility = 'private'::text) AND (user_id = auth.uid()))"
+        },
+        {
+          "policyname": "memory_select_shared",
+          "q": "((visibility = ANY (ARRAY['room_shared'::text, 'circle_shared'::text, 'org_shared'::text])) AND (circle_id IN ( SELECT circle_members.circle_id\n   FROM circle_members\n  WHERE (circle_members.user_id = auth.uid()))))"
+        }
+      ]
     },
     {
-      "level": "FAIL",
+      "level": "PASS",
       "name": "hot-path indexes present",
-      "detail": "missing: idx_memory_entries_title_trgm, idx_memory_entries_content_trgm, idx_memory_entries_circle_rank, idx_memory_entries_pinned, idx_memory_entries_embedding",
+      "detail": "5/5 present",
       "data": {
-        "missing": [
-          "idx_memory_entries_title_trgm",
-          "idx_memory_entries_content_trgm",
-          "idx_memory_entries_circle_rank",
-          "idx_memory_entries_pinned",
-          "idx_memory_entries_embedding"
-        ]
+        "missing": []
       }
     },
     {
       "level": "PASS",
       "name": "match_memories is SECURITY INVOKER",
       "detail": "INVOKER — semantic search honours RLS",
-      "data": null
+      "data": {
+        "prosecdef": false
+      }
     }
   ]
 }

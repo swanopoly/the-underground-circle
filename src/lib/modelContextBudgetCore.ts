@@ -68,7 +68,8 @@ const PROVIDER_PREFIX_HEADS: ReadonlySet<string> = new Set<string>([
   'openswan',
   // Vendor/org heads seen inside OpenRouter/HF-style ids.
   'meta-llama', 'deepseek-ai', 'qwen', 'black-forest-labs', 'stabilityai',
-  'moonshotai', 'x-ai',
+  'moonshotai', 'x-ai', 'meta', 'mistral-ai', 'zai-org', 'minimaxai',
+  'accounts', 'fireworks', 'models',
 ]);
 
 function normalizeModelIdLocal(modelId: string): string {
@@ -93,13 +94,16 @@ function normalizeModelIdLocal(modelId: string): string {
 // makes resolveModelContextBudget a no-op identity — the safe default.
 
 export const MODEL_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
-  // Anthropic Claude — the app default family; all modern tiers are 200k, the
-  // "already-large default" band the fixed budgets were tuned for → identity.
+  // Anthropic Claude — exact long-context tiers first. Sonnet 4.6 and Haiku
+  // remain at their established 200k windows; unknown Claude ids stay on the
+  // conservative family fallback below.
+  'claude-sonnet-5': 1_000_000,
+  'claude-opus-5': 1_000_000,
   'claude-sonnet-4-6': 200_000,
-  'claude-fable-5': 200_000,
-  'claude-opus-4-8': 200_000,
-  'claude-opus-4-7': 200_000,
-  'claude-opus-4-6': 200_000,
+  'claude-fable-5': 1_000_000,
+  'claude-opus-4-8': 1_000_000,
+  'claude-opus-4-7': 1_000_000,
+  'claude-opus-4-6': 1_000_000,
   'claude-haiku-4-5': 200_000,
   'claude-haiku-4-5-20251001': 200_000,
   'claude-3-5-sonnet': 200_000,
@@ -115,15 +119,19 @@ export const MODEL_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
   'gpt-4.1': 1_000_000,
   'gpt-4.1-mini': 1_000_000,
   'gpt-4.1-nano': 1_000_000,
-  'gpt-5.5-pro': 400_000,
-  'gpt-5.5': 400_000,
-  'gpt-5.4': 400_000,
-  'gpt-5.4-mini': 400_000,
-  'gpt-5.4-nano': 400_000,
+  'gpt-5.6-sol': 1_050_000,
+  'gpt-5.6-terra': 1_050_000,
+  'gpt-5.6-luna': 1_050_000,
+  'gpt-5.5-pro': 1_050_000,
+  'gpt-5.5': 1_050_000,
+  'gpt-5.4': 1_050_000,
+  'gpt-5.4-mini': 1_050_000,
+  'gpt-5.4-nano': 1_050_000,
   'codex-mini': 128_000,
   'o1': 200_000,
   'o1-mini': 128_000,
   'o3': 200_000,
+  'o3-pro': 200_000,
   'o3-mini': 200_000,
   'o4-mini': 200_000,
 
@@ -135,11 +143,15 @@ export const MODEL_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
   'gemini-2.0-flash': 1_000_000,
   'gemini-1.5-pro': 2_000_000,
   'gemini-1.5-flash': 1_000_000,
+  'gemini-3.6-flash': 1_048_576,
+  'gemini-3.5-flash-lite': 1_048_576,
   'gemini-3.5-flash': 1_000_000,
   'gemini-3.1-pro-preview': 1_000_000,
   'gemini-3.1-flash-lite': 1_000_000,
 
   // DeepSeek
+  'deepseek-v4-pro': 1_000_000,
+  'deepseek-v4-flash': 1_000_000,
   'deepseek-v3': 128_000,
   'deepseek-v3.2': 128_000,
   'deepseek-r1': 128_000,
@@ -147,6 +159,13 @@ export const MODEL_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
   'deepseek-reasoner': 128_000,
 
   // Mistral / Mixtral / Codestral
+  'mistral-medium-3-5': 256_000,
+  'mistral-large-2512': 256_000,
+  'mistral-small-2603': 256_000,
+  'codestral-2508': 128_000,
+  'ministral-14b-2512': 256_000,
+  'ministral-8b-2512': 256_000,
+  'ministral-3b-2512': 256_000,
   'mistral-large-3': 128_000,
   'mistral-large': 128_000,
   'mistral-small': 32_000, // small-window boundary → gentle reduce
@@ -177,9 +196,23 @@ export const MODEL_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
   'sonar': 128_000,
 
   // Cohere Command
+  'command-a-plus-05-2026': 128_000,
+  'command-a-reasoning-08-2025': 128_000,
+  'command-a-03-2025': 128_000,
+  'command-r7b-12-2024': 128_000,
   'command-a': 256_000,
   'command-r-plus': 128_000,
   'command-r': 128_000,
+
+  // Current Z.AI, MiniMax, and open-weight hosted families.
+  'glm-5.1': 200_000,
+  'glm-5': 200_000,
+  'minimax-m2.7': 204_800,
+  'minimax-m2.7-highspeed': 204_800,
+  'minimax-m2.5': 204_800,
+  'minimax-m2.5-highspeed': 204_800,
+  'gpt-oss-120b': 131_072,
+  'gpt-oss-20b': 131_072,
 
   // BlackSwan-v5 (app-trained Qwen). Grounding context only; tools never route
   // here. Conservative small-ish window. One normalized key covers
@@ -196,9 +229,11 @@ const FAMILY_WINDOW_PATTERNS: ReadonlyArray<{ pattern: RegExp; window: number }>
   { pattern: /^gpt-4o/, window: 128_000 },
   { pattern: /^gpt-4-turbo/, window: 128_000 },
   { pattern: /^gpt-4\b/, window: 8_000 },
+  { pattern: /^gpt-5\.6/, window: 1_050_000 },
   { pattern: /^gpt-5/, window: 400_000 },
   { pattern: /^gpt-3\.5/, window: 16_000 },
   { pattern: /^o[1-9]\b/, window: 200_000 },
+  { pattern: /^claude-(?:sonnet|opus|fable)-5\b/, window: 1_000_000 },
   { pattern: /^claude-/, window: 200_000 },
   { pattern: /^mixtral/, window: 32_000 },
   { pattern: /^(mistral|ministral|magistral|codestral)/, window: 128_000 },
@@ -209,6 +244,9 @@ const FAMILY_WINDOW_PATTERNS: ReadonlyArray<{ pattern: RegExp; window: number }>
   { pattern: /^deepseek/, window: 128_000 },
   { pattern: /^sonar/, window: 128_000 },
   { pattern: /^command/, window: 128_000 },
+  { pattern: /^glm-/, window: 200_000 },
+  { pattern: /^minimax-/, window: 204_800 },
+  { pattern: /^gpt-oss-/, window: 131_072 },
   { pattern: /blackswan/, window: 32_000 },
 ];
 

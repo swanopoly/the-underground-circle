@@ -1,27 +1,27 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Platform } from 'react-native';
+import { Platform, useWindowDimensions } from 'react-native';
+import {
+  AGENT_PANEL_SIDE_DEFAULT_W,
+  AGENT_PANEL_SIDE_MAX_W,
+  AGENT_PANEL_SIDE_MIN_W,
+  clampAgentPanelSideWidthForViewport,
+  computeAgentPanelGeometry,
+  parseAgentPanelStoredSideWidth,
+  resolveAgentPanelViewport,
+  type AgentPanelMode,
+} from './agentPanelLayoutCore';
 
-type PanelMode = 'center' | 'side';
+type ActiveSideResize = {
+  onMove: (event: MouseEvent) => void;
+  onUp: () => void;
+  previousCursor: string;
+  previousUserSelect: string;
+};
 
-const POPUP_PADDING = 24;
-const CENTER_W_RATIO = 0.62;
-const CENTER_H_RATIO = 0.8;
-const CENTER_MIN_W = 560;
-const CENTER_MAX_W = 1000;
-const CENTER_MIN_H = 480;
-const SIDE_MIN_W = 380;
-const SIDE_MAX_W = 720;
-const SIDE_DEFAULT_W = 480;
-// App header is 48px + 1px bottom border and sticks at top:0 with
-// zIndex 1000 (see `AppHeader.tsx`). The docked panel uses position:fixed
-// at top:0, so without this offset the header overlays the panel's top
-// strip (close button, tabs) and clips them. Matches the header's total
-// footprint including its border.
-const APP_HEADER_OFFSET = 49;
 const MODE_KEY = 'uc_agent_panel_mode_v1';
 const SIDE_W_KEY = 'uc_agent_panel_side_w_v1';
 
-function getInitialMode(): PanelMode {
+function getInitialMode(): AgentPanelMode {
   if (Platform.OS !== 'web') return 'center';
   try {
     const stored = typeof localStorage !== 'undefined' ? localStorage.getItem(MODE_KEY) : null;
@@ -31,25 +31,32 @@ function getInitialMode(): PanelMode {
 }
 
 function getInitialSideWidth(): number {
-  if (Platform.OS !== 'web') return SIDE_DEFAULT_W;
+  if (Platform.OS !== 'web') return AGENT_PANEL_SIDE_DEFAULT_W;
   try {
     const stored = typeof localStorage !== 'undefined' ? localStorage.getItem(SIDE_W_KEY) : null;
-    if (stored) return Math.max(SIDE_MIN_W, Math.min(SIDE_MAX_W, parseInt(stored, 10)));
+    return parseAgentPanelStoredSideWidth(stored);
   } catch {}
-  return SIDE_DEFAULT_W;
+  return AGENT_PANEL_SIDE_DEFAULT_W;
 }
 
-export function useAgentPanelLayout() {
-  const [panelMode, setPanelMode] = useState<PanelMode>(getInitialMode);
+export function useAgentPanelLayout(allowSideMode = true) {
+  const measuredViewport = useWindowDimensions();
+  const [panelMode, setPanelMode] = useState<AgentPanelMode>(getInitialMode);
   const [sideWidth, setSideWidth] = useState<number>(getInitialSideWidth);
   const [isResizing, setIsResizing] = useState(false);
   const [backdropOn, setBackdropOn] = useState(false);
   const dragStartX = useRef(0);
   const dragStartW = useRef(0);
-  const [viewport, setViewport] = useState(() => ({
-    w: typeof window !== 'undefined' ? window.innerWidth : 1920,
-    h: typeof window !== 'undefined' ? window.innerHeight : 1080,
-  }));
+  const activeSideResizeRef = useRef<ActiveSideResize | null>(null);
+  // Browser viewport globals are not a React Native viewport contract.
+  // In particular, wide native tablets enter Office's desktop breakpoint and
+  // therefore consume this geometry. Keep one platform-aware source of truth
+  // so rotation and split-screen changes cannot leave a 1920x1080 panel sized
+  // outside the native Modal window.
+  const viewport = useMemo(
+    () => resolveAgentPanelViewport(measuredViewport.width, measuredViewport.height),
+    [measuredViewport.height, measuredViewport.width],
+  );
 
   useEffect(() => {
     if (Platform.OS !== 'web' || typeof localStorage === 'undefined') return;
@@ -66,70 +73,84 @@ export function useAgentPanelLayout() {
   }, [sideWidth]);
 
   useEffect(() => {
-    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
-    const onResize = () => {
-      setViewport({ w: window.innerWidth, h: window.innerHeight });
-      setSideWidth(width => Math.min(width, Math.min(SIDE_MAX_W, window.innerWidth - 80)));
-    };
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
+    // Clamp a saved dock width whenever RN reports a new browser width. Native
+    // also reaches this effect on rotation, but remains centered and simply
+    // keeps a safe preference for a future web session.
+    setSideWidth(width => clampAgentPanelSideWidthForViewport(width, viewport.w));
+  }, [viewport.w]);
+
+  const effectivePanelMode: AgentPanelMode = allowSideMode ? panelMode : 'center';
 
   const toggleMode = useCallback(() => {
+    if (!allowSideMode) return;
     setPanelMode(mode => (mode === 'center' ? 'side' : 'center'));
+  }, [allowSideMode]);
+
+  const stopSideResize = useCallback((updateState = true) => {
+    const activeResize = activeSideResizeRef.current;
+    if (!activeResize) return;
+    activeSideResizeRef.current = null;
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('mousemove', activeResize.onMove);
+      window.removeEventListener('mouseup', activeResize.onUp);
+      window.removeEventListener('blur', activeResize.onUp);
+    }
+    if (typeof document !== 'undefined') {
+      document.body.style.cursor = activeResize.previousCursor;
+      document.body.style.userSelect = activeResize.previousUserSelect;
+    }
+    if (updateState) setIsResizing(false);
   }, []);
 
+  useEffect(() => {
+    if (effectivePanelMode !== 'side') stopSideResize();
+  }, [effectivePanelMode, stopSideResize]);
+
+  useEffect(() => () => {
+    // Never update hook state during teardown, but always restore global DOM
+    // listeners and the body styles captured when resizing began.
+    stopSideResize(false);
+  }, [stopSideResize]);
+
   const startSideResize = useCallback((startPageX: number) => {
-    if (Platform.OS !== 'web' || panelMode !== 'side' || typeof window === 'undefined') return;
+    if (Platform.OS !== 'web' || effectivePanelMode !== 'side' || typeof window === 'undefined') return;
+    stopSideResize();
     dragStartX.current = startPageX;
     dragStartW.current = sideWidth;
     setIsResizing(true);
 
     const onMove = (ev: MouseEvent) => {
       const delta = dragStartX.current - ev.pageX;
-      setSideWidth(Math.max(SIDE_MIN_W, Math.min(SIDE_MAX_W, dragStartW.current + delta)));
+      setSideWidth(Math.max(
+        AGENT_PANEL_SIDE_MIN_W,
+        Math.min(AGENT_PANEL_SIDE_MAX_W, dragStartW.current + delta),
+      ));
     };
 
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-      setIsResizing(false);
-    };
+    const onUp = () => stopSideResize();
 
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    activeSideResizeRef.current = { onMove, onUp, previousCursor, previousUserSelect };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
+    window.addEventListener('blur', onUp);
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
-  }, [panelMode, sideWidth]);
+  }, [effectivePanelMode, sideWidth, stopSideResize]);
 
-  const panelGeometry = useMemo(() => {
-    const maxCenteredWidth = Math.max(CENTER_MIN_W, viewport.w - (POPUP_PADDING * 2));
-    const maxCenteredHeight = Math.max(CENTER_MIN_H, viewport.h - (POPUP_PADDING * 2));
-    const clampedSideWidth = Math.max(
-      Math.min(sideWidth, Math.max(320, viewport.w - 24)),
-      Math.min(SIDE_MIN_W, Math.max(280, viewport.w - 24)),
-    );
+  const resizeSideBy = useCallback((delta: number) => {
+    if (effectivePanelMode !== 'side' || !Number.isFinite(delta)) return;
+    setSideWidth(width => Math.max(
+      AGENT_PANEL_SIDE_MIN_W,
+      Math.min(AGENT_PANEL_SIDE_MAX_W, width + delta),
+    ));
+  }, [effectivePanelMode]);
 
-    if (panelMode === 'side') {
-      return {
-        width: clampedSideWidth,
-        height: Math.max(320, viewport.h - APP_HEADER_OFFSET),
-        left: viewport.w - clampedSideWidth,
-        top: APP_HEADER_OFFSET,
-      };
-    }
-
-    const width = Math.min(CENTER_MAX_W, maxCenteredWidth, Math.max(CENTER_MIN_W, Math.round(viewport.w * CENTER_W_RATIO)));
-    const height = Math.min(maxCenteredHeight, Math.max(CENTER_MIN_H, Math.round(viewport.h * CENTER_H_RATIO)));
-    return {
-      width,
-      height,
-      left: Math.max(POPUP_PADDING, Math.round((viewport.w - width) / 2)),
-      top: Math.max(POPUP_PADDING, Math.round((viewport.h - height) / 2)),
-    };
-  }, [panelMode, sideWidth, viewport.h, viewport.w]);
+  const panelGeometry = useMemo(
+    () => computeAgentPanelGeometry(effectivePanelMode, sideWidth, viewport),
+    [effectivePanelMode, sideWidth, viewport],
+  );
 
   const panelTransition = useMemo(() => {
     const ease = 'cubic-bezier(0.4, 0, 0.2, 1)';
@@ -143,9 +164,13 @@ export function useAgentPanelLayout() {
     panelMode,
     panelGeometry,
     panelTransition,
-    backdropOpacity: backdropOn && panelMode === 'center' ? 1 : 0,
+    // AgentPanel owns the responsive effective mode. A saved desktop `side`
+    // preference may be temporarily centered on compact web/native, so the raw
+    // preference must not make that modal's blocking backdrop transparent.
+    backdropOpacity: backdropOn ? 1 : 0,
     setBackdropOn,
     toggleMode,
     startSideResize,
+    resizeSideBy,
   };
 }

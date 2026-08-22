@@ -17,6 +17,7 @@ import {
 } from '../../../../lib/brandPack';
 
 interface Props {
+  userId: string | null | undefined;
   circleId: string | null | undefined;
   visible: boolean;
   onClose: () => void;
@@ -25,27 +26,28 @@ interface Props {
 
 const VOICE_OPTIONS: BrandVoice[] = ['professional', 'playful', 'minimal', 'bold', 'warm', 'technical'];
 
-export default function BrandPackEditor({ circleId, visible, onClose, onSaved }: Props) {
+export default function BrandPackEditor({ userId, circleId, visible, onClose, onSaved }: Props) {
   const [pack, setPack] = useState<BrandPack>({});
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (!visible || !circleId) return;
+    setPack({});
+    if (!visible || !userId || !circleId) return;
     let cancelled = false;
-    loadBrandPack(circleId)
+    loadBrandPack({ userId, circleId })
       .then((p) => { if (!cancelled && p) setPack(p); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [visible, circleId]);
+  }, [circleId, userId, visible]);
 
-  if (!circleId) return null;
+  if (!userId || !circleId) return null;
 
   const patch = (partial: Partial<BrandPack>) => setPack(prev => ({ ...prev, ...partial }));
 
   const handleSave = async () => {
     setSaving(true);
     try {
-      await saveBrandPack(circleId, pack);
+      await saveBrandPack({ userId, circleId }, pack);
       onSaved?.(pack);
       onClose();
     } finally {
@@ -54,7 +56,7 @@ export default function BrandPackEditor({ circleId, visible, onClose, onSaved }:
   };
 
   const handleReset = async () => {
-    await clearBrandPack(circleId);
+    await clearBrandPack({ userId, circleId });
     setPack({});
     onSaved?.({});
     onClose();
@@ -192,9 +194,9 @@ const styles = StyleSheet.create({
     borderRadius: 6, paddingHorizontal: 10, paddingVertical: 6,
     minWidth: 96,
   },
-  voiceChipActive: { borderColor: '#22d3ee', backgroundColor: '#22d3ee1a' },
+  voiceChipActive: { borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#6366f11a' },
   voiceChipText: { color: '#94a3b8', fontSize: 10, fontWeight: '900', letterSpacing: 0.6, fontFamily: 'monospace' },
-  voiceChipTextActive: { color: '#22d3ee' },
+  voiceChipTextActive: { color: '#6366f1' },
   voiceChipSub: { color: '#7f8ea3', fontSize: 9, marginTop: 2, fontFamily: 'monospace' },
   footer: {
     flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4,
@@ -207,7 +209,7 @@ const styles = StyleSheet.create({
   footerBtnGhostText: { color: '#94a3b8', fontSize: 10, fontWeight: '900', letterSpacing: 0.6, fontFamily: 'monospace' },
   footerBtnPrimary: {
     paddingHorizontal: 14, paddingVertical: 8, borderRadius: 6,
-    borderWidth: 1, borderColor: '#22d3ee', backgroundColor: '#22d3ee18',
+    borderWidth: 1, borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#6366f118',
   },
-  footerBtnPrimaryText: { color: '#22d3ee', fontSize: 10, fontWeight: '900', letterSpacing: 0.6, fontFamily: 'monospace' },
+  footerBtnPrimaryText: { color: '#6366f1', fontSize: 10, fontWeight: '900', letterSpacing: 0.6, fontFamily: 'monospace' },
 });

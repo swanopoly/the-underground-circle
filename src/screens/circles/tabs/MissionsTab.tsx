@@ -14,9 +14,9 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { supabase } from '../../../lib/supabase';
+import { loadSafeCircleProfiles } from '../../../lib/safeProfiles';
 import { showConfirm } from '../../../lib/alert';
 import {
-  useMissions,
   useMissionDetail,
   useProofOfWork,
   createMission,
@@ -28,7 +28,6 @@ import {
   isOverdue,
   formatDeadline,
   powIcon,
-  getMissionAnalytics,
   useFavoriteMissions,
   Mission,
   MissionTask,
@@ -63,6 +62,9 @@ import { getEmptyStateSuggestions, type EmptyStateSuggestionAction } from '../..
 interface Props {
   circleId: string;
   accentColor?: string;
+  missions: Mission[];
+  loading: boolean;
+  onRefresh: () => void | Promise<void>;
 }
 
 // ─── Proof Quick Add ─────────────────────────────────────────────────────────
@@ -236,7 +238,6 @@ function DailyFocus({ missions, streak, accentColor, onSelectMission }: {
   accentColor: string;
   onSelectMission: (id: string) => void;
 }) {
-  const { useMissionDetail: _unused, ...rest } = {} as any; // avoid import
   // Find the most urgent mission (overdue first, then closest deadline)
   const sorted = [...missions].sort((a, b) => {
     const aOverdue = isOverdue(a) ? 0 : 1;
@@ -248,23 +249,20 @@ function DailyFocus({ missions, streak, accentColor, onSelectMission }: {
   const top = sorted[0];
   if (!top) return null;
 
-  const nudges = [
-    'Ship something today.',
-    'Small progress > no progress.',
-    'Your circle is watching.',
-    'One task at a time.',
-    'Build momentum.',
-  ];
-  const nudge = nudges[Math.floor(Date.now() / 86400000) % nudges.length];
+  const nextStep = isOverdue(top)
+    ? 'Past due — open it to resolve the next task.'
+    : 'Open the mission to continue with its next task.';
 
   return (
     <Pressable
       style={[styles.focusCard, { borderLeftColor: isOverdue(top) ? PIXEL_COLORS.red : accentColor }]}
       onPress={() => onSelectMission(top.id)}
+      accessibilityRole="button"
+      accessibilityLabel={`Up next: ${top.title}, ${formatDeadline(top.deadline)}`}
     >
       <View style={styles.focusRow}>
         <View style={{ flex: 1 }}>
-          <Text style={styles.focusLabel}>FOCUS</Text>
+          <Text style={styles.focusLabel}>UP NEXT</Text>
           <Text style={styles.focusTitle} numberOfLines={1}>{top.title}</Text>
           <Text style={styles.focusDeadline}>
             {formatDeadline(top.deadline)}
@@ -273,41 +271,8 @@ function DailyFocus({ missions, streak, accentColor, onSelectMission }: {
         </View>
         <Text style={[styles.focusArrow, { color: accentColor }]}>{'>'}</Text>
       </View>
-      <Text style={styles.focusNudge}>{nudge}</Text>
+      <Text style={styles.focusNudge}>{nextStep}</Text>
     </Pressable>
-  );
-}
-
-// ─── Progress Ring (web SVG) ─────────────────────────────────────────────────
-
-function ProgressRing({ progress, size = 36, strokeWidth = 3, color }: {
-  progress: number; size?: number; strokeWidth?: number; color: string;
-}) {
-  if (Platform.OS !== 'web') {
-    // Native fallback — simple percentage text
-    return (
-      <View style={{ width: size, height: size, borderRadius: size / 2, borderWidth: strokeWidth, borderColor: color + '30', alignItems: 'center', justifyContent: 'center' }}>
-        <Text style={{ color, fontSize: 10, fontWeight: '700', fontFamily: 'monospace' }}>{progress}%</Text>
-      </View>
-    );
-  }
-  const radius = (size - strokeWidth) / 2;
-  const circumference = 2 * Math.PI * radius;
-  const offset = circumference - (progress / 100) * circumference;
-
-  return (
-    <View style={{ width: size, height: size }}>
-      {/* @ts-ignore — SVG works on web */}
-      <svg width={size} height={size} style={{ transform: 'rotate(-90deg)' }}>
-        <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke={color + '20'} strokeWidth={strokeWidth} />
-        <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke={color} strokeWidth={strokeWidth}
-          strokeDasharray={circumference} strokeDashoffset={offset} strokeLinecap="round"
-          style={{ transition: 'stroke-dashoffset 0.5s ease' } as any} />
-      </svg>
-      <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
-        <Text style={{ color, fontSize: 9, fontWeight: '700', fontFamily: 'monospace' }}>{progress}%</Text>
-      </View>
-    </View>
   );
 }
 
@@ -361,8 +326,13 @@ const TASK_STATUS_COLORS: Record<TaskStatus, string> = {
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
-export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indigo }: Props) {
-  const { missions, loading } = useMissions(circleId);
+export default function MissionsTab({
+  circleId,
+  accentColor = PIXEL_COLORS.indigo,
+  missions,
+  loading,
+  onRefresh,
+}: Props) {
   // Per-user mission pins. Pinned missions float to the top of the list.
   const { favorites, toggle: toggleFavorite } = useFavoriteMissions();
   const { entries: proofEntries, loading: proofLoading } = useProofOfWork(circleId);
@@ -376,6 +346,7 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
   const [filter, setFilter] = useState<'all' | 'active' | 'completed' | 'archived'>('all');
   const [searchText, setSearchText] = useState('');
   const [showProof, setShowProof] = useState(false);
+  const [showMissionTools, setShowMissionTools] = useState(false);
   // Notion-style view toggle for the mission pane: list vs timeline (gantt).
   const [missionView, setMissionView] = useState<'list' | 'timeline'>('list');
 
@@ -397,12 +368,21 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
     setShowCreate(true);
   }, []);
 
-  const [analytics, setAnalytics] = useState<{ completionRate: number; completedTasks: number; totalTasks: number; overdueCount: number } | null>(null);
+  const analytics = React.useMemo(() => {
+    const visibleMissions = missions.filter((mission) => mission.status !== 'archived');
+    const tasks = visibleMissions.slice(0, 20).flatMap((mission) => mission.tasks || []);
+    const completedTasks = tasks.filter((task) => task.status === 'done').length;
+    return {
+      completionRate: tasks.length > 0 ? Math.round((completedTasks / tasks.length) * 100) : 0,
+      completedTasks,
+      totalTasks: tasks.length,
+      overdueCount: visibleMissions.filter((mission) => isOverdue(mission)).length,
+    };
+  }, [missions]);
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setMainUserId(data.user?.id || null)).catch(() => {});
-    getMissionAnalytics(circleId).then(a => setAnalytics(a)).catch(() => {});
-  }, [circleId]);
+  }, []);
 
   // Deep-link consumption — if the user landed via /join/{code}?mission={id}
   // and the App.tsx URL parser stored that mission ID, auto-open it once the
@@ -481,8 +461,7 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
         missionId={selectedId}
         circleId={circleId}
         accentColor={accentColor}
-        onBack={() => setSelectedId(null)}
-        onOpenMission={(id) => setSelectedId(id)}
+        onBack={() => { setSelectedId(null); void onRefresh(); }}
         favorites={favorites}
         onToggleFavorite={toggleFavorite}
       />
@@ -494,7 +473,7 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
       {/* Header */}
       <View style={styles.header}>
         <View>
-          <Text style={styles.title}>MISSIONS</Text>
+          <Text style={styles.title}>Missions</Text>
           <Text style={styles.subtitle}>
             {missions.filter(m => m.status === 'active').length} active
             {missions.filter(m => m.status === 'completed').length > 0 &&
@@ -506,8 +485,10 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
         <Pressable
           style={[styles.createBtn, { backgroundColor: accentColor }]}
           onPress={() => setShowCreate(true)}
+          accessibilityRole="button"
+          accessibilityLabel="Create a new mission"
         >
-          <Text style={styles.createBtnText}>+ NEW MISSION</Text>
+          <Text style={styles.createBtnText}>New mission</Text>
         </Pressable>
       </View>
 
@@ -521,75 +502,94 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
         />
       )}
 
-      {/* Analytics bar */}
-      {analytics && analytics.totalTasks > 0 && (
-        <View style={styles.analyticsRow}>
-          <View style={styles.analyticItem}>
-            <Text style={styles.analyticValue}>{analytics.completionRate}%</Text>
-            <Text style={styles.analyticLabel}>done</Text>
-          </View>
-          <View style={styles.analyticItem}>
-            <Text style={styles.analyticValue}>{analytics.completedTasks}/{analytics.totalTasks}</Text>
-            <Text style={styles.analyticLabel}>tasks</Text>
-          </View>
-          {analytics.overdueCount > 0 && (
-            <View style={styles.analyticItem}>
-              <Text style={[styles.analyticValue, { color: PIXEL_COLORS.red }]}>{analytics.overdueCount}</Text>
-              <Text style={styles.analyticLabel}>overdue</Text>
-            </View>
-          )}
-        </View>
-      )}
-
-      {/* Search — matches on title + description, case-insensitive. */}
-      <View style={{ marginHorizontal: GRID.md, marginBottom: GRID.sm }}>
-        <TextInput
-          style={{
-            backgroundColor: PIXEL_COLORS.bg1,
-            borderWidth: 1,
-            borderColor: searchText ? accentColor + '60' : PIXEL_COLORS.bg3,
-            borderRadius: 8,
-            paddingHorizontal: 12,
-            paddingVertical: 8,
-            color: PIXEL_COLORS.text0,
-            fontSize: 13,
-          }}
-          placeholder="Search missions by title or description…"
-          placeholderTextColor={PIXEL_COLORS.text3}
-          value={searchText}
-          onChangeText={setSearchText}
-          returnKeyType="search"
-          nativeID="input-mission-search"
-        />
-      </View>
-
-      {/* Filters + view toggle */}
-      <View style={styles.filterRow}>
-        {(['all', 'active', 'completed', 'archived'] as const).map(f => (
+      {/* Keep the two common scopes visible; search, history, analytics, and
+          alternate views stay one level down until they are needed. */}
+      <View style={styles.missionControls}>
+        {(['all', 'active'] as const).map(f => (
           <Pressable
             key={f}
             style={[styles.filterPill, filter === f && { backgroundColor: accentColor + '20', borderColor: accentColor + '50' }]}
             onPress={() => setFilter(f)}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: filter === f }}
           >
-            <Text style={[styles.filterText, filter === f && { color: accentColor }]}>
-              {f.toUpperCase()}
-            </Text>
+            <Text style={[styles.filterText, filter === f && { color: accentColor }]}>{f === 'all' ? 'All' : 'Active'}</Text>
           </Pressable>
         ))}
         <View style={{ flex: 1 }} />
-        {(['list', 'timeline'] as const).map((v) => (
-          <Pressable
-            key={v}
-            style={[styles.filterPill, missionView === v && { backgroundColor: accentColor + '20', borderColor: accentColor + '50' }]}
-            onPress={() => setMissionView(v)}
-            nativeID={`btn-mission-view-${v}`}
-          >
-            <Text style={[styles.filterText, missionView === v && { color: accentColor }]}>
-              {v === 'list' ? '☰ LIST' : '▭ TIMELINE'}
-            </Text>
-          </Pressable>
-        ))}
+        <Pressable
+          style={[styles.toolsButton, showMissionTools && { borderColor: accentColor + '50' }]}
+          onPress={() => setShowMissionTools((value) => !value)}
+          accessibilityRole="button"
+          accessibilityLabel="Mission search, filters, and view"
+          accessibilityState={{ expanded: showMissionTools }}
+        >
+          <Text style={[styles.toolsButtonText, showMissionTools && { color: accentColor }]}>
+            {`${filter === 'completed' ? 'Completed · ' : filter === 'archived' ? 'Archived · ' : missionView === 'timeline' ? 'Timeline · ' : ''}Filter & view`}
+          </Text>
+        </Pressable>
       </View>
+
+      {showMissionTools && (
+        <View style={styles.missionTools} nativeID="section-mission-tools">
+          <TextInput
+            style={[styles.missionSearch, searchText ? { borderColor: accentColor + '60' } : null]}
+            placeholder="Search missions"
+            placeholderTextColor={PIXEL_COLORS.text3}
+            value={searchText}
+            onChangeText={setSearchText}
+            returnKeyType="search"
+            accessibilityLabel="Search missions by title or description"
+            nativeID="input-mission-search"
+          />
+          <View style={styles.filterRow}>
+            {(['completed', 'archived'] as const).map((f) => (
+              <Pressable
+                key={f}
+                style={[styles.filterPill, filter === f && { backgroundColor: accentColor + '20', borderColor: accentColor + '50' }]}
+                onPress={() => setFilter(f)}
+                accessibilityRole="tab"
+                accessibilityState={{ selected: filter === f }}
+              >
+                <Text style={[styles.filterText, filter === f && { color: accentColor }]}>
+                  {f === 'completed' ? 'Completed' : 'Archived'}
+                </Text>
+              </Pressable>
+            ))}
+            <View style={{ flex: 1 }} />
+            {(['list', 'timeline'] as const).map((v) => (
+              <Pressable
+                key={v}
+                style={[styles.filterPill, missionView === v && { backgroundColor: accentColor + '20', borderColor: accentColor + '50' }]}
+                onPress={() => setMissionView(v)}
+                accessibilityRole="tab"
+                accessibilityState={{ selected: missionView === v }}
+                nativeID={`btn-mission-view-${v}`}
+              >
+                <Text style={[styles.filterText, missionView === v && { color: accentColor }]}>{v === 'list' ? 'List' : 'Timeline'}</Text>
+              </Pressable>
+            ))}
+          </View>
+          {analytics.totalTasks > 0 && (
+            <View style={styles.analyticsRow}>
+              <View style={styles.analyticItem}>
+                <Text style={styles.analyticValue}>{analytics.completionRate}%</Text>
+                <Text style={styles.analyticLabel}>done</Text>
+              </View>
+              <View style={styles.analyticItem}>
+                <Text style={styles.analyticValue}>{analytics.completedTasks}/{analytics.totalTasks}</Text>
+                <Text style={styles.analyticLabel}>tasks</Text>
+              </View>
+              {analytics.overdueCount > 0 && (
+                <View style={styles.analyticItem}>
+                  <Text style={[styles.analyticValue, { color: PIXEL_COLORS.red }]}>{analytics.overdueCount}</Text>
+                  <Text style={styles.analyticLabel}>overdue</Text>
+                </View>
+              )}
+            </View>
+          )}
+        </View>
+      )}
 
       {/* Timeline view */}
       {missionView === 'timeline' && !loading && (
@@ -761,6 +761,12 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
           accentColor={accentColor}
           prefillTitle={createPrefillTitle}
           onClose={() => { setShowCreate(false); setCreatePrefillTitle(''); }}
+          onCreated={async (missionId) => {
+            await onRefresh();
+            setShowCreate(false);
+            setCreatePrefillTitle('');
+            setSelectedId(missionId);
+          }}
         />
       )}
     </View>
@@ -773,7 +779,7 @@ function MissionCard({ mission, accentColor, onPress }: {
   mission: Mission; accentColor: string; onPress: () => void;
 }) {
   const [hovered, setHovered] = useState(false);
-  const { tasks } = useMissionDetail(mission.id);
+  const tasks = mission.tasks || [];
   const progress = missionProgress(tasks);
   const overdue = isOverdue(mission);
   const statusColor = STATUS_COLORS[mission.status];
@@ -784,6 +790,8 @@ function MissionCard({ mission, accentColor, onPress }: {
       onPress={onPress}
       onHoverIn={() => setHovered(true)}
       onHoverOut={() => setHovered(false)}
+      accessibilityRole="button"
+      accessibilityLabel={`Open mission ${mission.title}, ${STATUS_LABELS[mission.status].toLowerCase()}, ${formatDeadline(mission.deadline)}`}
     >
       {/* Top row: status + deadline */}
       <View style={styles.cardTopRow}>
@@ -805,26 +813,19 @@ function MissionCard({ mission, accentColor, onPress }: {
         <Text style={styles.cardDesc} numberOfLines={2}>{mission.description}</Text>
       )}
 
-      {/* Progress ring + bar */}
+      {/* One progress signal is enough; the prior ring + bar duplicated the
+          same number and made every card visually heavier. */}
       {tasks.length > 0 && (
-        <View style={[styles.progressSection, { flexDirection: 'row', alignItems: 'center', gap: 10 }]}>
-          <ProgressRing
-            progress={progress}
-            color={mission.status === 'completed' ? PIXEL_COLORS.green : accentColor}
-            size={34}
-            strokeWidth={3}
-          />
-          <View style={{ flex: 1 }}>
-            <View style={styles.progressBarBg}>
-              <View style={[styles.progressBarFill, {
-                width: `${progress}%` as any,
-                backgroundColor: mission.status === 'completed' ? PIXEL_COLORS.green : accentColor,
-              }]} />
-            </View>
-            <Text style={styles.progressLabel}>
-              {tasks.filter(t => t.status === 'done').length}/{tasks.length} tasks
-            </Text>
+        <View style={styles.progressSection}>
+          <View style={styles.progressBarBg}>
+            <View style={[styles.progressBarFill, {
+              width: `${progress}%` as any,
+              backgroundColor: mission.status === 'completed' ? PIXEL_COLORS.green : accentColor,
+            }]} />
           </View>
+          <Text style={styles.progressLabel}>
+            {tasks.filter(t => t.status === 'done').length} of {tasks.length} tasks complete
+          </Text>
         </View>
       )}
     </Pressable>
@@ -839,14 +840,14 @@ interface CircleMember {
   username: string;
 }
 
-function MissionDetail({ missionId, circleId, accentColor, onBack, onOpenMission, favorites, onToggleFavorite }: {
+function MissionDetail({ missionId, circleId, accentColor, onBack, favorites, onToggleFavorite }: {
   missionId: string; circleId: string; accentColor: string; onBack: () => void;
-  onOpenMission?: (id: string) => void;
   favorites: Set<string>;
   onToggleFavorite: (missionId: string) => void;
 }) {
   const toggleFavorite = onToggleFavorite;
   const { mission, tasks, agents, loading, refresh } = useMissionDetail(missionId);
+  const remainingTaskCount = tasks.filter((task) => task.status !== 'done').length;
   const { show: showToast } = useToast();
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const { streak, recordCompletion } = useMissionStreak(currentUserId);
@@ -861,14 +862,19 @@ function MissionDetail({ missionId, circleId, accentColor, onBack, onOpenMission
   const [assigningTaskId, setAssigningTaskId] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [editTitle, setEditTitle] = useState('');
-  const [editDesc, setEditDesc] = useState('');
   const [editDeadline, setEditDeadline] = useState('');
   // Block editor draft; seeded from mission.brief_blocks or migrated from the
   // legacy `description` text when the user opens the editor.
   const [editBlocks, setEditBlocks] = useState<Block[]>([]);
   const [runningTaskId, setRunningTaskId] = useState<string | null>(null);
-  const [agentResult, setAgentResult] = useState<{ taskId: string; text: string } | null>(null);
+  const [agentResult, setAgentResult] = useState<{
+    taskId: string;
+    text: string;
+    status: 'complete' | 'update' | 'error';
+  } | null>(null);
   const [celebrating, setCelebrating] = useState(false);
+  const [showActions, setShowActions] = useState(false);
+  const [taskActionMenuId, setTaskActionMenuId] = useState<string | null>(null);
   // Notion page-history equivalent: show the mission_revisions log inline.
   const [showHistory, setShowHistory] = useState(false);
 
@@ -877,13 +883,17 @@ function MissionDetail({ missionId, circleId, accentColor, onBack, onOpenMission
     (async () => {
       const { data } = await supabase
         .from('circle_members')
-        .select('user_id, profiles(display_name, username)')
+        .select('user_id')
         .eq('circle_id', circleId);
       if (data) {
-        setMembers(data.map((m: any) => ({
-          user_id: m.user_id,
-          display_name: m.profiles?.display_name || m.profiles?.username || 'Unknown',
-          username: m.profiles?.username || '',
+        const profiles = await loadSafeCircleProfiles({
+          circleId,
+          userIds: data.map((member: any) => member.user_id),
+        });
+        setMembers(profiles.map(profile => ({
+          user_id: profile.id,
+          display_name: profile.display_name || profile.username || 'Unknown',
+          username: profile.username || '',
         })));
       }
     })().catch(() => {});
@@ -988,11 +998,40 @@ function MissionDetail({ missionId, circleId, accentColor, onBack, onOpenMission
         />
       )}
 
-      {/* Back button + share + title */}
+      {/* Keep the default header task-focused. Secondary actions are available
+          under one disclosure instead of six simultaneous buttons. */}
       <View style={styles.detailHeader}>
-        <Pressable onPress={onBack} style={styles.backBtn}>
+        <Pressable onPress={onBack} style={styles.backBtn} accessibilityRole="button" accessibilityLabel="Back to missions">
           <Text style={styles.backBtnText}>{'<'} Back</Text>
         </Pressable>
+        <View style={{ flex: 1 }} />
+        <View style={[styles.statusBadge, {
+          backgroundColor: STATUS_COLORS[mission.status] + '20',
+          borderColor: STATUS_COLORS[mission.status] + '40',
+        }]}>
+          <Text style={[styles.statusText, { color: STATUS_COLORS[mission.status] }]}>
+            {STATUS_LABELS[mission.status]}
+          </Text>
+        </View>
+        <Pressable
+          onPress={() => setShowActions((value) => !value)}
+          style={styles.moreBtn}
+          accessibilityRole="button"
+          accessibilityLabel="More mission actions"
+          accessibilityState={{ expanded: showActions }}
+          nativeID="btn-mission-more"
+        >
+          <Text style={styles.moreBtnText}>...</Text>
+        </Pressable>
+      </View>
+
+      {showActions && (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.detailActionMenu}
+          nativeID="menu-mission-actions"
+        >
         <Pressable onPress={async () => {
           // Generate (or reuse) a link invite for this circle and append the
           // mission ID as a deep-link param. App.tsx captures ?mission= and
@@ -1077,15 +1116,8 @@ function MissionDetail({ missionId, circleId, accentColor, onBack, onOpenMission
         >
           <Text style={styles.shareBtnText}>↧ MD</Text>
         </Pressable>
-        <View style={[styles.statusBadge, {
-          backgroundColor: STATUS_COLORS[mission.status] + '20',
-          borderColor: STATUS_COLORS[mission.status] + '40',
-        }]}>
-          <Text style={[styles.statusText, { color: STATUS_COLORS[mission.status] }]}>
-            {STATUS_LABELS[mission.status]}
-          </Text>
-        </View>
-      </View>
+        </ScrollView>
+      )}
 
       <ScrollView style={styles.list} contentContainerStyle={styles.detailContent}>
         {/* Title — tap to edit */}
@@ -1152,16 +1184,7 @@ function MissionDetail({ missionId, circleId, accentColor, onBack, onOpenMission
             </View>
           </View>
         ) : (
-          <Pressable onPress={() => {
-            setEditTitle(mission.title);
-            setEditDesc(mission.description || '');
-            setEditDeadline(mission.deadline?.split('T')[0] || '');
-            const existing = (mission as any).brief_blocks as Block[] | undefined;
-            setEditBlocks(Array.isArray(existing) && existing.length > 0
-              ? existing
-              : blocksFromText(mission.description));
-            setEditing(true);
-          }}>
+          <View>
             <Text style={styles.detailTitle}>{mission.title}</Text>
             {(() => {
               // Prefer structured blocks (with mention chips, formatting) when
@@ -1185,12 +1208,13 @@ function MissionDetail({ missionId, circleId, accentColor, onBack, onOpenMission
               }
               return null;
             })()}
-          </Pressable>
+          </View>
         )}
 
         {/* Notion-style page history */}
         {showHistory && (
           <MissionHistoryPanel
+            circleId={circleId}
             missionId={missionId}
             accentColor={accentColor}
             onClose={() => setShowHistory(false)}
@@ -1213,7 +1237,6 @@ function MissionDetail({ missionId, circleId, accentColor, onBack, onOpenMission
           {!editing && (
             <Pressable onPress={() => {
               setEditTitle(mission.title);
-              setEditDesc(mission.description || '');
               setEditDeadline(mission.deadline?.split('T')[0] || '');
               const existing2 = (mission as any).brief_blocks as Block[] | undefined;
               setEditBlocks(Array.isArray(existing2) && existing2.length > 0
@@ -1243,23 +1266,27 @@ function MissionDetail({ missionId, circleId, accentColor, onBack, onOpenMission
         {mission.status === 'active' && (
           <View style={styles.actionsRow}>
             <Pressable
-              style={[styles.actionBtn, { borderColor: PIXEL_COLORS.green + '40' }]}
+              style={[
+                styles.actionBtn,
+                { borderColor: PIXEL_COLORS.green + '40' },
+                remainingTaskCount > 0 && { opacity: 0.45 },
+              ]}
+              disabled={remainingTaskCount > 0}
               onPress={async () => {
                 await updateMission(missionId, { status: 'completed' });
                 refresh();
               }}
+              accessibilityRole="button"
+              accessibilityLabel={remainingTaskCount > 0
+                ? `${remainingTaskCount} tasks must be finished before completing this mission`
+                : 'Complete mission'}
+              accessibilityState={{ disabled: remainingTaskCount > 0 }}
             >
-              <Text style={[styles.actionBtnText, { color: PIXEL_COLORS.green }]}>Mark Complete</Text>
+              <Text style={[styles.actionBtnText, { color: PIXEL_COLORS.green }]}>Complete mission</Text>
             </Pressable>
-            <Pressable
-              style={[styles.actionBtn, { borderColor: PIXEL_COLORS.text2 + '40' }]}
-              onPress={async () => {
-                await updateMission(missionId, { status: 'archived' });
-                onBack();
-              }}
-            >
-              <Text style={[styles.actionBtnText, { color: PIXEL_COLORS.text2 }]}>Archive</Text>
-            </Pressable>
+            {remainingTaskCount > 0 && (
+              <Text style={styles.remainingTasksText}>{remainingTaskCount} task{remainingTaskCount === 1 ? '' : 's'} remaining</Text>
+            )}
           </View>
         )}
         {mission.status === 'completed' && (
@@ -1280,14 +1307,18 @@ function MissionDetail({ missionId, circleId, accentColor, onBack, onOpenMission
         <Text style={[pixelLabel, { marginTop: GRID.xl, marginBottom: GRID.sm }]}>TASKS</Text>
 
         {tasks.map(task => (
-          <View key={task.id} style={styles.taskRow}>
+          <React.Fragment key={task.id}>
+          <View style={styles.taskRow}>
             <Pressable
               style={[styles.checkbox, task.status === 'done' && { backgroundColor: PIXEL_COLORS.green + '20', borderColor: PIXEL_COLORS.green }]}
               onPress={() => handleToggleTask(task)}
+              accessibilityRole="checkbox"
+              accessibilityLabel={`${task.status === 'done' ? 'Reopen' : 'Complete'} task ${task.title}`}
+              accessibilityState={{ checked: task.status === 'done' }}
             >
               {task.status === 'done' && <Text style={{ color: PIXEL_COLORS.green, fontSize: 12, fontWeight: '700' }}>{'✓'}</Text>}
             </Pressable>
-            <Pressable style={styles.taskContent} onPress={() => setAssigningTaskId(assigningTaskId === task.id ? null : task.id)}>
+            <View style={styles.taskContent}>
               <Text style={[styles.taskTitle, task.status === 'done' && styles.taskTitleDone]}>
                 {task.title}
               </Text>
@@ -1301,7 +1332,7 @@ function MissionDetail({ missionId, circleId, accentColor, onBack, onOpenMission
                   </Text>
                 )}
                 {!task.assignee_id && !task.agent_name && (
-                  <Text style={[styles.taskAgent, { color: PIXEL_COLORS.text3 }]}>tap to assign</Text>
+                  <Text style={[styles.taskAgent, { color: PIXEL_COLORS.text3 }]}>Unassigned</Text>
                 )}
               </View>
               {task.description && (
@@ -1309,45 +1340,7 @@ function MissionDetail({ missionId, circleId, accentColor, onBack, onOpenMission
                   {task.description}
                 </Text>
               )}
-            </Pressable>
-            {/* Suggest agent button — for unassigned pending tasks */}
-            {!task.agent_name && !task.assignee_id && task.status !== 'done' && (
-              <Pressable
-                style={styles.suggestBtn}
-                onPress={async () => {
-                  try {
-                    // Lazy-load office agents
-                    const { data } = await supabase
-                      .from('circle_office_agents')
-                      .select('*')
-                      .eq('circle_id', circleId)
-                      .eq('is_published', true);
-                    const agents = (data || []) as any[];
-                    if (agents.length === 0) {
-                      showToast('No agents available in circle', 'warning');
-                      return;
-                    }
-                    const suggestion = await suggestBestAgent({
-                      circleId,
-                      agents,
-                      taskTitle: task.title,
-                      taskDescription: task.description || undefined,
-                    });
-                    if (suggestion) {
-                      await updateMissionTask(task.id, { agent_name: suggestion.agent.name });
-                      showToast(`Assigned ${suggestion.agent.name} (${suggestion.score}% match)`, 'info');
-                      refresh();
-                    } else {
-                      showToast('No agent suggestion found', 'warning');
-                    }
-                  } catch (e: any) {
-                    showToast(`Suggest error: ${e.message}`, 'error');
-                  }
-                }}
-              >
-                <Text style={styles.suggestBtnText}>?</Text>
-              </Pressable>
-            )}
+            </View>
             {/* Run with agent button — only for agent-assigned, pending tasks */}
             {task.agent_name && task.status !== 'done' && (
               <Pressable
@@ -1368,10 +1361,15 @@ function MissionDetail({ missionId, circleId, accentColor, onBack, onOpenMission
                   });
                   setRunningTaskId(null);
                   if (result.success) {
-                    setAgentResult({ taskId: task.id, text: result.response });
-                    showToast(`${task.agent_name} completed task`, 'success');
+                    if (result.completed) {
+                      setAgentResult({ taskId: task.id, text: result.response, status: 'complete' });
+                      showToast(`${task.agent_name} verified this task complete`, 'success');
+                    } else {
+                      setAgentResult({ taskId: task.id, text: result.response, status: 'update' });
+                      showToast(`${task.agent_name} sent an update; the task is still in progress`, 'info');
+                    }
                   } else {
-                    setAgentResult({ taskId: task.id, text: `Error: ${result.error}` });
+                    setAgentResult({ taskId: task.id, text: `Error: ${result.error}`, status: 'error' });
                     showToast(`Agent failed: ${result.error}`, 'error');
                   }
                   refresh();
@@ -1380,18 +1378,93 @@ function MissionDetail({ missionId, circleId, accentColor, onBack, onOpenMission
                 <Text style={styles.runBtnText}>{runningTaskId === task.id ? '...' : 'Run'}</Text>
               </Pressable>
             )}
-            <Pressable onPress={() => handleDeleteTask(task.id)} style={styles.deleteBtn}>
-              <Text style={styles.deleteBtnText}>x</Text>
+            <Pressable
+              onPress={() => setTaskActionMenuId(taskActionMenuId === task.id ? null : task.id)}
+              style={styles.taskMoreBtn}
+              accessibilityRole="button"
+              accessibilityLabel={`More actions for ${task.title}`}
+              accessibilityState={{ expanded: taskActionMenuId === task.id }}
+            >
+              <Text style={styles.taskMoreText}>...</Text>
             </Pressable>
           </View>
+          {taskActionMenuId === task.id && (
+            <View style={styles.taskActionMenu}>
+              <Pressable
+                style={styles.taskMenuAction}
+                onPress={() => {
+                  setAssigningTaskId(assigningTaskId === task.id ? null : task.id);
+                  setTaskActionMenuId(null);
+                }}
+                accessibilityRole="button"
+                accessibilityLabel={`Assign ${task.title}`}
+              >
+                <Text style={styles.taskMenuActionText}>Assign</Text>
+              </Pressable>
+              {!task.agent_name && !task.assignee_id && task.status !== 'done' && (
+                <Pressable
+                  style={styles.taskMenuAction}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Suggest an agent for ${task.title}`}
+                  onPress={async () => {
+                    setTaskActionMenuId(null);
+                    try {
+                      const { data } = await supabase
+                        .from('circle_office_agents')
+                        .select('*')
+                        .eq('circle_id', circleId)
+                        .eq('is_published', true);
+                      const availableAgents = (data || []) as any[];
+                      if (availableAgents.length === 0) {
+                        showToast('No agents available in circle', 'warning');
+                        return;
+                      }
+                      const suggestion = await suggestBestAgent({
+                        circleId,
+                        agents: availableAgents,
+                        taskTitle: task.title,
+                        taskDescription: task.description || undefined,
+                      });
+                      if (suggestion) {
+                        await updateMissionTask(task.id, { agent_name: suggestion.agent.name });
+                        showToast(`Assigned ${suggestion.agent.name} (${suggestion.score}% match)`, 'info');
+                        refresh();
+                      } else {
+                        showToast('No agent suggestion found', 'warning');
+                      }
+                    } catch (e: any) {
+                      showToast(`Suggest error: ${e.message}`, 'error');
+                    }
+                  }}
+                >
+                  <Text style={styles.taskMenuActionText}>Suggest agent</Text>
+                </Pressable>
+              )}
+              <Pressable
+                style={styles.taskMenuAction}
+                onPress={() => { setTaskActionMenuId(null); void handleDeleteTask(task.id); }}
+                accessibilityRole="button"
+                accessibilityLabel={`Delete ${task.title}`}
+              >
+                <Text style={[styles.taskMenuActionText, { color: PIXEL_COLORS.red }]}>Delete</Text>
+              </Pressable>
+            </View>
+          )}
+          </React.Fragment>
         ))}
 
         {/* Agent result display */}
         {agentResult && (
-          <View style={styles.agentResultBox}>
+          <View style={[
+            styles.agentResultBox,
+            agentResult.status === 'update' && { borderLeftColor: PIXEL_COLORS.amber },
+            agentResult.status === 'error' && { borderLeftColor: PIXEL_COLORS.red },
+          ]}>
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: GRID.sm }}>
-              <Text style={[pixelLabel]}>AGENT RESPONSE</Text>
-              <Pressable onPress={() => setAgentResult(null)}>
+              <Text style={[pixelLabel]}>
+                {agentResult.status === 'complete' ? 'VERIFIED COMPLETE' : agentResult.status === 'update' ? 'UPDATE RECEIVED' : 'AGENT ERROR'}
+              </Text>
+              <Pressable onPress={() => setAgentResult(null)} accessibilityRole="button" accessibilityLabel="Dismiss agent response">
                 <Text style={{ color: PIXEL_COLORS.text3, fontSize: 12, fontFamily: 'monospace' }}>x</Text>
               </Pressable>
             </View>
@@ -1480,16 +1553,15 @@ function MissionDetail({ missionId, circleId, accentColor, onBack, onOpenMission
 
 // ─── Create Mission Modal (with template picker) ────────────────────────────
 
-function CreateMissionModal({ circleId, accentColor, onClose, prefillTitle }: {
+function CreateMissionModal({ circleId, accentColor, onClose, onCreated, prefillTitle }: {
   circleId: string; accentColor: string; onClose: () => void;
+  onCreated: (missionId: string) => void | Promise<void>;
   prefillTitle?: string;
 }) {
-  // When a prefill title is passed in (e.g. from `/mission create Ship X`
-  // in chat), skip the template picker and jump straight to the form so
-  // the user can add the remaining details (description, deadline, template,
-  // tasks) without retyping the title.
   const hasPrefill = !!prefillTitle && prefillTitle.trim().length > 0;
-  const [step, setStep] = useState<'templates' | 'form'>(hasPrefill ? 'form' : 'templates');
+  // Creation always starts with the short form. Templates are an optional
+  // accelerator, never a gate in front of naming the mission.
+  const [step, setStep] = useState<'templates' | 'form'>('form');
   const [selectedTemplate, setSelectedTemplate] = useState<MissionTemplate | null>(null);
   const [templateFilter, setTemplateFilter] = useState('all');
   const [title, setTitle] = useState(hasPrefill ? prefillTitle!.trim() : '');
@@ -1497,6 +1569,7 @@ function CreateMissionModal({ circleId, accentColor, onClose, prefillTitle }: {
   const [deadline, setDeadline] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [createdMissionId, setCreatedMissionId] = useState<string | null>(null);
 
   const handlePickTemplate = (template: MissionTemplate) => {
     setSelectedTemplate(template);
@@ -1508,13 +1581,14 @@ function CreateMissionModal({ circleId, accentColor, onClose, prefillTitle }: {
 
   const handleBlank = () => {
     setSelectedTemplate(null);
-    setTitle('');
-    setDescription('');
-    setDeadline('');
     setStep('form');
   };
 
   const handleCreate = async () => {
+    if (createdMissionId) {
+      await onCreated(createdMissionId);
+      return;
+    }
     if (!title.trim()) { setError('Title required'); return; }
     setSaving(true);
     setError('');
@@ -1534,9 +1608,11 @@ function CreateMissionModal({ circleId, accentColor, onClose, prefillTitle }: {
     if (err || !mission) { setError(err || 'Failed to create mission'); setSaving(false); return; }
 
     // Auto-create tasks from template
+    let failedStarterTasks = 0;
     if (selectedTemplate) {
       for (const t of selectedTemplate.defaultTasks) {
-        await createMissionTask(mission.id, t.title, { agentName: t.agentName });
+        const result = await createMissionTask(mission.id, t.title, { agentName: t.agentName });
+        if (result.error) failedStarterTasks += 1;
       }
       // Seed a structured brief so the block editor shows a real starting
       // page (heading + description + tasks-as-checkboxes) instead of empty.
@@ -1544,7 +1620,14 @@ function CreateMissionModal({ circleId, accentColor, onClose, prefillTitle }: {
       await updateMission(mission.id, { brief_blocks: seedBlocks } as any).catch(() => {});
     }
 
-    onClose();
+    if (failedStarterTasks > 0) {
+      setCreatedMissionId(mission.id);
+      setError(`Mission created, but ${failedStarterTasks} starter task${failedStarterTasks === 1 ? '' : 's'} could not be added. Open the mission to review it.`);
+      setSaving(false);
+      return;
+    }
+
+    await onCreated(mission.id);
   };
 
   const filteredTemplates = templateFilter === 'all'
@@ -1559,8 +1642,8 @@ function CreateMissionModal({ circleId, accentColor, onClose, prefillTitle }: {
         {/* ── Step 1: Template Picker ── */}
         {step === 'templates' && (
           <>
-            <Text style={styles.modalTitle}>NEW MISSION</Text>
-            <Text style={[pixelBody, { marginBottom: GRID.md }]}>Pick a template or start from scratch.</Text>
+            <Text style={styles.modalTitle}>Choose a template</Text>
+            <Text style={[pixelBody, { marginBottom: GRID.md }]}>Use a starter when it helps, or continue with your current mission.</Text>
 
             {/* Category filter */}
             <View style={styles.filterRow}>
@@ -1584,8 +1667,8 @@ function CreateMissionModal({ circleId, accentColor, onClose, prefillTitle }: {
                   <Text style={{ color: PIXEL_COLORS.text2, fontSize: 16, fontWeight: '700', fontFamily: 'monospace' }}>+</Text>
                 </View>
                 <View style={styles.templateCardContent}>
-                  <Text style={styles.templateCardTitle}>Blank Mission</Text>
-                  <Text style={styles.templateCardDesc}>Start from scratch</Text>
+                  <Text style={styles.templateCardTitle}>Continue without a template</Text>
+                  <Text style={styles.templateCardDesc}>Keep the details already entered</Text>
                 </View>
               </Pressable>
 
@@ -1606,8 +1689,8 @@ function CreateMissionModal({ circleId, accentColor, onClose, prefillTitle }: {
             </ScrollView>
 
             <View style={[styles.modalActions, { marginTop: GRID.md }]}>
-              <Pressable style={styles.cancelBtn} onPress={onClose}>
-                <Text style={styles.cancelBtnText}>Cancel</Text>
+              <Pressable style={styles.cancelBtn} onPress={() => setStep('form')}>
+                <Text style={styles.cancelBtnText}>Back to mission</Text>
               </Pressable>
             </View>
           </>
@@ -1616,13 +1699,19 @@ function CreateMissionModal({ circleId, accentColor, onClose, prefillTitle }: {
         {/* ── Step 2: Mission Form ── */}
         {step === 'form' && (
           <>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: GRID.sm, marginBottom: GRID.lg }}>
-              <Pressable onPress={() => setStep('templates')} style={styles.backBtn}>
-                <Text style={styles.backBtnText}>{'<'}</Text>
+            <View style={styles.createModalHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.modalTitle}>New mission</Text>
+                {selectedTemplate && <Text style={styles.templateSelectedText}>Using {selectedTemplate.name}</Text>}
+              </View>
+              <Pressable
+                onPress={() => setStep('templates')}
+                style={styles.useTemplateBtn}
+                accessibilityRole="button"
+                accessibilityLabel="Choose a mission template"
+              >
+                <Text style={styles.useTemplateText}>{selectedTemplate ? 'Change template' : 'Use a template'}</Text>
               </Pressable>
-              <Text style={styles.modalTitle}>
-                {selectedTemplate ? selectedTemplate.name : 'NEW MISSION'}
-              </Text>
             </View>
 
             <Text style={[pixelLabel, { marginBottom: GRID.xs }]}>TITLE</Text>
@@ -1636,7 +1725,7 @@ function CreateMissionModal({ circleId, accentColor, onClose, prefillTitle }: {
               maxLength={200}
             />
 
-            <Text style={[pixelLabel, { marginTop: GRID.md, marginBottom: GRID.xs }]}>DESCRIPTION</Text>
+            <Text style={[pixelLabel, { marginTop: GRID.md, marginBottom: GRID.xs }]}>SUCCESS CRITERIA</Text>
             <TextInput
               style={[styles.input, styles.inputMultiline]}
               placeholder="What does success look like?"
@@ -1647,7 +1736,7 @@ function CreateMissionModal({ circleId, accentColor, onClose, prefillTitle }: {
               maxLength={1000}
             />
 
-            <Text style={[pixelLabel, { marginTop: GRID.md, marginBottom: GRID.xs }]}>DEADLINE</Text>
+            <Text style={[pixelLabel, { marginTop: GRID.md, marginBottom: GRID.xs }]}>DUE DATE · OPTIONAL</Text>
             <TextInput
               style={styles.input}
               placeholder="YYYY-MM-DD"
@@ -1673,8 +1762,11 @@ function CreateMissionModal({ circleId, accentColor, onClose, prefillTitle }: {
                 style={[styles.createBtn, { backgroundColor: accentColor }]}
                 onPress={handleCreate}
                 disabled={saving}
+                accessibilityRole="button"
+                accessibilityLabel={createdMissionId ? 'Open created mission' : 'Create mission'}
+                accessibilityState={{ disabled: saving }}
               >
-                <Text style={styles.createBtnText}>{saving ? 'Creating...' : 'Create Mission'}</Text>
+                <Text style={styles.createBtnText}>{saving ? 'Creating...' : createdMissionId ? 'Open mission' : 'Create mission'}</Text>
               </Pressable>
             </View>
           </>
@@ -1689,7 +1781,7 @@ function CreateMissionModal({ circleId, accentColor, onClose, prefillTitle }: {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: PIXEL_COLORS.bg0,
+    backgroundColor: '#0d1117',
   },
 
   // Header
@@ -1702,10 +1794,9 @@ const styles = StyleSheet.create({
     paddingBottom: GRID.sm,
   },
   title: {
-    color: PIXEL_COLORS.text0,
+    color: '#e6edf3',
     fontSize: 18,
-    fontWeight: '800',
-    letterSpacing: 1,
+    fontWeight: '600',
   },
   subtitle: {
     color: PIXEL_COLORS.text2,
@@ -1729,10 +1820,10 @@ const styles = StyleSheet.create({
     gap: GRID.sm,
   },
   focusLabel: {
-    color: PIXEL_COLORS.text3,
+    color: PIXEL_COLORS.text2,
     fontSize: 9,
-    fontWeight: '800',
-    letterSpacing: 1.5,
+    fontWeight: '700',
+    letterSpacing: 0.8,
     marginBottom: 2,
   },
   focusTitle: {
@@ -1751,9 +1842,8 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
   },
   focusNudge: {
-    color: PIXEL_COLORS.text3,
+    color: PIXEL_COLORS.text2,
     fontSize: 11,
-    fontStyle: 'italic',
     marginTop: GRID.xs,
   },
 
@@ -1780,15 +1870,59 @@ const styles = StyleSheet.create({
     fontSize: 11,
   },
 
+  missionControls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: GRID.md,
+    gap: GRID.sm,
+    marginBottom: GRID.sm,
+  },
+  toolsButton: {
+    minHeight: 34,
+    justifyContent: 'center',
+    paddingHorizontal: GRID.md,
+    paddingVertical: GRID.xs,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: PIXEL_COLORS.border0,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  toolsButtonText: {
+    color: PIXEL_COLORS.text2,
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  missionTools: {
+    paddingTop: GRID.xs,
+    paddingBottom: GRID.sm,
+    marginHorizontal: GRID.md,
+    backgroundColor: '#161b22',
+    borderWidth: 1,
+    borderColor: '#30363d',
+    borderRadius: 8,
+  },
+  missionSearch: {
+    ...pixelInset,
+    marginHorizontal: GRID.sm,
+    marginBottom: GRID.sm,
+    paddingHorizontal: GRID.md,
+    paddingVertical: GRID.sm,
+    color: PIXEL_COLORS.text0,
+    fontSize: 13,
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
+  },
+
   // Filter pills
   filterRow: {
     flexDirection: 'row',
     paddingHorizontal: GRID.md,
     gap: GRID.sm,
-    marginBottom: GRID.md,
+    marginBottom: GRID.sm,
     flexWrap: 'wrap',
   },
   filterPill: {
+    minHeight: 32,
+    justifyContent: 'center',
     paddingHorizontal: GRID.md,
     paddingVertical: GRID.xs,
     borderRadius: 10,
@@ -1836,8 +1970,8 @@ const styles = StyleSheet.create({
   // Card
   card: {
     ...pixelCard,
-    padding: GRID.lg,
-    marginBottom: GRID.md,
+    padding: GRID.md,
+    marginBottom: GRID.sm,
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'border-color 0.15s' } as any : {}),
   },
   cardTopRow: {
@@ -1906,8 +2040,32 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flexWrap: 'wrap',
     paddingHorizontal: GRID.lg,
-    paddingTop: GRID.lg,
+    paddingVertical: GRID.md,
     gap: GRID.md,
+  },
+  moreBtn: {
+    width: 40,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: PIXEL_COLORS.border0,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  moreBtnText: {
+    color: PIXEL_COLORS.text1,
+    fontSize: 16,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
+  detailActionMenu: {
+    paddingHorizontal: GRID.lg,
+    paddingVertical: GRID.sm,
+    gap: GRID.sm,
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: '#21262d',
   },
   detailContent: {
     paddingHorizontal: GRID.md,
@@ -1916,7 +2074,7 @@ const styles = StyleSheet.create({
   detailTitle: {
     color: PIXEL_COLORS.text0,
     fontSize: 20,
-    fontWeight: '800',
+    fontWeight: '700',
     lineHeight: 28,
     marginTop: GRID.md,
   },
@@ -1951,19 +2109,19 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
   },
   shareBtn: {
-    backgroundColor: PIXEL_COLORS.green + '14',
+    minHeight: 36,
+    justifyContent: 'center',
+    backgroundColor: '#21262d',
     borderWidth: 1,
-    borderColor: PIXEL_COLORS.green + '55',
-    paddingHorizontal: GRID.sm,
+    borderColor: '#30363d',
+    paddingHorizontal: GRID.md,
     paddingVertical: 5,
     borderRadius: 6,
   },
   shareBtnText: {
-    color: PIXEL_COLORS.green,
+    color: '#e6edf3',
     fontSize: 11,
-    fontWeight: '700',
-    fontFamily: 'monospace',
-    letterSpacing: 0.5,
+    fontWeight: '600',
   },
 
   // Actions
@@ -1971,6 +2129,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: GRID.sm,
     marginTop: GRID.lg,
+  },
+  remainingTasksText: {
+    alignSelf: 'center',
+    color: PIXEL_COLORS.text3,
+    fontSize: 11,
   },
   actionBtn: {
     paddingHorizontal: GRID.md,
@@ -1993,8 +2156,8 @@ const styles = StyleSheet.create({
     gap: GRID.md,
   },
   checkbox: {
-    width: 22,
-    height: 22,
+    width: 28,
+    height: 28,
     borderRadius: 6,
     borderWidth: 1.5,
     borderColor: PIXEL_COLORS.border2,
@@ -2032,6 +2195,45 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     fontFamily: 'monospace',
+  },
+  taskMoreBtn: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 7,
+    borderWidth: 1,
+    borderColor: PIXEL_COLORS.border0,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  taskMoreText: {
+    color: PIXEL_COLORS.text2,
+    fontSize: 14,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+  },
+  taskActionMenu: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: GRID.sm,
+    paddingBottom: GRID.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: PIXEL_COLORS.border0,
+  },
+  taskMenuAction: {
+    minHeight: 34,
+    justifyContent: 'center',
+    paddingHorizontal: GRID.sm,
+    paddingVertical: GRID.xs,
+    borderRadius: 7,
+    borderWidth: 1,
+    borderColor: PIXEL_COLORS.border0,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  taskMenuActionText: {
+    color: PIXEL_COLORS.text1,
+    fontSize: 11,
+    fontWeight: '600',
   },
 
   // Add task
@@ -2092,6 +2294,8 @@ const styles = StyleSheet.create({
 
   // Create button
   createBtn: {
+    minHeight: 38,
+    justifyContent: 'center',
     paddingHorizontal: GRID.lg,
     paddingVertical: GRID.sm,
     borderRadius: 10,
@@ -2126,9 +2330,33 @@ const styles = StyleSheet.create({
   modalTitle: {
     color: PIXEL_COLORS.text0,
     fontSize: 16,
-    fontWeight: '800',
-    letterSpacing: 1,
+    fontWeight: '600',
+    marginBottom: GRID.sm,
+  },
+  createModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: GRID.md,
     marginBottom: GRID.lg,
+  },
+  templateSelectedText: {
+    color: PIXEL_COLORS.text2,
+    fontSize: 11,
+  },
+  useTemplateBtn: {
+    minHeight: 36,
+    justifyContent: 'center',
+    paddingHorizontal: GRID.md,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#30363d',
+    backgroundColor: '#21262d',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  useTemplateText: {
+    color: '#a5b4fc',
+    fontSize: 11,
+    fontWeight: '600',
   },
   input: {
     ...pixelInset,

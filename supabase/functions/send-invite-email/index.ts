@@ -138,20 +138,26 @@ Deno.serve(async (req: Request) => {
       });
 
       if (!response.ok) {
-        const err = await response.text();
-        console.error("Resend error:", err);
+        await response.body?.cancel().catch(() => undefined);
+        console.error("[send-invite-email] Resend rejected the invite delivery", {
+          status: response.status,
+        });
         return json({ error: "Failed to send email" }, 500);
       }
 
       return json({ success: true });
     }
 
-    // Fallback: log the invite (no email service configured)
-    console.log(`[INVITE] Would email ${normalizedEmail}: join ${safeCircleName} via ${joinUrl}`);
+    // Never print the recipient address, invite code, or bearer-like join URL.
+    // Hosted logs are not a delivery channel and may be visible to operators
+    // who are not members of the invited Circle.
+    console.info("[send-invite-email] Invite retained without email delivery because Resend is not configured");
 
     return json({ success: true, note: "Email service not configured, invite created but email not sent" });
   } catch (error: any) {
-    console.error("Send invite email error:", error);
-    return json({ error: error.message || "Internal server error" }, 500);
+    console.error("[send-invite-email] Invite delivery failed", {
+      name: error instanceof Error ? error.name : typeof error,
+    });
+    return json({ error: "Internal server error" }, 500);
   }
 });

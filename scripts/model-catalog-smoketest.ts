@@ -6,7 +6,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { findAliasKey, resolveProviderRoutes } from '../src/lib/crossProviderRouter';
+import { findAliasKey, resolvePlainChatModelRoute, resolveProviderRoutes } from '../src/lib/crossProviderRouter';
 import { isMarketplaceRoutedModel } from '../src/lib/blackswanRouting';
 import { getModelFailoverChain, resolveModelForSoul } from '../src/lib/serviceProfileSouls';
 import { resolveModelRate } from '../src/lib/modelPricing';
@@ -88,7 +88,7 @@ function hasPricingRow(modelId: string): boolean {
  *  mirror id like `openai/gpt-5.5` or `meta-llama/...:nitro` reduces to the
  *  bare model id used to key modelCapabilities. */
 function bareModelId(modelId: string): string {
-  return modelId.replace(/^[a-zA-Z0-9_.-]+\//, '').replace(/:.*$/, '');
+  return (modelId.split('/').at(-1) || modelId).replace(/:.*$/, '');
 }
 
 /** True when a (possibly provider-prefixed) model id maps back to a
@@ -123,6 +123,17 @@ function popularOpenRouterIds(): string[] {
     .filter(Boolean) as string[];
 }
 
+function baseTextChatPickerIds(): string[] {
+  const block = chatTabSource.match(/const CHAT_MODELS:[\s\S]*?\n\];/)?.[0] || '';
+  const out: string[] = [];
+  for (const line of block.split('\n')) {
+    const id = line.match(/id:\s*'([^']+)'/)?.[1];
+    const group = line.match(/group:\s*'([^']+)'/)?.[1];
+    if (id && id !== 'auto' && group !== 'creative') out.push(id);
+  }
+  return out;
+}
+
 /** Every model-id literal referenced by a serviceProfileSouls Auto ladder
  *  (the `['provider', 'provider/model']` tuples). */
 function serviceSoulLadderIds(): string[] {
@@ -150,7 +161,11 @@ function modelFailoverIds(): string[] {
 
 // Deprecated model ids that must never reappear in a picker catalog, and the
 // banned xAI/Grok family (project decision: no Grok / no xAI anywhere).
-const DEPRECATED_MODEL_IDS = ['o3', 'o4-mini', 'o3-mini', 'mixtral-8x7b-32768'];
+const DEPRECATED_MODEL_IDS = [
+  'gpt-4o', 'gpt-4o-mini', 'gpt-4.1-nano', 'o4-mini', 'o3-mini',
+  'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-3.1-pro-preview',
+  'deepseek-chat', 'deepseek-reasoner', 'mixtral-8x7b-32768',
+];
 const GROK_XAI_PATTERNS = ['grok', 'x-ai', 'xai'];
 
 // Ladder ids intentionally allowed to be unresolved in PROVIDER_MODELS.
@@ -159,17 +174,39 @@ const GROK_XAI_PATTERNS = ['grok', 'x-ai', 'xai'];
 const KNOWN_UNRESOLVED_LADDER_IDS = new Set<string>([]);
 
 function main() {
-  assert(ids('openai')[0] === 'gpt-5.5', 'OpenAI catalog starts with GPT-5.5 for newest default picks', ids('openai').slice(0, 5));
+  for (const provider of ALL_PROVIDERS) {
+    const providerIds = ids(provider);
+    assert(
+      new Set(providerIds).size === providerIds.length,
+      `${provider} catalog has no duplicate exact model IDs`,
+      providerIds,
+    );
+  }
+
+  assert(ids('openai')[0] === 'gpt-5.6-sol', 'OpenAI catalog starts with the exact GPT-5.6 Sol deep tier', ids('openai').slice(0, 6));
+  assert(ids('openai').includes('gpt-5.6-terra'), 'OpenAI catalog includes GPT-5.6 Terra for balanced agent work');
+  assert(ids('openai').includes('gpt-5.6-luna'), 'OpenAI catalog includes GPT-5.6 Luna for low-cost workers');
   assert(ids('openai').includes('gpt-5.5-pro'), 'OpenAI catalog includes GPT-5.5 Pro for explicit hardest-work picks');
   assert(ids('openai').includes('gpt-5.4-mini'), 'OpenAI catalog includes GPT-5.4 Mini for subagents/computer-use');
 
   assert(ids('anthropic').includes('claude-fable-5'), 'Anthropic catalog includes Claude Fable 5');
+  assert(ids('anthropic').includes('claude-opus-5'), 'Anthropic catalog includes Claude Opus 5');
+  assert(ids('anthropic').includes('claude-sonnet-5'), 'Anthropic catalog includes Claude Sonnet 5');
   assert(ids('anthropic').includes('claude-opus-4-8'), 'Anthropic catalog includes Claude Opus 4.8');
   assert(ids('anthropic').includes('claude-sonnet-4-6'), 'Anthropic catalog keeps Claude Sonnet 4.6');
 
-  assert(ids('google_ai').includes('gemini-3.5-flash'), 'Google AI catalog includes Gemini 3.5 Flash');
+  assert(ids('google_ai').includes('gemini-3.6-flash'), 'Google AI catalog includes Gemini 3.6 Flash');
+  assert(ids('google_ai').includes('gemini-3.5-flash-lite'), 'Google AI catalog includes Gemini 3.5 Flash-Lite');
+  assert(ids('google_ai').includes('gemini-3.5-flash'), 'Google AI catalog keeps Gemini 3.5 Flash');
   assert(ids('google_ai').includes('gemini-3.1-flash-lite'), 'Google AI catalog includes Gemini 3.1 Flash-Lite');
-  assert(ids('google_ai').includes('gemini-2.5-flash-lite'), 'Google AI catalog includes Gemini 2.5 Flash-Lite fallback');
+  assert(!ids('google_ai').some((id) => id.startsWith('gemini-2.5')), 'Google AI catalog does not offer retired Gemini 2.5 models');
+
+  assert(ids('groq').includes('openai/gpt-oss-120b'), 'Groq catalog includes current GPT-OSS 120B');
+  assert(ids('mistral_ai').includes('mistral-medium-3-5'), 'Mistral catalog includes current Medium 3.5');
+  assert(ids('cohere').includes('command-a-plus-05-2026'), 'Cohere catalog includes current Command A Plus');
+  assert(ids('deepseek').includes('deepseek-v4-pro'), 'DeepSeek catalog includes current V4 Pro');
+  assert(ids('zai').includes('glm-5.1'), 'Z.AI catalog includes current GLM 5.1');
+  assert(ids('minimax').includes('MiniMax-M2.7'), 'MiniMax catalog includes current M2.7');
 
   assert(ids('perplexity').includes('sonar-deep-research'), 'Perplexity catalog includes Sonar Deep Research');
   assert(ids('perplexity').includes('sonar-reasoning-pro'), 'Perplexity catalog includes Sonar Reasoning Pro');
@@ -183,22 +220,35 @@ function main() {
     false,
     new Set(['openai']),
   );
-  assert(complexBuildModel === 'openai/gpt-5.5', 'Auto complex build routes to GPT-5.5 when OpenAI is connected', complexBuildModel);
+  assert(complexBuildModel === 'openai/gpt-5.6-sol', 'Auto complex build routes to GPT-5.6 Sol when OpenAI is connected', complexBuildModel);
 
+  assert(findAliasKey('gpt-5.6') === 'gpt-5.6-sol', 'Floating GPT-5.6 chooser alias resolves explicitly to Sol');
+  assert(findAliasKey('gpt-5.6-terra') === 'gpt-5.6-terra', 'Cross-provider aliases know GPT-5.6 Terra');
+  assert(findAliasKey('claude-sonnet-5') === 'claude-sonnet-5', 'Cross-provider aliases know Claude Sonnet 5');
+  assert(findAliasKey('gemini-3.6-flash') === 'gemini-3.6-flash', 'Cross-provider aliases know Gemini 3.6 Flash');
   assert(findAliasKey('gpt-5.5') === 'gpt-5.5', 'Cross-provider aliases know GPT-5.5');
   assert(findAliasKey('claude-opus-4-8') === 'claude-opus-4-8', 'Cross-provider aliases know Claude Opus 4.8');
   assert(findAliasKey('sonar-deep-research') === 'sonar-deep-research', 'Cross-provider aliases know Sonar Deep Research');
 
-  const gptRoutes = resolveProviderRoutes('gpt-5.5', { available: new Set(['openai', 'openrouter']) });
-  assert(gptRoutes.some((route) => route.provider === 'openai' && route.modelId === 'gpt-5.5'), 'GPT-5.5 has direct OpenAI route', gptRoutes);
-  assert(gptRoutes.some((route) => route.provider === 'openrouter' && route.modelId === 'openai/gpt-5.5'), 'GPT-5.5 has OpenRouter fallback route', gptRoutes);
+  const gptRoutes = resolveProviderRoutes('gpt-5.6-sol', { available: new Set(['openai', 'openrouter']) });
+  assert(gptRoutes.some((route) => route.provider === 'openai' && route.modelId === 'gpt-5.6-sol'), 'GPT-5.6 Sol has direct OpenAI route', gptRoutes);
+  assert(gptRoutes.some((route) => route.provider === 'openrouter' && route.modelId === 'openai/gpt-5.6-sol'), 'GPT-5.6 Sol has OpenRouter fallback route', gptRoutes);
 
+  assert(hasCapability('gpt-5.6-sol', 'reasoning'), 'Capability router marks GPT-5.6 Sol as reasoning-capable');
+  assert(hasCapability('claude-sonnet-5', 'code'), 'Capability router marks Sonnet 5 as code-capable');
+  assert(hasCapability('gemini-3.6-flash', 'image_understand'), 'Capability router marks Gemini 3.6 Flash as multimodal');
   assert(hasCapability('gpt-5.5', 'reasoning'), 'Capability router marks GPT-5.5 as reasoning-capable');
   assert(hasCapability('claude-opus-4-8', 'code'), 'Capability router marks Opus 4.8 as code-capable');
   assert(hasCapability('sonar-deep-research', 'reasoning'), 'Capability router marks Sonar Deep Research as reasoning-capable');
 
   assert(isMarketplaceRoutedModel('openai_compatible/company-agent'), 'BlackSwan routing treats OpenAI-compatible models as marketplace routed');
   assert(isMarketplaceRoutedModel('github-models/openai/gpt-4.1'), 'BlackSwan routing treats GitHub Models as marketplace routed');
+
+  const baseTextIds = baseTextChatPickerIds();
+  assert(baseTextIds.length > 0, 'Parsed base text model ids from the Chat picker');
+  for (const id of baseTextIds) {
+    assert(resolvePlainChatModelRoute(id) !== null, `Base Chat picker model "${id}" resolves to an executable provider route`);
+  }
 
   // ── Drift guard: selectable == wired ───────────────────────────────────────
   // The frontier/default tier is what Auto and the failover ladders actually
@@ -209,13 +259,13 @@ function main() {
   // shipping a picker entry that degrades to the ['text'] default at runtime.
   const WIRED_FRONTIER_IDS = [
     // OpenAI
-    'gpt-5.5', 'gpt-5.5-pro', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-4o',
+    'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
+    'gpt-5.5', 'gpt-5.5-pro', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-4.1', 'gpt-4.1-mini', 'o3', 'o3-pro',
     // Anthropic
-    'claude-fable-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6',
+    'claude-fable-5', 'claude-opus-5', 'claude-sonnet-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6',
     'claude-sonnet-4-6', 'claude-haiku-4-5',
     // Google AI
-    'gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite',
-    'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite',
+    'gemini-3.6-flash', 'gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-3.1-flash-lite',
   ];
   const frontierCatalogIds = new Set([...ids('openai'), ...ids('anthropic'), ...ids('google_ai')]);
   for (const id of WIRED_FRONTIER_IDS) {
@@ -281,7 +331,7 @@ function main() {
     const bare = bareModelId(id).toLowerCase();
     return DEPRECATED_MODEL_IDS.some((dep) => low === dep || bare === dep);
   });
-  assert(deprecatedHits.length === 0, 'No deprecated model ids (o3 / o4-mini / o3-mini / mixtral-8x7b-32768) in picker catalogs', deprecatedHits);
+  assert(deprecatedHits.length === 0, 'No retired direct model ids in picker catalogs', deprecatedHits);
 
   const grokHits = catalogIdsForBanScan.filter((id) => {
     const segments = id.toLowerCase().split('/');

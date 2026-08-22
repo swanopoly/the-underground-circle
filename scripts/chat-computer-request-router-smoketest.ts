@@ -6,17 +6,26 @@
  * Run: npm run smoke:chat-computer-request-router
  */
 
+import { readFileSync } from 'node:fs';
+
 import { buildChatAutomationPlan, summarisePlanForTelemetry } from '../src/lib/chatAutomationPlanner';
 import { formatChatComputerTaskAutonomyPromptBlock } from '../src/lib/chatComputerTaskAutonomy';
 import {
+  buildChatComputerRequestedActionContract,
+  buildChatComputerRequestedActionExecutionGate,
   buildChatComputerUsePolicyInputs,
   buildChatComputerRequestRoute,
   buildChatComputerRequestRoutePromptBlock,
   constraintBlocksToolCall,
   detectAlwaysConfirmFloorCategories,
+  formatChatComputerRequestedActionContractPromptBlock,
 } from '../src/lib/chatComputerRequestRouter';
 
 let failures = 0;
+const CHAT_TAB_SOURCE = readFileSync(
+  new URL('../src/screens/circles/tabs/ChatTab.tsx', import.meta.url),
+  'utf8',
+);
 
 function fail(message: string) {
   failures += 1;
@@ -145,6 +154,193 @@ assertRoute(
   },
 );
 
+const illustratorMultiActionTask = 'Open Adobe Illustrator 2026, create a new document, add a blue circle, and export it as PNG';
+const illustratorMultiActionRoute = buildChatComputerRequestRoute(illustratorMultiActionTask);
+const illustratorMultiActionContract = illustratorMultiActionRoute?.requestedActionContract;
+const illustratorMultiActionPrompt = buildChatComputerRequestRoutePromptBlock(illustratorMultiActionTask) || '';
+if (!illustratorMultiActionRoute || !illustratorMultiActionContract) {
+  fail('Illustrator multi-action request must carry an explicit requested-action contract');
+} else if (
+  illustratorMultiActionContract.mode !== 'all_actions_required'
+  || illustratorMultiActionContract.actionCount !== 4
+  || illustratorMultiActionContract.capped
+  || illustratorMultiActionContract.requiresDecompositionBeforeMutation
+) {
+  fail(`Illustrator multi-action contract has wrong envelope: ${JSON.stringify(illustratorMultiActionContract)}`);
+} else if (JSON.stringify(illustratorMultiActionContract.actions.map((action) => ({
+  id: action.id,
+  verb: action.verb,
+  connective: action.connective,
+  text: action.text,
+}))) !== JSON.stringify([
+  { id: 'A1', verb: 'open', connective: 'lead', text: 'Open Adobe Illustrator 2026' },
+  { id: 'A2', verb: 'create', connective: 'comma', text: 'create a new document' },
+  { id: 'A3', verb: 'add', connective: 'comma', text: 'add a blue circle' },
+  { id: 'A4', verb: 'export', connective: 'also', text: 'export it as PNG' },
+])) {
+  fail(`Illustrator multi-action contract dropped or changed an action: ${JSON.stringify(illustratorMultiActionContract.actions)}`);
+} else if (
+  !Object.isFrozen(illustratorMultiActionContract)
+  || !Object.isFrozen(illustratorMultiActionContract.actions)
+  || illustratorMultiActionContract.actions.some((action) => (
+    !Object.isFrozen(action) || !Object.isFrozen(action.dependsOnActionIds)
+  ))
+) {
+  fail('requested-action contract and nested action/dependency values must be immutable');
+} else if (
+  !illustratorMultiActionContract.actions.every((action) => (
+    illustratorMultiActionRoute.completionProof.some((proof) => proof.startsWith(`${action.id} independently verified`))
+  ))
+  || !illustratorMultiActionRoute.evidenceContract?.failClosedRules.some((rule) => /any requested action without independent proof/i.test(rule))
+) {
+  fail('every requested Illustrator action must enter completion proof and the fail-closed evidence boundary');
+} else if (
+  !illustratorMultiActionPrompt.includes('## REQUEST ACTION COVERAGE CONTRACT')
+  || !illustratorMultiActionPrompt.includes('A1. Open Adobe Illustrator 2026')
+  || !illustratorMultiActionPrompt.includes('A4. export it as PNG')
+  || !illustratorMultiActionPrompt.includes('partial coverage')
+  || !illustratorMultiActionPrompt.includes('blocked, pending, failed, cancelled, or outcome-unknown')
+) {
+  fail('computer prompt must enumerate every requested action and forbid partial whole-task completion');
+} else {
+  pass('Illustrator multi-action request carries immutable A1-A4 execution and proof accounting');
+}
+const illustratorMultiActionTelemetry = summarisePlanForTelemetry(
+  buildChatAutomationPlan({ message: illustratorMultiActionTask }),
+);
+const compactRequestedActions = (illustratorMultiActionTelemetry.computerRequestRoute as any)?.requestedActionContract;
+if (
+  compactRequestedActions?.actionCount !== 4
+  || compactRequestedActions?.actions?.map((action: any) => action.id).join(',') !== 'A1,A2,A3,A4'
+) {
+  fail(`planner telemetry must retain the bounded requested-action ledger: ${JSON.stringify(compactRequestedActions)}`);
+} else {
+  pass('planner telemetry retains the bounded A1-A4 requested-action ledger');
+}
+
+const politeGerundContract = buildChatComputerRequestedActionContract(
+  'Would you mind opening Illustrator, creating a blank document, adding a blue circle, and saving it',
+);
+if (JSON.stringify(politeGerundContract?.actions.map((action) => action.verb)) !== JSON.stringify(['open', 'create', 'add', 'save'])) {
+  fail(`polite gerund multi-action contract must retain all action heads: ${JSON.stringify(politeGerundContract)}`);
+} else {
+  pass('polite gerund desktop request retains every action in the coverage contract');
+}
+
+const sequentialContract = buildChatComputerRequestedActionContract(
+  'Open Illustrator, then create a document, then export it',
+);
+if (
+  JSON.stringify(sequentialContract?.actions.map((action) => action.dependsOnActionIds))
+  !== JSON.stringify([[], ['A1'], ['A2']])
+) {
+  fail(`explicit then dependencies must remain A1 -> A2 -> A3: ${JSON.stringify(sequentialContract)}`);
+} else {
+  pass('explicit multi-action dependencies are preserved in order');
+}
+
+const sentenceContract = buildChatComputerRequestedActionContract(
+  'Open Illustrator. Create a document. Add a circle. Export it as PNG.',
+);
+if (
+  sentenceContract?.actionCount !== 4
+  || JSON.stringify(sentenceContract.actions.map((action) => action.dependsOnActionIds))
+    !== JSON.stringify([[], ['A1'], ['A2'], ['A3']])
+) {
+  fail(`sentence-separated actions must retain all ordered dependencies: ${JSON.stringify(sentenceContract)}`);
+} else {
+  pass('sentence-separated desktop steps retain the complete ordered action ledger');
+}
+
+const cappedContract = buildChatComputerRequestedActionContract(
+  'open Illustrator, create a file, add a circle, draw a square, rotate the square, resize the circle, save the file, export a PNG, print a copy, and close Illustrator',
+);
+const cappedPrompt = formatChatComputerRequestedActionContractPromptBlock(cappedContract) || '';
+const cappedExecutionGate = buildChatComputerRequestedActionExecutionGate(
+  'open Illustrator, create a file, add a circle, draw a square, rotate the square, resize the circle, save the file, export a PNG, print a copy, and close Illustrator',
+);
+if (
+  !cappedContract?.capped
+  || !cappedContract.requiresDecompositionBeforeMutation
+  || cappedContract.actionCount !== 8
+  || !cappedPrompt.includes('Decomposition gate:')
+  || !cappedPrompt.includes('do not execute a truncated action list')
+  || !cappedExecutionGate.blocked
+  || !cappedExecutionGate.blocker?.includes('Nothing was run')
+  || !cappedExecutionGate.fixAction?.includes('before any mutation')
+) {
+  fail(`overflowing multi-action requests must stop for bounded decomposition: ${JSON.stringify({ cappedContract, cappedExecutionGate })}`);
+} else {
+  pass('overflowing multi-action request has an executable pre-mutation gate and retains its tail');
+}
+const chatGateBuildIndex = CHAT_TAB_SOURCE.indexOf(
+  'const requestedActionExecutionGate = buildChatComputerRequestedActionExecutionGate(trimmed);',
+);
+const chatGateBlockerIndex = CHAT_TAB_SOURCE.indexOf(
+  '...(requestedActionExecutionGate.blocker ? [requestedActionExecutionGate.blocker] : [])',
+  chatGateBuildIndex,
+);
+const chatPreflightStopIndex = CHAT_TAB_SOURCE.indexOf(
+  'if (preflightBlockers.length > 0)',
+  chatGateBlockerIndex,
+);
+if (
+  chatGateBuildIndex < 0
+  || chatGateBlockerIndex <= chatGateBuildIndex
+  || chatPreflightStopIndex <= chatGateBlockerIndex
+) {
+  fail('Chat must feed the decomposition gate into the preflight stop before computer execution');
+} else {
+  pass('Chat enforces the requested-action decomposition gate before computer execution');
+}
+
+const oversizedInputContract = buildChatComputerRequestedActionContract(
+  `Open Illustrator, create a document, and add the requested artwork ${'with a carefully described visual requirement '.repeat(120)}`,
+);
+const oversizedInputGate = buildChatComputerRequestedActionExecutionGate(
+  `Open Illustrator, create a document, and add the requested artwork ${'with a carefully described visual requirement '.repeat(120)}`,
+);
+if (
+  !oversizedInputContract?.capped
+  || !oversizedInputContract.requiresDecompositionBeforeMutation
+  || oversizedInputContract.actions.length < 2
+  || !oversizedInputGate.blocked
+) {
+  fail(`input beyond the detector scan bound must require intact-request decomposition: ${JSON.stringify(oversizedInputContract)}`);
+} else {
+  pass('input beyond the detector scan bound fails closed before mutation');
+}
+
+const hiddenTailOversizedTask = `${'background context '.repeat(260)}Open Illustrator`;
+const hiddenTailOversizedGate = buildChatComputerRequestedActionExecutionGate(hiddenTailOversizedTask);
+if (
+  hiddenTailOversizedTask.length <= 4_000
+  || hiddenTailOversizedGate.blocked !== true
+  || !hiddenTailOversizedGate.blocker?.includes('4,000-character')
+) {
+  fail(`raw over-bound input must stop even when its actionable tail is outside the scan window: ${JSON.stringify(hiddenTailOversizedGate)}`);
+} else {
+  pass('raw input length independently closes the hidden-tail decomposition bypass');
+}
+
+const normalExecutionGate = buildChatComputerRequestedActionExecutionGate(illustratorMultiActionTask);
+if (
+  normalExecutionGate.blocked
+  || normalExecutionGate.blocker !== null
+  || normalExecutionGate.fixAction !== null
+  || normalExecutionGate.contract?.actionCount !== 4
+) {
+  fail(`bounded multi-action request must remain executable: ${JSON.stringify(normalExecutionGate)}`);
+} else {
+  pass('bounded multi-action request passes the executable decomposition gate');
+}
+
+if (buildChatComputerRequestedActionContract('Open Adobe Illustrator 2026') !== null) {
+  fail('single-action desktop request must not fabricate a multi-action contract');
+} else {
+  pass('single-action desktop request remains a single direct action');
+}
+
 const exactPhotoshopTask = 'Open Photoshop and start a new project 600 x 600';
 const exactPhotoshopRoute = buildChatComputerRequestRoute(exactPhotoshopTask);
 const exactPhotoshopPrompt = buildChatComputerRequestRoutePromptBlock(exactPhotoshopTask) || '';
@@ -215,6 +411,12 @@ for (const task of [
   'I need you to open Photoshop and start a new project 600 x 600',
   'Can you open Photoshop and create a 600 x 600 document?',
   'I need you to open Photoshop and create a 600 by 600 document',
+  'Hey, can you just open Photoshop and start a new project 600 x 600 for me right now, please!',
+  'Could you possibly open Photoshop and create a 600 x 600 document on my Mac?',
+  'Go ahead and open Photoshop and start a new project 600 by 600 when you can.',
+  'I’d like you to open Photoshop and create a 600 x 600 document real quick.',
+  'Would you mind opening Photoshop and creating a 600 x 600 document for me?',
+  'Would you mind opening Photoshop and starting a new project 600 x 600 when you can?',
 ]) {
   const route = buildChatComputerRequestRoute(task);
   if (
@@ -243,6 +445,19 @@ if (!extraActionPhotoshopRoute
   fail('Photoshop request with an appended edit must use the generic gated desktop route without browser ownership');
 } else {
   pass('Photoshop request with an appended edit cannot inherit exact-program direct authority');
+}
+
+for (const task of [
+  'Open Photoshop and create a new document 600 x 600 tomorrow',
+  'Open Photoshop and create a new document 600 x 600 for my client',
+  'Open Photoshop and create a new document 600 x 600 without asking',
+]) {
+  const route = buildChatComputerRequestRoute(task);
+  if (route?.modelOrchestration?.mode === 'deterministic_local_program') {
+    fail(`material suffix must stay outside exact-program authority: ${task}`);
+  } else {
+    pass(`material suffix stays outside exact-program authority: ${task}`);
+  }
 }
 
 assertRoute(
@@ -932,18 +1147,20 @@ for (const [task, expectedTarget, expectedDispatch, expectedTools] of [
   ['Focus Photoshop', 'Photoshop', 'Adobe Photoshop 2026', ['desktop.observe_app', 'desktop.focus_app', 'desktop.observe_app']],
   ['Focus Visual Studio Code', 'Visual Studio Code', 'Visual Studio Code', ['desktop.observe_app', 'desktop.focus_app', 'desktop.observe_app']],
   ['Start TextEdit', 'TextEdit', 'TextEdit', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
-  ['Switch to Slack', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
-  ['Bring Slack to the front', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
-  ['Activate Slack', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Switch to Slack', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Bring Slack to the front', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Activate Slack', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.focus_app', 'desktop.observe_app']],
   ['Can you open Photoshop?', 'Photoshop', 'Adobe Photoshop 2026', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
   ['Could you launch Photoshop?', 'Photoshop', 'Adobe Photoshop 2026', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
   ['Would you open Photoshop?', 'Photoshop', 'Adobe Photoshop 2026', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
   ['Can you please open Photoshop?', 'Photoshop', 'Adobe Photoshop 2026', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['can you open adobe illustrator for me', 'adobe illustrator', 'Adobe Illustrator 2026', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Can you open Adobe Illustrator up for me?', 'Adobe Illustrator', 'Adobe Illustrator 2026', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
   ['Open Photoshop please', 'Photoshop', 'Adobe Photoshop 2026', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
   ['Open up Photoshop', 'Photoshop', 'Adobe Photoshop 2026', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
-  ['Switch over to Slack', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
-  ['Bring Slack forward', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
-  ['Bring forward Slack', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Switch over to Slack', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Bring Slack forward', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.focus_app', 'desktop.observe_app']],
+  ['Bring forward Slack', 'Slack', 'Slack', ['desktop.observe_app', 'desktop.focus_app', 'desktop.observe_app']],
   ['Open settings', 'settings', 'System Settings', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
   ['Open Chrome', 'Chrome', 'Google Chrome', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
   ['Launch Firefox', 'Firefox', 'Firefox', ['desktop.observe_app', 'desktop.launch_app', 'desktop.wait_for_app', 'desktop.focus_app', 'desktop.observe_app']],
@@ -951,6 +1168,9 @@ for (const [task, expectedTarget, expectedDispatch, expectedTools] of [
   const route = buildChatComputerRequestRoute(task);
   const program = route?.deterministicLifecycleReadProgram;
   const actionTools = route?.actionItems.map((item) => item.tool) || [];
+  const expectedConditions = program?.operation === 'focus'
+    ? ['always', 'if_not_frontmost', 'always']
+    : ['always', 'if_not_running', 'if_launched', 'if_initially_running_not_frontmost', 'always'];
   const prompt = buildChatComputerRequestRoutePromptBlock(task) || '';
   if (
     route?.aiNeed?.level !== 'none'
@@ -962,6 +1182,7 @@ for (const [task, expectedTarget, expectedDispatch, expectedTools] of [
     || program.targetAppName !== expectedTarget
     || program.dispatchAppName !== expectedDispatch
     || JSON.stringify(actionTools) !== JSON.stringify(expectedTools)
+    || JSON.stringify(program.steps.map((step) => step.when)) !== JSON.stringify(expectedConditions)
     || route.recommendedTools.some((tool) => !expectedTools.includes(tool as any))
     || /selected_chat_model_then_openswan|model_guided_tools/.test(prompt)
   ) {
@@ -976,10 +1197,93 @@ for (const [task, expectedTarget, expectedDispatch, expectedTools] of [
   }
 }
 
+const invariantLifecyclePrefixes: Array<(command: string) => string> = [
+  (command) => command,
+  (command) => `Please ${command}`,
+  (command) => `Hey, ${command}`,
+  (command) => `Okay, ${command}`,
+  (command) => `Can you ${command}`,
+  (command) => `Could you please just ${command}`,
+  (command) => `Could you possibly ${command}`,
+  (command) => `Would you be able to ${command}`,
+  (command) => `Could you do me a favor and ${command}`,
+  (command) => `I need you to ${command}`,
+  (command) => `I’d like you to ${command}`,
+  (command) => `Go ahead and ${command}`,
+  (command) => `Would you mind ${command.replace(/^open\b/i, 'opening')}`,
+];
+const invariantLifecycleSuffixes = [
+  '',
+  ' please!',
+  ' for me?',
+  ' now.',
+  ' already!',
+  ' right now.',
+  ' real quick!',
+  ' when you can.',
+  ' if possible, okay?',
+  ' no rush, thanks!',
+  ' on my Mac.',
+  ' as soon as you can, thanks!',
+  ' for us when you get a chance, please!',
+] as const;
+const lifecycleInvariantFailures: string[] = [];
+let lifecycleInvariantCount = 0;
+for (const withPrefix of invariantLifecyclePrefixes) {
+  for (const suffix of invariantLifecycleSuffixes) {
+    lifecycleInvariantCount += 1;
+    const task = `${withPrefix('open Adobe Illustrator')}${suffix}`;
+    const route = buildChatComputerRequestRoute(task);
+    const program = route?.deterministicLifecycleReadProgram;
+    const tools = route?.actionItems.map((item) => item.tool) || [];
+    if (
+      route?.sourceMessage !== task
+      || route.aiNeed?.level !== 'none'
+      || route.approvalRequired
+      || route.modelOrchestration?.mode !== 'deterministic_local_program'
+      || program?.targetAppName !== 'Adobe Illustrator'
+      || program.dispatchAppName !== 'Adobe Illustrator 2026'
+      || route.appResolution !== null
+      || JSON.stringify(tools) !== JSON.stringify([
+        'desktop.observe_app',
+        'desktop.launch_app',
+        'desktop.wait_for_app',
+        'desktop.focus_app',
+        'desktop.observe_app',
+      ])
+    ) {
+      lifecycleInvariantFailures.push(`${task}: ${JSON.stringify({
+        sourceMessage: route?.sourceMessage,
+        aiNeed: route?.aiNeed?.level,
+        approvalRequired: route?.approvalRequired,
+        mode: route?.modelOrchestration?.mode,
+        program,
+        appResolution: route?.appResolution,
+        tools,
+      })}`);
+    }
+  }
+}
+if (lifecycleInvariantFailures.length > 0) {
+  fail(`harmless wording changed lifecycle execution semantics:\n${lifecycleInvariantFailures.slice(0, 3).join('\n')}`);
+} else {
+  pass(`${lifecycleInvariantCount} harmless wording variants preserve one exact target-locked lifecycle program`);
+}
+
 for (const task of [
   'Should I open Photoshop?',
   'Can you open Photoshop and create a document?',
   'Could you launch Photoshop, then tell me which document is open?',
+  'Open Adobe Illustrator for my client',
+  'Open Adobe Illustrator For My Client',
+  'Open Adobe Illustrator tomorrow',
+  'Open Adobe Illustrator at 5 PM',
+  'Open Adobe Illustrator in the background',
+  'Open Adobe Illustrator if it is installed',
+  'Open Adobe Illustrator without asking',
+  'Open Adobe Illustrator with my credentials',
+  'Open Adobe Illustrator again',
+  'Maybe open Adobe Illustrator',
   'Open the door',
   'Open my file',
   'Open task manager',
@@ -1473,7 +1777,7 @@ for (const precisionCase of [
   } else pass('floor gate: purchase click requires pay confirmation');
 }
 
-// ─── T7 UX: sticky "always allow" scopes — downgrade rules on the route ─────
+// ─── T7 UX: broad sticky scopes are retired until a safe category exists ────
 
 {
   const {
@@ -1483,7 +1787,7 @@ for (const precisionCase of [
     createStickyScope,
     setActiveStickyScopes,
     STICKY_FLOOR_CATEGORIES,
-    formatStickyScopeAppliedNotice,
+    STICKY_GRANTABLE_CATEGORIES,
   } = require('../src/lib/computerGrantGate') as typeof import('../src/lib/computerGrantGate');
 
   // The router floor and the sticky exclusion list are the same object —
@@ -1492,11 +1796,20 @@ for (const precisionCase of [
     fail('sticky: ALWAYS_CONFIRM_FLOOR must be the canonical STICKY_FLOOR_CATEGORIES list');
   } else pass('sticky: router floor re-exports the sticky floor list');
 
-  const mk = (scopeKind: 'site' | 'app', scopeKey: string, cats: any[]) => {
-    const created = createStickyScope({ scopeKind, scopeKey, allowedCategories: cats, grantedByUserId: 'user_1' });
-    if (!created.ok) throw new Error(`smoke scope creation failed: ${created.error}`);
-    return created.scope;
-  };
+  if (STICKY_GRANTABLE_CATEGORIES.length !== 0) {
+    fail(`sticky: no router mutation category is currently safe for a broad grant (${JSON.stringify(STICKY_GRANTABLE_CATEGORIES)})`);
+  } else pass('sticky: broad grantable categories stay empty');
+
+  for (const category of ['publish', 'upload', 'download', 'send', 'save', 'pay', 'login', 'delete', 'grant'] as any[]) {
+    const created = createStickyScope({
+      scopeKind: 'site',
+      scopeKey: 'acme.com',
+      allowedCategories: [category],
+      grantedByUserId: 'user_1',
+    });
+    if (created.ok) fail(`sticky: exact category ${category} must not create a standing grant`);
+    else pass(`sticky: exact category ${category} rejects standing grant creation`);
+  }
 
   const APPROVAL_TASK = 'go to acme.com and publish the draft post';
 
@@ -1506,36 +1819,21 @@ for (const precisionCase of [
     fail(`sticky: baseline publish task must require approval with no sticky stamp (got approval=${baseline?.approvalRequired}, sticky=${JSON.stringify(baseline?.stickyScopeApplied)})`);
   } else pass('sticky: baseline publish task requires approval');
 
-  // Full coverage on a matching site (www + case variant) downgrades approval
-  // and stamps + notices the route.
-  const publishScope = mk('site', 'WWW.Acme.com', ['publish', 'upload']);
-  const downgraded = buildChatComputerRequestRoute(APPROVAL_TASK, { stickyScopes: [publishScope] });
-  if (!downgraded || downgraded.approvalRequired || downgraded.stickyScopeApplied?.scopeKey !== 'acme.com') {
-    fail(`sticky: covered publish task should downgrade approval (approval=${downgraded?.approvalRequired}, sticky=${JSON.stringify(downgraded?.stickyScopeApplied)})`);
-  } else pass('sticky: full coverage downgrades approval and stamps the route');
-  const notice = formatStickyScopeAppliedNotice({ scopeKey: 'acme.com' });
-  if (!downgraded?.notes.some((note) => note.includes(notice))) {
-    fail(`sticky: route notes must carry the standing-grant notice (got ${JSON.stringify(downgraded?.notes)})`);
-  } else pass('sticky: route notes carry the visible standing-grant notice');
-
-  // Partial coverage never downgrades: task needs publish+send, scope covers publish.
-  const partial = buildChatComputerRequestRoute('go to acme.com, publish the draft post and send the newsletter email', { stickyScopes: [publishScope] });
-  if (!partial || !partial.approvalRequired || partial.stickyScopeApplied) {
-    fail('sticky: partial coverage must keep approval required');
-  } else pass('sticky: partial coverage keeps approval required');
-
-  // Wrong site never downgrades.
-  const wrongSite = buildChatComputerRequestRoute('go to other.com and publish the draft post', { stickyScopes: [publishScope] });
-  if (!wrongSite || !wrongSite.approvalRequired || wrongSite.stickyScopeApplied) {
-    fail('sticky: non-matching site must keep approval required');
-  } else pass('sticky: non-matching site keeps approval required');
-
-  // Floor categories are NEVER downgraded by a sticky scope — even by a
-  // maliciously crafted scope object that claims to allow them. login/delete
-  // keep route-level approval; the sticky scope must never be recorded as
-  // applied for any floor category.
-  const malicious = { ...publishScope, allowedCategories: ['publish', 'pay', 'login', 'delete', 'grant'] as any };
+  // A forged historical scope cannot resurrect a retired broad grant.
+  const malicious = {
+    id: 'sticky_site_acme.com',
+    scopeKind: 'site' as const,
+    scopeKey: 'acme.com',
+    allowedCategories: ['publish', 'upload', 'download', 'send', 'save', 'pay', 'login', 'delete', 'grant'] as any,
+    grantedByUserId: 'user_1',
+    grantedAtIso: new Date().toISOString(),
+    expiresAtIso: new Date(Date.now() + 86_400_000).toISOString(),
+    lastUsedAtIso: null,
+    useCount: 0,
+    revoked: null,
+  };
   for (const { msg, cat } of [
+    { msg: APPROVAL_TASK, cat: 'publish' },
     { msg: 'log into acme.com and publish the draft post', cat: 'login' },
     { msg: 'go to acme.com and delete every old draft post', cat: 'delete' },
   ]) {
@@ -1560,38 +1858,21 @@ for (const precisionCase of [
   }
 
   // Explicit "ask me" intent and user ask-before constraints are never overridden.
-  const explicitAsk = buildChatComputerRequestRoute('go to acme.com and publish the draft post but ask me before publishing it', { stickyScopes: [publishScope] });
+  const explicitAsk = buildChatComputerRequestRoute('go to acme.com and publish the draft post but ask me before publishing it', { stickyScopes: [malicious] });
   if (!explicitAsk || !explicitAsk.approvalRequired || explicitAsk.stickyScopeApplied) {
     fail('sticky: ask-before constraint must override a standing grant');
   } else pass('sticky: user ask-before constraint overrides the grant');
 
-  // Expired and revoked scopes never downgrade.
-  const expired = { ...publishScope, expiresAtIso: '2020-01-01T00:00:00Z' };
-  const revoked = { ...publishScope, revoked: { atIso: new Date().toISOString(), byUserId: 'user_1' } };
-  for (const [label, scope] of [['expired', expired], ['revoked', revoked]] as const) {
-    const route = buildChatComputerRequestRoute(APPROVAL_TASK, { stickyScopes: [scope as any] });
-    if (!route || !route.approvalRequired || route.stickyScopeApplied) {
-      fail(`sticky: ${label} scope must not downgrade approval`);
-    } else pass(`sticky: ${label} scope does not downgrade`);
-  }
-
-  // App scope covers a desktop-app mutation on the named app.
-  const notionScope = mk('app', 'Notion', ['publish', 'save']);
-  const appRoute = buildChatComputerRequestRoute('in the Notion app, publish the meeting notes page', { stickyScopes: [notionScope] });
-  if (!appRoute || appRoute.approvalRequired || appRoute.stickyScopeApplied?.scopeKey !== 'notion') {
-    fail(`sticky: app scope should downgrade the matching app task (approval=${appRoute?.approvalRequired}, sticky=${JSON.stringify(appRoute?.stickyScopeApplied)})`);
-  } else pass('sticky: app scope downgrades the matching desktop-app task');
-
-  // Prompt block carries the standing-grant line plus the floor reminder.
-  setActiveStickyScopes([publishScope]);
+  // Hydrating a forged historical scope cannot add standing-grant prompt
+  // language or change route authority.
+  setActiveStickyScopes([malicious]);
   const promptWithGrant = buildChatComputerRequestRoutePromptBlock(APPROVAL_TASK) || '';
   setActiveStickyScopes([]);
-  if (!promptWithGrant.includes('Standing grant applied') || !promptWithGrant.includes('still requires fresh confirmation')) {
-    fail('sticky: prompt block should carry the standing-grant line + floor reminder');
-  } else pass('sticky: prompt block carries grant line via hydrated registry');
+  if (promptWithGrant.includes('Standing grant applied')) {
+    fail('sticky: forged broad grant must not enter the prompt');
+  } else pass('sticky: forged broad grant is removed during hydration');
 
-  // Persisted-route optionality: routes without the field parse/round-trip,
-  // and a stamped route survives JSON round-trip with the stamp intact.
+  // Persisted routes without the retired stamp remain readable.
   const plain = JSON.parse(JSON.stringify(baseline)) as typeof baseline;
   if (plain && plain.stickyScopeApplied !== null && plain.stickyScopeApplied !== undefined) {
     fail('sticky: route without a grant must keep an empty stickyScopeApplied after round-trip');
@@ -1600,10 +1881,6 @@ for (const precisionCase of [
   if ((plain as any).stickyScopeApplied !== undefined || !plain.approvalRequired) {
     fail('sticky: pre-T7 persisted route (field absent) must stay readable');
   } else pass('sticky: pre-T7 persisted route without the field stays readable');
-  const stamped = JSON.parse(JSON.stringify(downgraded)) as typeof downgraded;
-  if (stamped?.stickyScopeApplied?.scopeId !== publishScope.id) {
-    fail('sticky: stamped route must round-trip the applied scope');
-  } else pass('sticky: stamped route round-trips the applied scope');
 }
 
 // ─── Wave-2: task→best-app resolution on the route ───────────────────────────

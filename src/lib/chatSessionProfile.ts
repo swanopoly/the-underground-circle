@@ -1,6 +1,10 @@
 import { storage } from './storage';
 import { detectAgenticCodingProfile, detectAgenticCodingProfileWithConfidence, type AgenticCodingProfile, type AgenticCodingSurface } from './agenticCodingProfile';
 import type { OpenSwanChatMode } from './openswanModePolicy';
+import {
+  chatPersonalThreadStorageKey,
+  type ChatPersonalStorageScope,
+} from './chatSessionStatePersistence';
 
 export type SessionCodingProfile = AgenticCodingProfile | 'auto';
 export type SessionDelegationMode = 'auto' | 'parallel' | 'focused';
@@ -15,7 +19,7 @@ export const SESSION_PROFILE_OPTIONS: Array<{
   color: string;
   description: string;
 }> = [
-  { id: 'auto',      label: 'Auto',      shortLabel: 'AUTO',   color: '#22d3ee', description: 'OpenSwan decides whether this is build, review, debug, or architecture work from the request.' },
+  { id: 'auto',      label: 'Auto',      shortLabel: 'AUTO',   color: '#6366f1', description: 'OpenSwan decides whether this is build, review, debug, or architecture work from the request.' },
   { id: 'senior',    label: 'Build',     shortLabel: 'BUILD',  color: '#22c55e', description: 'OpenSwan ships working code — implements features, scaffolds endpoints, wires UI.' },
   { id: 'review',    label: 'Review',    shortLabel: 'REVIEW', color: '#f59e0b', description: 'OpenSwan audits a diff or file — findings, risks, style, security.' },
   { id: 'debug',     label: 'Debug',     shortLabel: 'DEBUG',  color: '#ef4444', description: 'OpenSwan roots out a bug — reproduce, bisect, explain, propose a fix.' },
@@ -36,7 +40,7 @@ export const SESSION_DELEGATION_MODE_OPTIONS: Array<{
   color: string;
   description: string;
 }> = [
-  { id: 'auto',     label: 'Auto',     shortLabel: 'AUTO',  color: '#22d3ee', description: 'OpenSwan decides when to fan out to specialist sub-agents.' },
+  { id: 'auto',     label: 'Auto',     shortLabel: 'AUTO',  color: '#6366f1', description: 'OpenSwan decides when to fan out to specialist sub-agents.' },
   { id: 'parallel', label: 'Parallel', shortLabel: 'PAR',   color: '#f59e0b', description: 'Prefer a multi-agent specialist crew for substantial tasks.' },
   { id: 'focused',  label: 'Solo',     shortLabel: 'FOCUS', color: '#94a3b8', description: 'Single OpenSwan context, no delegation — fastest and cheapest.' },
 ];
@@ -59,7 +63,7 @@ function normalizeDelegationMode(value: string | null | undefined): SessionDeleg
   return DEFAULT_DELEGATION_MODE;
 }
 
-function threadProfileKey(threadId: string): string {
+function legacyThreadProfileKey(threadId: string): string {
   return `uc_chat_session_profile_${threadId}`;
 }
 
@@ -67,11 +71,11 @@ function roomProfileKey(roomId: string): string {
   return `uc_room_chat_profile_${roomId}`;
 }
 
-function threadDelegationModeKey(threadId: string): string {
+function legacyThreadDelegationModeKey(threadId: string): string {
   return `uc_chat_delegation_mode_${threadId}`;
 }
 
-function threadChatModeKey(threadId: string): string {
+function legacyThreadChatModeKey(threadId: string): string {
   return `uc_chat_mode_${threadId}`;
 }
 
@@ -98,14 +102,27 @@ function normalizeChatMode(value: string | null | undefined): ThreadChatMode {
   return DEFAULT_CHAT_MODE;
 }
 
-export async function loadThreadSessionProfile(threadId: string | null): Promise<SessionCodingProfile> {
-  if (!threadId) return DEFAULT_PROFILE;
-  return normalizeProfile(await storage.getItem(threadProfileKey(threadId)));
+export type ThreadSessionStorageScope = ChatPersonalStorageScope & Readonly<{
+  threadId?: unknown;
+}>;
+
+async function retireLegacyThreadValue(key: string): Promise<void> {
+  try { await storage.removeItem(key); } catch {}
 }
 
-export async function saveThreadSessionProfile(threadId: string | null, profile: SessionCodingProfile): Promise<void> {
-  if (!threadId) return;
-  await storage.setItem(threadProfileKey(threadId), normalizeProfile(profile));
+export async function loadThreadSessionProfile(scope: ThreadSessionStorageScope): Promise<SessionCodingProfile> {
+  const key = chatPersonalThreadStorageKey('session_profile', scope, scope.threadId);
+  if (!key) return DEFAULT_PROFILE;
+  if (typeof scope.threadId === 'string' && scope.threadId) {
+    await retireLegacyThreadValue(legacyThreadProfileKey(scope.threadId));
+  }
+  return normalizeProfile(await storage.getItem(key));
+}
+
+export async function saveThreadSessionProfile(scope: ThreadSessionStorageScope, profile: SessionCodingProfile): Promise<void> {
+  const key = chatPersonalThreadStorageKey('session_profile', scope, scope.threadId);
+  if (!key) return;
+  await storage.setItem(key, normalizeProfile(profile));
 }
 
 export async function loadRoomSessionProfile(roomId: string): Promise<SessionCodingProfile> {
@@ -116,24 +133,34 @@ export async function saveRoomSessionProfile(roomId: string, profile: SessionCod
   await storage.setItem(roomProfileKey(roomId), normalizeProfile(profile));
 }
 
-export async function loadThreadDelegationMode(threadId: string | null): Promise<SessionDelegationMode> {
-  if (!threadId) return DEFAULT_DELEGATION_MODE;
-  return normalizeDelegationMode(await storage.getItem(threadDelegationModeKey(threadId)));
+export async function loadThreadDelegationMode(scope: ThreadSessionStorageScope): Promise<SessionDelegationMode> {
+  const key = chatPersonalThreadStorageKey('delegation_mode', scope, scope.threadId);
+  if (!key) return DEFAULT_DELEGATION_MODE;
+  if (typeof scope.threadId === 'string' && scope.threadId) {
+    await retireLegacyThreadValue(legacyThreadDelegationModeKey(scope.threadId));
+  }
+  return normalizeDelegationMode(await storage.getItem(key));
 }
 
-export async function saveThreadDelegationMode(threadId: string | null, mode: SessionDelegationMode): Promise<void> {
-  if (!threadId) return;
-  await storage.setItem(threadDelegationModeKey(threadId), normalizeDelegationMode(mode));
+export async function saveThreadDelegationMode(scope: ThreadSessionStorageScope, mode: SessionDelegationMode): Promise<void> {
+  const key = chatPersonalThreadStorageKey('delegation_mode', scope, scope.threadId);
+  if (!key) return;
+  await storage.setItem(key, normalizeDelegationMode(mode));
 }
 
-export async function loadThreadChatMode(threadId: string | null): Promise<ThreadChatMode> {
-  if (!threadId) return DEFAULT_CHAT_MODE;
-  return normalizeChatMode(await storage.getItem(threadChatModeKey(threadId)));
+export async function loadThreadChatMode(scope: ThreadSessionStorageScope): Promise<ThreadChatMode> {
+  const key = chatPersonalThreadStorageKey('mode', scope, scope.threadId);
+  if (!key) return DEFAULT_CHAT_MODE;
+  if (typeof scope.threadId === 'string' && scope.threadId) {
+    await retireLegacyThreadValue(legacyThreadChatModeKey(scope.threadId));
+  }
+  return normalizeChatMode(await storage.getItem(key));
 }
 
-export async function saveThreadChatMode(threadId: string | null, mode: ThreadChatMode): Promise<void> {
-  if (!threadId) return;
-  await storage.setItem(threadChatModeKey(threadId), normalizeChatMode(mode));
+export async function saveThreadChatMode(scope: ThreadSessionStorageScope, mode: ThreadChatMode): Promise<void> {
+  const key = chatPersonalThreadStorageKey('mode', scope, scope.threadId);
+  if (!key) return;
+  await storage.setItem(key, normalizeChatMode(mode));
 }
 
 export async function loadRoomDelegationMode(roomId: string): Promise<SessionDelegationMode> {

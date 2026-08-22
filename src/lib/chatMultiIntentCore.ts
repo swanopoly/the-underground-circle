@@ -39,6 +39,7 @@ export type IntentConnective =
   | 'lead'
   | 'then'
   | 'also'
+  | 'comma'
   | 'enumerated'
   | 'newline'
   | 'semicolon';
@@ -99,27 +100,49 @@ const ACTION_VERBS: Readonly<Record<string, true>> = Object.freeze({
   update: true, change: true, modify: true, edit: true, revise: true,
   rewrite: true, refactor: true, rename: true, tweak: true, adjust: true,
   delete: true, remove: true, drop: true, clear: true, purge: true,
-  wipe: true, uninstall: true, revoke: true, reset: true,
-  deploy: true, ship: true, release: true, publish: true, promote: true,
+  wipe: true, erase: true, uninstall: true, revoke: true, reset: true,
+  deploy: true, ship: true, release: true, publish: true, unpublish: true, promote: true,
   rollback: true, revert: true, cutover: true,
   run: true, execute: true, exec: true, start: true, stop: true,
   restart: true, launch: true, open: true, close: true, kill: true,
+  focus: true, activate: true, switch: true, bring: true,
+  use: true, navigate: true, visit: true, browse: true, go: true,
+  read: true, view: true, look: true, report: true, tell: true,
+  show: true, list: true, describe: true, explain: true,
+  search: true, find: true, locate: true, extract: true, scrape: true,
+  capture: true, screenshot: true, record: true,
+  click: true, tap: true, press: true, type: true, paste: true, fill: true,
+  enter: true, select: true, choose: true, toggle: true, scroll: true,
+  zoom: true, maximize: true, minimize: true,
   send: true, email: true, share: true, post: true, forward: true,
-  submit: true, notify: true, message: true, dm: true,
+  submit: true, notify: true, message: true, dm: true, invite: true,
+  buy: true, purchase: true, pay: true, charge: true,
+  order: true, book: true, reserve: true, complete: true,
   review: true, audit: true, check: true, inspect: true, test: true,
   verify: true, validate: true, analyze: true, analyse: true, research: true,
   investigate: true, summarize: true, summarise: true, document: true,
   commit: true, push: true, pull: true, merge: true, rebase: true,
   fetch: true, clone: true, checkout: true, tag: true, stash: true,
   install: true, configure: true, config: true, setup: true, enable: true,
-  disable: true, connect: true, integrate: true, wire: true, hook: true,
+  disable: true, archive: true, unarchive: true, connect: true, disconnect: true, integrate: true, wire: true, hook: true,
+  approve: true, authorize: true, grant: true, link: true, login: true, log: true,
+  sign: true, authenticate: true,
   provision: true,
   move: true, copy: true, download: true, upload: true, import: true,
-  export: true, migrate: true, sync: true, backup: true, restore: true,
+  export: true, save: true, print: true, package: true, place: true,
+  overwrite: true,
+  relink: true, migrate: true, sync: true, backup: true, restore: true,
+  resize: true, rotate: true, crop: true, trim: true, split: true,
+  draw: true, paint: true, retouch: true, animate: true,
   rollout: true,
   optimize: true, optimise: true, format: true, lint: true, bump: true,
-  compile: true, package: true, bundle: true, render: true, plan: true,
+  compile: true, bundle: true, render: true, plan: true,
   schedule: true, translate: true, convert: true, replace: true, set: true,
+  put: true, apply: true, confirm: true, accept: true, dismiss: true,
+  cancel: true, play: true, pause: true, resume: true, mute: true,
+  unmute: true, turn: true, drag: true, attach: true, detach: true,
+  duplicate: true, group: true, ungroup: true, align: true,
+  distribute: true, lock: true, unlock: true,
 });
 
 // ── Boundary detection patterns ──────────────────────────────────────────────
@@ -149,6 +172,35 @@ const NEWLINE_RE = new RegExp(`${H}*(?:\\r?\\n${H}*)+`, 'g');
 /** ';' → boundary type 'semicolon'. */
 const SEMI_RE = new RegExp(`${H}*;+${H}*`, 'g');
 
+/**
+ * Sentence-separated imperatives are ordered steps too: "Open the app. Create
+ * a document. Export it." The same two-actionable-head guard used by every
+ * candidate prevents ordinary prose, abbreviations, and version numbers from
+ * manufacturing phantom actions. Map the separator to `then` so downstream
+ * dependency tracking preserves the written order without adding a second
+ * persistence enum for equivalent sequence semantics.
+ */
+const SENTENCE_RE = new RegExp(`[.!?]{1,3}${H}+`, 'g');
+
+/** Explicit connective text following sentence punctuation owns the boundary. */
+const EXPLICIT_CONNECTIVE_HEAD_RE =
+  /^(?:and\s+then|then|after\s+that|afterwards?|next|finally|lastly|followed\s+by|and\s+also|as\s+well\s+as|also|plus)\b/i;
+
+/** "Open X before creating Y"; the lookahead leaves `before` on clause Y. */
+const BEFORE_ACTION_RE = new RegExp(
+  `${H}+(?=before${H}+(?:you${H}+)?[a-z][a-z'\u2019-]{1,31})`,
+  'gi',
+);
+
+/**
+ * Plain comma lists are candidates only. The same two-actionable-head guard
+ * used for every other boundary decides whether a comma is a real action
+ * boundary, so object lists such as "open Illustrator, Photoshop, and Figma"
+ * remain one intent while "open Illustrator, create a file, and export it"
+ * retains all three actions.
+ */
+const COMMA_RE = new RegExp(`${H}*,+${H}*`, 'g');
+
 /** Line-start enumeration marker (1. / 1) / - / * / •) → boundary 'enumerated'. */
 const ENUM_MARKER_RE = new RegExp(
   `(?:^|\\r?\\n)${H}*(?:\\d{1,3}[.)]|[-*•])${H}+(?=\\S)`,
@@ -168,7 +220,59 @@ const LEADING_EDGE_RE = /^[\s"'“”‘’(\[<>*•:;,.!?_-]+/;
  * an imperative.
  */
 const LEADING_FILLER_RE =
-  /^(?:please|pls|plz|kindly|then|also|next|now|just|first(?:ly)?|second(?:ly)?|third(?:ly)?|finally|lastly|afterwards?|afterward|plus|and|so|go|ok|okay|yeah|yep|maybe|actually|quickly|quick|really|simply|kindly|can\s+you|could\s+you|would\s+you|will\s+you|you\s+should|i\s+want\s+you\s+to|i\s+need\s+you\s+to|i\s+want\s+to|i\s+need\s+to|go\s+ahead\s+and|let'?s|lets)\b[\s,:;.!-]*/i;
+  /^(?:please|pls|plz|kindly|hey(?:\s+there)?|hi(?:\s+there)?|hello(?:\s+there)?|then|also|next|now|just|first(?:ly)?|second(?:ly)?|third(?:ly)?|finally|lastly|afterwards?|afterward|plus|and|so|ok|okay|alright|yeah|yep|maybe|possibly|actually|quickly|quick|really|simply|permanently|irreversibly|kindly|would\s+you\s+mind|do\s+you\s+mind|could\s+you\s+be\s+able\s+to|would\s+you\s+be\s+able\s+to|do\s+me\s+a\s+favou?r\s+and|can\s+you|could\s+you|would\s+you|will\s+you|you\s+should|i\s+want\s+you\s+to|i\s+need\s+you\s+to|i\s+would\s+like\s+you\s+to|i(?:'|’)d\s+like\s+you\s+to|i\s+want\s+to|i\s+need\s+to|go\s+ahead\s+and|let'?s|lets)\b[\s,:;.!-]*/i;
+
+/** Explicit instruction-list preambles; ordinary narrative prefixes stay intact. */
+const LEADING_TASK_PREAMBLE_RE =
+  /^(?:(?:please\s+)?(?:do|complete|perform|follow)\s+(?:(?:the\s+)?following|these)(?:\s+(?:steps?|tasks?|actions?|instructions?))?|here(?:'s|\s+is|\s+are)\s+(?:the\s+)?(?:task|request|steps?|instructions?)|(?:the\s+)?(?:task|request|steps?|instructions?)\s+(?:is|are))\s*[:,-]\s*/i;
+
+/** Optional app/browser scope before the first imperative: "In Chrome, open…". */
+const LEADING_APP_SCOPE_RE =
+  /^(?:in|inside|within)\s+(?:the\s+)?[a-z0-9][a-z0-9 .+&'’()_-]{0,80}\s*,\s*/i;
+
+/** Bounded state-transition preface before a real next imperative. */
+const LEADING_READY_TRANSITION_RE =
+  /^(?:once|when|after)\s+(?:(?:(?:the\s+)?(?:app|application|page|site|window|document|file)|it)\s+(?:(?:is|becomes)\s+)?(?:opened|loaded|launches|starts|loads|opens|open|ready)|(?:ready|loaded))\b\s*,?\s*/i;
+
+/** Direct imperative after an explicit before-boundary: "before you save". */
+const LEADING_BEFORE_DIRECT_RE = /^before\s+(?:you\s+)?/i;
+
+/** Temporal gerund clauses are action requests only in this explicit frame. */
+const LEADING_TEMPORAL_GERUND_RE = /^(?:after|before)\s+([a-z]{2,32}ing)\b/i;
+
+/**
+ * A conditional control clause constrains the preceding action; it is not a
+ * separately completable user ask. Keeping it attached prevents request
+ * ledgers such as `A1 buy the item / A2 stop if a CAPTCHA appears`, where A2
+ * could never receive independent completion proof. Direct controls such as
+ * `stop playback` and `pause the video` remain ordinary actions.
+ */
+const LEADING_CONDITIONAL_CONTROL_RE =
+  /^(?:stop|pause|cancel|confirm)\s+(?:if|when|unless|before|after)\b/i;
+
+/**
+ * Gerund action heads are accepted only inside an explicit "would/do you
+ * mind ..." request frame. This keeps polite requests natural without turning
+ * narrative prose such as "I was running and opening files" into mutations.
+ */
+const POLITE_GERUND_REQUEST_RE =
+  /^\s*(?:(?:hey|hi|hello)(?:\s+there)?\s*[,!]\s*)?(?:(?:ok(?:ay)?|alright|actually|please|kindly)\s*,?\s*)*(?:would|do)\s+you\s+mind\b/i;
+
+function actionVerbFromGerund(word: string): string | null {
+  if (!/^[a-z]{2,32}ing$/.test(word)) return null;
+  const stem = word.slice(0, -3);
+  const candidates = [
+    stem,
+    `${stem}e`,
+    stem.length >= 2 && stem[stem.length - 1] === stem[stem.length - 2]
+      ? stem.slice(0, -1)
+      : '',
+  ];
+  for (const candidate of candidates) {
+    if (candidate && ACTION_VERBS[candidate] === true) return candidate;
+  }
+  return null;
+}
 
 // ── Secret-safety + text cleaning ─────────────────────────────────────────────
 
@@ -263,26 +367,46 @@ function cleanSegmentText(raw: string): string {
  * leading list marker + edge punctuation, iteratively strips courtesy/sequence
  * filler, then reads the first alphabetic token. Total: never throws.
  */
-function firstActionVerb(raw: string): string | null {
+function firstActionVerb(raw: string, allowGerund = false): string | null {
   try {
     if (typeof raw !== 'string' || !raw) return null;
     let t = raw.length > MAX_SEGMENT_CHARS * 2 ? raw.slice(0, MAX_SEGMENT_CHARS * 2) : raw;
     t = t.replace(LEADING_MARKER_RE, '').replace(LEADING_EDGE_RE, '');
+    t = t.replace(LEADING_TASK_PREAMBLE_RE, '');
+    t = t.replace(LEADING_APP_SCOPE_RE, '');
+    const temporalGerund = t.match(LEADING_TEMPORAL_GERUND_RE);
+    if (temporalGerund) {
+      const temporalVerb = actionVerbFromGerund(temporalGerund[1].toLowerCase());
+      if (temporalVerb) return temporalVerb;
+    }
+    t = t.replace(LEADING_BEFORE_DIRECT_RE, '');
+    t = t.replace(LEADING_READY_TRANSITION_RE, '');
     for (let i = 0; i < MAX_FILLER_STRIPS; i += 1) {
       const next = t.replace(LEADING_FILLER_RE, '');
       if (next === t) break;
       t = next.replace(LEADING_EDGE_RE, '');
     }
+    if (LEADING_CONDITIONAL_CONTROL_RE.test(t)) return null;
     const m = t.match(/^([a-zA-Z][a-zA-Z'’-]*)/);
     if (!m) return null;
     const w = m[1].toLowerCase().replace(/['’-]+$/, '');
     // Strict === true (not truthy): ACTION_VERBS is a plain object literal, so a
     // missing key like "constructor" would otherwise resolve to the inherited
     // Object.prototype.constructor (a truthy function) and be mis-read as a verb.
-    return ACTION_VERBS[w] === true ? w : null;
+    if (ACTION_VERBS[w] === true) return w;
+    return allowGerund ? actionVerbFromGerund(w) : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Shared, bounded imperative classifier for callers that already isolated one
+ * candidate clause. Reuse the exact multi-intent vocabulary instead of growing
+ * a second command-specific verb list.
+ */
+export function resolveLeadingChatActionVerb(raw: string): string | null {
+  return firstActionVerb(raw);
 }
 
 // ── Internal boundary model ───────────────────────────────────────────────────
@@ -302,6 +426,7 @@ const BOUNDARY_PRIORITY: Readonly<Record<Boundary['type'], number>> = Object.fre
   enumerated: 2,
   newline: 3,
   semicolon: 4,
+  comma: 5,
 });
 
 /** Guarded regex sweep — collects matches; never throws; bounded + zero-width safe. */
@@ -349,14 +474,22 @@ function detectEnumeratedBoundaries(s: string): Boundary[] | null {
   return out;
 }
 
-/** Inline (non-enumerated) boundaries: then / also / bare-and / newline / semicolon. */
+/** Inline (non-enumerated) boundaries: sequence/additive glue and punctuation. */
 function detectInlineBoundaries(s: string): Boundary[] {
   const cands: Boundary[] = [];
   for (const m of scan(THEN_RE, s)) pushCandidate(cands, 'then', m.index, m.index + m[0].length);
+  for (const m of scan(BEFORE_ACTION_RE, s)) pushCandidate(cands, 'then', m.index, m.index + m[0].length);
+  for (const m of scan(SENTENCE_RE, s)) {
+    const following = s.slice(m.index + m[0].length, m.index + m[0].length + 48);
+    if (!EXPLICIT_CONNECTIVE_HEAD_RE.test(following)) {
+      pushCandidate(cands, 'then', m.index, m.index + m[0].length);
+    }
+  }
   for (const m of scan(ALSO_RE, s)) pushCandidate(cands, 'also', m.index, m.index + m[0].length);
   for (const m of scan(AND_RE, s)) pushCandidate(cands, 'also', m.index, m.index + m[0].length);
   for (const m of scan(NEWLINE_RE, s)) pushCandidate(cands, 'newline', m.index, m.index + m[0].length);
   for (const m of scan(SEMI_RE, s)) pushCandidate(cands, 'semicolon', m.index, m.index + m[0].length);
+  for (const m of scan(COMMA_RE, s)) pushCandidate(cands, 'comma', m.index, m.index + m[0].length);
   return resolveNonOverlapping(cands);
 }
 
@@ -387,14 +520,14 @@ interface Clause {
 }
 
 /** Split the turn into clauses at the accepted boundaries (offsets preserved). */
-function buildClauses(s: string, boundaries: Boundary[]): Clause[] {
+function buildClauses(s: string, boundaries: Boundary[], allowGerund: boolean): Clause[] {
   const clauses: Clause[] = [];
   let cursor = 0;
   let connective: IntentConnective = 'lead';
   for (const b of boundaries) {
     const start = cursor;
     const end = b.gStart;
-    clauses.push({ start, end, connective, actionable: firstActionVerb(s.slice(start, end)) !== null });
+    clauses.push({ start, end, connective, actionable: firstActionVerb(s.slice(start, end), allowGerund) !== null });
     cursor = b.gEnd;
     connective = b.type;
   }
@@ -402,7 +535,7 @@ function buildClauses(s: string, boundaries: Boundary[]): Clause[] {
     start: cursor,
     end: s.length,
     connective,
-    actionable: firstActionVerb(s.slice(cursor, s.length)) !== null,
+    actionable: firstActionVerb(s.slice(cursor, s.length), allowGerund) !== null,
   });
   return clauses;
 }
@@ -411,9 +544,9 @@ function emptyLeadSegment(): IntentSegment {
   return { index: 0, text: '', verb: null, connective: 'lead', sequential: false };
 }
 
-function singleResult(s: string, clauses: Clause[]): MultiIntentResult {
+function singleResult(s: string, clauses: Clause[], allowGerund: boolean): MultiIntentResult {
   const text = cleanSegmentText(s);
-  const verb = firstActionVerb(s);
+  const verb = firstActionVerb(s, allowGerund);
   const anyActionable = clauses.some((c) => c.actionable);
   return {
     isMultiIntent: false,
@@ -460,8 +593,9 @@ export function segmentChatIntents(message: unknown): MultiIntentResult {
       return { isMultiIntent: false, segments: [emptyLeadSegment()], reason: 'empty' };
     }
 
+    const allowGerund = POLITE_GERUND_REQUEST_RE.test(sliced);
     const boundaries = detectEnumeratedBoundaries(sliced) ?? detectInlineBoundaries(sliced);
-    const clauses = buildClauses(sliced, boundaries);
+    const clauses = buildClauses(sliced, boundaries, allowGerund);
 
     // Walk clauses, merging every non-actionable clause into the current
     // segment (a boundary is kept only when both sides are actionable). Each
@@ -482,7 +616,7 @@ export function segmentChatIntents(message: unknown): MultiIntentResult {
 
     // Fewer than 2 actionable segments → the whole (bounded) turn is one intent.
     if (ranges.length < 2) {
-      return singleResult(sliced, clauses);
+      return singleResult(sliced, clauses, allowGerund);
     }
 
     // Cap: fold the overflow tail into the last kept segment (nothing dropped).
@@ -499,10 +633,14 @@ export function segmentChatIntents(message: unknown): MultiIntentResult {
       const start = clauses[a].start;
       const end = clauses[b].end;
       const text = cleanSegmentText(sliced.slice(start, end));
+      const actionableClause = clauses.slice(a, b + 1).find((clause) => clause.actionable);
+      const verbSource = actionableClause
+        ? sliced.slice(actionableClause.start, actionableClause.end)
+        : text;
       return {
         index,
         text,
-        verb: firstActionVerb(text),
+        verb: firstActionVerb(verbSource, allowGerund),
         connective: clauses[a].connective,
         sequential: false, // set below (forward-looking)
       };

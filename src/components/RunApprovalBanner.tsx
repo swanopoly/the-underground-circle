@@ -19,7 +19,14 @@
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { View, Text, Pressable, StyleSheet, ScrollView } from 'react-native';
-import { useAgentRunApprovals, resolveRunApproval, type AgentRunApproval, type ApprovalKind } from '../services/runApprovalsService';
+import {
+  useAgentRunApprovals,
+  resolveRunApproval,
+  resolveRunApprovalExact,
+  type AgentRunApproval,
+  type ApprovalKind,
+  type RunApprovalsExactAuthority,
+} from '../services/runApprovalsService';
 import { renderApprovalAction } from '../lib/approvalPayloadRenderer';
 import { classifyApprovalAge, type ApprovalStaleness } from '../lib/approvalPreviewCore';
 import { toolAutoApproveCategory } from '../lib/openswanToolRuntime';
@@ -32,6 +39,7 @@ import {
   RISK_TIER_CHIP_COLORS,
 } from '../lib/approvalCardModelCore';
 import { describeApprovalRiskChip, type ApprovalRiskTier } from '../lib/approvalIntentPreview';
+import { readOpenSwanApprovalAuditToolName } from '../lib/openswanToolApprovals';
 
 const KIND_ACCENTS: Record<ApprovalKind, { fg: string; bg: string; border: string; label: string }> = {
   publish:             { fg: '#fbbf24', bg: '#422006', border: '#92400e', label: 'PUBLISH' },
@@ -51,10 +59,10 @@ interface Props {
   accentColor?: string;
   /**
    * approval-resume: fires after a resolveRunApproval succeeds, with the full
-   * approval row + the decision. ChatTab uses this to auto-send a continuation
-   * turn ("approval granted — retry that tool call") so Approve actually
-   * resumes the stalled task instead of waiting for the user to type
-   * "continue". Optional/additive — other mounts (OfficeTab) can omit it.
+   * approval row + the decision. ChatTab treats it as a value-free wake-up;
+   * exact encrypted call custody and persisted lineage are independently
+   * revalidated before direct OpenSwan dispatch. Optional/additive — other
+   * mounts (OfficeTab) can omit it.
    */
   onResolved?: (approval: AgentRunApproval, status: 'approved' | 'rejected') => void;
   /**
@@ -74,9 +82,31 @@ interface Props {
    * runStatus pill. Optional/additive.
    */
   onPendingChange?: (pendingCount: number) => void;
+  /**
+   * Value-free recovery signal for exact approvals resolved in another tab or
+   * before this Chat mount observed the transition. Rows here are not dispatch
+   * authority; the owning Chat surface must match persisted run/source lineage
+   * and restore the encrypted device-local exact-call envelope.
+   */
+  onApprovedUnconsumedChange?: (approvals: AgentRunApproval[]) => void;
+  /**
+   * Optional host-level visibility/consent boundary. Chat uses requester-only
+   * rows so another member's run cannot change its pending state or be
+   * resolved from the wrong device; other mounts retain their existing view.
+   */
+  allowApproval?: (approval: AgentRunApproval) => boolean;
+  /**
+   * Process-private approvals (currently linked Chat desktop attachments)
+   * are hidden everywhere unless the exact owning surface proves it can take
+   * custody of the in-memory capability. This predicate is checked again at
+   * tap time; omitting it is fail-closed for those rows.
+   */
+  allowDevicePrivateApproval?: (approval: AgentRunApproval) => boolean;
+  exactAuthority?: RunApprovalsExactAuthority | null;
+  isExactAuthorityCurrent?: (authority: RunApprovalsExactAuthority) => boolean;
 }
 
-function ApprovalCard({ item, userId, onResolve }: { item: AgentRunApproval; userId: string; onResolve: (item: AgentRunApproval, status: 'approved' | 'rejected') => Promise<void>; }) {
+function ApprovalCard({ item, userId, onResolve, allowRemember = true }: { item: AgentRunApproval; userId: string; onResolve: (item: AgentRunApproval, status: 'approved' | 'rejected') => Promise<void>; allowRemember?: boolean; }) {
   const [busy, setBusy] = useState<'approving' | 'rejecting' | null>(null);
   const [remember, setRemember] = useState(false);
   const accent = KIND_ACCENTS[item.approval_kind] || KIND_ACCENTS.privileged_action;
@@ -87,8 +117,8 @@ function ApprovalCard({ item, userId, onResolve }: { item: AgentRunApproval; use
   // the next call. Null (uncategorized tool, credential fill, no payload
   // tool) → no checkbox; those always ask.
   const rememberCategory = useMemo(() => {
-    const tool = (item.payload as any)?.tool;
-    const cat = typeof tool === 'string' ? toolAutoApproveCategory(tool) : null;
+    const tool = readOpenSwanApprovalAuditToolName(item.payload);
+    const cat = tool ? toolAutoApproveCategory(tool) : null;
     // Floor suppression (approvalCardModelCore): never offer a standing
     // auto-approve for pay/delete/login/grant or credential entry — the
     // request-side gate would refuse to honor it anyway. Narrows-only:
@@ -103,13 +133,13 @@ function ApprovalCard({ item, userId, onResolve }: { item: AgentRunApproval; use
       // "Remember this" — approve + ticked checkbox persists the category as
       // auto-approved for future tool calls (mirrors HitlApprovalBanner).
       // Reject + remember is deliberately not offered — never auto-deny.
-      if (status === 'approved' && remember && rememberCategory) {
+      if (allowRemember && status === 'approved' && remember && rememberCategory) {
         await writeUserAutoApprove(userId, rememberCategory, 'auto').catch(() => {});
       }
     } finally {
       setBusy(null);
     }
-  }, [item, onResolve, remember, rememberCategory, userId]);
+  }, [allowRemember, item, onResolve, remember, rememberCategory, userId]);
 
   const ageLabel = useMemo(() => {
     const ms = Date.now() - new Date(item.requested_at).getTime();
@@ -185,7 +215,7 @@ function ApprovalCard({ item, userId, onResolve }: { item: AgentRunApproval; use
       {item.description && item.description !== action.headline ? (
         <Text style={styles.descriptionText} numberOfLines={3}>{item.description}</Text>
       ) : null}
-      {rememberCategory ? (
+      {allowRemember && rememberCategory ? (
         <Pressable
           onPress={() => setRemember((prev) => !prev)}
           style={styles.rememberRow}
@@ -282,8 +312,8 @@ function ApprovalBatchCard({ rows, tool, tier, onResolveBatch, onReviewIndividua
         </View>
         <Text style={styles.ageText}>{`×${n}`}</Text>
       </View>
-      <Text style={styles.titleText} numberOfLines={2}>{`${n}× ${tool}`}</Text>
-      <Text style={styles.detailText} numberOfLines={1}>Same tool, same risk — approve together or review each one.</Text>
+      <Text style={styles.titleText} numberOfLines={2}>{`Review ${n} related actions`}</Text>
+      <Text style={styles.detailText} numberOfLines={1}>One decision for this bounded step.</Text>
       {rows.map((row, i) => (
         <Text key={row.id} style={styles.batchLineText} numberOfLines={1}>
           {`${i + 1}. ${lines[i]}`}
@@ -303,7 +333,7 @@ function ApprovalBatchCard({ rows, tool, tier, onResolveBatch, onReviewIndividua
           disabled={!!busy}
         >
           <Text style={[styles.approveButtonText, { color: accent.fg }]}>
-            {busy === 'approving' ? 'Approving…' : `Approve all ${n}`}
+            {busy === 'approving' ? 'Approving…' : `Allow ${n} actions`}
           </Text>
         </Pressable>
       </View>
@@ -314,7 +344,7 @@ function ApprovalBatchCard({ rows, tool, tier, onResolveBatch, onReviewIndividua
         accessibilityRole="button"
         accessibilityLabel={`Review these ${n} approvals one-by-one`}
       >
-        <Text style={styles.reviewOneByOneText}>Review one-by-one</Text>
+        <Text style={styles.reviewOneByOneText}>Review separately</Text>
       </Pressable>
     </View>
   );
@@ -325,23 +355,80 @@ type RenderCard =
   | { key: string; kind: 'single'; row: AgentRunApproval }
   | { key: string; kind: 'batch'; rows: AgentRunApproval[]; tool: string; tier: ApprovalRiskTier };
 
-export default function RunApprovalBanner({ circleId, userId, onResolved, onResolvedBatch, onPendingChange }: Props) {
-  const { approvals, pendingCount, refresh } = useAgentRunApprovals(circleId);
+export default function RunApprovalBanner({
+  circleId,
+  userId,
+  onResolved,
+  onResolvedBatch,
+  onPendingChange,
+  onApprovedUnconsumedChange,
+  allowApproval,
+  allowDevicePrivateApproval,
+  exactAuthority,
+  isExactAuthorityCurrent,
+}: Props) {
+  const { approvals, approvedUnconsumed, refresh } = useAgentRunApprovals(
+    circleId,
+    userId,
+    exactAuthority,
+    isExactAuthorityCurrent,
+  );
+  const approvedUnconsumedCallbackRef = React.useRef(onApprovedUnconsumedChange);
+  approvedUnconsumedCallbackRef.current = onApprovedUnconsumedChange;
+  const visibleApprovals = useMemo(() => approvals.filter((approval) => {
+    if (allowApproval?.(approval) === false) return false;
+    const tool = readOpenSwanApprovalAuditToolName(approval.payload);
+    if (tool !== 'desktop.open_attachment') return true;
+    return allowDevicePrivateApproval?.(approval) === true;
+  }), [allowApproval, allowDevicePrivateApproval, approvals]);
+  const visiblePendingCount = visibleApprovals.length;
 
   // approval-resume: surface the pending count (incl. 0) so the host can
   // reflect a "needs your approval" state. Must run before the early return
   // below so a drop back to 0 is still reported.
   useEffect(() => {
-    onPendingChange?.(pendingCount);
-  }, [pendingCount, onPendingChange]);
+    onPendingChange?.(visiblePendingCount);
+  }, [visiblePendingCount, onPendingChange]);
+
+  useEffect(() => {
+    approvedUnconsumedCallbackRef.current?.(approvedUnconsumed);
+  }, [approvedUnconsumed]);
 
   const onResolve = useCallback(async (item: AgentRunApproval, status: 'approved' | 'rejected') => {
-    const result = await resolveRunApproval(item.id, status, userId);
+    if (allowApproval?.(item) === false) {
+      refresh();
+      return;
+    }
+    if (
+      readOpenSwanApprovalAuditToolName(item.payload) === 'desktop.open_attachment'
+      && allowDevicePrivateApproval?.(item) !== true
+    ) {
+      refresh();
+      return;
+    }
+    if (status === 'approved' && !isApprovalRowLive(item.requested_at, item.timeout_seconds, Date.now())) {
+      refresh();
+      return;
+    }
+    const capturedAuthority = exactAuthority ? { ...exactAuthority } : null;
+    const authorityIsCurrent = () => Boolean(capturedAuthority && isExactAuthorityCurrent?.(capturedAuthority));
+    let resultOk = false;
+    let resolvedApproval: AgentRunApproval = item;
+    if (capturedAuthority) {
+      const result = await resolveRunApprovalExact(item.id, status, capturedAuthority, authorityIsCurrent);
+      resultOk = result.ok;
+      resolvedApproval = result.approval || item;
+    } else {
+      const result = await resolveRunApproval(item.id, status, userId);
+      resultOk = result.ok;
+    }
     // Optimistic — realtime will confirm; this keeps the UI snappy if
     // the channel is lagging.
     refresh();
-    if (result.ok) onResolved?.(item, status);
-  }, [userId, refresh, onResolved]);
+    if (resultOk && (!capturedAuthority || authorityIsCurrent())) {
+      onResolved?.(resolvedApproval, status);
+    }
+  }, [allowApproval, allowDevicePrivateApproval, exactAuthority, isExactAuthorityCurrent, userId, refresh, onResolved]);
 
   // approval-batch: resolve every covered row, then hand the successes to the
   // host in ONE callback. Per-row `resolveRunApproval` keeps the per-row
@@ -354,13 +441,29 @@ export default function RunApprovalBanner({ circleId, userId, onResolved, onReso
     // be granted under a bundle tap. Reject-all intentionally skips the
     // filter: rejecting a dead-but-still-pending row only clears it.
     const now = Date.now();
+    const permitted = rows.filter((row) => (
+      allowApproval?.(row) !== false
+      && (
+        readOpenSwanApprovalAuditToolName(row.payload) !== 'desktop.open_attachment'
+        || allowDevicePrivateApproval?.(row) === true
+      )
+    ));
     const target = status === 'approved'
-      ? rows.filter((row) => isApprovalRowLive(row.requested_at, row.timeout_seconds, now))
-      : rows;
-    const settled = await Promise.all(target.map(async (row) => ({
-      row,
-      ok: (await resolveRunApproval(row.id, status, userId)).ok,
-    })));
+      ? permitted.filter((row) => isApprovalRowLive(row.requested_at, row.timeout_seconds, now))
+      : permitted;
+    const capturedAuthority = exactAuthority ? { ...exactAuthority } : null;
+    const authorityIsCurrent = () => Boolean(capturedAuthority && isExactAuthorityCurrent?.(capturedAuthority));
+    const settled = await Promise.all(target.map(async (row) => {
+      if (capturedAuthority) {
+        const result = await resolveRunApprovalExact(row.id, status, capturedAuthority, authorityIsCurrent);
+        return {
+          row: result.approval || row,
+          ok: result.ok && authorityIsCurrent(),
+        };
+      }
+      const result = await resolveRunApproval(row.id, status, userId);
+      return { row, ok: result.ok };
+    }));
     refresh();
     const okRows = settled.filter((s) => s.ok).map((s) => s.row);
     if (okRows.length === 0) return;
@@ -371,7 +474,7 @@ export default function RunApprovalBanner({ circleId, userId, onResolved, onReso
     // callback (reject-all never resumes: hosts gate on status there).
     if (onResolvedBatch) onResolvedBatch(okRows, status);
     else if (onResolved) for (const row of okRows) onResolved(row, status);
-  }, [userId, refresh, onResolvedBatch, onResolved]);
+  }, [allowApproval, allowDevicePrivateApproval, exactAuthority, isExactAuthorityCurrent, userId, refresh, onResolvedBatch, onResolved]);
 
   // approval-batch: rows the user chose to review individually. Sticky for
   // the life of the mount (fail-open — exploding a batch only ever adds
@@ -390,16 +493,16 @@ export default function RunApprovalBanner({ circleId, userId, onResolved, onReso
   // provably batch-safe stays a solo card) with user explosions applied on
   // top. Every pending row appears in exactly one card.
   const renderCards = useMemo<RenderCard[]>(() => {
-    const plan = planRunApprovalBatchCards(approvals);
+    const plan = planRunApprovalBatchCards(visibleApprovals);
     const cards: RenderCard[] = [];
     for (const entry of plan) {
       if (entry.kind === 'single') {
-        const row = approvals[entry.index];
+        const row = visibleApprovals[entry.index];
         if (row) cards.push({ key: row.id, kind: 'single', row });
         continue;
       }
       const rows = entry.indices
-        .map((i) => approvals[i])
+        .map((i) => visibleApprovals[i])
         .filter((row): row is AgentRunApproval => !!row);
       const kept = rows.filter((row) => !reviewIndividuallyIds.has(row.id));
       if (kept.length >= 2) {
@@ -412,21 +515,21 @@ export default function RunApprovalBanner({ circleId, userId, onResolved, onReso
       }
     }
     return cards;
-  }, [approvals, reviewIndividuallyIds]);
+  }, [visibleApprovals, reviewIndividuallyIds]);
 
-  if (pendingCount === 0) return null;
+  if (visiblePendingCount === 0) return null;
 
   // Show at most 3 CARDS; the overflow counter reports the ROWS the visible
   // cards don't cover (a batch card covers several rows at once).
   const visible = renderCards.slice(0, 3);
   const coveredRows = visible.reduce((sum, card) => sum + (card.kind === 'batch' ? card.rows.length : 1), 0);
-  const overflow = Math.max(0, pendingCount - coveredRows);
+  const overflow = Math.max(0, visiblePendingCount - coveredRows);
 
   return (
     <View style={styles.container} nativeID="section-chat-run-approvals">
       <View style={styles.headerRow}>
         <Text style={styles.headerText}>
-          {pendingCount === 1 ? '1 action needs approval' : `${pendingCount} actions need approval`}
+          {visiblePendingCount === 1 ? '1 action needs approval' : `${visiblePendingCount} actions need approval`}
         </Text>
         {overflow > 0 ? <Text style={styles.overflowText}>+{overflow} more in queue</Text> : null}
       </View>
@@ -446,7 +549,7 @@ export default function RunApprovalBanner({ circleId, userId, onResolved, onReso
             onReviewIndividually={onReviewIndividually}
           />
         ) : (
-          <ApprovalCard key={card.key} item={card.row} userId={userId} onResolve={onResolve} />
+          <ApprovalCard key={card.key} item={card.row} userId={userId} onResolve={onResolve} allowRemember={!exactAuthority} />
         ))}
       </ScrollView>
     </View>

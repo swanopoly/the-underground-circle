@@ -41,8 +41,8 @@ type Tab = 'overview' | 'training' | 'models' | 'datasets' | 'deploy';
 // ── Model versions data ──────────────────────────────────────────────────────
 
 const VERSIONS = [
-  { ver: 'v3', base: 'Qwen2.5-3B', params: '3B', data: '12K', method: 'QLoRA 4-bit', status: 'deployed' as const, vram: '5GB', time: '2h', loss: 1.42, evalLoss: 1.58 },
-  { ver: 'v4', base: 'Qwen2.5-7B', params: '7B', data: '43K', method: 'QLoRA r64 + DPO', status: 'trained' as const, vram: '10GB', time: '8h', loss: 0.89, evalLoss: 1.12 },
+  { ver: 'v3', base: 'Qwen2.5-3B', params: '3B', data: '12K', method: 'QLoRA 4-bit', status: 'sample' as const, vram: '5GB', time: '2h', loss: 1.42, evalLoss: 1.58 },
+  { ver: 'v4', base: 'Qwen2.5-7B', params: '7B', data: '43K', method: 'QLoRA r64 + DPO', status: 'sample' as const, vram: '10GB', time: '8h', loss: 0.89, evalLoss: 1.12 },
   { ver: 'v5', base: 'Qwen3.5-27B', params: '27B', data: '43K', method: 'QLoRA r64 + DPO', status: 'planned' as const, vram: '56GB', time: '~24h', loss: 0, evalLoss: 0 },
 ];
 
@@ -99,10 +99,10 @@ export default function ModelLabPanel({ circleId }: { circleId: string }) {
 
   const TABS: { key: Tab; label: string; icon: string }[] = [
     { key: 'overview', label: 'Overview', icon: '📊' },
-    { key: 'training', label: 'Training', icon: '🔥' },
+    { key: 'training', label: 'Training Plan', icon: '🔥' },
     { key: 'models', label: 'Models', icon: '🤗' },
     { key: 'datasets', label: 'Datasets', icon: '📁' },
-    { key: 'deploy', label: 'Deploy', icon: '🚀' },
+    { key: 'deploy', label: 'Deploy Guide', icon: '🚀' },
   ];
 
   // ── Overview tab ───────────────────────────────────────────────────────────
@@ -113,26 +113,26 @@ export default function ModelLabPanel({ circleId }: { circleId: string }) {
       <View style={s.statsGrid}>
         <View style={s.statBox}>
           <Text style={s.statValue}>3</Text>
-          <Text style={s.statLabel}>Model Versions</Text>
+          <Text style={s.statLabel}>Sample Versions</Text>
         </View>
         <View style={s.statBox}>
           <Text style={[s.statValue, { color: T.green }]}>43K</Text>
-          <Text style={s.statLabel}>Training Examples</Text>
+          <Text style={s.statLabel}>Sample Examples</Text>
         </View>
         <View style={s.statBox}>
           <Text style={[s.statValue, { color: T.accent }]}>0.89</Text>
-          <Text style={s.statLabel}>Best Loss (v4)</Text>
+          <Text style={s.statLabel}>Sample Loss (v4)</Text>
         </View>
         <View style={s.statBox}>
           <Text style={[s.statValue, { color: T.amber }]}>2x</Text>
-          <Text style={s.statLabel}>Unsloth Speedup</Text>
+          <Text style={s.statLabel}>Illustrative Speedup</Text>
         </View>
       </View>
 
       {/* Model cards */}
-      <Text style={s.sectionLabel}>MODEL VERSIONS</Text>
+      <Text style={s.sectionLabel}>SAMPLE MODEL VERSIONS</Text>
       {VERSIONS.map(v => {
-        const statusColor = v.status === 'deployed' ? T.green : v.status === 'trained' ? T.blue : T.textMuted;
+        const statusColor = v.status === 'sample' ? T.blue : T.textMuted;
         return (
           <Pressable
             key={v.ver}
@@ -171,11 +171,10 @@ export default function ModelLabPanel({ circleId }: { circleId: string }) {
 
       {/* Unsloth info */}
       <View style={s.infoCard}>
-        <Text style={s.infoTitle}>Powered by Unsloth</Text>
+        <Text style={s.infoTitle}>Designed around Unsloth workflows</Text>
         <Text style={s.infoText}>
-          2x faster training, 70% less VRAM, zero accuracy loss.{'\n'}
-          QLoRA 4-bit fine-tuning on consumer GPUs (RTX 3090+).{'\n'}
-          Supports: Qwen, Llama, Mistral, Gemma, DeepSeek, Phi.
+          Reference targets include faster training and lower VRAM use with QLoRA 4-bit fine-tuning.{'\n'}
+          Verify compatibility, resource needs, and results in a connected training runtime before use.
         </Text>
       </View>
     </ScrollView>
@@ -222,7 +221,7 @@ export default function ModelLabPanel({ circleId }: { circleId: string }) {
         {/* Loss curve visualization */}
         {v.loss > 0 && (
           <>
-            <Text style={s.sectionLabel}>TRAINING LOSS CURVE</Text>
+            <Text style={s.sectionLabel}>SAMPLE TRAINING LOSS CURVE</Text>
             <View style={s.chartContainer}>
               {/* Y-axis labels */}
               <View style={s.yAxis}>
@@ -255,7 +254,7 @@ export default function ModelLabPanel({ circleId }: { circleId: string }) {
             </View>
 
             {/* Learning rate schedule */}
-            <Text style={s.sectionLabel}>LEARNING RATE SCHEDULE</Text>
+            <Text style={s.sectionLabel}>SAMPLE LEARNING RATE SCHEDULE</Text>
             <View style={s.lrRow}>
               {V4_LOSS_CURVE.map((point, i) => (
                 <View key={i} style={s.lrItem}>
@@ -269,7 +268,7 @@ export default function ModelLabPanel({ circleId }: { circleId: string }) {
         )}
 
         {/* Hyperparameters */}
-        <Text style={s.sectionLabel}>HYPERPARAMETERS</Text>
+        <Text style={s.sectionLabel}>REFERENCE HYPERPARAMETERS</Text>
         <View style={s.hyperGrid}>
           {[
             { label: 'LoRA Rank', value: '64' },
@@ -355,7 +354,7 @@ export default function ModelLabPanel({ circleId }: { circleId: string }) {
 
   const renderDatasets = () => (
     <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
-      <Text style={s.sectionLabel}>TRAINING DATA COMPOSITION</Text>
+      <Text style={s.sectionLabel}>SAMPLE TRAINING DATA COMPOSITION</Text>
 
       <View style={s.dataComposition}>
         {/* Visual bar */}
@@ -375,7 +374,7 @@ export default function ModelLabPanel({ circleId }: { circleId: string }) {
         </View>
       </View>
 
-      <Text style={s.sectionLabel}>DATA FORMAT</Text>
+      <Text style={s.sectionLabel}>REFERENCE DATA FORMAT</Text>
       <View style={s.codeBlock}>
         <Text style={s.codeText} selectable>{`{
   "conversations": [
@@ -391,7 +390,7 @@ export default function ModelLabPanel({ circleId }: { circleId: string }) {
       <View style={s.statsGrid}>
         <View style={s.statBox}>
           <Text style={s.statValue}>7K</Text>
-          <Text style={s.statLabel}>DPO Pairs</Text>
+          <Text style={s.statLabel}>Sample DPO Pairs</Text>
         </View>
         <View style={s.statBox}>
           <Text style={[s.statValue, { color: T.green }]}>✓</Text>
@@ -425,10 +424,10 @@ export default function ModelLabPanel({ circleId }: { circleId: string }) {
       <Text style={s.sectionLabel}>EXPORT FORMATS</Text>
 
       {[
-        { format: 'GGUF (Q4_K_M)', target: 'Ollama / llama.cpp / LM Studio', icon: '📦', status: 'v3 + v4 exported', color: T.green },
-        { format: 'Merged 16-bit', target: 'vLLM / HuggingFace / Any framework', icon: '🔄', status: 'Available', color: T.blue },
-        { format: 'LoRA Adapter', target: 'Lightweight ~100MB / Merge later', icon: '🧩', status: 'v4 saved', color: T.accent },
-        { format: 'HuggingFace Hub', target: 'Cloud hosting / Inference API', icon: '🤗', status: 'Not pushed yet', color: T.amber },
+        { format: 'GGUF (Q4_K_M)', target: 'Ollama / llama.cpp / LM Studio', icon: '📦', status: 'Reference format', color: T.blue },
+        { format: 'Merged 16-bit', target: 'vLLM / HuggingFace / Any framework', icon: '🔄', status: 'Reference format', color: T.blue },
+        { format: 'LoRA Adapter', target: 'Lightweight ~100MB / Merge later', icon: '🧩', status: 'Reference format', color: T.accent },
+        { format: 'HuggingFace Hub', target: 'Cloud hosting / Inference API', icon: '🤗', status: 'Not connected', color: T.amber },
       ].map(e => (
         <View key={e.format} style={s.exportCard}>
           <Text style={{ fontSize: 20 }}>{e.icon}</Text>
@@ -442,7 +441,7 @@ export default function ModelLabPanel({ circleId }: { circleId: string }) {
         </View>
       ))}
 
-      <Text style={s.sectionLabel}>DEPLOYMENT COMMANDS</Text>
+      <Text style={s.sectionLabel}>REFERENCE COMMANDS — NOT RUN FROM THIS SCREEN</Text>
       <View style={s.codeBlock}>
         <Text style={s.codeText} selectable>{`# Export GGUF from trained model
 python -c "
@@ -459,7 +458,7 @@ ollama cp blackswan:v4 blackswan:latest
 huggingface-cli upload your-name/blackswan-v4 models/v4/gguf/`}</Text>
       </View>
 
-      <Text style={s.sectionLabel}>CLOUD GPU PRICING</Text>
+      <Text style={s.sectionLabel}>ILLUSTRATIVE GPU PRICING — VERIFY BEFORE USE</Text>
       <View style={s.statsGrid}>
         {[
           { provider: 'RunPod', price: '$0.30-0.50', gpu: 'A100 40GB', time: '30-60m' },
@@ -481,12 +480,27 @@ huggingface-cli upload your-name/blackswan-v4 models/v4/gguf/`}</Text>
 
   return (
     <View style={s.container}>
+      <View
+        testID="model-lab-reference-notice"
+        accessible
+        accessibilityLabel="Reference workspace. Models, training runs, datasets, exports, and deployments shown here are sample data and are not connected to an execution runtime. Only the Models tab may load live Hugging Face metadata."
+        style={s.provenanceNotice}
+      >
+        <Text accessibilityRole="header" style={s.provenanceTitle}>REFERENCE WORKSPACE</Text>
+        <Text style={s.provenanceText}>
+          Models, training, datasets, exports, and deployments are sample plans—no training or deploy runtime is connected. Only Models may load live Hugging Face metadata.
+        </Text>
+      </View>
+
       {/* Tab bar */}
       <View style={s.tabBar}>
         {TABS.map(t => (
           <Pressable
             key={t.key}
             onPress={() => setTab(t.key)}
+            accessibilityRole="tab"
+            accessibilityLabel={t.label}
+            accessibilityState={{ selected: tab === t.key }}
             style={[s.tab, tab === t.key && s.tabActive]}
           >
             <Text style={s.tabIcon}>{t.icon}</Text>
@@ -511,6 +525,9 @@ huggingface-cli upload your-name/blackswan-v4 models/v4/gguf/`}</Text>
 
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: T.bg },
+  provenanceNotice: { backgroundColor: T.bgCard, borderBottomWidth: 1, borderBottomColor: T.amber + '70', paddingHorizontal: 12, paddingVertical: 10 },
+  provenanceTitle: { color: T.amber, fontSize: 10, fontWeight: '800', fontFamily: MONO, letterSpacing: 1 },
+  provenanceText: { color: T.textSec, fontSize: 10, fontFamily: MONO, lineHeight: 15, marginTop: 3 },
   tabBar: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: T.border, paddingHorizontal: 8 },
   tab: { flex: 1, alignItems: 'center', paddingVertical: 8 },
   tabActive: { borderBottomWidth: 2, borderBottomColor: T.accent },

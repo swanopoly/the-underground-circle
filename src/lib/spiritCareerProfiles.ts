@@ -1,4 +1,22 @@
-import type { ResearchDocument } from './researchKnowledge';
+// Kept structural and import-free so the canonical Spirit prompt catalog can
+// also be consumed by Deno Edge without pulling the client research graph.
+type SpiritResearchDocument = {
+  id: string;
+  title: string;
+  summary?: string | null;
+  content?: string | null;
+  tags?: string[] | null;
+  source_type?: 'report' | null;
+  source_title?: string | null;
+  source_url?: string | null;
+  authors?: string[] | null;
+  review_status?: 'reviewed' | null;
+  evidence_score?: number | null;
+  visibility?: 'public' | null;
+  domain_key?: 'general' | null;
+  is_active?: boolean | null;
+  metadata?: Record<string, unknown> | null;
+};
 
 export interface SpiritCareerProfile {
   spiritId: string;
@@ -546,7 +564,7 @@ export function buildSpiritCareerResearchBundle(query: string, spiritId?: string
   ].join('\n');
 }
 
-export function getBuiltInSpiritCareerResearchDocuments(): ResearchDocument[] {
+export function getBuiltInSpiritCareerResearchDocuments(): SpiritResearchDocument[] {
   return Object.values(SPIRIT_CAREER_PROFILES).map(profile => ({
     id: `builtin-spirit-career-${profile.spiritId}`,
     title: `${profile.seniorRoleTitle} Role Profile`,
@@ -569,5 +587,5 @@ export function getBuiltInSpiritCareerResearchDocuments(): ResearchDocument[] {
     visibility: 'public',
     domain_key: 'general',
     is_active: true,
-  }) as ResearchDocument & { metadata: Record<string, unknown> });
+  }) as SpiritResearchDocument & { metadata: Record<string, unknown> });
 }

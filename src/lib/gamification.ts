@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { loadSafeCircleProfiles } from './safeProfiles';
 import { UserXP, Achievement, UserAchievement, XPEvent } from '../types';
 
 // XP amounts for each user action — generous by design.
@@ -215,7 +216,7 @@ export async function checkAndUnlockAchievements(userId: string): Promise<UserAc
       case 'circle_created': {
         const { count } = await supabase
           .from('circles')
-          .select('*', { count: 'exact', head: true })
+          .select('id', { count: 'exact', head: true })
           .eq('created_by', userId);
         earned = (count || 0) >= req.count;
         break;
@@ -372,7 +373,12 @@ export async function getLeaderboard(
   limit: number = 20
 ): Promise<{ user_id: string; total_xp: number; level: number; title: string; username: string; display_name: string }[]> {
   try {
-    if (circleId) {
+    if (!circleId) {
+      // There is no product authority for a public/global peer directory.
+      // Callers must provide one exact Circle before names are projected.
+      return [];
+    }
+
     // Get members of circle first
     const { data: members } = await supabase
       .from('circle_members')
@@ -391,11 +397,7 @@ export async function getLeaderboard(
       .limit(limit);
 
     // Fetch profiles
-    const { data: profiles } = await supabase
-      .from('profiles')
-      .select('id, username, display_name')
-      .in('id', userIds)
-      .limit(50);
+    const profiles = await loadSafeCircleProfiles({ circleId, userIds });
 
     const profileMap = new Map((profiles || []).map((p: any) => [p.id, p]));
     return (data || []).map((d: any) => ({
@@ -406,31 +408,6 @@ export async function getLeaderboard(
       username: profileMap.get(d.user_id)?.username || '',
       display_name: profileMap.get(d.user_id)?.display_name || '',
     }));
-  }
-
-  const { data } = await supabase
-    .from('user_xp')
-    .select('user_id, total_xp, level, title')
-    .order('total_xp', { ascending: false })
-    .limit(limit);
-
-  if (!data?.length) return [];
-  const userIds = data.map((d: any) => d.user_id);
-  const { data: profiles } = await supabase
-    .from('profiles')
-    .select('id, username, display_name')
-    .in('id', userIds)
-    .limit(50);
-
-  const profileMap = new Map((profiles || []).map((p: any) => [p.id, p]));
-  return data.map((d: any) => ({
-    user_id: d.user_id,
-    total_xp: d.total_xp,
-    level: d.level,
-    title: d.title,
-    username: profileMap.get(d.user_id)?.username || '',
-    display_name: profileMap.get(d.user_id)?.display_name || '',
-  }));
   } catch (error) {
     console.error('getLeaderboard exception:', error);
     return [];

@@ -10,6 +10,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { supabase } from '../../../../lib/supabase';
+import { safeGetUser } from '../../../../lib/authSession';
 
 interface Props {
   circleId: string;
@@ -93,6 +94,7 @@ export default function AgentTemplates({ circleId, onClose, onDeployed }: Props)
   const [systemPrompt, setSystemPrompt] = useState('');
   const [deploying, setDeploying] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [deployError, setDeployError] = useState('');
 
   const openDeploy = (t: Template) => {
     setSelected(t);
@@ -100,15 +102,22 @@ export default function AgentTemplates({ circleId, onClose, onDeployed }: Props)
     setSystemPrompt(t.systemPrompt);
     setWebhookUrl('');
     setSuccess(false);
+    setDeployError('');
   };
 
   const handleDeploy = async () => {
     if (!selected || !agentName.trim()) return;
     setDeploying(true);
+    setDeployError('');
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { value: user, error: authError } = await safeGetUser();
+      if (!user) {
+        throw new Error(authError
+          ? 'Secure session verification is temporarily unavailable. Try again.'
+          : 'Sign in before deploying an agent.');
+      }
       // Log to agent_activity as deployment event
-      await supabase.from('agent_activity').insert({
+      const { error } = await supabase.from('agent_activity').insert({
         circle_id: circleId,
         agent_name: agentName.trim(),
         source: 'system',
@@ -120,12 +129,15 @@ export default function AgentTemplates({ circleId, onClose, onDeployed }: Props)
           system_prompt: systemPrompt,
         },
       });
+      if (error) throw error;
       setSuccess(true);
       onDeployed?.(agentName.trim());
-    } catch (e) {
+    } catch (e: any) {
       console.error(e);
+      setDeployError(e?.message || 'Agent deployment could not be saved.');
+    } finally {
+      setDeploying(false);
     }
-    setDeploying(false);
   };
 
   return (
@@ -217,6 +229,10 @@ export default function AgentTemplates({ circleId, onClose, onDeployed }: Props)
                     textAlignVertical="top"
                   />
                 </View>
+
+                {!!deployError && (
+                  <Text style={styles.deployError}>{deployError}</Text>
+                )}
 
                 <View style={styles.modalActions}>
                   <Pressable
@@ -364,6 +380,13 @@ const styles = StyleSheet.create({
     color: '#eee',
     fontSize: 13,
     fontFamily: 'monospace',
+  },
+  deployError: {
+    color: '#ef4444',
+    fontSize: 10,
+    fontFamily: 'monospace',
+    lineHeight: 14,
+    marginBottom: 12,
   },
   textArea: { minHeight: 70, textAlignVertical: 'top' },
   modalActions: { flexDirection: 'row', gap: 10, marginTop: 4 },

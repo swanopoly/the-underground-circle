@@ -16,6 +16,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { View, Text, Pressable, StyleSheet, ScrollView, Platform } from "react-native";
 import { supabase } from "../lib/supabase";
+import { loadSafeCircleProfiles } from "../lib/safeProfiles";
+import { PROFILE_DASHBOARD_TOKENS as PD } from "./profile/profileDashboardTheme";
 
 interface MentionRow {
   id: string;
@@ -89,23 +91,28 @@ async function resolveSources(rows: MentionRow[]): Promise<MentionRow[]> {
   ]);
 
   // Resolve author names + circle names with two small batched queries.
-  const authorIds = Array.from(new Set(rows.map((r) => r.author_id).filter(Boolean) as string[]));
   const circleIds = Array.from(new Set(rows.map((r) => r.circle_id).filter(Boolean)));
-  const [{ data: profiles }, { data: circles }] = await Promise.all([
-    authorIds.length
-      ? supabase.from("profiles").select("id, display_name, username").in("id", authorIds)
-      : Promise.resolve({ data: [] as any[] } as any),
+  const [profilesByCircle, { data: circles }] = await Promise.all([
+    Promise.all(circleIds.map(async circleId => {
+      const authorIds = Array.from(new Set(
+        rows.filter(row => row.circle_id === circleId).map(row => row.author_id).filter(Boolean) as string[],
+      ));
+      return [circleId, await loadSafeCircleProfiles({ circleId, userIds: authorIds })] as const;
+    })),
     circleIds.length
       ? supabase.from("circles").select("id, name").in("id", circleIds)
       : Promise.resolve({ data: [] as any[] } as any),
   ]);
   // Typed as any-valued maps so the .display_name / .name accessors below
   // don't trip the compiler on the {} default value.
-  const profileById = new Map<string, any>(((profiles || []) as any[]).map((p) => [p.id, p]));
+  const profileByCircleAndId = new Map<string, any>();
+  for (const [circleId, profiles] of profilesByCircle) {
+    for (const profile of profiles) profileByCircleAndId.set(`${circleId}:${profile.id}`, profile);
+  }
   const circleById = new Map<string, any>(((circles || []) as any[]).map((c) => [c.id, c]));
 
   return rows.map((r) => {
-    const profile = r.author_id ? profileById.get(r.author_id) : null;
+    const profile = r.author_id ? profileByCircleAndId.get(`${r.circle_id}:${r.author_id}`) : null;
     const circle = circleById.get(r.circle_id);
     return {
       ...r,
@@ -188,6 +195,8 @@ export default function MentionsInbox() {
                   <Pressable
                     key={r.id}
                     onPress={() => deepLinkFor(r.source_type, r.source_id)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Open mention from ${r.authorName || "a circle member"}`}
                     style={[s.row, !r.seen && s.rowUnread]}
                   >
                     <View style={{ flex: 1, minWidth: 0 }}>
@@ -214,12 +223,11 @@ export default function MentionsInbox() {
 
 const s = StyleSheet.create({
   card: {
-    backgroundColor: "#111827",
+    backgroundColor: PD.panel,
     borderWidth: 1,
-    borderColor: "#1f2937",
-    borderRadius: 16,
+    borderColor: PD.border,
+    borderRadius: PD.panelRadius,
     padding: 16,
-    marginTop: 12,
   },
   header: {
     flexDirection: "row",
@@ -231,28 +239,31 @@ const s = StyleSheet.create({
     width: 28,
     height: 28,
     borderWidth: 1,
-    borderColor: "#243041",
-    borderRadius: 10,
-    backgroundColor: "#0f172a",
+    borderColor: PD.borderStrong,
+    borderRadius: 8,
+    backgroundColor: PD.inset,
     alignItems: "center",
     justifyContent: "center",
   },
   iconText: {
-    color: "#8b5cf6",
+    color: PD.accent,
     fontSize: 14,
     fontWeight: "700",
   },
   title: {
     flex: 1,
-    color: "#e5eefc",
-    fontSize: 16,
-    fontWeight: "700",
+    color: PD.text,
+    fontSize: 13,
+    fontWeight: "900",
+    letterSpacing: 1.2,
+    textTransform: "uppercase",
+    fontFamily: "monospace",
   },
   unreadPill: {
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: 999,
-    backgroundColor: "#4f46e5",
+    backgroundColor: PD.accent,
   },
   unreadText: {
     color: "#eef2ff",
@@ -261,14 +272,14 @@ const s = StyleSheet.create({
     letterSpacing: 0.5,
   },
   count: {
-    color: "#64748b",
+    color: PD.textMuted,
     fontSize: 12,
     fontWeight: "700",
     fontFamily: "monospace",
     marginLeft: 6,
   },
   hint: {
-    color: "#64748b",
+    color: PD.textMuted,
     fontSize: 12,
     fontWeight: "600",
     paddingVertical: 16,
@@ -276,26 +287,26 @@ const s = StyleSheet.create({
   },
   emptyBox: {
     borderWidth: 1,
-    borderColor: "#1f2937",
-    borderRadius: 12,
+    borderColor: PD.border,
+    borderRadius: 10,
     padding: 16,
     alignItems: "center",
     gap: 6,
-    backgroundColor: "#0f172a",
+    backgroundColor: PD.inset,
   },
   emptyTitle: {
-    color: "#e5eefc",
+    color: PD.text,
     fontSize: 14,
     fontWeight: "700",
   },
   emptyHint: {
-    color: "#64748b",
+    color: PD.textMuted,
     fontSize: 12,
     fontWeight: "500",
     textAlign: "center",
   },
   dayHeader: {
-    color: "#64748b",
+    color: PD.textMuted,
     fontSize: 10,
     fontWeight: "700",
     letterSpacing: 1,
@@ -308,22 +319,22 @@ const s = StyleSheet.create({
     gap: 10,
     padding: 10,
     borderWidth: 1,
-    borderColor: "#1f2937",
-    borderRadius: 12,
-    backgroundColor: "#0f172a",
+    borderColor: PD.border,
+    borderRadius: 10,
+    backgroundColor: PD.inset,
     ...(Platform.OS === "web" ? { transition: "all 0.15s ease", cursor: "pointer" } as any : {}),
   },
   rowUnread: {
-    borderColor: "#4f46e5",
-    backgroundColor: "#1e1b4b",
+    borderColor: PD.accent,
+    backgroundColor: `${PD.accent}18`,
   },
   rowTitle: {
-    color: "#e5eefc",
+    color: PD.text,
     fontSize: 13,
     fontWeight: "700",
   },
   rowMeta: {
-    color: "#64748b",
+    color: PD.textMuted,
     fontSize: 10,
     fontWeight: "600",
     marginTop: 3,
@@ -331,7 +342,7 @@ const s = StyleSheet.create({
     fontFamily: "monospace",
   },
   rowTime: {
-    color: "#64748b",
+    color: PD.textMuted,
     fontSize: 11,
     fontWeight: "700",
     fontFamily: "monospace",

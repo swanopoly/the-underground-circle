@@ -10,6 +10,12 @@
 > `ChatTab.tsx`, `chatPromptAssembly.ts`, `openswanSessionRuntime.ts`,
 > `openswanToolRuntime.ts`, `openswanMemoryStores.ts`, `chat-stream/index.ts`,
 > `OpenSwanConsole.tsx`, `package.json`).
+>
+> **Status update 2026-08-07.** Finding 4 now has one narrow product-code
+> adoption: validated run handles survive Chat web/native navigation and focus
+> the existing Office run drawer. Other entity kinds and dispatch surfaces are
+> still pending; the original analysis below is retained with current status
+> called out explicitly.
 
 ## Why this doc exists (and what it deliberately does NOT cover)
 
@@ -47,7 +53,7 @@ live-run freshness / failover visibility.**
 | 1 | Realtime subscriptions don't reconnect → silent staleness | all 3 | **High** | Med | **CORE BUILT** (trapped in `agentPresence.ts`) — generalize |
 | 2 | Same live run shows 3 different freshnesses; vanishes when empty | chat↔office↔feed | **High** | Med | NEEDS small shared core |
 | 3 | Provider/transport failover is recorded but invisible in the primary lane | chat | **Med-High** | Low-Med | **CORE BUILT** (`chatLaneOutcome.servedBy`) — needs render seam |
-| 4 | Cross-surface deep-links carry no entity handle → "go to chat" dead-ends | all 3 | **Med** | Low | NEEDS tiny payload core |
+| 4 | Cross-surface deep-links only partially carry entity handles | all 3 | **Med** | Low | **PARTIAL** — Chat run → Office exact drawer landed; other kinds/surfaces pending |
 | 5 | No app-wide "realtime disconnected / data may be stale" signal | all 3 | **Med** | Low | **CORE BUILT** (`ConnectionStatus`) — globalize |
 | 6 | First-value arc incomplete + fragile panels lack a poll fallback | all 3 | **Low-Med** | Low-Med | **CORE BUILT** partial (`emptyStateSuggestions`) — extend |
 
@@ -183,33 +189,142 @@ cards can show "served by fallback" too.
 
 ---
 
-### 4 — Cross-surface navigation carries no entity handle → "go to chat/office" dead-ends at the generic tab · NEEDS tiny core · SAFE
+### 4 — Cross-surface entity focus is partially adopted · run → Office current; other kinds pending
 
-Every cross-surface jump is `uc:switch-tab` with a payload of **only `{ tab }`**,
-so the app can move you *to* a surface but never *to the specific thing*. Clicking
-"ask the agent" from a Feed/Office empty state, or wanting to jump from a live run
-in Feed to the Chat thread that owns it, drops you at a cold generic surface.
+**Status update 2026-08-07.** The canonical core is
+`src/lib/entityHandleCore.ts`; do not create the formerly proposed parallel
+`surfaceNavIntentCore.ts`. Its first runtime adoption is intentionally narrow:
 
-**Evidence.**
-- Payload is tab-only at every dispatch site: `FeedTab.tsx:281`,
-  `OfficeTab.tsx:4222`, `ChatTab.tsx:4320`, `MissionsTab.tsx:389`,
-  `missionChatCommands.ts:176`, `ProfileTab.tsx:22`; listener
-  `CircleDetailScreen.tsx:226-238`. None carry a `threadId`/`runId`/`taskId`.
-- The only deep-links that *do* carry an id are bespoke one-offs, proving the
-  appetite but not the pattern: mission `?mission=` URL param
-  (`MissionsTab.tsx:996`, honored `:416`) and Office's in-surface `open_run`
-  drawer (`OfficeTab.tsx:309-311`). There is no way to go **Feed run → Chat
-  thread** or **Office agent → its run history in another tab**.
-- `emptyStateSuggestions` explicitly wants this — its `open` actions dispatch
-  `uc:switch-tab` (`emptyStateSuggestions.ts:22-24`) but can only name a tab.
+- Chat passes its existing typed run handle through `encodeEntityHandle` for
+  both the web `uc:switch-tab` payload and native route params. `open_run`,
+  approval, retry fallback, and resolved run-reference actions therefore carry
+  `office:run:<id>` instead of discarding the id.
+- `CircleDetailScreen` decodes the untrusted value and accepts focus only when
+  the requested tab is `OFFICE` and the decoded kind/surface are exactly
+  `run`/`office`. It captures the request before activating lazy Office, so a
+  first visit does not lose the focus event.
+- `OfficeTab` forwards the exact id into its existing `RunHistoryDrawer`; a
+  request sequence remounts the drawer when the same run is clicked twice.
+  This path creates no new viewer, runtime, run row, or completion claim.
 
-**Fix.** Extend the `uc:switch-tab` contract to an optional, validated
-`{ tab, focus?: { kind:'thread'|'run'|'task'|'agent', id } }` via a tiny pure
-**`surfaceNavIntentCore.ts`** (validate/serialize, mirrors the shape discipline
-of `emptyStateSuggestions`), and have each surface's existing listener honor a
-`focus` by opening the relevant thread/run drawer it already has
-(Office already has `open_run`; Chat has thread selection). Dispatch sites and
-`CircleDetailScreen` listener are **SAFE** except the `ChatTab.tsx` handler (flag).
+This does **not** close Finding 4. Thread, task, mission, agent, room, and message
+focus remain unadopted, and Feed/Office/Missions/Profile/command dispatchers
+still need to pass their validated handles into the appropriate existing
+surface owner. Continue by extending `entityHandleCore` and the central
+`CircleDetailScreen` focus handoff rather than adding another navigation
+contract. The run → Office claim is source/focused-smoke current only; no live
+web/native GUI navigation pass has been claimed.
+
+**Adjacent connected-agent truth boundary (2026-08-07).** Selected, assigned,
+multi-agent, and dedicated-session Chat dispatches now project one bounded
+`accepted | drafted | failed | unknown` receipt. Accepted/drafted/unknown messages retain
+`delegatedTo` and force `outcomeVerdict: unknown`; direct terminal sends and
+managed task launches use the same receipt boundary. A bridge/session
+acknowledgement never becomes a run id. Only `accepted` writes one canonical
+`main_chat` `agent_runs` ledger row, leaves it `queued`, attributes it with the
+canonical agent subject, and records only bounded external provider/session
+correlation with `completionVerified: false`. The row does not opt into runtime
+heartbeats because Chat cannot finalize the external provider lifecycle.
+`drafted`, `failed`, and `unknown` write no run. `unknown` preserves any exact
+external lineage when OpenSwan cannot prove whether the single attempt began
+and blocks automatic fallback/replay. The current `circle_chat_threads` id stays
+bounded metadata and is never sent to the unrelated legacy
+`agent_runs.chat_session_id` foreign key.
+
+The accepted receipt is rebuilt with that real run UUID and persists with the
+Chat message, so Office's existing run telemetry and exact run drawer own task
+visibility across refresh. Chat no longer immediately flips an accepted roster
+agent back to `idle`; provider/session polling owns roster presence. This is a
+nonterminal handoff ledger, not lifecycle completion: typed provider
+started/final events and live bridge E2E remain pending, an acknowledgement may
+never set `running`/`completed`/`failed`, and no deployment claim is made for
+this source/focused-smoke slice.
+
+Chat's target and transport boundary is also source-hardened. The assignment
+picker preserves an encoded immutable agent id, stale selections become
+unavailable, quoted names must resolve uniquely, multi-agent and terminal-name
+ties dispatch nothing, and production-shaped immutable ids remain exact through
+multi-agent planning so duplicate names can be disambiguated. Only the canonical `default::blackswan` identity may become the
+default OpenSwan target. A published OpenSwan Office row never supplies a
+session key: an owner row requires matching authenticated owner evidence and
+the same private §36 binding resolver for send or dedicated spawn, while
+another member's OpenSwan or terminal-provider row performs no local provider
+call. Published custom rows require an exact connection id or explicit exact
+gateway. Custom gateways cannot inherit a same-provider/name local token;
+credentials require `isOwn`, both nonempty matching owner ids, and an enabled
+exact normalized endpoint match. Missing alleged-owner evidence stops before
+network I/O. Terminal/custom send and launch adapters expose
+`transportAccepted: true | false | null`, accept only structured positive
+evidence on HTTP success, require the exact selected-session echo, and stop
+after one ambiguous task-bearing POST. Claude, Codex, and Gemini servers require
+one case-sensitive exact session id before input; aliases, prefixes, case folds,
+and duplicates fail before mutation. Cursor exact-session input fails closed
+until its GUI bridge can bind one verified Composer conversation. A one-session
+launch requires one receipt-safe exact returned session id; Chat stores it as
+external lineage, retains a selected DB agent's DB subject, and otherwise uses
+the session subject. Missing, unsafe, or multiple lineage stays unknown without
+replay or an accepted run. Office run lookup is exact-first and uses names only
+for identity-less legacy rows. An exact session is never replaced and one
+launch never fans out across providers. Sequential Chat
+chains pause on accepted, unknown, failed, or thrown upstream work and keep
+downstream agents undispatched instead of forwarding acknowledgement/error
+prose. Authenticated multi-member, custom-gateway, and response-loss E2E remain
+pending.
+
+**Office/Feed connected-agent launch parity (2026-08-07).** The Office terminal and
+direct Feed/Kanban invocation path no longer treats Claude Code `/spawn` as a
+provider final. One exact 36-hex spawn handle is required for `accepted`; Office
+then writes a queued canonical `office_terminal` ledger and keeps the response
+and tracking task nonterminal. A lost, timed-out, inconsistent, or malformed
+response is `outcome_unknown`, creates no run, and is not replayed. Feed task
+runs stay `running` after acceptance or become `blocked` when dispatch is
+unknown; both branches return before completion metrics, proof publication,
+memory, or XP. Exact bridge status adoption is still pending, so this closes the
+false-completion path without manufacturing a final result. Feed no longer
+sends an idle/offline agent the task once as a wake-up and again through the
+selected adapter. Sequential collaboration pauses at the first nonterminal
+child instead of completing the parent or dispatching dependent agents with
+acknowledgement prose.
+
+An accepted direct Feed handoff also writes one best-effort queued `feed_task`
+canonical run linked to the exact task and task-run attempt with canonical
+agent subject metadata. Ledger unavailability preserves acceptance and never
+replays; outcome-unknown and failed attempts create no accepted row. Activity
+Feed and Task Detail expose the exact local run as an Office action and never
+substitute external connection, session, or provider-run ids.
+
+OpenSwan Office/Feed sends now require one exact `connectionId::sessionKey` and
+use the canonical structured `sessions_send` adapter. There is no implicit
+main-session fallback or prose-history completion inference. Feed task cards,
+Active Runs, history, and activity rows expose accepted/unknown states.
+
+The source-wired route from a published Office agent to that exact session is
+now an explicit owner choice. The displayed session's Agent Gateway panel lets
+the current owner bind/move/clear one of their published OpenSwan Office agents
+to the exact owner-owned `agents_bots` UUID plus case-sensitive session key.
+§36 adds the owner-private, no-backfill `office_agent_session_bindings` table,
+owner-only reads, server-authorized set/clear RPCs, and `invoke_agent_v2`; the
+v2 RPC composes the canonical Office claim once and returns a versioned
+bound-or-missing snapshot. Public Office rows never store the provider session
+or gateway token, and the token remains in device-local secret storage.
+
+Office and Feed then share one pure fail-closed resolver. It requires the exact
+Office UUID, exactly one current local connection whose `remoteId` equals the
+claimed bot UUID, exact `provider = openswan`, enabled/connected state, a
+hydrated real local token, and exactly one case-sensitive matching session on
+that connection. The session rows and a non-secret connection fingerprint are
+co-published from the same poll generation; duplicate local ids, stale async
+results, and same-id endpoint/private-bot replacement invalidate the snapshot.
+Only that resolver may construct `connectionId::sessionKey`; it has no
+agent-name, provider, first-connection, first-session, or main-session fallback.
+Missing, stale, ambiguous, offline, or tokenless evidence produces the fixed
+pre-dispatch binding error. §36 remains pending/not applied, and no live
+authenticated binding UI, provider dispatch, cross-device credential
+availability, or deployment is claimed. Typed provider final-result
+reconciliation after an accepted send also remains pending.
+
+Forward migration §35 preserves an Office parent with a `streaming` handoff
+response past the legacy sweeper, but it remains pending/not applied.
 
 ---
 

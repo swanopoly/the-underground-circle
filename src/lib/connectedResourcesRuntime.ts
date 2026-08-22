@@ -153,13 +153,19 @@ export async function loadConnectedResourcesSnapshot(args: {
  */
 export async function buildConnectedResourcesContextBlock(args: {
   circleId?: string | null;
+  userId?: string | null;
   connectedProviders?: Iterable<string> | null;
 }): Promise<string | null> {
   const circleId = args.circleId || '';
+  const userId = typeof args.userId === 'string' ? args.userId.trim().toLowerCase() : '';
+  // This block contains personal vault usernames, Google account metadata,
+  // and provider-key presence. A Circle id alone is therefore never a cache
+  // authority: two members of the same Circle must not share this snapshot.
+  if (!userId) return null;
   const providerKeyNames = Array.from(args.connectedProviders || [])
     .filter((p): p is string => typeof p === 'string' && p.length > 0);
 
-  const cacheKey = `${circleId}::${[...providerKeyNames].sort().join(',')}`;
+  const cacheKey = `${encodeURIComponent(userId)}::${encodeURIComponent(circleId)}::${[...providerKeyNames].sort().join(',')}`;
   const cached = cache.get(cacheKey);
   if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.block || null;
 

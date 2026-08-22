@@ -6,8 +6,13 @@ import {
 import OfficeFloorView from './office/OfficeFloor';
 import PixelAgent from './office/PixelAgent';
 import AgentPanel from './office/AgentPanel';
+import {
+  isAgentPanelRuntimeConnectionSnapshotCurrent,
+  resolveAgentPanelRuntimeConnectionSnapshot,
+  type AgentPanelRuntimeConnectionSnapshot,
+} from './office/AgentPanelTabs';
 import { OfficeIntelligenceSection, OfficeRuntimeSection, OfficeWorkspaceSection } from './office/OfficeSections';
-import { OFFICE_DESK_POSITIONS, OFFICE_FLOOR_HEIGHT, OFFICE_FLOOR_WIDTH } from './office/officeFloorLayout';
+import { OFFICE_DESK_POSITIONS, OFFICE_FLOOR_GRID_SIZE, OFFICE_FLOOR_HEIGHT, OFFICE_FLOOR_WIDTH } from './office/officeFloorLayout';
 import CustomizePanel, { TelegramConfig } from './office/CustomizePanel';
 import McpPanel from './office/McpPanel';
 import type { OfficeCommand } from './office/OfficeChat';
@@ -20,13 +25,80 @@ import {
   getOfficeStatusLabel,
   getOfficeStatusSortRank,
   isConnectedOfficeStatus,
+  applyDurableOfficeAgentCost,
+  applyOfficeAgentLifetimeUsage,
+  findDurableOfficeAgentCost,
 } from '../../../lib/officeAgents';
 import {
   OFFICE_THEMES, AgentAppearance, FurnitureItem, FurnitureType, FURNITURE_CATALOG,
   OfficeFloor, DEFAULT_FLOORS, createDefaultFloor, OfficeTheme, UC_AGENT_APPEARANCE,
-  generateRandomAppearance, OWNER_EMAIL, isInteractiveFurniture,
+  generateRandomAppearance, OWNER_EMAIL, isInteractiveFurniture, getOfficeAddonDefinition,
 } from '../../../lib/officeConfig';
-import { validateOfficeLayout } from '../../../lib/officeValidation';
+import {
+  commitOfficeEditorSnapshot,
+  buildOfficeOAuthWidgetReset,
+  createOfficeEditorHistory,
+  getOfficeEditorHistoryAvailability,
+  mergeOfficeAddonCatalogPreferences,
+  mergeOfficeEditorFurnitureState,
+  isOfficeServiceAsyncScopeCurrent,
+  OFFICE_ADDON_PREFERENCES_STORAGE_KEY,
+  parseOfficeAddonCatalogPreferences,
+  planOfficeRoomKit,
+  recordOfficeAddonRecentType,
+  redoOfficeEditorHistory,
+  serializeOfficeAddonCatalogPreferences,
+  setOfficeAddonFavorite,
+  undoOfficeEditorHistory,
+  type OfficeAddonCatalogPreferences,
+  type OfficeEditorHistory,
+  type OfficeRoomKitId,
+  type OfficeServiceAsyncScope,
+} from '../../../lib/officeAddonExperienceCore';
+import {
+  constrainOfficeFurnitureGeometry,
+  sanitizeOfficeText,
+  validateOfficeLayout,
+} from '../../../lib/officeValidation';
+import {
+  createOfficeLayoutLocalWriteQueue,
+  officeLayoutLocalCacheKey,
+  readOfficeLayoutLocalCacheEnvelope,
+} from '../../../lib/officeLayoutLocalCache';
+import {
+  drainLatestOfficeLayoutSaveQueue,
+  queueLatestOfficeLayoutSave,
+  runOfficeLayoutRequestWithDeadline,
+} from '../../../lib/officeLayoutSaveQueueCore';
+import { createOfficePreferenceWriteQueue } from '../../../lib/officePreferenceWriteQueueCore';
+import {
+  acknowledgeOfficeAttention,
+  deleteOfficeFloorPreset,
+  listOfficeAttentionAcknowledgements,
+  listOfficeFloorPresets,
+  loadOfficeCircleSessionMemoryMode,
+  loadOfficeLayoutState,
+  loadOfficeUserPreferences,
+  patchOfficeUserPreferences,
+  saveOfficeFloorPreset,
+  saveOfficeCircleSessionMemoryMode,
+  saveOfficeLayoutState,
+  verifyOfficeCircleMembership,
+  type OfficeDashboardExactAuthority,
+  type OfficeLayoutDocument,
+  type OfficeLayoutSaveResult,
+} from '../../../lib/officeDashboardPersistence';
+import {
+  deleteVerifiedLocalSecret,
+  readVerifiedLocalSecret,
+  writeVerifiedLocalSecret,
+} from '../../../lib/localSecrets';
+import { useAuth } from '../../../hooks/useAuth';
+import {
+  applyOfficeFloorPreset,
+  reconcileAutomaticOfficeFloorAssignments,
+  type OfficeFloorPresetRecord,
+} from '../../../lib/officeFloorPresetCore';
 import { getBridgeUrl, getBridgeEnvironment } from '../../../lib/bridgeEnvironment';
 import { fetchBridgeAuthenticated } from '../../../lib/bridgeAuth';
 import ConnectAllBridgesPanel, { isConnectPanelDismissed } from '../../../components/office/ConnectAllBridgesPanel';
@@ -34,11 +106,31 @@ import OfficeBridgeReadinessStrip from '../../../components/office/OfficeBridgeR
 import OfficeLaneHealthStrip from '../../../components/office/OfficeLaneHealthStrip';
 import OfficeBridgeDiagPanel from '../../../components/office/OfficeBridgeDiagPanel';
 import { SEED_EVENT_NAME, buildComposerSeedDetail } from '../../../lib/chatComposerSeedCore';
+import { normalizeChatAgentFocusDraft } from '../../../lib/chatAgentTargets';
+import { encodeEntityHandle } from '../../../lib/entityHandleCore';
 import type { OfficeBridgeReadinessSnapshot as OfficeBridgeReadinessSnapshotModel } from '../../../lib/officeBridgeReadiness';
-import { useCustomThemes, customThemeToOfficeTheme, CUSTOM_THEME_PREFIX, CustomThemeRecord } from '../../../services/customThemes';
-import { enrichAgentsWithCache, enrichSessionsWithCache, takeSnapshot, loadSessionTags as loadCachedTags } from '../../../lib/sessionCache';
-import { restoreAllAgents, recordAgentActivity, renameAgent as renameAgentIdentity, updateAgentIdentity, getAgentIdentityByAgent, getAgentIdentityKey, applyIdentityToAgent } from '../../../lib/agentIdentity';
-import { loadAgentIdentities, seedIdentitiesIfServerEmpty, type AgentIdentity } from '../../../lib/agentIdentity';
+import { useCustomThemesExact, customThemeToOfficeTheme, CUSTOM_THEME_PREFIX, CustomThemeRecord } from '../../../services/customThemes';
+import {
+  enrichAgentsWithCache,
+  enrichSessionsWithCache,
+  takeSnapshot,
+  loadSessionTags as loadCachedTags,
+} from '../../../lib/sessionCache';
+import {
+  applyIdentityToAgent,
+  agentIdentityExactStorageKey,
+  getAgentIdentityByAgent,
+  getAgentIdentityKey,
+  loadAgentIdentitiesExact,
+  recordAgentActivityExact,
+  refreshAgentIdentitiesFromServerExact,
+  renameAgentExact,
+  restoreAllAgentsExact,
+  updateAgentIdentityExact,
+  type AgentIdentity,
+  type AgentIdentityExactAuthority,
+  type AgentIdentityExactSaveResult,
+} from '../../../lib/agentIdentity';
 import {
   verifyBot, getChat, TelegramPoller, TelegramMessage,
 } from '../../../lib/telegramService';
@@ -48,32 +140,29 @@ import {
 } from '../../../lib/openswanService';
 import {
   openOAuthPopup, checkOAuthStatus, disconnectOAuth, fetchCalendarEvents, fetchEmails,
-  OAuthProvider,
+  OfficeOAuthProvider, type OAuthConnectionStatus,
 } from '../../../lib/oauthConnect';
 import {
-  AgentConnection, ProviderType, loadConnections, saveConnections, PROVIDER_META,
-  autoDiscoverLocalAgents, probeEndpointHealth, getOpenSwanEndpoint,
+  AgentConnection, ProviderType, PROVIDER_META,
+  autoDiscoverLocalAgents, probeEndpointHealth,
+  loadOfficeConnectionsExact, saveOfficeConnectionsExact,
+  type OfficeConnectionExactAuthority,
 } from '../../../lib/connectionManager';
 import { supportsOpenSwanRpc, testAgentBridgeConnection } from '../../../lib/agentBridgeSupport';
-import {
-  isAutoConnectRunning,
-  getAutoConnectConnections,
-  getAutoConnectSessions,
-  subscribeAutoConnect,
-} from '../../../lib/agentAutoConnectState';
 import { storage } from '../../../lib/storage';
 import { loadTrendingContent } from '../../../lib/trendingContent';
 import AgentQuickConnect from "../../../components/AgentQuickConnect";
 import SuggestedTaskChips from "../../../components/SuggestedTaskChips";
 import { getEmptyStateSuggestions, type EmptyStateSuggestionAction } from '../../../lib/emptyStateSuggestions';
 import {
-  SessionTag, loadSessionTags, addSessionTag, removeSessionTag,
+  SessionTag,
+  addSessionTag,
+  loadSessionTags,
+  removeSessionTag,
+  type OfficeSessionStorageScope,
 } from '../../../lib/sessionTags';
-import {
-  BudgetConfig, loadBudgetConfig, saveBudgetConfig, calculateBudgetAlerts,
-} from '../../../lib/budgetAlerts';
+import { BudgetConfig, calculateBudgetAlerts } from '../../../lib/budgetAlerts';
 import BudgetAlertBanner from '../../../components/BudgetAlertBanner';
-import { calculatePeriodCosts } from '../../../lib/costCalculations';
 import {
   OfficeBuildingNowCard,
   OfficeTokensCard,
@@ -134,9 +223,10 @@ import {
   type ChatAttentionItem,
 } from '../../../lib/chatAttentionQueue';
 import { isApprovalRowLive } from '../../../lib/approvalCardModelCore';
-import { showAlert } from '../../../lib/alert';
+import { isRuntimeOwnedAgentApprovalActionType } from '../../../lib/agentApprovalsWorker';
+import { showAlert, showConfirm } from '../../../lib/alert';
 import type { ComputerTaskChecklistCard } from '../../../lib/computerTaskState';
-import { useAgentApprovals, useAgentControl } from '../../../services/hitlService';
+import { useAgentApprovals, type AgentApprovalsExactAuthority } from '../../../services/hitlService';
 import {
   CircleOfficeAgent,
   loadCircleOfficeAgents,
@@ -153,41 +243,69 @@ import {
 } from '../../../lib/circleGames';
 import {
   startHeartbeat,
-  stopHeartbeat,
   getLastSeen,
 } from '../../../lib/agentHeartbeat';
 import {
   joinPresenceChannel,
-  leavePresenceChannel,
-  broadcastAgentUpdate,
   extractLiveAgents,
   AgentLiveState,
   ConnectionStatus,
 } from '../../../lib/agentPresence';
 import {
-  subscribeToTerminalCommands,
-  cleanupTerminalChannels,
+  subscribeToTerminalCommandsExact,
+  buildTerminalNativeCommandTargets,
+  isTerminalCommandDispatchReceiptCurrent,
   updateAgentAnalytics,
-  sendTerminalCommand,
+  sendTerminalCommandExact,
   syncAgentTokenSnapshot,
-  BroadcastCommandPayload,
+  loadOfficeAgentUsageProfilesExact,
+  type OfficeAgentUsageProfile,
+  type SendCommandParams,
+  type TerminalCommandDispatchReceipt,
+  type TerminalExactAuthority,
+  type TerminalNativeCommandTarget,
 } from '../../../lib/officeTerminal';
 import {
   invokeAndStream,
   invokeAllAgents,
   invokeSelectedAgents,
+  type OfficeInvocationExactExecution,
 } from '../../../lib/agentInvocation';
-import { buildAgentRuntimeSubject, isUuidLike, type AgentRuntimeSubjectMetadata } from '../../../lib/agentRuntimeSubject';
-import { getCircleSessionMemoryMode, getActiveRuns } from '../../../lib/agentRunSystem';
-import { buildOfficeRoster } from '../../../lib/officeRoster';
-import { useUserApiKeys } from '../../../lib/llmProviders';
-import { useOfficeSurfaceState } from './office/useOfficeSurfaceState';
-import { getAdaptiveOfficeDefaults, loadAdaptiveWorkspaceSettings, loadCircleWorkspaceProfile, recordOfficeActivity } from '../../../lib/workspaceAdaptation';
 import {
-  IdleBehaviorConfig, loadIdleConfig, saveIdleConfig,
-  startIdleScheduler, stopIdleScheduler, getDefaultIdleConfig,
+  buildOfficeSessionSnapshot,
+  readOfficeAgentSessionBindingsBatch,
+  resolveOfficeAgentSessionBinding,
+  type OfficeAgentSessionBindingRecord,
+} from '../../../lib/officeAgentSessionBinding';
+import {
+  buildOpenSwanConnectionFingerprint,
+  matchesOpenSwanConnectionFingerprint,
+  type OpenSwanConnectionFingerprint,
+} from '../../../lib/officeAgentSessionBindingCore';
+import { buildAgentRuntimeSubject, isUuidLike, type AgentRuntimeSubjectMetadata } from '../../../lib/agentRuntimeSubject';
+import { getActiveRuns } from '../../../lib/agentRunSystem';
+import {
+  buildOfficeRoster,
+  isOfficeAgentOwnedByCurrentUser,
+  resolveUniqueOfficeAgentById,
+} from '../../../lib/officeRoster';
+import { useUserApiKeysExact } from '../../../lib/llmProviders';
+import { useOfficeSurfaceState } from './office/useOfficeSurfaceState';
+import {
+  getAdaptiveOfficeDefaults,
+  loadAdaptiveWorkspaceSettingsExact,
+  loadCircleWorkspaceProfileExact,
+  recordOfficeActivityExact,
+} from '../../../lib/workspaceAdaptation';
+import {
+  IdleBehaviorConfig,
+  type IdleSchedulerAuthority,
+  getDefaultIdleConfig,
+  loadIdleConfigExact,
+  normalizeIdleConfig,
+  startIdleScheduler,
 } from '../../../lib/idleBehaviors';
-import { supabase } from '../../../lib/supabase';
+import { getSupabaseClientForAccessToken, supabase } from '../../../lib/supabase';
 import { subscribeWithReconnect } from '../../../lib/subscribeWithReconnect';
 // Stylesheets live in their own module — see office/officeTabStyles.ts.
 import {
@@ -203,17 +321,35 @@ import {
 import CircleOfficePanel, { OfficeConnectBridgesSection } from './office/CircleOfficePanel';
 import { fetchNFTs } from '../../../lib/crypto';
 
-function setAutoConnectCircleId(circleId: string) {
-  import('../../../lib/agentAutoConnect')
-    .then((mod) => mod.setAutoConnectCircleId(circleId))
-    .catch(() => {});
+function isVirtualBlackSwanTarget(input: {
+  targetAgentId?: string | null;
+  targetAgentIds?: string[] | null;
+  targetAgentName?: string | null;
+}): boolean {
+  if (input.targetAgentId === BLACKSWAN_AGENT_ID) return true;
+  if (input.targetAgentIds?.includes(BLACKSWAN_AGENT_ID)) return true;
+  if (input.targetAgentId || (input.targetAgentIds?.length || 0) > 0) return false;
+  const targetName = String(input.targetAgentName || '').trim().toLowerCase();
+  return targetName === 'blackswan'
+    || targetName === '@blackswan'
+    || targetName === 'swan'
+    || targetName === '@swan';
 }
 
-function updateAutoConnectConnections(connections: AgentConnection[]) {
-  import('../../../lib/agentAutoConnect')
-    .then((mod) => mod.updateAutoConnectConnections(connections))
-    .catch(() => {});
-}
+type ServiceOAuthScope = Omit<OfficeServiceAsyncScope, 'serviceType' | 'provider'> & {
+  serviceType: 'calendar_widget' | 'email_hub';
+  provider: OfficeOAuthProvider;
+  userId: string;
+  accessToken: string;
+  authorityGeneration: number;
+};
+
+type ServiceOAuthStatus = OAuthConnectionStatus | {
+  state: 'checking';
+  connected: false;
+  email: '';
+};
+
 import { NFT } from '../../../types';
 import AgentSetupWizard from '../../../components/AgentSetupWizard';
 import ConnectAgentModal from '../../../components/ConnectAgentModal';
@@ -233,44 +369,35 @@ import PokerGame from '../../../components/poker/PokerGame';
 import HuggingFaceExplorer from './office/HuggingFaceExplorer';
 import HfToolRunner from './office/HfToolRunner';
 import Marquee from '../../../components/web-effects/Marquee.web';
-import StatusPicker from '../../../components/office/StatusPicker';
 import XPEventFeed from '../../../components/rpg/XPEventFeed';
 import StreakFlame from '../../../components/rpg/StreakFlame';
 import GitHubWallFeed from '../../../components/office/GitHubWallFeed';
-import WorldClockBar from '../../../components/office/WorldClockBar';
 import SoundMixer from '../../../components/office/SoundMixer';
 import SiteCredentialVaultPanel from '../../../components/vault/SiteCredentialVaultPanel';
 
-const STORAGE_KEY_TELEGRAM = '@office_telegram_config';
-const STORAGE_KEY_AGENT_NAMES = '@office_agent_names';
-const STORAGE_KEY_FLOORS = '@office_floors';
-const STORAGE_KEY_FLOORS_TS = '@office_floors_updated_at';
-const STORAGE_KEY_CURRENT_FLOOR = '@office_current_floor';
-const STORAGE_KEY_APPEARANCES = '@office_appearances';
-const STORAGE_KEY_WHITEBOARD_NOTES = '@office_whiteboard_notes';
-const publishCtaDismissedKey = (circleId: string) => `@office_publish_cta_dismissed_${circleId}`;
-
-// Track whether Supabase profile columns exist (migrations may not be run yet)
-// Reset each mount — a transient error shouldn't permanently disable sync
-let _profileHasOfficeLayout = true;
-let _profileHasAgentAppearance = true;
-let _profileHasOfficePreferences = true;
-
-function isMissingProfileColumnError(error: any): boolean {
-  const code = String(error?.code || '');
-  const message = String(error?.message || '').toLowerCase();
-  return (
-    code === 'PGRST204'
-    || code === '42703'
-    || message.includes('column')
-    || message.includes('schema cache')
-  );
-}
+const officePrivateStorageKey = (
+  kind: 'agent_names' | 'appearances' | 'whiteboard_notes' | 'telegram_metadata',
+  userId: string,
+  circleId: string,
+) => `@office_private_v2:${kind}:${userId}:${circleId}`;
+const legacyOfficeTelegramStorageKey = (userId: string, circleId: string) => (
+  `@office_private_v2:telegram:${userId}:${circleId}`
+);
+const LEGACY_OWNERLESS_TELEGRAM_STORAGE_KEY = '@office_telegram_config';
+const OFFICE_TELEGRAM_SECRET_NAMESPACE = 'office_telegram_bot_token_v1';
+const officeTelegramSecretId = (userId: string, circleId: string) => `${userId}:${circleId}`;
+const officeAddonPreferencesStorageKey = (userId: string, circleId: string) => (
+  `${OFFICE_ADDON_PREFERENCES_STORAGE_KEY}:${userId}:${circleId}`
+);
+const publishCtaDismissedKey = (userId: string, circleId: string) => (
+  `@office_publish_cta_dismissed_v2:${userId}:${circleId}`
+);
 
 export interface AgentStats {
   agentCount: number;
   sessionCount: number;
   costToday: number;
+  costTotal: number;
   costWeek: number;
   tokens: number;
   tokensTotal: number;
@@ -283,6 +410,9 @@ export interface AgentStats {
 interface Props {
   circleId: string;
   accentColor: string;
+  focusRunId?: string | null;
+  focusRunRequestId?: number;
+  onOpenAgentInChat?: (focus: string, draft?: string) => void;
   onAgentStats?: (stats: AgentStats) => void;
   onReady?: () => void;
 }
@@ -320,30 +450,264 @@ const FRESHNESS_DOT_COLORS: Record<RunFreshness, string> = {
   unknown: '#606075',
 };
 
-export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady }: Props) {
+type OfficeExactAuthority = AgentIdentityExactAuthority & {
+  circleId: string;
+  generation: number;
+};
+
+function resolveAgentIdentityRefreshSnapshot(
+  localIdentities: Map<string, AgentIdentity>,
+  serverResult: Readonly<{
+    serverVerified: boolean;
+    identities: Map<string, AgentIdentity>;
+  }>,
+): Map<string, AgentIdentity> {
+  // A successful exact server read is count-complete, so absence is durable
+  // truth (including an empty snapshot). Local state is fallback-only when
+  // that read fails and must never resurrect a server-deleted identity.
+  return new Map(serverResult.serverVerified ? serverResult.identities : localIdentities);
+}
+
+function idleConfigAuthorityKey(authority: Readonly<{
+  userId: string;
+  circleId: string;
+  authorityGeneration: number;
+}>): string {
+  return [
+    encodeURIComponent(authority.userId),
+    encodeURIComponent(authority.circleId),
+    String(authority.authorityGeneration),
+  ].join(':');
+}
+
+function mergeRemoteIdleConfigWithExactRunHistory(
+  remoteValue: unknown,
+  exactLocalConfig: IdleBehaviorConfig,
+): IdleBehaviorConfig {
+  const remoteConfig = normalizeIdleConfig(remoteValue);
+  const localConfig = normalizeIdleConfig(exactLocalConfig);
+  const behaviors = { ...remoteConfig.behaviors };
+  for (const [behaviorId, remoteState] of Object.entries(remoteConfig.behaviors)) {
+    const localState = localConfig.behaviors[behaviorId];
+    if (!localState?.lastRanAt) continue;
+    const remoteRanAt = remoteState.lastRanAt ? Date.parse(remoteState.lastRanAt) : Number.NaN;
+    const localRanAt = Date.parse(localState.lastRanAt);
+    if (
+      !Number.isFinite(localRanAt)
+      || localRanAt > Date.now() + 5 * 60_000
+      || (Number.isFinite(remoteRanAt) && remoteRanAt >= localRanAt)
+    ) continue;
+    // Remote preferences own user choices. The exact local receipt may only
+    // advance run history so a slower remote write cannot make work due again.
+    behaviors[behaviorId] = { ...remoteState, lastRanAt: localState.lastRanAt };
+  }
+  return { ...remoteConfig, behaviors };
+}
+
+function toOfficeDashboardAuthority(authority: OfficeExactAuthority): OfficeDashboardExactAuthority {
+  return {
+    userId: authority.userId,
+    circleId: authority.circleId,
+    accessToken: authority.accessToken,
+    authorityGeneration: authority.generation,
+  };
+}
+
+export default function OfficeTab({
+  circleId,
+  accentColor,
+  focusRunId = null,
+  focusRunRequestId = 0,
+  onOpenAgentInChat,
+  onAgentStats,
+  onReady,
+}: Props) {
+  const { session: authSession, user: authUser, loading: authLoading } = useAuth();
+  const authIdentityMatches = Boolean(
+    authUser?.id
+    && authSession?.user.id
+    && authUser.id === authSession.user.id,
+  );
+  const authReady = !authLoading && authIdentityMatches && Boolean(authSession?.access_token);
+  const authAuthorityRef = useRef<OfficeExactAuthority | null>(null);
+  const authAuthorityGenerationRef = useRef(0);
+  const [authAuthorityRetry, setAuthAuthorityRetry] = useState(0);
+  const [committedAuthAuthority, setCommittedAuthAuthority] = useState<OfficeExactAuthority | null>(null);
+  const committedAuthScopeKey = authReady && authUser?.id && authSession?.access_token
+    ? `${authUser.id}:${circleId}:${authSession.access_token}`
+    : null;
+  useEffect(() => {
+    const generation = authAuthorityGenerationRef.current + 1;
+    authAuthorityGenerationRef.current = generation;
+    const nextAuthority: OfficeExactAuthority | null = authReady && authUser?.id && authSession?.access_token
+      ? {
+          userId: authUser.id,
+          circleId,
+          accessToken: authSession.access_token,
+          generation,
+        }
+      : null;
+    authAuthorityRef.current = nextAuthority;
+    setCommittedAuthAuthority(nextAuthority);
+    return () => {
+      authAuthorityGenerationRef.current += 1;
+      if (authAuthorityRef.current?.generation === generation) {
+        authAuthorityRef.current = null;
+      }
+      setCommittedAuthAuthority((current) => (
+        current?.generation === generation ? null : current
+      ));
+    };
+  }, [authReady, authUser?.id, authSession?.access_token, authAuthorityRetry, circleId, committedAuthScopeKey]);
+  const officeUserPreferencesAvailableRef = useRef(true);
+  const officePreferenceWriteQueueRef = useRef<ReturnType<typeof createOfficePreferenceWriteQueue> | null>(null);
+  if (!officePreferenceWriteQueueRef.current) {
+    officePreferenceWriteQueueRef.current = createOfficePreferenceWriteQueue({
+      getCurrentScope: () => authAuthorityRef.current,
+      save: async (item, signal) => {
+        const currentScope = authAuthorityRef.current;
+        if (
+          currentScope?.userId !== item.userId
+          || currentScope?.circleId !== item.circleId
+          || currentScope?.accessToken !== item.accessToken
+          || currentScope?.generation !== item.authorityGeneration
+        ) return { ok: false, retryable: false };
+        const result = await patchOfficeUserPreferences(
+          item.circleId,
+          item.partial,
+          { userId: item.userId, accessToken: item.accessToken },
+          signal,
+        );
+        if (result.unavailable) officeUserPreferencesAvailableRef.current = false;
+        return { ok: result.ok, retryable: result.retryable };
+      },
+    });
+  }
+  useEffect(() => () => {
+    authAuthorityRef.current = null;
+    officePreferenceWriteQueueRef.current?.dispose();
+  }, []);
+  const captureOfficeAuthority = useCallback((): OfficeExactAuthority | null => {
+    const authority = authAuthorityRef.current;
+    if (
+      !authReady
+      || !authority
+      || authority.userId !== authUser?.id
+      || authority.circleId !== circleId
+      || authority.accessToken !== authSession?.access_token
+    ) return null;
+    return { ...authority };
+  }, [authReady, authSession?.access_token, authUser?.id, circleId]);
+  const isOfficeAuthorityCurrent = useCallback((authority: OfficeExactAuthority | null | undefined): boolean => {
+    const current = authAuthorityRef.current;
+    return Boolean(
+      authReady
+      && authority
+      && current
+      && authority.userId === authUser?.id
+      && authority.circleId === circleId
+      && authority.accessToken === authSession?.access_token
+      && current.userId === authority.userId
+      && current.circleId === authority.circleId
+      && current.accessToken === authority.accessToken
+      && current.generation === authority.generation
+    );
+  }, [authReady, authSession?.access_token, authUser?.id, circleId]);
+  const officeInvocationLifecycleRef = useRef<{
+    authority: OfficeExactAuthority;
+    controller: AbortController;
+  } | null>(null);
+  useEffect(() => {
+    officeInvocationLifecycleRef.current?.controller.abort();
+    officeInvocationLifecycleRef.current = null;
+    const authority = committedAuthAuthority;
+    if (!authority || !isOfficeAuthorityCurrent(authority)) return undefined;
+    const controller = new AbortController();
+    officeInvocationLifecycleRef.current = { authority, controller };
+    return () => {
+      controller.abort();
+      if (officeInvocationLifecycleRef.current?.controller === controller) {
+        officeInvocationLifecycleRef.current = null;
+      }
+    };
+  }, [committedAuthAuthority, isOfficeAuthorityCurrent]);
+  const captureOfficeInvocationExecution = useCallback((
+    authority: OfficeExactAuthority,
+  ): OfficeInvocationExactExecution | null => {
+    const lifecycle = officeInvocationLifecycleRef.current;
+    if (
+      !lifecycle
+      || lifecycle.controller.signal.aborted
+      || lifecycle.authority.userId !== authority.userId
+      || lifecycle.authority.circleId !== authority.circleId
+      || lifecycle.authority.accessToken !== authority.accessToken
+      || lifecycle.authority.generation !== authority.generation
+      || !isOfficeAuthorityCurrent(authority)
+    ) return null;
+    return {
+      authority: { ...authority },
+      isCurrent: isOfficeAuthorityCurrent,
+      signal: lifecycle.controller.signal,
+    };
+  }, [isOfficeAuthorityCurrent]);
+  const privateStorageKeys = useMemo(() => ({
+    agentNames: officePrivateStorageKey('agent_names', authUser?.id || '', circleId),
+    appearances: officePrivateStorageKey('appearances', authUser?.id || '', circleId),
+    whiteboardNotes: officePrivateStorageKey('whiteboard_notes', authUser?.id || '', circleId),
+    telegramMetadata: officePrivateStorageKey('telegram_metadata', authUser?.id || '', circleId),
+  }), [authUser?.id, circleId]);
   const surfaceState = useOfficeSurfaceState();
   const [selectedAgent, setSelectedAgent] = useState<OfficeAgent | null>(null);
+  // A bearer refresh retires every exact-authority object and rehydrates the
+  // Office from scratch. The panel may survive that same-subject refresh, but
+  // only by retaining this non-sensitive logical-scope id. Never retain the
+  // prior Agent object (it may contain stale runtime presentation authority),
+  // and never carry the id across an account/circle boundary.
+  const selectedAgentRefreshRetentionRef = useRef<{
+    scope: string;
+    agentId: string;
+  } | null>(null);
+  const clearSelectedAgentPanel = useCallback(() => {
+    selectedAgentRefreshRetentionRef.current = null;
+    setSelectedAgent(null);
+  }, []);
   // Filter chips that sit above the agents list. Persisted in localStorage so
   // a user who always works in "mine" doesn't have to re-toggle every visit.
+  // The durable profile preference is the only persistence owner; the retired
+  // global browser key could leak another account's selection on shared devices.
   type AgentFilterMode = 'all' | 'mine' | 'active' | 'bonded';
-  const [agentFilterMode, setAgentFilterMode] = useState<AgentFilterMode>(() => {
-    if (typeof window === 'undefined' || !window.localStorage) return 'all';
-    const stored = window.localStorage.getItem('uc_office_agent_filter_v1');
-    return (stored === 'mine' || stored === 'active' || stored === 'bonded') ? stored as AgentFilterMode : 'all';
-  });
+  const [agentFilterMode, setAgentFilterMode] = useState<AgentFilterMode>('all');
   const persistAgentFilter = useCallback((mode: AgentFilterMode) => {
     setAgentFilterMode(mode);
-    try { window.localStorage?.setItem('uc_office_agent_filter_v1', mode); } catch {}
   }, []);
-  // Click origin for pop-out animation (where the user clicked the agent on screen)
-  const [panelOrigin, setPanelOrigin] = useState<{ x: number; y: number } | null>(null);
   const [celebrationBadge, setCelebrationBadge] = useState<Badge | null>(null);
   const [dancingAgentId, setDancingAgentId] = useState<string | null>(null);
-  const [userId, setUserId] = useState<string | undefined>();
-  const [userEmail, setUserEmail] = useState<string | undefined>();
+  const userId = authUser?.id;
+  const userEmail = authUser?.email ?? undefined;
   const [sessionMemoryMode, setSessionMemoryMode] = useState<'private' | 'shared'>('private');
   const [savingSessionMemoryMode, setSavingSessionMemoryMode] = useState(false);
-  const pendingApprovals = useAgentApprovals(circleId);
+  const approvalsAuthority = useMemo(() => {
+    const authority = committedAuthAuthority;
+    return authority
+      ? {
+          userId: authority.userId,
+          circleId: authority.circleId,
+          accessToken: authority.accessToken,
+          authorityGeneration: authority.generation,
+      }
+      : null;
+  }, [committedAuthAuthority]);
+  const isApprovalAuthorityCurrent = useCallback((authority: AgentApprovalsExactAuthority): boolean => {
+    const current = authAuthorityRef.current;
+    return Boolean(
+      current
+      && current.userId === authority.userId
+      && current.circleId === authority.circleId
+      && current.accessToken === authority.accessToken
+      && current.generation === authority.authorityGeneration
+    );
+  }, []);
+  const pendingApprovals = useAgentApprovals(circleId, approvalsAuthority);
   // showControlCard removed — controls now embedded in AgentPanel
 
   // Circle-wide "Needs you" strip (plan §4a/§5b) — same chatAttentionQueue
@@ -359,6 +723,37 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   // run drawer chat uses instead of pointing at the board with an alert.
   const [showOfficeRunDetail, setShowOfficeRunDetail] = useState(false);
   const [officeRunDetailRefId, setOfficeRunDetailRefId] = useState<string | null>(null);
+  const [officeRunDetailRequestId, setOfficeRunDetailRequestId] = useState(0);
+  const openOfficeRunDetail = useCallback((runId: string | null | undefined) => {
+    const nextRunId = String(runId || '').trim();
+    if (!nextRunId) return;
+    setOfficeRunDetailRefId(nextRunId);
+    setOfficeRunDetailRequestId((current) => current + 1);
+    setShowOfficeRunDetail(true);
+  }, []);
+  useEffect(() => {
+    setShowOfficeRunDetail(false);
+    setOfficeRunDetailRefId(null);
+  }, [circleId]);
+  useEffect(() => {
+    let cancelled = false;
+    setDismissedOfficeAttentionIds(new Set());
+    const requestedAuthority = captureOfficeAuthority();
+    if (!circleId || !userId || !requestedAuthority) return () => { cancelled = true; };
+    const requestIsCurrent = () => !cancelled && isOfficeAuthorityCurrent(requestedAuthority);
+    void listOfficeAttentionAcknowledgements(
+      circleId,
+      toOfficeDashboardAuthority(requestedAuthority),
+      requestIsCurrent,
+    ).then((ids) => {
+      if (requestIsCurrent()) setDismissedOfficeAttentionIds(new Set(ids));
+    });
+    return () => { cancelled = true; };
+  }, [captureOfficeAuthority, circleId, committedAuthScopeKey, isOfficeAuthorityCurrent, userId]);
+  useEffect(() => {
+    if (!focusRunId || focusRunRequestId <= 0) return;
+    openOfficeRunDetail(focusRunId);
+  }, [focusRunId, focusRunRequestId, openOfficeRunDetail]);
   useEffect(() => {
     if (!circleId) return;
     let cancelled = false;
@@ -367,7 +762,14 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         const runs = await getActiveRuns(circleId);
         if (!cancelled) {
           setOfficeBlockedRuns(runs.filter(
-            (run) => run.status === 'waiting_approval' || run.status === 'paused',
+            (run) => {
+              if (run.status !== 'waiting_approval' && run.status !== 'paused') return false;
+              return classifyRunFreshness({
+                status: run.status,
+                updatedAtMs: runFreshnessUpdatedAtMs(run),
+                nowMs: Date.now(),
+              }).freshness !== 'stale';
+            },
           ));
         }
       } catch { /* queue is a summary — a failed poll just shows stale data */ }
@@ -392,7 +794,22 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   }, [officeAttentionActive]);
   const handleOfficeAttentionAction = (item: ChatAttentionItem, action: ChatAttentionAction) => {
     if (action.kind === 'dismiss') {
+      const requestedAuthority = captureOfficeAuthority();
+      if (!requestedAuthority) return;
+      const requestIsCurrent = () => isOfficeAuthorityCurrent(requestedAuthority);
       setDismissedOfficeAttentionIds((prev) => new Set(prev).add(item.id));
+      void acknowledgeOfficeAttention(
+        circleId,
+        item.id,
+        item.kind === 'run_blocked' ? item.refId : null,
+        toOfficeDashboardAuthority(requestedAuthority),
+        requestIsCurrent,
+      )
+        .then((result) => {
+          if (requestIsCurrent() && !result.ok) {
+            showAlert('Dismissal saved for this visit only', result.error || 'The Office server could not save this acknowledgement.');
+          }
+        });
       return;
     }
     if (action.kind === 'refile_approval') {
@@ -406,8 +823,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     if (action.kind === 'open_run') {
       // Attention items carry the exact run id — deep-link the drawer to it
       // instead of landing on the newest run.
-      setOfficeRunDetailRefId(item.refId ?? null);
-      setShowOfficeRunDetail(true);
+      openOfficeRunDetail(item.refId);
     }
   };
 
@@ -416,36 +832,58 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   // approval must be visible here too. Light poll; storage read is cheap.
   const [computerTaskCard, setComputerTaskCard] = useState<ComputerTaskChecklistCard | null>(null);
   useEffect(() => {
+    const requestedAuthority = committedAuthAuthority;
     let cancelled = false;
+    setComputerTaskCard(null);
+    if (!requestedAuthority || !isOfficeAuthorityCurrent(requestedAuthority)) return undefined;
+    const requestIsCurrent = () => (
+      !cancelled && isOfficeAuthorityCurrent(requestedAuthority)
+    );
     const load = async () => {
       try {
-        const { loadComputerTaskState, buildComputerTaskChecklistCard } = await import('../../../lib/computerTaskState');
-        const record = await loadComputerTaskState(circleId);
-        if (!cancelled) setComputerTaskCard(buildComputerTaskChecklistCard(record));
+        const { loadComputerTaskStateExact, buildComputerTaskChecklistCard } = await import('../../../lib/computerTaskState');
+        const result = await loadComputerTaskStateExact(
+          requestedAuthority,
+          null,
+          requestIsCurrent,
+        );
+        if (!requestIsCurrent()) return;
+        setComputerTaskCard(buildComputerTaskChecklistCard(result.ok ? result.record : null));
       } catch { /* dashboard extra — never break Office */ }
     };
     void load();
     const timer = setInterval(load, 30_000);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [circleId]);
+  }, [committedAuthAuthority, isOfficeAuthorityCurrent]);
 
   // Saved Chat plans that are ready for Office/SwanBot/OpenSwan handoff. The
   // queue is informational here; execution stays in Chat until the typed Office
   // execution contract lands.
   const [officeAgentPlans, setOfficeAgentPlans] = useState<AgentPlanPersisted[]>([]);
   useEffect(() => {
+    const requestedAuthority = committedAuthAuthority;
     let cancelled = false;
+    setOfficeAgentPlans([]);
+    if (!requestedAuthority || !isOfficeAuthorityCurrent(requestedAuthority)) return undefined;
+    const requestIsCurrent = () => (
+      !cancelled && isOfficeAuthorityCurrent(requestedAuthority)
+    );
     const load = async () => {
       try {
-        const { listAgentPlans } = await import('../../../lib/agentPlanPersistence');
-        const plans = await listAgentPlans({ circleId, limit: 20 });
-        if (!cancelled) setOfficeAgentPlans(plans);
+        const { listAgentPlansExact } = await import('../../../lib/agentPlanPersistence');
+        const result = await listAgentPlansExact(
+          { circleId, limit: 20 },
+          requestedAuthority,
+          requestIsCurrent,
+        );
+        if (!requestIsCurrent()) return;
+        setOfficeAgentPlans(result.ok ? result.plans : []);
       } catch { /* dashboard extra - never break Office */ }
     };
     void load();
     const timer = setInterval(() => { void load(); }, 60_000);
     const handle = subscribeWithReconnect({
-      channelName: `office-agent-plans:${circleId}`,
+      channelName: `office-agent-plans:${requestedAuthority.userId}:${circleId}:${requestedAuthority.generation}`,
       setup: (channel) => channel.on('postgres_changes', {
         event: '*',
         schema: 'public',
@@ -459,7 +897,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       clearInterval(timer);
       handle.unsubscribe();
     };
-  }, [circleId]);
+  }, [circleId, committedAuthAuthority, isOfficeAuthorityCurrent]);
   const visibleAgentPlans = useMemo(
     () => officeAgentPlans.filter((plan) => plan.status !== 'completed' && plan.status !== 'archived'),
     [officeAgentPlans],
@@ -481,9 +919,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   // ── Office ops board (Building Now + Token Tracker) ──────────────────────
   // D6 pattern: lazy-import loader, bounded pure models, silent failures.
   // Runs poll every 15s plus a realtime subscription for instant updates;
-  // Claude usage (summary + by-model, 7d) refreshes at most every 60s.
+  // Durable Claude usage (rolling 24h + 7d and 7d by-model) refreshes at most
+  // every 60s. Local session totals are intentionally not billing periods.
   const [opsBoard, setOpsBoard] = useState<OfficeBuildingBoard | null>(null);
   const [opsTokenTracker, setOpsTokenTracker] = useState<OfficeTokenTrackerCardModel | null>(null);
+  const [opsDurableSpendPeriods, setOpsDurableSpendPeriods] = useState<{
+    today: number;
+    week: number;
+    month: number;
+  } | null>(null);
   // O1 (P38): per-agent 24h accountability (last outcome + counts + cost),
   // keyed by the same lowercased agent-name seam as opsRunNodesByAgent.
   const [opsAccountability, setOpsAccountability] = useState<Map<string, OfficeAgentAccountabilityModel> | null>(null);
@@ -509,33 +953,42 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   }, []);
   const opsLiveRunsRef = useRef<AgentRun[]>([]);
   const opsUsageCacheRef = useRef<{
-    summary?: ClaudeUsageSummary;
+    todaySummary?: ClaudeUsageSummary;
+    weekSummary?: ClaudeUsageSummary;
+    monthSummary?: ClaudeUsageSummary;
     byModel?: ClaudeUsageByModel[];
     fetchedAtMs: number;
   }>({ fetchedAtMs: 0 });
-  // Synced from enrichedSessions in render (declared below) so the loader can
-  // read the latest sessions without re-subscribing — same pattern as onReadyRef.
-  const opsSessionsRef = useRef<OpenSwanSession[]>([]);
 
   useEffect(() => {
+    const requestedAuthority = committedAuthAuthority;
     let cancelled = false;
     let unsubscribeRuns: (() => void) | null = null;
+    let usageRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    const usageRequestIsCurrent = () => Boolean(
+      !cancelled
+      && requestedAuthority
+      && isOfficeAuthorityCurrent(requestedAuthority),
+    );
     // Reset per-circle so a circle switch can't show stale spend/runs.
     opsLiveRunsRef.current = [];
     opsUsageCacheRef.current = { fetchedAtMs: 0 };
+    setOpsTokenTracker(null);
+    setOpsDurableSpendPeriods(null);
     setOpsRunFreshness(new Map());
 
     const rebuildTracker = async () => {
       try {
         const { buildOfficeTokenTracker } = await import('../../../lib/officeOpsBoard');
         if (cancelled) return;
-        const sessions = opsSessionsRef.current;
-        const pc = sessions.length > 0 ? calculatePeriodCosts(sessions) : null;
         setOpsTokenTracker(buildOfficeTokenTracker({
-          summary: opsUsageCacheRef.current.summary,
+          summary: opsUsageCacheRef.current.weekSummary,
           byModel: opsUsageCacheRef.current.byModel,
           liveRuns: opsLiveRunsRef.current,
-          periodCosts: pc ? { today: pc.today, week: pc.week } : undefined,
+          periodCosts: {
+            today: opsUsageCacheRef.current.todaySummary?.total_cost,
+            week: opsUsageCacheRef.current.weekSummary?.total_cost,
+          },
           nowMs: Date.now(),
         }));
       } catch { /* dashboard extra — never break Office */ }
@@ -573,19 +1026,38 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     };
 
     const reloadUsage = async () => {
+      if (!requestedAuthority || !usageRequestIsCurrent()) return;
       // Cache: refresh Claude usage at most every 60s even if callers race.
       if (Date.now() - opsUsageCacheRef.current.fetchedAtMs < 60_000) return;
       opsUsageCacheRef.current.fetchedAtMs = Date.now(); // claim slot before await
       try {
-        const { getClaudeUsageSummary, getClaudeUsageByModel } = await import('../../../lib/claudeUsage');
-        const [summary, byModel] = await Promise.all([
-          getClaudeUsageSummary(circleId, 7),
-          getClaudeUsageByModel(circleId, 7),
+        const { getClaudeUsageSummaryStrict, getClaudeUsageByModelStrict } = await import('../../../lib/claudeUsage');
+        const exactClient = getSupabaseClientForAccessToken(requestedAuthority.accessToken);
+        const [todaySummary, weekSummary, monthSummary, byModel] = await Promise.all([
+          getClaudeUsageSummaryStrict(circleId, 1, exactClient),
+          getClaudeUsageSummaryStrict(circleId, 7, exactClient),
+          getClaudeUsageSummaryStrict(circleId, 30, exactClient),
+          getClaudeUsageByModelStrict(circleId, 7, exactClient),
         ]);
-        if (cancelled) return;
-        opsUsageCacheRef.current = { summary, byModel, fetchedAtMs: Date.now() };
+        if (!usageRequestIsCurrent()) return;
+        opsUsageCacheRef.current = { todaySummary, weekSummary, monthSummary, byModel, fetchedAtMs: Date.now() };
+        setOpsDurableSpendPeriods({
+          today: Math.max(0, todaySummary.total_cost),
+          week: Math.max(0, weekSummary.total_cost),
+          month: Math.max(0, monthSummary.total_cost),
+        });
         void rebuildTracker();
-      } catch { /* dashboard extra — never break Office */ }
+      } catch {
+        // Retain the last known server snapshot. A transient auth/network race
+        // during login must not replace real spend with a convincing $0.
+        opsUsageCacheRef.current = { ...opsUsageCacheRef.current, fetchedAtMs: 0 };
+        if (!cancelled && !usageRetryTimer) {
+          usageRetryTimer = setTimeout(() => {
+            usageRetryTimer = null;
+            void reloadUsage();
+          }, 5_000);
+        }
+      }
     };
 
     void reloadRuns();
@@ -608,10 +1080,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       cancelled = true;
       clearInterval(runsTimer);
       clearInterval(usageTimer);
+      if (usageRetryTimer) clearTimeout(usageRetryTimer);
       try { unsubscribeRuns?.(); } catch {}
       unsubscribeRuns = null;
     };
-  }, [circleId]);
+  }, [circleId, committedAuthAuthority, isOfficeAuthorityCurrent]);
 
   // Map building run nodes to roster agents by both display name and canonical
   // subject identity. Display-name matching remains the fallback; subject keys
@@ -628,10 +1101,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     (opsBoard?.building ?? []).forEach(visit);
     return map;
   }, [opsBoard]);
-
-  // Agent control hook for selected agent
-  const selectedSessionKey = getAgentIdentityKey(selectedAgent);
-  const agentControl = useAgentControl(circleId, selectedSessionKey);
 
   // Read-only local diagnostics through the Claude bridge allowlist.
   const handleRunCommand = React.useCallback(async (cmd: string) => {
@@ -676,11 +1145,14 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   // Disconnect handler — stops poller and marks agent offline
   const handleDisconnectAgent = React.useCallback(() => {
     if (!selectedAgent) return;
-    setSelectedAgent(null);
-  }, [selectedAgent]);
+    clearSelectedAgentPanel();
+  }, [clearSelectedAgentPanel, selectedAgent]);
 
   // Load custom themes from Supabase
-  const { themes: customThemeRecords, refresh: refreshCustomThemes } = useCustomThemes(circleId);
+  const { themes: customThemeRecords, refresh: refreshCustomThemes } = useCustomThemesExact(
+    committedAuthAuthority,
+    isOfficeAuthorityCurrent,
+  );
   const customThemeLookup = React.useMemo(() => {
     const map: Record<string, OfficeTheme> = {};
     for (const rec of customThemeRecords) {
@@ -694,14 +1166,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     return OFFICE_THEMES[themeId] || customThemeLookup[themeId] || OFFICE_THEMES.underground;
   }, [customThemeLookup]);
 
-  // Load user ID for rewards
-  useEffect(() => {
-    supabase.auth.getUser().then(({ data: { user } }) => {
-      setUserId(user?.id);
-      setUserEmail(user?.email ?? undefined);
-    }).catch(() => {});
-  }, []);
-
   // Pre-load trending content for thought bubbles (HN + X trends, 12h cache)
   useEffect(() => {
     loadTrendingContent().catch(() => {});
@@ -714,6 +1178,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   // so the save useEffect doesn't fire on the initial load.
   const budgetLoadedRef = useRef(false);
   const idleLoadedRef = useRef(false);
+  const [idleConfigReadyAuthorityKey, setIdleConfigReadyAuthorityKey] = useState<string | null>(null);
   const remoteBudgetAppliedRef = useRef(false);
   const remoteIdleAppliedRef = useRef(false);
   const [activeCatalogCat, setActiveCatalogCat] = useState<string>('connected');
@@ -723,6 +1188,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const [statusHistory, setStatusHistory] = useState<Array<OfficeAgent[]>>([]);
   const [enrichedAgents, setEnrichedAgents] = useState<OfficeAgent[]>([]);
   const [agentIdentities, setAgentIdentities] = useState<Map<string, AgentIdentity>>(new Map());
+  const [agentUsageProfiles, setAgentUsageProfiles] = useState<Map<string, OfficeAgentUsageProfile>>(new Map());
+  const agentIdentityRefreshGenerationRef = useRef(0);
+  const agentUsageProfileAdoptionGenerationRef = useRef(0);
+  const agentUsageSyncInFlightRef = useRef(false);
   const enrichedAgentsRef = useRef<OfficeAgent[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [agentNames, setAgentNames] = useState<Record<string, string>>({});
@@ -736,14 +1205,14 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   // Keep refs in sync with state for use in intervals/callbacks
   useEffect(() => { enrichedAgentsRef.current = enrichedAgents; }, [enrichedAgents]);
   useEffect(() => { sessionTagsRef.current = sessionTags; }, [sessionTags]);
-  const { keys: providerKeys, refresh: refreshProviderKeys } = useUserApiKeys();
+  const { keys: providerKeys, refresh: refreshProviderKeys } = useUserApiKeysExact(
+    committedAuthAuthority,
+    isOfficeAuthorityCurrent,
+  );
   const [budgetAlertsDismissed, setBudgetAlertsDismissed] = useState(false);
   const [actionResult, setActionResult] = useState<string>('');
   const [showActionResult, setShowActionResult] = useState(false);
   const [enrichedSessions, setEnrichedSessions] = useState<OpenSwanSession[]>([]);
-  // Keep the ops-board loader's view of sessions current without it needing
-  // enrichedSessions in its effect deps (it reads via ref at rebuild time).
-  opsSessionsRef.current = enrichedSessions;
   const enrichedSessionSignatureRef = useRef('');
   const {
     showCustomize, setShowCustomize,
@@ -776,50 +1245,155 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     serviceModalVisible, setServiceModalVisible,
   } = surfaceState;
 
-  useEffect(() => {
-    let cancelled = false;
-    Promise.all([
-      loadCircleWorkspaceProfile(circleId),
-      loadAdaptiveWorkspaceSettings(circleId),
-    ]).then(([profile, settings]) => {
-      if (cancelled) return;
-      const adaptive = getAdaptiveOfficeDefaults(profile, settings);
-      setTerminalInitialTab(adaptive.terminalInitialTab);
-    }).catch(() => {});
-    return () => { cancelled = true; };
-  }, [circleId, setTerminalInitialTab]);
-
-  useEffect(() => {
-    if (selectedAgent) {
-      recordOfficeActivity(circleId, 'select_agent').catch(() => {});
-      recordOfficeActivity(circleId, 'runtime').catch(() => {});
-    }
-  }, [circleId, selectedAgent]);
-
-  useEffect(() => {
-    if (editMode || placingType || selectedFurnitureId) {
-      recordOfficeActivity(circleId, 'workspace').catch(() => {});
-    }
-  }, [circleId, editMode, placingType, selectedFurnitureId]);
-
-  useEffect(() => {
-    if (showGitHubFeed || showSoundMixer || showVault) {
-      recordOfficeActivity(circleId, 'intelligence').catch(() => {});
-    }
-  }, [circleId, showGitHubFeed, showSoundMixer, showVault]);
-
-  useEffect(() => {
-    if (terminalSize !== 'closed') {
-      recordOfficeActivity(circleId, 'runtime').catch(() => {});
-      recordOfficeActivity(circleId, terminalInitialTab === 'automations' ? 'terminal_automations' : 'terminal_commands').catch(() => {});
-    }
-  }, [circleId, terminalInitialTab, terminalSize]);
-
   // ─── Multi-floor state ──────────────────────────────
   const [floors, setFloors] = useState<OfficeFloor[]>(DEFAULT_FLOORS);
   const floorsRef = useRef<OfficeFloor[]>(DEFAULT_FLOORS);
-  useEffect(() => { floorsRef.current = floors; }, [floors]);
+  // Editor history stays local and bounded. Persistence continues through the
+  // canonical floor layout path; the history only restores valid snapshots.
+  const officeEditorHistoriesRef = useRef<Partial<Record<string, OfficeEditorHistory>>>({});
+  const officeEditorItemStateRef = useRef<Partial<Record<string, Record<string, FurnitureItem>>>>({});
+  useEffect(() => {
+    floorsRef.current = floors;
+    const liveFloorIds = new Set(floors.map((floor) => floor.id));
+    for (const floorId of Object.keys(officeEditorItemStateRef.current)) {
+      if (!liveFloorIds.has(floorId)) delete officeEditorItemStateRef.current[floorId];
+    }
+    for (const floorId of Object.keys(officeEditorHistoriesRef.current)) {
+      if (!liveFloorIds.has(floorId)) delete officeEditorHistoriesRef.current[floorId];
+    }
+    for (const floor of floors) {
+      const retained = { ...(officeEditorItemStateRef.current[floor.id] || {}) };
+      for (const item of floor.furniture) retained[item.id] = item;
+
+      // Keep only live items and bounded history tombstones. This preserves
+      // configuration across Undo -> Redo without becoming an unbounded cache.
+      const liveItemIds = floor.furniture.map((item) => item.id);
+      const liveItemIdSet = new Set(liveItemIds);
+      const historicalIds = new Set<string>();
+      const history = officeEditorHistoriesRef.current[floor.id];
+      if (history) {
+        for (const entry of [...history.past, history.present, ...history.future]) {
+          for (const item of entry.floor.furniture) {
+            if (!liveItemIdSet.has(item.id)) historicalIds.add(item.id);
+          }
+        }
+      }
+      const retainedIds = [
+        ...liveItemIds,
+        ...Array.from(historicalIds).slice(-Math.max(0, 200 - liveItemIds.length)),
+      ];
+      officeEditorItemStateRef.current[floor.id] = Object.fromEntries(
+        retainedIds.flatMap((id) => retained[id] ? [[id, retained[id]]] : []),
+      );
+    }
+  }, [floors]);
+  const [officeEditorHistoryRevision, setOfficeEditorHistoryRevision] = useState(0);
+  const currentUserId = authReady ? authUser?.id || '' : '';
+  const [currentUserName, setCurrentUserName] = useState<string>('');
+  const floorLayoutScope = currentUserId ? `${currentUserId}:${circleId}` : null;
+  useEffect(() => {
+    const retained = selectedAgentRefreshRetentionRef.current;
+    if (
+      authReady
+      && floorLayoutScope
+      && (!retained || retained.scope === floorLayoutScope)
+    ) return;
+    selectedAgentRefreshRetentionRef.current = null;
+    setSelectedAgent(null);
+  }, [authReady, floorLayoutScope]);
+  const officeSessionStorageScope = useMemo<OfficeSessionStorageScope | null>(() => (
+    currentUserId ? { userId: currentUserId, circleId } : null
+  ), [circleId, currentUserId]);
+  const [officeAddonPreferences, setOfficeAddonPreferences] = useState<OfficeAddonCatalogPreferences>(() =>
+    parseOfficeAddonCatalogPreferences(null));
+  const [officeAddonPreferencesLoadedScope, setOfficeAddonPreferencesLoadedScope] = useState<string | null>(null);
+  const officeAddonPreferencesMutatedForScopeRef = useRef<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const scope = currentUserId ? `${currentUserId}:${circleId}` : null;
+    officeAddonPreferencesMutatedForScopeRef.current = null;
+    setOfficeAddonPreferencesLoadedScope(null);
+    setOfficeAddonPreferences(parseOfficeAddonCatalogPreferences(null));
+    if (!scope) return () => { cancelled = true; };
+    storage.getItem(officeAddonPreferencesStorageKey(currentUserId, circleId)).then((raw) => {
+      if (cancelled) return;
+      const persisted = parseOfficeAddonCatalogPreferences(raw);
+      setOfficeAddonPreferences((current) => (
+        officeAddonPreferencesMutatedForScopeRef.current === scope
+          ? mergeOfficeAddonCatalogPreferences(persisted, current)
+          : persisted
+      ));
+      setOfficeAddonPreferencesLoadedScope(scope);
+    }).catch(() => {
+      if (cancelled) return;
+      setOfficeAddonPreferencesLoadedScope(scope);
+    });
+    return () => { cancelled = true; };
+  }, [circleId, currentUserId]);
+  useEffect(() => {
+    const scope = currentUserId ? `${currentUserId}:${circleId}` : null;
+    if (!scope || officeAddonPreferencesLoadedScope !== scope) return;
+    storage.setItem(
+      officeAddonPreferencesStorageKey(currentUserId, circleId),
+      serializeOfficeAddonCatalogPreferences(officeAddonPreferences),
+    ).catch(() => {});
+  }, [circleId, currentUserId, officeAddonPreferences, officeAddonPreferencesLoadedScope]);
+  const [activeScrabbleItemId, setActiveScrabbleItemId] = useState<string | null>(null);
+  const [activePokerItemId, setActivePokerItemId] = useState<string | null>(null);
+  const [activePhoneItemId, setActivePhoneItemId] = useState<string | null>(null);
   const [currentFloorId, setCurrentFloorId] = useState<string>('floor_1');
+  const currentFloorIdRef = useRef(currentFloorId);
+  currentFloorIdRef.current = currentFloorId;
+  const officeFloorIdSequenceRef = useRef(0);
+  const [floorLayoutSaveState, setFloorLayoutSaveState] = useState<'loading' | 'saving' | 'saved' | 'error'>('loading');
+  const [floorLayoutSaveDetail, setFloorLayoutSaveDetail] = useState('Loading server layout…');
+  const layoutVersionRef = useRef(0);
+  const pendingLayoutSaveRef = useRef<{
+    scope: string;
+    circleId: string;
+    layout: OfficeLayoutDocument;
+    version: number;
+    localBackupVerified: boolean;
+    mutationEpoch: number;
+    authScope: { userId: string; accessToken: string };
+  } | null>(null);
+  const layoutSaveInFlightRef = useRef(false);
+  const activeLayoutSaveRef = useRef<typeof pendingLayoutSaveRef.current>(null);
+  const layoutSaveDrainRequestedRef = useRef(false);
+  const layoutSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const layoutSaveScopeRef = useRef<string | null>(floorLayoutScope);
+  // Render-time invalidation makes stale async continuations fail closed as
+  // soon as authentication or circle identity changes. The retiring pending
+  // snapshot carries its own authority and is handed off explicitly below.
+  layoutSaveScopeRef.current = floorLayoutScope;
+  const floorLayoutMutationEpochRef = useRef(0);
+  const markFloorLayoutMutation = useCallback((detail: string) => {
+    floorLayoutMutationEpochRef.current += 1;
+    setFloorLayoutSaveState('saving');
+    setFloorLayoutSaveDetail(detail);
+  }, []);
+  const layoutLocalWriteQueueRef = useRef<ReturnType<typeof createOfficeLayoutLocalWriteQueue> | null>(null);
+  if (!layoutLocalWriteQueueRef.current) {
+    layoutLocalWriteQueueRef.current = createOfficeLayoutLocalWriteQueue(storage);
+  }
+  const enqueueVerifiedLocalLayoutSave = useCallback((input: {
+    userId: string;
+    circleId: string;
+    floors: OfficeFloor[];
+    currentFloorId: string;
+    updatedAt: number;
+  }): Promise<boolean> => {
+    return runOfficeLayoutRequestWithDeadline(
+      () => layoutLocalWriteQueueRef.current!.enqueue(input),
+    ).catch(() => false);
+  }, []);
+  const [floorPresets, setFloorPresets] = useState<OfficeFloorPresetRecord[]>([]);
+  const [floorPresetsLoading, setFloorPresetsLoading] = useState(false);
+  const [floorPresetSaving, setFloorPresetSaving] = useState(false);
+  const [floorPresetStatus, setFloorPresetStatus] = useState<string | null>(null);
+  const floorPresetLoadRequestRef = useRef(0);
+  const floorPresetRequestRef = useRef(0);
+  const floorLayoutGenerationRef = useRef(0);
 
   // ─── Image / NFT picker state ───────────────────────────────────────────
   const [nftPickerTargetId, setNftPickerTargetId] = useState<string | null>(null);
@@ -851,6 +1425,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const [serviceModalTargetId, setServiceModalTargetId] = useState<string | null>(null);
   const [serviceModalType, setServiceModalType] = useState<string>('');
   const [serviceUrl, setServiceUrl] = useState('');
+  const [serviceUrlError, setServiceUrlError] = useState('');
   const [serviceTvApp, setServiceTvApp] = useState('youtube');
   const [serviceTvWidth, setServiceTvWidth] = useState('120');
   const [serviceTvHeight, setServiceTvHeight] = useState('80');
@@ -860,14 +1435,50 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const [serviceCalendarProvider, setServiceCalendarProvider] = useState('google');
   const [serviceEmailProvider, setServiceEmailProvider] = useState('outlook');
   const [oauthConnecting, setOauthConnecting] = useState(false);
-  const [oauthStatus, setOauthStatus] = useState<{ connected: boolean; email: string } | null>(null);
+  const [oauthStatus, setOauthStatus] = useState<ServiceOAuthStatus | null>(null);
   const [oauthError, setOauthError] = useState('');
+  const serviceOAuthGenerationRef = useRef(0);
+  const oauthMutationTokenRef = useRef<number | null>(null);
+  const serviceOAuthDisconnectControllerRef = useRef<{
+    generation: number;
+    controller: AbortController;
+  } | null>(null);
+  const serviceWidgetRefreshEpochRef = useRef(0);
+  const serviceWidgetRefreshGenerationsRef = useRef(new Map<string, number>());
+  const serviceModalVisibleRef = useRef(serviceModalVisible);
+  const serviceModalTargetIdRef = useRef(serviceModalTargetId);
+  const serviceModalTypeRef = useRef(serviceModalType);
+  const serviceCalendarProviderRef = useRef(serviceCalendarProvider);
+  const serviceEmailProviderRef = useRef(serviceEmailProvider);
+  serviceModalVisibleRef.current = serviceModalVisible;
+  serviceModalTargetIdRef.current = serviceModalTargetId;
+  serviceModalTypeRef.current = serviceModalType;
+  serviceCalendarProviderRef.current = serviceCalendarProvider;
+  serviceEmailProviderRef.current = serviceEmailProvider;
+
+  const invalidateServiceWidgetRefreshes = useCallback(() => {
+    // Advance a monotonic epoch before clearing per-widget counters. Clearing
+    // alone creates an ABA race: an old generation 1 and a new generation 1
+    // could otherwise both pass after provider connect/disconnect/switch.
+    serviceWidgetRefreshEpochRef.current += 1;
+    serviceWidgetRefreshGenerationsRef.current.clear();
+  }, []);
 
   // ─── Interactive furniture state ──────────────────────────────────────────
   const [interactInputId, setInteractInputId] = useState<string | null>(null);
   const [interactInputText, setInteractInputText] = useState('');
   const [interactAgentTarget, setInteractAgentTarget] = useState<string | null>(null);
+  const [interactSending, setInteractSending] = useState(false);
+  const [interactSendError, setInteractSendError] = useState('');
   const [floorEffects, setFloorEffects] = useState<Array<{ id: string; type: string; x: number; y: number; createdAt: number }>>([]);
+
+  useEffect(() => {
+    if (!interactInputId || Platform.OS !== 'web') return;
+    const frame = requestAnimationFrame(() => {
+      document.querySelector('[data-testid="office-command-review-input"]')?.scrollIntoView?.({ block: 'center', inline: 'nearest' });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [interactInputId]);
 
   // ─── Setup wizard ─────────────────────────────────────────────────────────
 
@@ -880,83 +1491,98 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
   // ─── Multi-connection state ──────────────────────────────
   const [connections, setConnections] = useState<AgentConnection[]>([]);
+  const connectionsRef = useRef<AgentConnection[]>([]);
+  // State provenance is separate from current auth: during a same-circle
+  // account/token swap, React may briefly retain the prior connection array.
+  const connectionsAuthorityRef = useRef<OfficeConnectionExactAuthority | null>(null);
   const pollersRef = useRef<Map<string, OpenSwanPoller>>(new Map());
+  const pollerGenerationsRef = useRef<Map<string, number>>(new Map());
   const sessionsRef = useRef<Map<string, OpenSwanSession[]>>(new Map());
+  const sessionFingerprintsRef = useRef<Map<string, OpenSwanConnectionFingerprint>>(new Map());
+  const officeSessionSnapshotRef = useRef(buildOfficeSessionSnapshot([], new Map(), new Map()));
   const [sessionsTick, setSessionsTick] = useState(0); // force re-render on session updates
+  connectionsRef.current = connections;
+  officeSessionSnapshotRef.current = buildOfficeSessionSnapshot(
+    connections,
+    sessionsRef.current,
+    sessionFingerprintsRef.current,
+  );
 
   // ─── Current user ─────────────────────────────────────────────────────────
-  const [currentUserId, setCurrentUserId] = useState<string>('');
-  const [currentUserName, setCurrentUserName] = useState<string>('');
-
   useEffect(() => {
     let cancelled = false;
-
-    (async () => {
-      try {
-        const { data } = await supabase.auth.getUser();
-        if (!data.user || cancelled) return;
-        setCurrentUserId(data.user.id);
-
-        try {
-          const { data: profile } = await supabase.from('profiles')
-            .select('display_name, username')
-            .eq('id', data.user.id)
-            .single();
-
-          if (!cancelled) {
-            setCurrentUserName(profile?.display_name || profile?.username || 'Agent');
-          }
-        } catch {}
-      } catch {}
-    })();
+    const requestedAuthority = committedAuthAuthority;
+    if (!requestedAuthority || !isOfficeAuthorityCurrent(requestedAuthority)) {
+      setCurrentUserName('');
+      return () => { cancelled = true; };
+    }
+    Promise.resolve(supabase.from('profiles')
+      .select('display_name, username')
+      .eq('id', requestedAuthority.userId)
+      .setHeader('Authorization', `Bearer ${requestedAuthority.accessToken}`)
+      .single())
+      .then(({ data: profile }) => {
+        if (!cancelled && isOfficeAuthorityCurrent(requestedAuthority)) {
+          setCurrentUserName(profile?.display_name || profile?.username || 'Agent');
+        }
+      })
+      .catch(() => {});
 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [committedAuthAuthority, isOfficeAuthorityCurrent]);
 
   useEffect(() => {
-    getCircleSessionMemoryMode(circleId).then(setSessionMemoryMode).catch(() => {});
-  }, [circleId]);
+    const requestedAuthority = captureOfficeAuthority();
+    if (!requestedAuthority) {
+      setSessionMemoryMode('private');
+      return;
+    }
+    const requestIsCurrent = () => isOfficeAuthorityCurrent(requestedAuthority);
+    void loadOfficeCircleSessionMemoryMode(
+      circleId,
+      toOfficeDashboardAuthority(requestedAuthority),
+      requestIsCurrent,
+    ).then((result) => {
+      if (requestIsCurrent()) setSessionMemoryMode(result.mode);
+    }).catch(() => {});
+  }, [captureOfficeAuthority, circleId, committedAuthScopeKey, isOfficeAuthorityCurrent]);
 
   const toggleSessionMemoryMode = useCallback(async () => {
     if (savingSessionMemoryMode) return;
+    const requestedAuthority = captureOfficeAuthority();
+    if (!requestedAuthority) return;
+    const requestIsCurrent = () => isOfficeAuthorityCurrent(requestedAuthority);
     const nextMode: 'private' | 'shared' = sessionMemoryMode === 'shared' ? 'private' : 'shared';
     setSavingSessionMemoryMode(true);
     try {
-      const { data, error } = await supabase
-        .from('circles')
-        .select('settings')
-        .eq('id', circleId)
-        .single();
-      if (error) throw error;
-
-      const { error: updateError } = await supabase
-        .from('circles')
-        .update({
-          settings: {
-            ...(data?.settings || {}),
-            sessionMemoryMode: nextMode,
-          },
-        })
-        .eq('id', circleId);
-      if (updateError) throw updateError;
-
-      setSessionMemoryMode(nextMode);
+      const result = await saveOfficeCircleSessionMemoryMode(
+        circleId,
+        nextMode,
+        toOfficeDashboardAuthority(requestedAuthority),
+        requestIsCurrent,
+      );
+      if (!result.ok) throw new Error(result.error);
+      if (requestIsCurrent()) setSessionMemoryMode(nextMode);
     } catch (err) {
-      console.error('[OfficeTab] Failed to update session memory mode:', err);
+      if (requestIsCurrent()) console.error('[OfficeTab] Failed to update session memory mode:', err);
     } finally {
-      setSavingSessionMemoryMode(false);
+      if (requestIsCurrent()) setSavingSessionMemoryMode(false);
     }
-  }, [circleId, savingSessionMemoryMode, sessionMemoryMode]);
+  }, [captureOfficeAuthority, circleId, isOfficeAuthorityCurrent, savingSessionMemoryMode, sessionMemoryMode]);
 
   // ─── Circle Office (shared agents from all members) ──────────────────────
   const [circleOfficeAgents, setCircleOfficeAgents] = useState<CircleOfficeAgent[]>([]);
+  const [officeAgentSessionBindings, setOfficeAgentSessionBindings] = useState<Map<string, OfficeAgentSessionBindingRecord>>(new Map());
   const [publishCtaDismissed, setPublishCtaDismissed] = useState(false);
   const [publishingToCircle, setPublishingToCircle] = useState(false);
   const readyFired = useRef(false);
-  const circleOfficeLoadInFlightRef = useRef<Promise<void> | null>(null);
-  const pendingCircleOfficeRefreshRef = useRef(false);
+  const circleOfficeLoadInFlightRef = useRef<{
+    scope: string;
+    promise: Promise<void>;
+  } | null>(null);
+  const pendingCircleOfficeRefreshRef = useRef<Set<string>>(new Set());
   const scheduledCircleOfficeRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const markOfficeReady = useCallback(() => {
     if (!readyFired.current && onReadyRef.current) {
@@ -966,29 +1592,46 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   }, []);
 
   const loadCircleOffice = useCallback(async () => {
-    if (circleOfficeLoadInFlightRef.current) {
-      pendingCircleOfficeRefreshRef.current = true;
-      return circleOfficeLoadInFlightRef.current;
+    const requestedAuthority = authAuthorityRef.current;
+    if (
+      !requestedAuthority
+      || requestedAuthority.circleId !== circleId
+      || floorLayoutScope !== `${requestedAuthority.userId}:${requestedAuthority.circleId}`
+    ) return;
+    const requestedScope = `${floorLayoutScope}:${requestedAuthority.generation}`;
+    if (circleOfficeLoadInFlightRef.current?.scope === requestedScope) {
+      pendingCircleOfficeRefreshRef.current.add(requestedScope);
+      return circleOfficeLoadInFlightRef.current.promise;
     }
+    const requestIsCurrent = () => (
+      authAuthorityRef.current?.userId === requestedAuthority.userId
+      && authAuthorityRef.current?.circleId === requestedAuthority.circleId
+      && authAuthorityRef.current?.accessToken === requestedAuthority.accessToken
+      && authAuthorityRef.current?.generation === requestedAuthority.generation
+      && layoutSaveScopeRef.current === floorLayoutScope
+    );
     const run = (async () => {
       try {
-        const { agents } = await loadCircleOfficeAgents(circleId);
+        const { agents } = await loadCircleOfficeAgents(circleId, {
+          userId: requestedAuthority.userId,
+          accessToken: requestedAuthority.accessToken,
+        });
+        if (!requestIsCurrent()) return;
         setCircleOfficeAgents(agents);
       } catch (error) {
-        console.warn('[OfficeTab] loadCircleOffice failed:', error);
-      } finally {
-        // Shared office agents should not block the shell from rendering.
-        markOfficeReady();
-        circleOfficeLoadInFlightRef.current = null;
+        if (requestIsCurrent()) console.warn('[OfficeTab] loadCircleOffice failed:', error);
       }
     })();
-    circleOfficeLoadInFlightRef.current = run;
+    const inFlight = { scope: requestedScope, promise: run };
+    circleOfficeLoadInFlightRef.current = inFlight;
     await run;
-    if (pendingCircleOfficeRefreshRef.current) {
-      pendingCircleOfficeRefreshRef.current = false;
+    if (circleOfficeLoadInFlightRef.current === inFlight) {
+      circleOfficeLoadInFlightRef.current = null;
+    }
+    if (pendingCircleOfficeRefreshRef.current.delete(requestedScope) && requestIsCurrent()) {
       void loadCircleOffice();
     }
-  }, [circleId, markOfficeReady]);
+  }, [circleId, committedAuthScopeKey, floorLayoutScope]);
 
   const scheduleCircleOfficeRefresh = useCallback((delayMs = 0) => {
     if (scheduledCircleOfficeRefreshRef.current) {
@@ -1010,7 +1653,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   onReadyRef.current = onReady;
 
   useEffect(() => {
-    setAutoConnectCircleId(circleId);
+    setCircleOfficeAgents([]);
+    setLiveUserIds(new Set());
+    setCircleConnectionStatus('offline');
+    pendingCircleOfficeRefreshRef.current.clear();
+    if (!authReady || !floorLayoutScope) return undefined;
     void loadCircleOffice();
     const unsub = subscribeToCircleOffice(circleId, loadCircleOffice);
     return () => {
@@ -1020,31 +1667,36 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       }
       unsub();
     };
-    // Intentionally omit loadCircleOffice from deps — it only needs circleId
-    // to change to re-fire. Including it caused the subscribe churn above.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [circleId]);
+  }, [authReady, circleId, floorLayoutScope, loadCircleOffice]);
 
   useEffect(() => {
     let cancelled = false;
-    storage.getItem(publishCtaDismissedKey(circleId)).then((raw) => {
+    if (!currentUserId) {
+      setPublishCtaDismissed(false);
+      return () => { cancelled = true; };
+    }
+    const requestedScope = floorLayoutScope;
+    storage.getItem(publishCtaDismissedKey(currentUserId, circleId)).then((raw) => {
       if (cancelled) return;
+      if (layoutSaveScopeRef.current !== requestedScope) return;
       setPublishCtaDismissed(raw === '1');
     }).catch(() => {});
     return () => { cancelled = true; };
-  }, [circleId]);
+  }, [circleId, currentUserId, floorLayoutScope]);
 
   useEffect(() => {
     if (currentUserId && circleOfficeAgents.some((agent) => agent.ownerId === currentUserId) && publishCtaDismissed) {
       setPublishCtaDismissed(false);
-      storage.removeItem(publishCtaDismissedKey(circleId)).catch(() => {});
+      storage.removeItem(publishCtaDismissedKey(currentUserId, circleId)).catch(() => {});
     }
   }, [circleId, circleOfficeAgents, currentUserId, publishCtaDismissed]);
 
   const dismissPublishCta = useCallback(() => {
     setPublishCtaDismissed(true);
-    storage.setItem(publishCtaDismissedKey(circleId), '1').catch(() => {});
-  }, [circleId]);
+    if (currentUserId) {
+      storage.setItem(publishCtaDismissedKey(currentUserId, circleId), '1').catch(() => {});
+    }
+  }, [circleId, currentUserId]);
 
   // Live presence state — userId → isOnline flag from Supabase Realtime
   const [liveUserIds, setLiveUserIds] = useState<Set<string>>(new Set());
@@ -1052,20 +1704,38 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
   // Start heartbeat + join Realtime Presence when we have connected agents
   useEffect(() => {
+    let cancelled = false;
+    let heartbeatCleanup: (() => Promise<void>) | null = null;
+    let presenceCleanup: (() => Promise<void>) | null = null;
     const connectedConns = connections.filter(c => c.status === 'connected');
+    const requestedAuthority = authAuthorityRef.current;
+    const requestedScope = floorLayoutScope;
+    const requestIsCurrent = () => (
+      !cancelled
+      && requestedAuthority
+      && authAuthorityRef.current?.userId === requestedAuthority.userId
+      && authAuthorityRef.current?.circleId === requestedAuthority.circleId
+      && authAuthorityRef.current?.accessToken === requestedAuthority.accessToken
+      && authAuthorityRef.current?.generation === requestedAuthority.generation
+      && layoutSaveScopeRef.current === requestedScope
+    );
 
-    // Start idle behavior scheduler (runs alongside heartbeat)
-    const isOwner = userEmail === OWNER_EMAIL;
-    if (userId) {
-      startIdleScheduler(circleId, userId, isOwner, () => idleConfigRef.current, (updated) => {
-        setIdleConfig(updated);
-        idleConfigRef.current = updated;
+    if (connectedConns.length > 0 && requestedAuthority && requestedScope) {
+      const authority = {
+        userId: requestedAuthority.userId,
+        accessToken: requestedAuthority.accessToken,
+        displayName: currentUserName || undefined,
+      };
+      // DB heartbeat layer. Its returned cleanup is bound to this exact
+      // lifecycle generation, so account-A teardown cannot idle account B.
+      void startHeartbeat(circleId, connectedConns, authority).then((cleanup) => {
+        if (!requestIsCurrent()) {
+          void cleanup();
+          return;
+        }
+        heartbeatCleanup = cleanup;
+        scheduleCircleOfficeRefresh();
       });
-    }
-
-    if (connectedConns.length > 0) {
-      // DB heartbeat layer
-      startHeartbeat(circleId, connectedConns).then(() => scheduleCircleOfficeRefresh());
 
       // Build live agent states from connections
       const myAgents: AgentLiveState[] = connectedConns.map(conn => ({
@@ -1079,36 +1749,117 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
       // Realtime Presence layer
       setCircleConnectionStatus('connecting');
-      joinPresenceChannel(circleId, myAgents, {
+      void joinPresenceChannel(circleId, myAgents, {
         onSync: (state) => {
+          if (!requestIsCurrent()) return;
           const live = extractLiveAgents(state);
           setLiveUserIds(new Set(live.keys()));
         },
-        onJoin: (userId) => {
-          setLiveUserIds(prev => new Set([...prev, userId]));
+        onJoin: (joinedUserId) => {
+          if (!requestIsCurrent()) return;
+          setLiveUserIds(prev => new Set([...prev, joinedUserId]));
           scheduleCircleOfficeRefresh(150);
         },
-        onLeave: (userId) => {
+        onLeave: (leftUserId) => {
+          if (!requestIsCurrent()) return;
           setLiveUserIds(prev => {
             const next = new Set(prev);
-            next.delete(userId);
+            next.delete(leftUserId);
             return next;
           });
           scheduleCircleOfficeRefresh(3000);
         },
         onConnectionStatus: (status) => {
-          setCircleConnectionStatus(status);
+          if (requestIsCurrent()) setCircleConnectionStatus(status);
         },
+      }, authority).then((cleanup) => {
+        if (!requestIsCurrent()) {
+          void cleanup();
+          return;
+        }
+        presenceCleanup = cleanup;
       });
     }
 
     return () => {
-      stopHeartbeat(circleId);
-      leavePresenceChannel(circleId);
-      stopIdleScheduler(circleId);
+      cancelled = true;
+      void heartbeatCleanup?.();
+      void presenceCleanup?.();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps — identity signature, not count
-  }, [circleId, connections.filter(c => c.status === 'connected').map(c => c.id).join(','), scheduleCircleOfficeRefresh]);
+  }, [
+    circleId,
+    committedAuthScopeKey,
+    connections.filter(c => c.status === 'connected').map(c => c.id).join(','),
+    currentUserName,
+    floorLayoutScope,
+    scheduleCircleOfficeRefresh,
+    userEmail,
+    userId,
+  ]);
+
+  // Presentation presence may promote a floor avatar to idle, but it never
+  // grants terminal execution authority. Build the canonical terminal target
+  // set once and reuse it for the picker, direct dispatch, and Realtime
+  // dispatch so @all cannot widen beyond what the user was allowed to select.
+  const mergedCircleAgents = useMemo(() => circleOfficeAgents.map(agent => ({
+    ...agent,
+    status: (liveUserIds.has(agent.ownerId) && agent.status === 'offline')
+      ? 'idle' as const
+      : agent.status,
+  })), [circleOfficeAgents, liveUserIds]);
+  const commandTargetAgents = useMemo<TerminalNativeCommandTarget[]>(() => {
+    const openSwanReadyAgentIds = new Set<string>();
+    for (const durableAgent of mergedCircleAgents) {
+      if (durableAgent.ownerId !== currentUserId || durableAgent.provider !== 'openswan') continue;
+      const binding = officeAgentSessionBindings.get(durableAgent.id) || null;
+      const resolution = resolveOfficeAgentSessionBinding({
+        officeAgentId: durableAgent.id,
+        binding,
+        connections: officeSessionSnapshotRef.current.connections,
+        sessionsByConnection: officeSessionSnapshotRef.current.sessionsByConnection,
+        sessionFingerprintsByConnection: officeSessionSnapshotRef.current.sessionFingerprintsByConnection,
+      });
+      if (resolution.ok) openSwanReadyAgentIds.add(durableAgent.id);
+    }
+    return buildTerminalNativeCommandTargets({
+      currentUserId,
+      connections,
+      officeAgents: mergedCircleAgents,
+      openSwanReadyAgentIds,
+      virtualDisplayName: DEFAULT_AGENT.name,
+    });
+  }, [connections, currentUserId, mergedCircleAgents, officeAgentSessionBindings, sessionsTick]);
+  const terminalDispatchAgents = useMemo<CircleOfficeAgent[]>(() => (
+    commandTargetAgents.flatMap((target) => {
+      if (target.id === BLACKSWAN_AGENT_ID || !target.connectionId) return [];
+      const durable = mergedCircleAgents.find(agent => agent.id === target.id);
+      const connection = connections.find(candidate => (
+        candidate.id === target.connectionId
+        && candidate.enabled
+        && candidate.status === 'connected'
+      ));
+      if (!durable || !connection) return [];
+      return [{
+        ...durable,
+        gatewayUrl: connection.endpoint,
+        // Exact live connection/binding evidence is the execution liveness
+        // authority. Normalize stale presentation status once so single,
+        // multi-select, and @all invoke the same visible executable set.
+        status: durable.status === 'active' || durable.status === 'building'
+          ? durable.status
+          : 'idle' as const,
+      }];
+    })
+  ), [commandTargetAgents, connections, mergedCircleAgents]);
+  const terminalDispatchAgentsRef = useRef<CircleOfficeAgent[]>(terminalDispatchAgents);
+  terminalDispatchAgentsRef.current = terminalDispatchAgents;
+  const ownedTerminalListenerIds = useMemo(() => (
+    circleOfficeAgents
+      .filter(agent => agent.ownerId === currentUserId && isUuidLike(agent.id))
+      .map(agent => agent.id)
+      .sort()
+  ), [circleOfficeAgents, currentUserId]);
+  const ownedTerminalListenerSignature = ownedTerminalListenerIds.join('|');
 
   // ─── Direct invocation handler (called by OfficeTerminal after send) ─────
   const handleCommandSent = useCallback((params: {
@@ -1121,11 +1872,29 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     targetAgentSubjects?: AgentRuntimeSubjectMetadata[] | null;
     model: string | null;
     senderId: string;
+    authority: TerminalExactAuthority;
+    targetFingerprint: string;
+    receipt: TerminalCommandDispatchReceipt;
   }) => {
+    if (
+      params.messageId !== params.receipt.messageId
+      || params.senderId !== params.authority.userId
+      || params.authority.circleId !== circleId
+      || !isTerminalCommandDispatchReceiptCurrent({
+        receipt: params.receipt,
+        expectedAuthority: params.authority,
+        expectedTargetFingerprint: params.targetFingerprint,
+        isCurrent: isOfficeAuthorityCurrent,
+      })
+    ) return;
+    const exactExecution = captureOfficeInvocationExecution(params.authority);
+    if (!exactExecution) return;
     const blackSwanAgent = createBlackSwanAgent(circleId);
-    const myAgents = circleOfficeAgents.filter(a => a.ownerId === currentUserId);
-    // Use the actual connected endpoint, not hardcoded localhost
-    const gwUrl = getOpenSwanEndpoint(connections) || undefined;
+    // Persistence and the advisory wake-up are awaited in OfficeTerminal.
+    // Re-read exact authority now so a disconnect/session switch during that
+    // await cannot dispatch through a stale captured gateway.
+    const dispatchableAgents = terminalDispatchAgentsRef.current;
+    const officeSessionSnapshot = officeSessionSnapshotRef.current;
 
     const baseReq = {
       messageId: params.messageId,
@@ -1138,25 +1907,28 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       model: params.model,
     };
 
-    const blackSwanTargeted =
-      params.targetAgentId === BLACKSWAN_AGENT_ID
-      || params.targetAgentName?.toLowerCase().includes('blackswan')
-      || params.targetAgentName?.toLowerCase().includes('swan')
-      || params.targetAgentIds?.includes(BLACKSWAN_AGENT_ID);
+    const blackSwanTargeted = isVirtualBlackSwanTarget(params);
 
     if (params.targetAgentIds && params.targetAgentIds.length > 0) {
       if (params.targetAgentIds.includes(BLACKSWAN_AGENT_ID) || blackSwanTargeted) {
         invokeAndStream(
           { ...baseReq, targetAgentId: BLACKSWAN_AGENT_ID, targetAgentName: '@BlackSwan' },
           blackSwanAgent,
+          undefined,
+          undefined,
+          officeSessionSnapshot,
+          exactExecution,
         ).catch(err => console.error('[OfficeTab] BlackSwan invocation failed:', err));
       }
-      const myTargetedAgents = myAgents.filter(a => params.targetAgentIds!.includes(a.id));
+      const myTargetedAgents = dispatchableAgents.filter(a => params.targetAgentIds!.includes(a.id));
       if (myTargetedAgents.length > 0) {
         invokeSelectedAgents(
           baseReq, myTargetedAgents,
           params.targetAgentIds.filter(id => id !== BLACKSWAN_AGENT_ID),
-          gwUrl,
+          undefined,
+          undefined,
+          officeSessionSnapshot,
+          exactExecution,
         ).catch(err => console.error('[OfficeTab] Multi-select invocation failed:', err));
       }
     } else if (params.targetAgentId) {
@@ -1164,14 +1936,21 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         invokeAndStream(
           { ...baseReq, targetAgentId: BLACKSWAN_AGENT_ID, targetAgentName: '@BlackSwan' },
           blackSwanAgent,
+          undefined,
+          undefined,
+          officeSessionSnapshot,
+          exactExecution,
         ).catch(err => console.error('[OfficeTab] BlackSwan invocation failed:', err));
       } else {
-        const agent = myAgents.find(a => a.id === params.targetAgentId);
+        const agent = dispatchableAgents.find(a => a.id === params.targetAgentId);
         if (agent) {
           invokeAndStream(
             { ...baseReq, targetAgentId: agent.id, targetAgentName: `@${agent.name}` },
             agent,
-            gwUrl,
+            undefined,
+            undefined,
+            officeSessionSnapshot,
+            exactExecution,
           ).catch(err => console.error('[OfficeTab] Invocation failed:', err));
         }
       }
@@ -1180,33 +1959,58 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       invokeAndStream(
         { ...baseReq, targetAgentId: BLACKSWAN_AGENT_ID, targetAgentName: '@BlackSwan' },
         blackSwanAgent,
+        undefined,
+        undefined,
+        officeSessionSnapshot,
+        exactExecution,
       ).catch(err => console.error('[OfficeTab] BlackSwan @all invocation failed:', err));
-      if (myAgents.length > 0) {
-        invokeAllAgents(baseReq, myAgents, gwUrl)
+      if (dispatchableAgents.length > 0) {
+        invokeAllAgents(
+          baseReq,
+          dispatchableAgents,
+          undefined,
+          undefined,
+          officeSessionSnapshot,
+          exactExecution,
+        )
           .catch(err => console.error('[OfficeTab] Multi-agent invocation failed:', err));
       }
     }
-  }, [circleId, currentUserId, circleOfficeAgents, connections]);
+  }, [captureOfficeInvocationExecution, circleId, isOfficeAuthorityCurrent]);
 
   // ─── Terminal command subscription ────────────────────────────────────────
-  // Listen for commands targeting my agents + BlackSwan; invoke accordingly
-  // Resolve the gateway URL from active connections (not hardcoded)
-  const resolvedGatewayUrl = getOpenSwanEndpoint(connections);
+  // Keep one listener across heartbeat/session polls. Its durable listener-id
+  // superset changes only when owned Office rows change; the callback reads
+  // the latest exact executable authority from a ref. Re-subscribing on every
+  // ephemeral poll would create a wake-up loss window because broadcasts have
+  // no backlog.
 
   useEffect(() => {
-    if (!currentUserId || !circleId) return;
+    const requestedAuthority = captureOfficeAuthority();
+    if (!currentUserId || !circleId || !requestedAuthority) return;
+    const exactExecution = captureOfficeInvocationExecution(requestedAuthority);
+    if (!exactExecution) return;
 
-    const myAgents = circleOfficeAgents.filter(a => a.ownerId === currentUserId);
     const blackSwanAgent = createBlackSwanAgent(circleId);
 
-    // Include both my agent IDs and BlackSwan's ID in the subscription filter
-    const myAgentIds = myAgents.map(a => a.id);
-    const listenIds = [...myAgentIds, BLACKSWAN_AGENT_ID];
+    // Listening to all owned durable ids is safe: the callback still dispatches
+    // only the current exact live/bound subset from terminalDispatchAgentsRef.
+    const listenIds = [...ownedTerminalListenerIds, BLACKSWAN_AGENT_ID];
 
     // Need at least BlackSwan to listen (always active)
     if (listenIds.length === 0) return;
 
-    const unsub = subscribeToTerminalCommands(circleId, listenIds, async (cmd: BroadcastCommandPayload) => {
+    const unsub = subscribeToTerminalCommandsExact(
+      requestedAuthority,
+      listenIds,
+      isOfficeAuthorityCurrent,
+      async ({ command: cmd, receipt }) => {
+      if (!isTerminalCommandDispatchReceiptCurrent({
+        receipt,
+        expectedAuthority: requestedAuthority,
+        expectedTargetFingerprint: receipt.target.fingerprint,
+        isCurrent: isOfficeAuthorityCurrent,
+      })) return;
       // Skip commands we sent ourselves — already handled via direct invocation (onCommandSent)
       if (cmd.senderId === currentUserId) return;
       const baseReq = {
@@ -1220,15 +2024,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         model: cmd.model,
       };
 
-      // Use connection endpoint, not hardcoded localhost
-      const gwUrl = resolvedGatewayUrl || undefined;
+      const dispatchableAgents = terminalDispatchAgentsRef.current;
+      const officeSessionSnapshot = officeSessionSnapshotRef.current;
 
       // Helper: check if BlackSwan is targeted
-      const blackSwanTargeted =
-        cmd.targetAgentId === BLACKSWAN_AGENT_ID
-        || cmd.targetAgentName?.toLowerCase().includes('blackswan')
-        || cmd.targetAgentName?.toLowerCase().includes('swan')
-        || cmd.targetAgentIds?.includes(BLACKSWAN_AGENT_ID);
+      const blackSwanTargeted = isVirtualBlackSwanTarget(cmd);
 
       if (cmd.targetAgentIds && cmd.targetAgentIds.length > 0) {
         // Multi-select — invoke selected agents in parallel
@@ -1237,16 +2037,23 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           invokeAndStream(
             { ...baseReq, targetAgentId: BLACKSWAN_AGENT_ID, targetAgentName: '@BlackSwan' },
             blackSwanAgent,
+            undefined,
+            undefined,
+            officeSessionSnapshot,
+            exactExecution,
           ).catch(err => console.error('[OfficeTab] BlackSwan invocation failed:', err));
         }
         // Invoke user's agents that are in the multi-select
-        const myTargetedAgents = myAgents.filter(a => cmd.targetAgentIds!.includes(a.id));
+        const myTargetedAgents = dispatchableAgents.filter(a => cmd.targetAgentIds!.includes(a.id));
         if (myTargetedAgents.length > 0) {
           invokeSelectedAgents(
             baseReq,
             myTargetedAgents,
             cmd.targetAgentIds.filter(id => id !== BLACKSWAN_AGENT_ID),
-            gwUrl
+            undefined,
+            undefined,
+            officeSessionSnapshot,
+            exactExecution,
           ).catch(err => console.error('[OfficeTab] Multi-select invocation failed:', err));
         }
       } else if (cmd.targetAgentId || blackSwanTargeted) {
@@ -1256,15 +2063,22 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           invokeAndStream(
             { ...baseReq, targetAgentId: BLACKSWAN_AGENT_ID, targetAgentName: '@BlackSwan' },
             blackSwanAgent,
+            undefined,
+            undefined,
+            officeSessionSnapshot,
+            exactExecution,
           ).catch(err => console.error('[OfficeTab] BlackSwan invocation failed:', err));
         } else {
-          const agent = myAgents.find(a => a.id === cmd.targetAgentId);
+          const agent = dispatchableAgents.find(a => a.id === cmd.targetAgentId);
           if (!agent) return;
 
           invokeAndStream(
             { ...baseReq, targetAgentId: agent.id, targetAgentName: `@${agent.name}` },
             agent,
-            gwUrl
+            undefined,
+            undefined,
+            officeSessionSnapshot,
+            exactExecution,
           ).catch(err => console.error('[OfficeTab] Invocation failed:', err));
         }
       } else {
@@ -1272,33 +2086,68 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         invokeAndStream(
           { ...baseReq, targetAgentId: BLACKSWAN_AGENT_ID, targetAgentName: '@BlackSwan' },
           blackSwanAgent,
+          undefined,
+          undefined,
+          officeSessionSnapshot,
+          exactExecution,
         ).catch(err => console.error('[OfficeTab] BlackSwan @all invocation failed:', err));
 
-        if (myAgents.length > 0) {
+        if (dispatchableAgents.length > 0) {
           invokeAllAgents(
             { ...baseReq, targetAgentName: '@all' },
-            myAgents,
-            gwUrl
+            dispatchableAgents,
+            undefined,
+            undefined,
+            officeSessionSnapshot,
+            exactExecution,
           ).catch(err => console.error('[OfficeTab] Multi-agent invocation failed:', err));
         }
       }
-    });
+      },
+    );
 
     return () => {
       unsub();
-      cleanupTerminalChannels(circleId);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps — identity signature, not count
-  }, [circleId, currentUserId, circleOfficeAgents.filter(a => a.ownerId === currentUserId).map(a => a.id).join(','), resolvedGatewayUrl]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps — exact sorted durable-id signature
+  }, [circleId, committedAuthAuthority?.generation, committedAuthScopeKey, currentUserId, ownedTerminalListenerSignature]);
 
-  // Merge live presence into circle office agents
-  const mergedCircleAgents = circleOfficeAgents.map(agent => ({
-    ...agent,
-    // Override status with 'idle' if user is live in Presence but DB shows offline
-    status: (liveUserIds.has(agent.ownerId) && agent.status === 'offline')
-      ? 'idle' as const
-      : agent.status,
-  }));
+  useEffect(() => {
+    let cancelled = false;
+    const ownUuidAgentIds = mergedCircleAgents
+      .filter(agent => agent.ownerId === currentUserId && isUuidLike(agent.id))
+      .map(agent => agent.id)
+      .sort();
+    if (ownUuidAgentIds.length === 0) {
+      setOfficeAgentSessionBindings(new Map());
+      return () => { cancelled = true; };
+    }
+    void readOfficeAgentSessionBindingsBatch(ownUuidAgentIds).then((result) => {
+      if (cancelled) return;
+      if (result.ok) {
+        setOfficeAgentSessionBindings(new Map(result.bindings));
+        return;
+      }
+      if (result.reason === 'transient_transport') {
+        const stillOwned = new Set(ownUuidAgentIds);
+        setOfficeAgentSessionBindings((current) => new Map(
+          Array.from(current).filter(([agentId]) => stillOwned.has(agentId)),
+        ));
+        return;
+      }
+      // Missing schema, denied access, or malformed rows cannot remain
+      // presentation authority. The exact invocation path independently reads
+      // one fresh binding again before any provider I/O.
+      setOfficeAgentSessionBindings(new Map());
+    }).catch(() => {
+      if (cancelled) return;
+      const stillOwned = new Set(ownUuidAgentIds);
+      setOfficeAgentSessionBindings((current) => new Map(
+        Array.from(current).filter(([agentId]) => stillOwned.has(agentId)),
+      ));
+    });
+    return () => { cancelled = true; };
+  }, [currentUserId, mergedCircleAgents.map(agent => `${agent.id}:${agent.ownerId}:${agent.updatedAt}`).join('|'), sessionsTick]);
 
   // Publish the user's first connection as their circle office agent
   // ─── Manual agent publish modal ──────────────────────────────────────────
@@ -1330,6 +2179,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     overrideProvider?: string
   ) => {
     if (publishingToCircle) return;
+    const requestedAuthority = authAuthorityRef.current;
+    if (!requestedAuthority || requestedAuthority.circleId !== circleId) {
+      handleActionResult('Sign in again before publishing an agent.');
+      return;
+    }
+    const requestIsCurrent = () => (
+      authAuthorityRef.current?.userId === requestedAuthority.userId
+      && authAuthorityRef.current?.circleId === requestedAuthority.circleId
+      && authAuthorityRef.current?.accessToken === requestedAuthority.accessToken
+      && authAuthorityRef.current?.generation === requestedAuthority.generation
+    );
 
     // Prefer passed values → connected conn → modal values → defaults
     const conn = connections.find(c => c.enabled);
@@ -1348,7 +2208,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         name: agentName,
         color: agentColor,
         toolIcon: display.icon,
+      }, {
+        userId: requestedAuthority.userId,
+        accessToken: requestedAuthority.accessToken,
       });
+      if (!requestIsCurrent()) return;
       if (result.error) {
         const message = result.error === 'agent_hidden'
           ? 'This agent is hidden from the Circle Office right now. Reconnect or rename it before publishing again.'
@@ -1360,13 +2224,24 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       handleActionResult(`${agentName} is now visible in the Circle Office.`);
       setShowPublishModal(false);
     } finally {
-      setPublishingToCircle(false);
+      if (requestIsCurrent()) setPublishingToCircle(false);
     }
   }, [circleId, connections, handleActionResult, publishingToCircle, publishName, publishProvider, scheduleCircleOfficeRefresh]);
 
   // Auto-publish when a connection becomes connected for the first time
   const autoPublishedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
+    autoPublishedRef.current.clear();
+  }, [committedAuthAuthority?.generation]);
+  useEffect(() => {
+    const requestedAuthority = authAuthorityRef.current;
+    if (!requestedAuthority || requestedAuthority.circleId !== circleId) return;
+    const requestIsCurrent = () => (
+      authAuthorityRef.current?.userId === requestedAuthority.userId
+      && authAuthorityRef.current?.circleId === requestedAuthority.circleId
+      && authAuthorityRef.current?.accessToken === requestedAuthority.accessToken
+      && authAuthorityRef.current?.generation === requestedAuthority.generation
+    );
     const connectedConns = connections.filter(c => c.status === 'connected');
     for (const conn of connectedConns) {
       if (!autoPublishedRef.current.has(conn.id)) {
@@ -1378,11 +2253,16 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           name: conn.name,
           color: conn.color || display.color,
           toolIcon: display.icon,
-        }).then(() => scheduleCircleOfficeRefresh(150));
+        }, {
+          userId: requestedAuthority.userId,
+          accessToken: requestedAuthority.accessToken,
+        }).then(() => {
+          if (requestIsCurrent()) scheduleCircleOfficeRefresh(150);
+        });
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps — identity signature, not count
-  }, [circleId, connections.filter(c => c.status === 'connected').map(c => c.id).join(','), scheduleCircleOfficeRefresh]);
+  }, [circleId, committedAuthScopeKey, connections.filter(c => c.status === 'connected').map(c => c.id).join(','), scheduleCircleOfficeRefresh]);
 
   // ─── Telegram state ──────────────────────────────
   const [telegramConfig, setTelegramConfig] = useState<TelegramConfig>({ botToken: '', chatId: '' });
@@ -1401,23 +2281,36 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
   // ─── Connection helpers ──────────────────────────────
 
-  const connectOne = useCallback(async (conn: AgentConnection) => {
+  const connectOne = useCallback(async (
+    conn: AgentConnection,
+    capturedAuthority?: OfficeConnectionExactAuthority,
+  ) => {
+    const requestedAuthority = capturedAuthority ?? captureOfficeAuthority();
+    if (!requestedAuthority || !isOfficeAuthorityCurrent(requestedAuthority)) return;
+    const generation = (pollerGenerationsRef.current.get(conn.id) || 0) + 1;
+    pollerGenerationsRef.current.set(conn.id, generation);
+    const priorPoller = pollersRef.current.get(conn.id);
+    if (priorPoller) priorPoller.stop();
+    pollersRef.current.delete(conn.id);
+    sessionsRef.current.delete(conn.id);
+    sessionFingerprintsRef.current.delete(conn.id);
     if (shouldSkipOpenSwanConnectionAttempt(conn)) {
       setConnections(prev => {
+        if (!isOfficeAuthorityCurrent(requestedAuthority)) return prev;
         const updated = prev.map(c => c.id === conn.id ? {
           ...c,
           status: 'error' as const,
           error: 'Authentication failed — wrong or missing token',
         } : c);
-        updateAutoConnectConnections(updated);
         return updated;
       });
       return;
     }
-    // Update status to connecting (local + singleton)
+    // Status is private to this exact Office authority. The app-level
+    // auto-connect singleton is intentionally not an Office data source.
     setConnections(prev => {
+      if (!isOfficeAuthorityCurrent(requestedAuthority)) return prev;
       const updated = prev.map(c => c.id === conn.id ? { ...c, status: 'connecting' as const, error: undefined } : c);
-      updateAutoConnectConnections(updated);
       return updated;
     });
 
@@ -1426,11 +2319,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       endpoint: conn.endpoint,
       token: conn.token,
     });
+    if (
+      pollerGenerationsRef.current.get(conn.id) !== generation
+      || !isOfficeAuthorityCurrent(requestedAuthority)
+    ) return;
 
     if (!result.ok) {
       setConnections(prev => {
+        if (!isOfficeAuthorityCurrent(requestedAuthority)) return prev;
         const updated = prev.map(c => c.id === conn.id ? { ...c, status: 'error' as const, error: result.error || 'Connection failed' } : c);
-        updateAutoConnectConnections(updated);
         return updated;
       });
       return;
@@ -1438,6 +2335,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
     if (!supportsOpenSwanRpc(conn.provider)) {
       setConnections(prev => {
+        if (!isOfficeAuthorityCurrent(requestedAuthority)) return prev;
         const updated = prev.map(c => c.id === conn.id ? {
           ...c,
           status: 'connected' as const,
@@ -1446,24 +2344,42 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           agentIds: [],
           lastConnected: new Date().toISOString(),
         } : c);
-        updateAutoConnectConnections(updated);
         return updated;
       });
       return;
     }
 
     const config: OpenSwanConfig = { endpoint: conn.endpoint, token: conn.token };
+    const connectionFingerprint = buildOpenSwanConnectionFingerprint(conn);
+    if (!connectionFingerprint) {
+      setConnections(prev => {
+        if (!isOfficeAuthorityCurrent(requestedAuthority)) return prev;
+        const updated = prev.map(c => c.id === conn.id ? {
+          ...c,
+          status: 'error' as const,
+          error: 'Invalid OpenSwan connection identity',
+        } : c);
+        return updated;
+      });
+      return;
+    }
 
     // Store initial sessions from the successful rich-bridge test result
     sessionsRef.current.set(conn.id, result.sessions || []);
+    sessionFingerprintsRef.current.set(conn.id, connectionFingerprint);
 
     // Fetch agent ids
     let agentIds: string[] = [];
     const agentsResult = await listAgents(config);
+    if (
+      pollerGenerationsRef.current.get(conn.id) !== generation
+      || !isOfficeAuthorityCurrent(requestedAuthority)
+    ) return;
     if (agentsResult.ok && agentsResult.agents) agentIds = agentsResult.agents;
 
-    // Update connection status (local + singleton)
+    // Update only while the captured account/circle/token generation owns it.
     setConnections(prev => {
+      if (!isOfficeAuthorityCurrent(requestedAuthority)) return prev;
         const updated = prev.map(c => c.id === conn.id ? {
           ...c,
           status: 'connected' as const,
@@ -1472,32 +2388,47 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           agentIds,
           lastConnected: new Date().toISOString(),
         } : c);
-      updateAutoConnectConnections(updated);
       return updated;
     });
 
     // Start poller
-    const oldPoller = pollersRef.current.get(conn.id);
-    if (oldPoller) oldPoller.stop();
-
-    const poller = new OpenSwanPoller(config, (update: OpenSwanUpdate) => {
+    let poller: OpenSwanPoller;
+    poller = new OpenSwanPoller(config, (update: OpenSwanUpdate) => {
+      const currentConnection = connectionsRef.current.find((candidate) => candidate.id === conn.id);
+      if (
+        pollerGenerationsRef.current.get(conn.id) !== generation
+        || pollersRef.current.get(conn.id) !== poller
+        || !isOfficeAuthorityCurrent(requestedAuthority)
+        || !currentConnection
+        || currentConnection.status !== 'connected'
+        || !matchesOpenSwanConnectionFingerprint(connectionFingerprint, currentConnection)
+      ) return;
       sessionsRef.current.set(conn.id, update.sessions);
+      sessionFingerprintsRef.current.set(conn.id, connectionFingerprint);
       setConnections(prev => {
+        if (!isOfficeAuthorityCurrent(requestedAuthority)) return prev;
         const updated = prev.map(c => c.id === conn.id && c.status === 'connected' ? {
           ...c, sessionCount: update.sessions.length,
         } : c);
-        updateAutoConnectConnections(updated);
         return updated;
       });
       setSessionsTick(t => t + 1);
     }, (error: string) => {
+      if (
+        pollerGenerationsRef.current.get(conn.id) !== generation
+        || pollersRef.current.get(conn.id) !== poller
+        || !isOfficeAuthorityCurrent(requestedAuthority)
+      ) return;
       // Poller detected persistent failure — mark as error for retry
       pollersRef.current.delete(conn.id);
+      pollerGenerationsRef.current.set(conn.id, generation + 1);
+      sessionsRef.current.delete(conn.id);
+      sessionFingerprintsRef.current.delete(conn.id);
       setConnections(prev => {
+        if (!isOfficeAuthorityCurrent(requestedAuthority)) return prev;
         const updated = prev.map(c => c.id === conn.id ? {
           ...c, status: 'error' as const, error,
         } : c);
-        updateAutoConnectConnections(updated);
         return updated;
       });
     });
@@ -1505,46 +2436,68 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     pollersRef.current.set(conn.id, poller);
 
     setSessionsTick(t => t + 1);
-  }, [shouldSkipOpenSwanConnectionAttempt]);
+  }, [captureOfficeAuthority, isOfficeAuthorityCurrent, shouldSkipOpenSwanConnectionAttempt]);
 
-  const disconnectOne = useCallback((connId: string) => {
+  const disconnectOne = useCallback((
+    connId: string,
+    capturedAuthority?: OfficeConnectionExactAuthority,
+  ) => {
+    const requestedAuthority = capturedAuthority ?? captureOfficeAuthority();
+    if (!requestedAuthority || !isOfficeAuthorityCurrent(requestedAuthority)) return;
+    pollerGenerationsRef.current.set(connId, (pollerGenerationsRef.current.get(connId) || 0) + 1);
     const poller = pollersRef.current.get(connId);
     if (poller) { poller.stop(); pollersRef.current.delete(connId); }
     sessionsRef.current.delete(connId);
+    sessionFingerprintsRef.current.delete(connId);
     setConnections(prev => {
+      if (!isOfficeAuthorityCurrent(requestedAuthority)) return prev;
       const updated = prev.map(c => c.id === connId ? {
         ...c, status: 'disconnected' as const, error: undefined, sessionCount: undefined, agentIds: undefined,
       } : c);
-      updateAutoConnectConnections(updated);
       return updated;
     });
     setSessionsTick(t => t + 1);
-  }, []);
+  }, [captureOfficeAuthority, isOfficeAuthorityCurrent]);
+
+  const persistOfficeConnections = useCallback(async (
+    values: AgentConnection[],
+    capturedAuthority?: OfficeConnectionExactAuthority,
+  ) => {
+    const requestedAuthority = capturedAuthority ?? captureOfficeAuthority();
+    if (!requestedAuthority || !isOfficeAuthorityCurrent(requestedAuthority)) return null;
+    const result = await saveOfficeConnectionsExact(
+      values,
+      requestedAuthority,
+      isOfficeAuthorityCurrent,
+    );
+    if (!result.ok || !isOfficeAuthorityCurrent(requestedAuthority)) return result;
+    connectionsAuthorityRef.current = requestedAuthority;
+    setConnections(result.connections);
+    return result;
+  }, [captureOfficeAuthority, isOfficeAuthorityCurrent]);
 
   const handleAddConnection = useCallback(async (conn: AgentConnection) => {
-    setConnections(prev => {
-      // Upsert: replace if same ID exists (edit mode), otherwise append
-      const exists = prev.some(c => c.id === conn.id);
-      const updated = exists
-        ? prev.map(c => c.id === conn.id ? conn : c)
-        : [...prev, conn];
-      saveConnections(updated);
-      updateAutoConnectConnections(updated);
-      return updated;
-    });
-    // Auto-connect
-    connectOne(conn);
-  }, [connectOne]);
+    const requestedAuthority = captureOfficeAuthority();
+    if (!requestedAuthority) return;
+    const current = connectionsRef.current;
+    const exists = current.some(c => c.id === conn.id);
+    const updated = exists
+      ? current.map(c => c.id === conn.id ? conn : c)
+      : [...current, conn];
+    const result = await persistOfficeConnections(updated, requestedAuthority);
+    if (!result?.ok || !isOfficeAuthorityCurrent(requestedAuthority)) return;
+    const savedConnection = result.connections.find(candidate => candidate.id === conn.id) ?? conn;
+    void connectOne(savedConnection, requestedAuthority);
+  }, [captureOfficeAuthority, connectOne, isOfficeAuthorityCurrent, persistOfficeConnections]);
 
   const handleRemoveConnection = useCallback(async (id: string) => {
-    disconnectOne(id);
-    setConnections(prev => {
-      const updated = prev.filter(c => c.id !== id);
-      saveConnections(updated);
-      updateAutoConnectConnections(updated);
-      return updated;
-    });
-  }, [disconnectOne]);
+    const requestedAuthority = captureOfficeAuthority();
+    if (!requestedAuthority) return;
+    const updated = connectionsRef.current.filter(c => c.id !== id);
+    const result = await persistOfficeConnections(updated, requestedAuthority);
+    if (!result?.ok || !isOfficeAuthorityCurrent(requestedAuthority)) return;
+    disconnectOne(id, requestedAuthority);
+  }, [captureOfficeAuthority, disconnectOne, isOfficeAuthorityCurrent, persistOfficeConnections]);
 
   const handleConnectConnection = useCallback((id: string) => {
     const conn = connections.find(c => c.id === id);
@@ -1558,7 +2511,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const handleReconnectAll = useCallback(() => {
     // Reconnect all enabled connections that aren't already connected
     const toReconnect = connections.filter(c => c.enabled && c.status !== 'connected' && c.status !== 'connecting');
-    
+
     if (toReconnect.length > 0) {
       toReconnect.forEach(conn => connectOne(conn));
     }
@@ -1570,44 +2523,59 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     return { endpoint: conn.endpoint, token: conn.token };
   }, [connections]);
 
-  // Helper: push partial office preferences to Supabase (merges into existing JSONB)
-  // Serialized via promise chain to prevent lost-update races between concurrent writes
-  const prefQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const pushOfficePreferences = useCallback((partial: Record<string, unknown>) => {
-    if (!_profileHasOfficePreferences) return;
-    prefQueueRef.current = prefQueueRef.current.then(async () => {
-      try {
-        const { data: { user } } = await supabase.auth.getUser();
-        if (!user) return;
-        const { data, error } = await supabase.from('profiles')
-          .select('office_preferences').eq('id', user.id).single();
-        // Only disable sync for schema-missing errors (column doesn't exist), not transient ones
-        if (error) {
-          if (isMissingProfileColumnError(error)) {
-            _profileHasOfficePreferences = false;
-          }
-          return;
-        }
-        const current = (data?.office_preferences || {}) as Record<string, unknown>;
-        const merged = { ...current, ...partial, updatedAt: Date.now() };
-        const { error: e2 } = await supabase.from('profiles')
-          .update({ office_preferences: merged }).eq('id', user.id);
-        if (e2 && isMissingProfileColumnError(e2)) {
-          _profileHasOfficePreferences = false;
-        }
-      } catch {}
+  // Push one immutable auth-scoped partial through the per-user queue. A
+  // retired account never dispatches, and a timed-out unknown write keeps only
+  // that account's lane reserved so another account remains usable.
+  const pushOfficePreferences = useCallback((
+    partial: Record<string, unknown>,
+    capturedAuthority?: Readonly<{
+      userId: string;
+      circleId: string;
+      accessToken: string;
+      generation: number;
+    }>,
+  ) => {
+    const requestedAuthority = capturedAuthority ?? authAuthorityRef.current;
+    const currentAuthority = authAuthorityRef.current;
+    if (
+      !officeUserPreferencesAvailableRef.current
+      || !requestedAuthority
+      || currentAuthority?.userId !== requestedAuthority.userId
+      || currentAuthority?.circleId !== requestedAuthority.circleId
+      || currentAuthority?.accessToken !== requestedAuthority.accessToken
+      || currentAuthority?.generation !== requestedAuthority.generation
+    ) return;
+    void officePreferenceWriteQueueRef.current?.enqueue({
+      userId: requestedAuthority.userId,
+      circleId: requestedAuthority.circleId,
+      accessToken: requestedAuthority.accessToken,
+      authorityGeneration: requestedAuthority.generation,
+      partial,
     });
   }, []);
 
   // ─── Telegram handlers ──────────────────────────────
 
   const handleTelegramConnect = useCallback(async () => {
-    const { botToken, chatId } = telegramConfig;
-    if (!botToken.trim()) { setTelegramError('Bot token is required'); return; }
+    const requestedAuthority = authAuthorityRef.current;
+    const botToken = telegramConfig.botToken.trim();
+    const chatId = telegramConfig.chatId.trim();
+    if (!requestedAuthority) {
+      setTelegramError('Sign in again before connecting Telegram.');
+      return;
+    }
+    const requestIsCurrent = () => (
+      authAuthorityRef.current?.userId === requestedAuthority.userId
+      && authAuthorityRef.current?.circleId === requestedAuthority.circleId
+      && authAuthorityRef.current?.accessToken === requestedAuthority.accessToken
+      && authAuthorityRef.current?.generation === requestedAuthority.generation
+    );
+    if (!botToken) { setTelegramError('Bot token is required'); return; }
     setTelegramConnecting(true);
     setTelegramError(null);
 
-    const botResult = await verifyBot(botToken.trim());
+    const botResult = await verifyBot(botToken);
+    if (!requestIsCurrent()) return;
     if (!botResult.ok) {
       setTelegramError(botResult.error || 'Invalid bot token');
       setTelegramConnecting(false);
@@ -1615,15 +2583,18 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     }
     setTelegramBotName(botResult.bot?.username || null);
 
-    if (chatId.trim()) {
-      const chatResult = await getChat(botToken.trim(), chatId.trim());
+    if (chatId) {
+      const chatResult = await getChat(botToken, chatId);
+      if (!requestIsCurrent()) return;
       if (chatResult.ok) setTelegramChatTitle(chatResult.title || null);
       else setTelegramChatTitle(null);
     }
 
     if (tgPollerRef.current) tgPollerRef.current.stop();
-    const poller = new TelegramPoller(botToken.trim(), (msgs) => {
-      setTelegramMessages(prev => [...msgs, ...prev].slice(0, 50));
+    const poller = new TelegramPoller(botToken, (msgs) => {
+      if (requestIsCurrent()) {
+        setTelegramMessages(prev => [...msgs, ...prev].slice(0, 50));
+      }
     });
     poller.start(5000);
     tgPollerRef.current = poller;
@@ -1631,10 +2602,41 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     setTelegramConnected(true);
     setTelegramConnecting(false);
 
-    const tgData = { botToken: botToken.trim(), chatId: chatId.trim() };
-    storage.setItem(STORAGE_KEY_TELEGRAM, JSON.stringify(tgData)).catch(() => {});
-    pushOfficePreferences({ telegramConfig: tgData });
-  }, [telegramConfig, pushOfficePreferences]);
+    const secretStored = await writeVerifiedLocalSecret(
+      OFFICE_TELEGRAM_SECRET_NAMESPACE,
+      officeTelegramSecretId(requestedAuthority.userId, requestedAuthority.circleId),
+      botToken,
+    );
+    if (!secretStored || !requestIsCurrent()) {
+      poller.stop();
+      tgPollerRef.current = null;
+      if (requestIsCurrent()) {
+        setTelegramConnected(false);
+        setTelegramError('Secure device storage is unavailable. Telegram was not saved.');
+      }
+      return;
+    }
+    const telegramMetadata = {
+      chatId,
+      botName: botResult.bot?.username || '',
+    };
+    try {
+      await storage.setItem(
+        officePrivateStorageKey(
+          'telegram_metadata',
+          requestedAuthority.userId,
+          requestedAuthority.circleId,
+        ),
+        JSON.stringify(telegramMetadata),
+      );
+    } catch {
+      // The encrypted token is the authority boundary. Non-secret metadata is
+      // best-effort locally and can still be recovered from the private RPC.
+    }
+    if (requestIsCurrent()) {
+      pushOfficePreferences({ telegramMetadata }, requestedAuthority);
+    }
+  }, [pushOfficePreferences, telegramConfig]);
 
   const handleTelegramDisconnect = useCallback(() => {
     if (tgPollerRef.current) { tgPollerRef.current.stop(); tgPollerRef.current = null; }
@@ -1643,191 +2645,504 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     setTelegramChatTitle(null);
     setTelegramMessages([]);
     setTelegramError(null);
-    // Clear persisted credentials — both local storage and remote profile
-    storage.removeItem(STORAGE_KEY_TELEGRAM).catch(() => {});
-    pushOfficePreferences({ telegramConfig: null });
+    // Remove the exact encrypted device credential and non-secret metadata.
+    const authority = authAuthorityRef.current;
+    if (authority) {
+      void deleteVerifiedLocalSecret(
+        OFFICE_TELEGRAM_SECRET_NAMESPACE,
+        officeTelegramSecretId(authority.userId, authority.circleId),
+      );
+      void storage.removeItem(
+        officePrivateStorageKey('telegram_metadata', authority.userId, authority.circleId),
+      );
+    }
+    if (authority) pushOfficePreferences({ telegramMetadata: null }, authority);
   }, [pushOfficePreferences]);
 
-  // ─── Load saved connections on mount + auto-discover ──────────────
-  // Agent detection (Claude Code bridge + OpenSwan) is handled by the app-level
-  // agentAutoConnect singleton (started in App.tsx on auth). OfficeTab just
-  // picks up the already-connected state and subscribes for updates.
+  // ─── Load exact-scope connections on mount + auto-discover ────────
+  // App-level bridge discovery may still support other surfaces, but Office
+  // connection records and protected credentials are owned by this captured
+  // user/circle lifecycle and never hydrate from the owner-global singleton.
 
   const floorsInitializedRef = useRef(false);
+  const [floorLayoutHydratedCircleId, setFloorLayoutHydratedCircleId] = useState<string | null>(null);
+  const [officeAccessError, setOfficeAccessError] = useState<string | null>(null);
+  const [officeAccessRetry, setOfficeAccessRetry] = useState(0);
+  // `null === null` is not hydration. Until the authenticated user/circle
+  // scope exists, render the loading boundary and reject editor mutations;
+  // otherwise a fast click can enter edit mode before initialization and then
+  // get reset when the real user scope arrives.
+  const floorLayoutHydrated = Boolean(floorLayoutScope)
+    && floorLayoutHydratedCircleId === floorLayoutScope;
+  const authoritativeLayoutReadRef = useRef(false);
+  const skipNextLayoutPersistenceRef = useRef(false);
   const initRef = useRef<string | null>(null);
+
+  // Idle work owns a dedicated exact-authority lifecycle. It must not restart
+  // when bridge presence, the asynchronously hydrated display name, or other
+  // heartbeat-only inputs churn. More importantly, it cannot observe transient
+  // defaults: the exact local receipt and remote preference read must reconcile
+  // after membership proof before this generation becomes runnable.
   useEffect(() => {
-    if (initRef.current === circleId) return;
-    initRef.current = circleId;
+    let cancelled = false;
+    const requestedAuthority = committedAuthAuthority;
+    if (!requestedAuthority || !floorLayoutHydrated) return undefined;
+    const schedulerAuthority: IdleSchedulerAuthority = {
+      circleId: requestedAuthority.circleId,
+      userId: requestedAuthority.userId,
+      accessToken: requestedAuthority.accessToken,
+      authorityGeneration: requestedAuthority.generation,
+    };
+    const requestedReadyKey = idleConfigAuthorityKey(schedulerAuthority);
+    if (
+      idleConfigReadyAuthorityKey !== requestedReadyKey
+      || !isOfficeAuthorityCurrent(requestedAuthority)
+    ) return undefined;
+
+    const requestIsCurrent = () => Boolean(
+      !cancelled
+      && idleConfigReadyAuthorityKey === requestedReadyKey
+      && isOfficeAuthorityCurrent(requestedAuthority)
+    );
+    const cleanup = startIdleScheduler(
+      schedulerAuthority,
+      userEmail === OWNER_EMAIL,
+      () => idleConfigRef.current,
+      (updated) => {
+        if (!requestIsCurrent()) return;
+        const normalized = normalizeIdleConfig(updated);
+        idleConfigRef.current = normalized;
+        setIdleConfig(normalized);
+      },
+      (authority) => Boolean(
+        requestIsCurrent()
+        && authority.circleId === schedulerAuthority.circleId
+        && authority.userId === schedulerAuthority.userId
+        && authority.accessToken === schedulerAuthority.accessToken
+        && authority.authorityGeneration === schedulerAuthority.authorityGeneration
+      ),
+    );
+
+    return () => {
+      cancelled = true;
+      cleanup();
+    };
+  }, [
+    committedAuthAuthority,
+    floorLayoutHydrated,
+    idleConfigReadyAuthorityKey,
+    isOfficeAuthorityCurrent,
+    userEmail,
+  ]);
+
+  const mutateFloorsDurably = useCallback((
+    update: (current: OfficeFloor[]) => OfficeFloor[],
+    detail = 'Saving every floor item and tool…',
+  ): boolean => {
+    const scope = floorLayoutScope;
+    if (!scope || !floorLayoutHydrated || layoutSaveScopeRef.current !== scope) return false;
+    const current = floorsRef.current;
+    const updated = update(current);
+    if (!Array.isArray(updated) || updated === current) return false;
+    floorsRef.current = updated;
+    markFloorLayoutMutation(detail);
+    setFloors(updated);
+    return true;
+  }, [floorLayoutHydrated, floorLayoutScope, markFloorLayoutMutation]);
+  const patchFurnitureStateDurably = useCallback((
+    floorId: string,
+    itemId: string | null,
+    update: (item: FurnitureItem) => FurnitureItem,
+  ): boolean => {
+    if (!itemId) return false;
+    return mutateFloorsDurably((current) => {
+      const floorIndex = current.findIndex((floor) => floor.id === floorId);
+      if (floorIndex < 0) return current;
+      const itemIndex = current[floorIndex].furniture.findIndex((item) => item.id === itemId);
+      if (itemIndex < 0) return current;
+      const nextItem = update(current[floorIndex].furniture[itemIndex]);
+      if (!nextItem || nextItem.id !== itemId) return current;
+      const nextFurniture = [...current[floorIndex].furniture];
+      nextFurniture[itemIndex] = nextItem;
+      const updated = [...current];
+      updated[floorIndex] = { ...current[floorIndex], furniture: nextFurniture };
+      return updated;
+    });
+  }, [mutateFloorsDurably]);
+  useEffect(() => {
+    const requestedAuthority = committedAuthAuthority;
+    const initializationKey = committedAuthScopeKey && requestedAuthority
+      ? `${committedAuthScopeKey}:generation:${requestedAuthority.generation}:retry:${officeAccessRetry}`
+      : null;
+    if (
+      !authReady
+      || !currentUserId
+      || !authSession?.access_token
+      || !floorLayoutScope
+      || !initializationKey
+      || !requestedAuthority
+      || requestedAuthority.userId !== currentUserId
+      || requestedAuthority.circleId !== circleId
+      || requestedAuthority.accessToken !== authSession.access_token
+      || requestedAuthority.generation !== authAuthorityRef.current?.generation
+      || initRef.current === initializationKey
+    ) return;
+    let cancelled = false;
+    const requestedAuthScope = {
+      userId: currentUserId,
+      accessToken: authSession.access_token,
+    };
+    const requestedAuthorityGeneration = requestedAuthority.generation;
+    const idleSchedulerAuthority: IdleSchedulerAuthority = {
+      circleId,
+      userId: currentUserId,
+      accessToken: authSession.access_token,
+      authorityGeneration: requestedAuthorityGeneration,
+    };
+    const requestedScope = floorLayoutScope;
+    const retainedAgentSelection = selectedAgentRefreshRetentionRef.current;
+    if (retainedAgentSelection?.scope !== requestedScope) {
+      selectedAgentRefreshRetentionRef.current = null;
+    }
+    const requestIsCurrent = () => (
+      !cancelled
+      && layoutSaveScopeRef.current === requestedScope
+      && requestedAuthScope.userId === authAuthorityRef.current?.userId
+      && circleId === authAuthorityRef.current?.circleId
+      && requestedAuthScope.accessToken === authAuthorityRef.current?.accessToken
+      && requestedAuthorityGeneration === authAuthorityRef.current?.generation
+    );
+    initRef.current = initializationKey;
+    floorLayoutGenerationRef.current += 1;
+    floorPresetLoadRequestRef.current += 1;
+    floorPresetRequestRef.current += 1;
+    setFloorPresetSaving(false);
     appearancesLoadedRef.current = false;
     prefsLoadedRef.current = false;
+    // Account/circle-private state must never remain painted while the next
+    // exact scope hydrates. Ownerless legacy local keys are intentionally not
+    // imported because their provenance cannot be proven.
+    setAgentNames({});
+    setTelegramConfig({ botToken: '', chatId: '' });
+    setTelegramConnected(false);
+    setTelegramConnecting(false);
+    setTelegramBotName(null);
+    setTelegramChatTitle(null);
+    setTelegramError(null);
+    setTelegramMessages([]);
+    if (tgPollerRef.current) {
+      tgPollerRef.current.stop();
+      tgPollerRef.current = null;
+    }
+    setAppearances({});
+    pollersRef.current.forEach((poller, connectionId) => {
+      pollerGenerationsRef.current.set(
+        connectionId,
+        (pollerGenerationsRef.current.get(connectionId) || 0) + 1,
+      );
+      poller.stop();
+    });
+    pollersRef.current.clear();
+    sessionsRef.current.clear();
+    sessionFingerprintsRef.current.clear();
+    connectionsAuthorityRef.current = null;
+    connectionsRef.current = [];
+    setConnections([]);
+    setSessionsTick(tick => tick + 1);
+    setWhiteboardNotes([]);
+    setCircleOfficeAgents([]);
+    setOfficeAgentSessionBindings(new Map());
+    setLiveUserIds(new Set());
+    setCircleConnectionStatus('offline');
+    setAgentIdentities(new Map());
+    setSessionTags(new Map());
+    sessionTagsRef.current = new Map();
+    setEnrichedAgents([]);
+    enrichedAgentsRef.current = [];
+    setEnrichedSessions([]);
+    setCronJobs([]);
+    setAgentFilterMode('all');
+    // Token rotation for the same exact user+circle keeps only the selected
+    // id above. The old Agent object is retired with the old generation and a
+    // unique current roster row may restore it after membership hydration.
+    setSelectedAgent(null);
+    setUserNfts([]);
+    setNftsLoading(false);
+    setBudgetConfig({ enabled: false });
+    const defaultIdleConfig = getDefaultIdleConfig();
+    setIdleConfig(defaultIdleConfig);
+    idleConfigRef.current = defaultIdleConfig;
+    setIdleConfigReadyAuthorityKey(null);
     floorsInitializedRef.current = false;
+    authoritativeLayoutReadRef.current = false;
+    skipNextLayoutPersistenceRef.current = false;
+    pendingLayoutSaveRef.current = null;
+    // Never dispatch a retired identity's snapshot after an account/circle
+    // change. Its verified scoped local envelope remains available for a later
+    // matching login to seed safely.
+    layoutSaveDrainRequestedRef.current = false;
+    if (layoutSaveTimerRef.current) clearTimeout(layoutSaveTimerRef.current);
+    layoutSaveTimerRef.current = null;
+    setFloorLayoutHydratedCircleId(null);
+    setOfficeAccessError(null);
+    officeEditorHistoriesRef.current = {};
+    officeEditorItemStateRef.current = {};
+    setOfficeEditorHistoryRevision((revision) => revision + 1);
+    const detachedDefaults = DEFAULT_FLOORS.map((floor) => ({
+      ...floor,
+      agentIds: [...floor.agentIds],
+      furniture: floor.furniture.map((item) => ({ ...item })),
+    }));
+    floorsRef.current = detachedDefaults;
+    setFloors(detachedDefaults);
+    setCurrentFloorId(detachedDefaults[0].id);
+    setEditMode(false);
+    setPlacingType(null);
+    setSelectedFurnitureId(null);
+    setNftPickerVisible(false);
+    setNftPickerTargetId(null);
+    setStickyEditorVisible(false);
+    setStickyEditorTargetId(null);
+    setServiceModalVisible(false);
+    setServiceModalTargetId(null);
+    setScrabbleVisible(false);
+    setPokerVisible(false);
+    setPhoneVisible(false);
+    setShowCustomize(false);
+    setShowMcpHub(false);
+    setShowRewards(false);
+    setShowSetupWizard(false);
+    setShowConnectAgent(false);
+    setShowGitHubFeed(false);
+    setShowSoundMixer(false);
+    setShowVault(false);
+    setShowPublishModal(false);
+    setTerminalSize('closed');
+    setTerminalInput('');
+    setTerminalTargetId('blackswan-default');
+    setTerminalTargetName('@BlackSwan');
+    setTerminalTargetIds(['blackswan-default']);
+    setTerminalModel('blackswan');
+    setActiveScrabbleItemId(null);
+    setActivePokerItemId(null);
+    setActivePhoneItemId(null);
+    layoutVersionRef.current = 0;
+    setFloorLayoutSaveState('loading');
+    setFloorLayoutSaveDetail('Loading server layout…');
     budgetLoadedRef.current = false;
     idleLoadedRef.current = false;
     remoteBudgetAppliedRef.current = false;
     remoteIdleAppliedRef.current = false;
 
-    // Tell the auto-connect service which circle we're in (for DB publishing)
-    setAutoConnectCircleId(circleId);
-
     // Reset Supabase column flags each mount — transient errors shouldn't
     // permanently disable sync for the rest of the session
-    _profileHasOfficeLayout = true;
-    _profileHasAgentAppearance = true;
-    _profileHasOfficePreferences = true;
+    officeUserPreferencesAvailableRef.current = true;
 
+    let membershipProven = false;
     (async () => {
+      // Previous builds wrote the Telegram token into plaintext browser
+      // storage. Never read or migrate those envelopes: delete them and keep
+      // only the verified encrypted device credential introduced below.
+      void runOfficeLayoutRequestWithDeadline(() => Promise.all([
+        storage.removeItem(legacyOfficeTelegramStorageKey(currentUserId, circleId)),
+        storage.removeItem(LEGACY_OWNERLESS_TELEGRAM_STORAGE_KEY),
+      ])).catch(() => {});
+
       // ── Start localStorage reads immediately (don't wait for connections) ──
       const storagePromise = Promise.all([
-        storage.getItem(STORAGE_KEY_AGENT_NAMES).catch(() => null),
-        storage.getItem(STORAGE_KEY_TELEGRAM).catch(() => null),
-        storage.getItem(STORAGE_KEY_FLOORS).catch(() => null),
-        storage.getItem(STORAGE_KEY_FLOORS_TS).catch(() => null),
-        storage.getItem(STORAGE_KEY_CURRENT_FLOOR).catch(() => null),
-        storage.getItem(STORAGE_KEY_APPEARANCES).catch(() => null),
-        storage.getItem(STORAGE_KEY_WHITEBOARD_NOTES).catch(() => null),
+        runOfficeLayoutRequestWithDeadline(() => storage.getItem(privateStorageKeys.agentNames)).catch(() => null),
+        runOfficeLayoutRequestWithDeadline(() => readVerifiedLocalSecret(
+          OFFICE_TELEGRAM_SECRET_NAMESPACE,
+          officeTelegramSecretId(currentUserId, circleId),
+        )).catch(() => ({ status: 'unavailable' as const })),
+        runOfficeLayoutRequestWithDeadline(() => storage.getItem(officeLayoutLocalCacheKey(currentUserId, circleId))).catch(() => null),
+        runOfficeLayoutRequestWithDeadline(() => storage.getItem(privateStorageKeys.appearances)).catch(() => null),
+        runOfficeLayoutRequestWithDeadline(() => storage.getItem(privateStorageKeys.whiteboardNotes)).catch(() => null),
+        runOfficeLayoutRequestWithDeadline(() => storage.getItem(privateStorageKeys.telegramMetadata)).catch(() => null),
+        runOfficeLayoutRequestWithDeadline(() => loadIdleConfigExact(idleSchedulerAuthority))
+          .catch(() => getDefaultIdleConfig()),
       ]);
 
-      // ── Pick up pre-connected agents from the app-level singleton ──
-      if (isAutoConnectRunning()) {
-        const preConns = getAutoConnectConnections();
-        const preSessions = getAutoConnectSessions();
-        if (preConns.length > 0) {
-          setConnections(preConns);
-          if (__DEV__) console.log('[OfficeTab] Loaded', preConns.length, 'pre-connected agents from auto-connect');
-        }
-        // Copy sessions into our local ref
-        for (const [key, sessions] of preSessions) {
-          sessionsRef.current.set(key, sessions);
-        }
-        if (preSessions.size > 0) {
-          setSessionsTick(t => t + 1);
-        }
-      } else {
-        // Fallback: singleton hasn't started yet — do legacy load
-        let conns = await loadConnections();
-        const { discovered } = await autoDiscoverLocalAgents(conns);
-        if (discovered) {
-          const existingOpenSwan = conns.find(c => c.provider === 'openswan');
-          if (existingOpenSwan?.token) {
-            discovered.token = existingOpenSwan.token;
-          }
-          conns = [...conns, discovered];
-          saveConnections(conns);
-        }
-        setConnections(conns);
-        for (const conn of conns) {
-          if (conn.enabled && !shouldSkipOpenSwanConnectionAttempt(conn)) connectOne(conn);
-        }
-        import('../../../lib/agentAutoConnect')
-          .then((mod) => mod.startAgentAutoConnect())
-          .catch(() => {});
+      // A scoped cache can make an authorized Office fast, but it cannot prove
+      // authorization. Keep the whole private surface closed until this exact
+      // bearer, user, circle, and lifecycle generation has a membership row.
+      const membership = await verifyOfficeCircleMembership(
+        circleId,
+        {
+          userId: requestedAuthScope.userId,
+          circleId,
+          accessToken: requestedAuthScope.accessToken,
+          authorityGeneration: requestedAuthorityGeneration || 0,
+        },
+        requestIsCurrent,
+      );
+      if (!requestIsCurrent()) return;
+      if (!membership.ok) {
+        selectedAgentRefreshRetentionRef.current = null;
+        setSelectedAgent(null);
+        setOfficeAccessError(membership.error);
+        setFloorLayoutSaveState('error');
+        setFloorLayoutSaveDetail(membership.error);
+        return;
       }
+      membershipProven = true;
+      setOfficeAccessError(null);
 
-      // ── Subscribe to singleton updates so OfficeTab stays in sync ──
-      // Merge rather than overwrite — prefer 'connected'/'connecting' status over stale singleton data
-      const unsub = subscribeAutoConnect(() => {
-        const latestConns = getAutoConnectConnections();
-        const latestSessions = getAutoConnectSessions();
-        setConnections(prev => {
-          // Build map of singleton connections by id
-          const singletonMap = new Map(latestConns.map(c => [c.id, c]));
-          // Merge: if local has a connection that's connected/connecting but singleton says error/disconnected,
-          // keep the local version (OfficeTab's connectOne is more authoritative)
-          const merged = prev.map(local => {
-            const singleton = singletonMap.get(local.id);
-            if (!singleton) return local;
-            // If local is actively connected/connecting, don't let stale singleton state override it
-            if ((local.status === 'connected' || local.status === 'connecting') &&
-                (singleton.status === 'error' || singleton.status === 'disconnected')) {
-              return local;
-            }
-            return singleton;
-          });
-          // Add any connections from singleton that don't exist locally
-          for (const sc of latestConns) {
-            if (!merged.some(m => m.id === sc.id)) {
-              merged.push(sc);
-            }
-          }
-          return merged;
-        });
-        for (const [key, sessions] of latestSessions) {
-          sessionsRef.current.set(key, sessions);
+      // ── Load only this captured account/circle connection lane ──
+      // Connection discovery is enrichment, never a layout-hydration
+      // dependency. The owner-global auto-connect singleton is deliberately
+      // excluded because its records cannot prove Office account custody.
+      const connectionAuthority: OfficeConnectionExactAuthority = {
+        userId: requestedAuthScope.userId,
+        circleId,
+        accessToken: requestedAuthScope.accessToken,
+        generation: requestedAuthorityGeneration || 0,
+      };
+      void (async () => {
+        const loaded = await runOfficeLayoutRequestWithDeadline(() => (
+          loadOfficeConnectionsExact(connectionAuthority, isOfficeAuthorityCurrent)
+        ));
+        if (!requestIsCurrent()) return;
+        let scopedConnections = loaded.ok ? loaded.connections : [];
+        const { discovered } = await runOfficeLayoutRequestWithDeadline(() => (
+          autoDiscoverLocalAgents(scopedConnections)
+        ));
+        if (!requestIsCurrent()) return;
+        if (discovered) {
+          const existingOpenSwan = scopedConnections.find(connection => connection.provider === 'openswan');
+          if (existingOpenSwan?.token) discovered.token = existingOpenSwan.token;
+          const saved = await saveOfficeConnectionsExact(
+            [...scopedConnections, discovered],
+            connectionAuthority,
+            isOfficeAuthorityCurrent,
+          );
+          if (!requestIsCurrent()) return;
+          if (saved.ok && saved.localSaved) scopedConnections = saved.connections;
         }
-        setSessionsTick(t => t + 1);
+        if (!requestIsCurrent()) return;
+        connectionsAuthorityRef.current = connectionAuthority;
+        setConnections(scopedConnections);
+        for (const connection of scopedConnections) {
+          if (connection.enabled && !shouldSkipOpenSwanConnectionAttempt(connection)) {
+            void connectOne(connection, connectionAuthority);
+          }
+        }
+      })().catch((error) => {
+        if (__DEV__ && requestIsCurrent()) {
+          console.warn('[OfficeTab] Exact connection enrichment failed:', error);
+        }
       });
-      // Store unsubscribe for cleanup
-      (initRef as any)._unsub = unsub;
 
       // ── Await localStorage reads (started earlier, runs in parallel with connections) ──
-      const [namesRaw, tgRaw, floorsRaw, tsRaw, currentFloorRaw, appearancesRaw, notesRaw] = await storagePromise;
+      const [
+        namesRaw,
+        telegramSecretResult,
+        layoutCacheRaw,
+        appearancesRaw,
+        notesRaw,
+        telegramMetadataRaw,
+        exactLocalIdleConfig,
+      ] = await storagePromise;
+      if (!requestIsCurrent()) return;
 
-      // Apply local-only state immediately (agent names, telegram, whiteboard)
+      // Apply exact-scope local state immediately. Telegram authority is
+      // accepted only from verified encrypted device storage.
       const localAgentNames = namesRaw ? (() => { try { return JSON.parse(namesRaw) as Record<string, string>; } catch { return {}; } })() : {};
-      const localTelegramConfig = tgRaw ? (() => { try { return JSON.parse(tgRaw) as { botToken?: string; chatId?: string }; } catch { return null; } })() : null;
+      const localTelegramBotToken = telegramSecretResult.status === 'found'
+        ? telegramSecretResult.value
+        : '';
       const localWhiteboardNotes = notesRaw ? (() => { try { return JSON.parse(notesRaw) as string[]; } catch { return []; } })() : [];
+      const localTelegramMetadata = telegramMetadataRaw ? (() => {
+        try {
+          const parsed = JSON.parse(telegramMetadataRaw) as { chatId?: unknown; botName?: unknown };
+          return {
+            chatId: typeof parsed.chatId === 'string' ? parsed.chatId.slice(0, 200) : '',
+            botName: typeof parsed.botName === 'string' ? parsed.botName.slice(0, 200) : '',
+          };
+        } catch {
+          return { chatId: '', botName: '' };
+        }
+      })() : { chatId: '', botName: '' };
       if (Object.keys(localAgentNames).length > 0) setAgentNames(localAgentNames);
-      if (tgRaw) try {
-        const tg = localTelegramConfig || {};
-        if (tg.botToken || tg.chatId) setTelegramConfig({ botToken: tg.botToken || '', chatId: tg.chatId || '' });
-      } catch {}
+      if (localTelegramBotToken || localTelegramMetadata.chatId) {
+        setTelegramConfig({
+          botToken: localTelegramBotToken,
+          chatId: localTelegramMetadata.chatId,
+        });
+      }
+      if (localTelegramMetadata.botName) setTelegramBotName(localTelegramMetadata.botName);
       if (localWhiteboardNotes.length > 0) setWhiteboardNotes(localWhiteboardNotes);
 
       // Parse local floors
-      let localFloors: OfficeFloor[] = [];
-      let localCurrentFloorId = currentFloorRaw || '';
-      let localUpdatedAt = 0;
-      if (floorsRaw) try {
-        const loaded = JSON.parse(floorsRaw) as OfficeFloor[];
-        if (loaded.length > 0) localFloors = loaded;
-      } catch {}
-      if (tsRaw) localUpdatedAt = parseInt(tsRaw, 10) || 0;
+      const localLayout = readOfficeLayoutLocalCacheEnvelope(layoutCacheRaw, currentUserId, circleId);
+      let localFloors: OfficeFloor[] = localLayout?.floors || [];
+      let localCurrentFloorId = localLayout?.currentFloorId || '';
+      const localUpdatedAt = localLayout?.updatedAt || 0;
 
       // Parse local appearances
       const localAppearances = appearancesRaw ? (() => { try { return JSON.parse(appearancesRaw); } catch { return {}; } })() : {};
 
-      // Apply local state immediately so the Office shell can paint from the
-      // fast path while remote profile merges continue in the background.
+      // Apply the exact-scope cache only after current membership was proven.
+      // Remote preferences/layout can continue in parallel behind that proof.
       setAppearances(localAppearances);
-      if (localFloors.length > 0) setFloors(localFloors);
+      if (localFloors.length > 0) {
+        officeEditorHistoriesRef.current = {};
+        setOfficeEditorHistoryRevision((revision) => revision + 1);
+        floorsRef.current = localFloors;
+        setFloors(localFloors);
+      }
       if (localCurrentFloorId) setCurrentFloorId(localCurrentFloorId);
-      markOfficeReady();
 
-      // ── Single getUser() call + parallel Supabase profile queries ──
+      // ── One app-owned auth identity + parallel scoped server reads ──
       let bestFloors = localFloors;
       let bestFloorId = localCurrentFloorId;
+      let remoteLayoutUpdatedAt = 0;
       let remotePrefsRecord: Record<string, unknown> | null = null;
+      let remoteIdleConfigValue: unknown = null;
+      let hasRemoteIdleConfig = false;
+      let idlePreferencesResolved = false;
       try {
-        const { data: { user: authUser } } = await supabase.auth.getUser();
-        if (authUser) {
-          // Fetch all profile columns in parallel (wrap builders so TS sees Promise)
-          const layoutP = _profileHasOfficeLayout
-            ? supabase.from('profiles').select('office_layout').eq('id', authUser.id).single().then(r => r)
-            : Promise.resolve({ data: null, error: null } as any);
-          const appearanceP = _profileHasAgentAppearance
-            ? supabase.from('profiles').select('agent_appearance').eq('id', authUser.id).single().then(r => r)
-            : Promise.resolve({ data: null, error: null } as any);
-          const prefsP = _profileHasOfficePreferences
-            ? supabase.from('profiles').select('office_preferences').eq('id', authUser.id).single().then(r => r)
-            : Promise.resolve({ data: null, error: null } as any);
+        if (requestIsCurrent()) {
+          // Layout authority and private preference enrichment are independent:
+          // an optional preference timeout never discards a valid layout read.
+          const layoutP = loadOfficeLayoutState(circleId, requestedAuthScope);
+          const prefsP = officeUserPreferencesAvailableRef.current
+            ? loadOfficeUserPreferences(circleId, requestedAuthScope)
+            : Promise.resolve({ ok: false, preferences: null, revision: 0, unavailable: true });
 
-          const [layoutRes, appearanceRes, prefsRes] = await Promise.all([layoutP, appearanceP, prefsP]);
+          const [layoutRes, prefsResult] = await Promise.all([
+            layoutP,
+            prefsP.then(
+              (value) => ({ status: 'fulfilled' as const, value }),
+              (reason) => ({ status: 'rejected' as const, reason }),
+            ),
+          ]);
+          if (!requestIsCurrent()) return;
+          authoritativeLayoutReadRef.current = layoutRes.ok;
+          // Private preference enrichment is optional. A timeout must not discard a
+          // successful authoritative layout read or force the editor into
+          // local-only mode.
+          const prefsRes = prefsResult.status === 'fulfilled'
+            ? prefsResult.value
+            : { ok: false, preferences: null, revision: 0, error: String(prefsResult.reason || '') };
+          idlePreferencesResolved = prefsRes.ok === true;
 
           // Merge floors
-          if (layoutRes.error) {
-            if (isMissingProfileColumnError(layoutRes.error)) _profileHasOfficeLayout = false;
-          } else if (layoutRes.data?.office_layout) {
-            const remote = layoutRes.data.office_layout as { floors?: OfficeFloor[]; currentFloorId?: string; updatedAt?: number };
-            if (remote?.floors && remote.floors.length > 0) {
-              const remoteUpdatedAt = remote.updatedAt || 0;
-              let useRemote = false;
-              if (remoteUpdatedAt > localUpdatedAt) {
-                useRemote = true;
-              } else if (remoteUpdatedAt === localUpdatedAt) {
-                const localItems = localFloors.reduce((n, f) => n + (f.furniture?.length || 0), 0);
-                const remoteItems = remote.floors.reduce((n, f) => n + (f.furniture?.length || 0), 0);
-                if (remoteItems > localItems) useRemote = true;
-              }
+          if (!layoutRes.ok) {
+            setFloorLayoutSaveState('error');
+            setFloorLayoutSaveDetail(layoutRes.error || 'Server layout unavailable. Local backup is still active.');
+          } else if (layoutRes.layout) {
+            const remote = layoutRes.layout;
+            layoutVersionRef.current = Math.max(layoutVersionRef.current, layoutRes.version, remote.updatedAt || 0);
+            setFloorLayoutSaveState('saved');
+            setFloorLayoutSaveDetail('Saved to this circle');
+            if (remote.floors.length > 0) {
+              const remoteUpdatedAt = remote.updatedAt || layoutRes.version || 0;
+              remoteLayoutUpdatedAt = remoteUpdatedAt;
+              // The server row is authoritative for an equal version too. Item
+              // count is not a conflict resolver: a valid deletion may have
+              // fewer items than a divergent local snapshot.
+              const useRemote = remoteUpdatedAt >= localUpdatedAt;
               if (useRemote) {
                 bestFloors = remote.floors;
                 bestFloorId = remote.currentFloorId || localCurrentFloorId;
@@ -1835,39 +3150,37 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
             }
           }
 
-          // Merge appearances — always call setAppearances so downstream
-          // auto-assignment logic can populate missing agents
-          if (appearanceRes.error) {
-            if (isMissingProfileColumnError(appearanceRes.error)) _profileHasAgentAppearance = false;
-          } else {
-            const remoteApp = appearanceRes.data?.agent_appearance || {};
-            setAppearances({ ...localAppearances, ...remoteApp });
-          }
-
-          // Merge office preferences (agent names, telegram, whiteboard)
-          if (prefsRes.error) {
-            if (isMissingProfileColumnError(prefsRes.error)) _profileHasOfficePreferences = false;
-          } else if (prefsRes.data?.office_preferences) {
-            remotePrefsRecord = prefsRes.data.office_preferences as Record<string, unknown>;
-            const remote = prefsRes.data.office_preferences as {
+          // Merge owner-and-circle private preferences. The peer-readable
+          // profiles.office_preferences blob is intentionally never read.
+          if (!prefsRes.ok) {
+            if (prefsRes.unavailable) officeUserPreferencesAvailableRef.current = false;
+          } else if (prefsRes.preferences) {
+            remotePrefsRecord = prefsRes.preferences;
+            const remote = prefsRes.preferences as {
               agentNames?: Record<string, string>;
-              telegramConfig?: { botToken?: string; chatId?: string };
+              telegramMetadata?: { chatId?: string; botName?: string };
               whiteboardNotes?: string[];
               budgetConfig?: BudgetConfig;
               idleConfig?: IdleBehaviorConfig;
               agentFilterMode?: AgentFilterMode;
+              appearances?: Record<string, AgentAppearance>;
             };
+            if (remote.appearances && typeof remote.appearances === 'object') {
+              setAppearances({ ...localAppearances, ...remote.appearances });
+            }
             // Remote agent names override local (more durable)
             if (remote.agentNames && Object.keys(remote.agentNames).length > 0) {
               const localNames = namesRaw ? (() => { try { return JSON.parse(namesRaw); } catch { return {}; } })() : {};
               setAgentNames({ ...localNames, ...remote.agentNames });
             }
-            // Remote telegram config overrides local
-            if (remote.telegramConfig?.botToken || remote.telegramConfig?.chatId) {
+            // Only non-secret Telegram metadata is durable server state. The
+            // bot token remains the exact encrypted device value loaded above.
+            if (remote.telegramMetadata?.chatId || remote.telegramMetadata?.botName) {
               setTelegramConfig({
-                botToken: remote.telegramConfig.botToken || '',
-                chatId: remote.telegramConfig.chatId || '',
+                botToken: localTelegramBotToken,
+                chatId: remote.telegramMetadata.chatId || '',
               });
+              setTelegramBotName(remote.telegramMetadata.botName || null);
             }
             // Remote whiteboard notes override local if non-empty
             if (remote.whiteboardNotes && remote.whiteboardNotes.length > 0) {
@@ -1881,19 +3194,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
               budgetLoadedRef.current = true;
               setBudgetConfig(remote.budgetConfig);
             }
-            // Remote idle behavior config — same load-then-flag dance.
+            // Remote settings remain primary. Reconciliation with the exact
+            // local run receipt happens once below, after every source settles.
             if (remote.idleConfig && typeof remote.idleConfig === 'object') {
-              remoteIdleAppliedRef.current = true;
-              idleLoadedRef.current = true;
-              setIdleConfig(remote.idleConfig);
-              idleConfigRef.current = remote.idleConfig;
+              remoteIdleConfigValue = remote.idleConfig;
+              hasRemoteIdleConfig = true;
             }
             // Agent filter mode (which subset of agents the user
             // wants to see — mine / all / active / bonded).
             if (remote.agentFilterMode &&
                 ['all', 'mine', 'active', 'bonded'].includes(remote.agentFilterMode)) {
               setAgentFilterMode(remote.agentFilterMode);
-              try { window.localStorage?.setItem('uc_office_agent_filter_v1', remote.agentFilterMode); } catch {}
             }
           }
 
@@ -1903,52 +3214,98 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           //    the case where the user customized for weeks while the
           //    migration was missing — first reload after applying it
           //    now syncs without any further user action.
-          const serverLayout = layoutRes.data?.office_layout as { floors?: OfficeFloor[] } | null | undefined;
-          const serverHasNoLayout = _profileHasOfficeLayout &&
-            (!serverLayout || !serverLayout.floors || serverLayout.floors.length === 0);
-          if (serverHasNoLayout && bestFloors.length > 0) {
-            const seedLayout = { floors: bestFloors, currentFloorId: bestFloorId, updatedAt: Date.now() };
+          const serverNeedsCircleLayout = layoutRes.ok
+            && (layoutRes.source === 'none' || localUpdatedAt > remoteLayoutUpdatedAt)
+            && bestFloors.length > 0;
+          if (serverNeedsCircleLayout) {
+            const seedVersion = Math.max(Date.now(), layoutVersionRef.current + 1, localUpdatedAt + 1);
+            layoutVersionRef.current = seedVersion;
+            const seedLayout = { floors: bestFloors, currentFloorId: bestFloorId, updatedAt: seedVersion };
             const validation = validateOfficeLayout(seedLayout);
-            if (validation.valid) {
-              supabase.from('profiles')
-                .update({ office_layout: validation.sanitizedLayout })
-                .eq('id', authUser.id)
-                .then(({ error }) => { if (error && isMissingProfileColumnError(error)) _profileHasOfficeLayout = false; });
+            if (validation.valid && validation.sanitizedLayout) {
+              const localBackupVerified = await enqueueVerifiedLocalLayoutSave({
+                userId: currentUserId,
+                circleId,
+                floors: validation.sanitizedLayout.floors as OfficeFloor[],
+                currentFloorId: validation.sanitizedLayout.currentFloorId,
+                updatedAt: seedVersion,
+              });
+              if (!requestIsCurrent()) return;
+              const result = await saveOfficeLayoutState(
+                circleId,
+                validation.sanitizedLayout,
+                seedVersion,
+                requestedAuthScope,
+              );
+              if (!requestIsCurrent()) return;
+              if (result.ok) {
+                setFloorLayoutSaveState('saved');
+                setFloorLayoutSaveDetail('Saved to this circle');
+              } else {
+                if (result.conflict) authoritativeLayoutReadRef.current = false;
+                queueLatestOfficeLayoutSave({
+                  pending: pendingLayoutSaveRef,
+                  active: activeLayoutSaveRef,
+                }, {
+                  scope: floorLayoutScope,
+                  circleId,
+                  layout: validation.sanitizedLayout as OfficeLayoutDocument,
+                  version: seedVersion,
+                  localBackupVerified,
+                  mutationEpoch: floorLayoutMutationEpochRef.current,
+                  authScope: requestedAuthScope,
+                });
+                setFloorLayoutSaveState('error');
+                setFloorLayoutSaveDetail(result.error || 'Server backup failed.');
+              }
             }
           }
-          const serverApp = appearanceRes.data?.agent_appearance as Record<string, unknown> | null | undefined;
-          const serverHasNoAppearance = _profileHasAgentAppearance &&
-            (!serverApp || Object.keys(serverApp).length === 0);
-          if (serverHasNoAppearance && Object.keys(localAppearances).length > 0) {
-            supabase.from('profiles')
-              .update({ agent_appearance: localAppearances })
-              .eq('id', authUser.id)
-              .then(({ error }) => { if (error && isMissingProfileColumnError(error)) _profileHasAgentAppearance = false; });
-          }
-
-          // Seed agent_identities table from localStorage if the table
-          // was just created (migration just applied) and the user has
-          // local identity data. Single round-trip, idempotent.
-          seedIdentitiesIfServerEmpty().catch(() => {});
+          // Ownerless identity storage has no proof of which account created
+          // it, so it is never uploaded automatically during auth hydration.
         }
-      } catch {}
+      } catch {
+        authoritativeLayoutReadRef.current = false;
+        setFloorLayoutSaveState('error');
+        setFloorLayoutSaveDetail('Server layout could not be checked. Local editing is available, but server sync is paused until retry.');
+      }
+
+      if (!requestIsCurrent()) return;
+
+      if (idlePreferencesResolved) {
+        const normalizedLocalIdleConfig = normalizeIdleConfig(exactLocalIdleConfig);
+        const hydratedIdleConfig = hasRemoteIdleConfig
+          ? mergeRemoteIdleConfigWithExactRunHistory(
+              remoteIdleConfigValue,
+              normalizedLocalIdleConfig,
+            )
+          : normalizedLocalIdleConfig;
+        // A remote read owns toggles/cooldowns/opt-in. Skip the hydration echo;
+        // later user changes and scheduler receipts still persist normally.
+        remoteIdleAppliedRef.current = hasRemoteIdleConfig;
+        idleLoadedRef.current = true;
+        idleConfigRef.current = hydratedIdleConfig;
+        setIdleConfig(hydratedIdleConfig);
+        setIdleConfigReadyAuthorityKey(idleConfigAuthorityKey(idleSchedulerAuthority));
+      }
 
       appearancesLoadedRef.current = true;
       prefsLoadedRef.current = true;
-      floorsInitializedRef.current = true;
-      if (_profileHasOfficePreferences) {
+      if (officeUserPreferencesAvailableRef.current) {
         const seedPrefs: Record<string, unknown> = {};
         if (!remotePrefsRecord?.agentNames && Object.keys(localAgentNames).length > 0) {
           seedPrefs.agentNames = localAgentNames;
         }
-        if (!remotePrefsRecord?.telegramConfig && (localTelegramConfig?.botToken || localTelegramConfig?.chatId)) {
-          seedPrefs.telegramConfig = {
-            botToken: localTelegramConfig.botToken || '',
-            chatId: localTelegramConfig.chatId || '',
-          };
+        if (!remotePrefsRecord?.appearances && Object.keys(localAppearances).length > 0) {
+          seedPrefs.appearances = localAppearances;
         }
         if (!remotePrefsRecord?.whiteboardNotes && localWhiteboardNotes.length > 0) {
           seedPrefs.whiteboardNotes = localWhiteboardNotes;
+        }
+        if (
+          !remotePrefsRecord?.telegramMetadata
+          && (localTelegramMetadata.chatId || localTelegramMetadata.botName)
+        ) {
+          seedPrefs.telegramMetadata = localTelegramMetadata;
         }
         if (!remotePrefsRecord?.agentFilterMode && agentFilterMode !== 'all') {
           seedPrefs.agentFilterMode = agentFilterMode;
@@ -1957,45 +3314,258 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       }
 
       // Apply floors
-      if (bestFloors.length > 0) setFloors(bestFloors);
+      if (bestFloors.length > 0) {
+        officeEditorHistoriesRef.current = {};
+        setOfficeEditorHistoryRevision((revision) => revision + 1);
+        floorsRef.current = bestFloors;
+        setFloors(bestFloors);
+      }
       if (bestFloorId) setCurrentFloorId(bestFloorId);
+      if (bestFloors.length > 0 && bestFloorId) {
+        const localVersion = Math.max(1, layoutVersionRef.current, localUpdatedAt, remoteLayoutUpdatedAt);
+        void enqueueVerifiedLocalLayoutSave({
+          userId: currentUserId,
+          circleId,
+          floors: bestFloors,
+          currentFloorId: bestFloorId,
+          updatedAt: localVersion,
+        });
+      }
+      // Make the persistence gate reactive. A ref-only transition could leave
+      // edits made during hydration permanently unsaved because no effect was
+      // guaranteed to run after the async merge finished.
+      floorsInitializedRef.current = true;
+      // Reconciliation itself is not a user mutation. A successful no-row
+      // load is seeded explicitly above; otherwise the first post-hydration
+      // render must not churn versions or overwrite failed server authority.
+      skipNextLayoutPersistenceRef.current = true;
+      setFloorLayoutHydratedCircleId(requestedScope);
+      markOfficeReady();
 
-      // ── Fire remaining async loads after first paint / idle time ──
+      // ── Finish non-persistent enrichment after first paint / idle time ──
       const cancelDeferredEnrichment = runWhenIdle(() => {
+        const storageScope = { userId: currentUserId, circleId };
         Promise.all([
-          loadSessionTags(),
-          loadCachedTags(),
+          loadSessionTags(storageScope),
+          loadCachedTags(storageScope),
         ]).then(([primaryTags, cachedTags]) => {
+          if (!requestIsCurrent()) return;
           const merged = new Map(cachedTags);
           primaryTags.forEach((tags, key) => { merged.set(key, tags); });
           setSessionTags(merged);
         }).catch(() => {});
 
-        loadBudgetConfig().then(cfg => {
-          if (!remoteBudgetAppliedRef.current) setBudgetConfig(cfg);
-          budgetLoadedRef.current = true;
-        }).catch(() => { budgetLoadedRef.current = true; });
-        loadIdleConfig().then(cfg => {
-          if (!remoteIdleAppliedRef.current) {
-            setIdleConfig(cfg);
-            idleConfigRef.current = cfg;
-          }
-          idleLoadedRef.current = true;
-        }).catch(() => { idleLoadedRef.current = true; });
+        // The budget legacy browser key is ownerless and cannot prove which
+        // account created it, so it is never imported. Idle readiness is not a
+        // deferred ref flip: it was committed reactively above only after the
+        // exact local and remote preference sources resolved.
+        budgetLoadedRef.current = true;
       }, 350);
 
       (initRef as any)._cancelDeferredEnrichment = cancelDeferredEnrichment;
-    })();
+    })().catch(() => {
+      if (!requestIsCurrent()) return;
+      if (!membershipProven) {
+        const message = 'The circle access check could not be completed. Check your connection and retry.';
+        selectedAgentRefreshRetentionRef.current = null;
+        setSelectedAgent(null);
+        setOfficeAccessError(message);
+        setFloorLayoutSaveState('error');
+        setFloorLayoutSaveDetail(message);
+        return;
+      }
+      authoritativeLayoutReadRef.current = false;
+      floorsInitializedRef.current = true;
+      skipNextLayoutPersistenceRef.current = true;
+      setFloorLayoutSaveState('error');
+      setFloorLayoutSaveDetail('Office layout initialization timed out. Local editing is available; retry server sync when the connection recovers.');
+      setFloorLayoutHydratedCircleId(requestedScope);
+      markOfficeReady();
+    });
 
     return () => {
+      cancelled = true;
       (initRef as any)._cancelDeferredEnrichment?.();
-      (initRef as any)._unsub?.();
+      pollersRef.current.forEach((poller, connectionId) => {
+        pollerGenerationsRef.current.set(
+          connectionId,
+          (pollerGenerationsRef.current.get(connectionId) || 0) + 1,
+        );
+        poller.stop();
+      });
+      pollersRef.current.clear();
+      sessionsRef.current.clear();
+      sessionFingerprintsRef.current.clear();
     };
-    // This boot path owns long-lived subscriptions/pollers. Re-running it
-    // for callback identity churn tears down the office runtime, so only
-    // restart when the actual circle changes.
+    // This boot path owns long-lived subscriptions/pollers. Re-running it for
+    // callback identity churn tears down the Office runtime, so restart only
+    // for an exact authority generation, circle, or explicit access retry.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [circleId]);
+  }, [authReady, circleId, committedAuthAuthority, committedAuthScopeKey, currentUserId, enqueueVerifiedLocalLayoutSave, floorLayoutScope, officeAccessRetry, privateStorageKeys]);
+
+  // Membership is a lease, not a one-time boot fact. Realtime changes are
+  // invalidation signals and a bounded poll covers missed DELETE events or a
+  // suspended tab. Loss of proof retires the exact generation before private
+  // state is cleared, so delayed callbacks can no longer apply or mutate.
+  useEffect(() => {
+    const requestedAuthority = committedAuthAuthority;
+    if (
+      !requestedAuthority
+      || !floorLayoutHydrated
+      || officeAccessError
+      || !isOfficeAuthorityCurrent(requestedAuthority)
+    ) return undefined;
+
+    let cancelled = false;
+    let checking = false;
+    const requestIsCurrent = () => (
+      !cancelled && isOfficeAuthorityCurrent(requestedAuthority)
+    );
+    const retirePrivateOffice = (message: string) => {
+      if (!requestIsCurrent()) return;
+      authAuthorityGenerationRef.current += 1;
+      if (authAuthorityRef.current?.generation === requestedAuthority.generation) {
+        authAuthorityRef.current = null;
+      }
+      setCommittedAuthAuthority((current) => (
+        current?.generation === requestedAuthority.generation ? null : current
+      ));
+      initRef.current = null;
+      setFloorLayoutHydratedCircleId(null);
+      setIdleConfigReadyAuthorityKey(null);
+      idleLoadedRef.current = false;
+      setOfficeAccessError(message);
+      selectedAgentRefreshRetentionRef.current = null;
+      setSelectedAgent(null);
+      setComputerTaskCard(null);
+      setOfficeAgentPlans([]);
+      setStatusHistory([]);
+      pollersRef.current.forEach((poller, connectionId) => {
+        pollerGenerationsRef.current.set(
+          connectionId,
+          (pollerGenerationsRef.current.get(connectionId) || 0) + 1,
+        );
+        poller.stop();
+      });
+      pollersRef.current.clear();
+      sessionsRef.current.clear();
+      sessionFingerprintsRef.current.clear();
+      connectionsAuthorityRef.current = null;
+      connectionsRef.current = [];
+      setConnections([]);
+      setCircleOfficeAgents([]);
+      setLiveUserIds(new Set());
+      setCircleConnectionStatus('offline');
+    };
+    const revalidateMembership = async () => {
+      if (checking || !requestIsCurrent()) return;
+      checking = true;
+      try {
+        const result = await verifyOfficeCircleMembership(
+          requestedAuthority.circleId,
+          toOfficeDashboardAuthority(requestedAuthority),
+          requestIsCurrent,
+        );
+        if (requestIsCurrent() && !result.ok) retirePrivateOffice(result.error);
+      } finally {
+        checking = false;
+      }
+    };
+
+    const timer = setInterval(() => { void revalidateMembership(); }, 45_000);
+    const membershipSubscription = subscribeWithReconnect({
+      channelName: `office-membership-lease:${requestedAuthority.userId}:${requestedAuthority.circleId}:${requestedAuthority.generation}`,
+      setup: (channel) => channel.on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'circle_members',
+        filter: `circle_id=eq.${requestedAuthority.circleId}`,
+      }, () => { void revalidateMembership(); }),
+      onCatchUp: () => { void revalidateMembership(); },
+    });
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      membershipSubscription.unsubscribe();
+    };
+  }, [committedAuthAuthority, floorLayoutHydrated, isOfficeAuthorityCurrent, officeAccessError]);
+
+  // Adaptive Office preferences and counters are private user+circle data.
+  // Start only after membership-backed Office hydration, and fence every
+  // async read/write to the captured bearer and lifecycle generation.
+  useEffect(() => {
+    let cancelled = false;
+    const requestedAuthority = captureOfficeAuthority();
+    if (
+      !floorLayoutHydrated
+      || officeAccessError
+      || !requestedAuthority
+      || !isOfficeAuthorityCurrent(requestedAuthority)
+    ) return () => { cancelled = true; };
+    const requestIsCurrent = (candidate: OfficeExactAuthority) => (
+      !cancelled && isOfficeAuthorityCurrent(candidate)
+    );
+    void Promise.all([
+      loadCircleWorkspaceProfileExact(requestedAuthority, requestIsCurrent),
+      loadAdaptiveWorkspaceSettingsExact(requestedAuthority, requestIsCurrent),
+    ]).then(([profileResult, settingsResult]) => {
+      if (
+        !requestIsCurrent(requestedAuthority)
+        || !profileResult.ok
+        || !profileResult.profile
+        || !settingsResult.ok
+        || !settingsResult.settings
+      ) return;
+      const adaptive = getAdaptiveOfficeDefaults(profileResult.profile, settingsResult.settings);
+      setTerminalInitialTab(adaptive.terminalInitialTab);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [
+    captureOfficeAuthority,
+    floorLayoutHydrated,
+    isOfficeAuthorityCurrent,
+    officeAccessError,
+    setTerminalInitialTab,
+  ]);
+
+  const recordAdaptiveOfficeActivity = useCallback((
+    kind: Parameters<typeof recordOfficeActivityExact>[1],
+  ) => {
+    if (!floorLayoutHydrated || officeAccessError) return;
+    const requestedAuthority = captureOfficeAuthority();
+    if (!requestedAuthority || !isOfficeAuthorityCurrent(requestedAuthority)) return;
+    void recordOfficeActivityExact(
+      requestedAuthority,
+      kind,
+      isOfficeAuthorityCurrent,
+    ).catch(() => {});
+  }, [captureOfficeAuthority, floorLayoutHydrated, isOfficeAuthorityCurrent, officeAccessError]);
+
+  useEffect(() => {
+    if (!selectedAgent) return;
+    recordAdaptiveOfficeActivity('select_agent');
+    recordAdaptiveOfficeActivity('runtime');
+  }, [recordAdaptiveOfficeActivity, selectedAgent]);
+
+  useEffect(() => {
+    if (editMode || placingType || selectedFurnitureId) {
+      recordAdaptiveOfficeActivity('workspace');
+    }
+  }, [editMode, placingType, recordAdaptiveOfficeActivity, selectedFurnitureId]);
+
+  useEffect(() => {
+    if (showGitHubFeed || showSoundMixer || showVault) {
+      recordAdaptiveOfficeActivity('intelligence');
+    }
+  }, [recordAdaptiveOfficeActivity, showGitHubFeed, showSoundMixer, showVault]);
+
+  useEffect(() => {
+    if (terminalSize === 'closed') return;
+    recordAdaptiveOfficeActivity('runtime');
+    recordAdaptiveOfficeActivity(
+      terminalInitialTab === 'automations' ? 'terminal_automations' : 'terminal_commands',
+    );
+  }, [recordAdaptiveOfficeActivity, terminalInitialTab, terminalSize]);
 
   // Cleanup pollers on unmount
   useEffect(() => {
@@ -2008,32 +3578,257 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
   // ─── Floor management (must be defined before useEffects that use it) ──────
 
-  // Auto-persist floors to localStorage + Supabase whenever they change
-  useEffect(() => {
-    if (!floorsInitializedRef.current) return; // skip first render with defaults
-    const now = Date.now();
-    storage.setItem(STORAGE_KEY_FLOORS, JSON.stringify(floors)).catch(() => {});
-    storage.setItem(STORAGE_KEY_FLOORS_TS, now.toString()).catch(() => {});
-    // Async push to Supabase (skip if column doesn't exist)
-    if (_profileHasOfficeLayout) {
-      const layoutData = { floors, currentFloorId, updatedAt: now };
-      const validation = validateOfficeLayout(layoutData);
-      if (!validation.valid) {
-        console.warn('[OfficeTab] Layout validation failed, skipping save:', validation.errors);
-      } else {
-        supabase.auth.getUser().then(({ data: { user } }) => {
-          if (user) {
-            supabase.from('profiles').update({
-              office_layout: validation.sanitizedLayout
-            }).eq('id', user.id).then(
-              ({ error }) => { if (error && isMissingProfileColumnError(error)) _profileHasOfficeLayout = false; },
-              () => {},
-            );
+  const flushPendingLayoutSave = useCallback(async () => {
+    await drainLatestOfficeLayoutSaveQueue({
+      pending: pendingLayoutSaveRef,
+      active: activeLayoutSaveRef,
+      inFlight: layoutSaveInFlightRef,
+      drainRequested: layoutSaveDrainRequestedRef,
+    }, {
+      getActiveScope: () => layoutSaveScopeRef.current,
+      save: async (pending): Promise<OfficeLayoutSaveResult> => {
+        try {
+          return await saveOfficeLayoutState(
+            pending.circleId,
+            pending.layout,
+            pending.version,
+            pending.authScope,
+          );
+        } catch {
+          return {
+            ok: false,
+            version: pending.version,
+            source: 'none',
+            error: 'The Office server could not be reached.',
+          };
+        }
+      },
+      onSettled: ({ item: pending, result }) => {
+        if (result.ok) {
+          layoutVersionRef.current = Math.max(layoutVersionRef.current, result.version);
+          // Never render SAVED for an older receipt while a newer verified
+          // local edit is queued or still completing its local-cache write.
+          if (
+            !pendingLayoutSaveRef.current
+            && layoutVersionRef.current === result.version
+            && floorLayoutMutationEpochRef.current === pending.mutationEpoch
+          ) {
+            setFloorLayoutSaveState('saved');
+            setFloorLayoutSaveDetail('Saved to this circle');
           }
-        }).catch(() => {});
-      }
+          return;
+        }
+        if (result.conflict) {
+          // Pause remote dispatch until Retry performs a fresh authoritative
+          // read, but preserve any newer pending snapshot exactly as queued.
+          authoritativeLayoutReadRef.current = false;
+          if (layoutSaveTimerRef.current) clearTimeout(layoutSaveTimerRef.current);
+          layoutSaveTimerRef.current = null;
+        }
+        setFloorLayoutSaveState('error');
+        const failure = result.error || 'Server backup failed.';
+        setFloorLayoutSaveDetail(pending.localBackupVerified
+          ? `${failure} Your verified local backup remains available.`
+          : `${failure} The local backup could not be verified either.`);
+      },
+    });
+  }, []);
+
+  const handleRetryFloorLayoutSave = useCallback(async () => {
+    const retryScope = floorLayoutScope;
+    const retryAuthScope = authAuthorityRef.current;
+    if (
+      !retryScope
+      || !retryAuthScope
+      || retryAuthScope.userId !== currentUserId
+      || layoutSaveScopeRef.current !== retryScope
+    ) return;
+    const retryStartVersion = layoutVersionRef.current;
+    const retryStartFingerprint = JSON.stringify({
+      floors: floorsRef.current,
+      currentFloorId: currentFloorIdRef.current,
+    });
+    const retrySnapshotIsCurrent = () => (
+      layoutSaveScopeRef.current === retryScope
+      && layoutVersionRef.current === retryStartVersion
+      && JSON.stringify({
+        floors: floorsRef.current,
+        currentFloorId: currentFloorIdRef.current,
+      }) === retryStartFingerprint
+    );
+    const fresh = await loadOfficeLayoutState(circleId, retryAuthScope);
+    if (!retrySnapshotIsCurrent()) {
+      authoritativeLayoutReadRef.current = false;
+      setFloorLayoutSaveState('error');
+      setFloorLayoutSaveDetail('The Office changed while checking the server. Your edit was kept; retry once more to compare the latest snapshot.');
+      return;
     }
-  }, [floors, currentFloorId]);
+    if (!fresh.ok) {
+      authoritativeLayoutReadRef.current = false;
+      setFloorLayoutSaveState('error');
+      setFloorLayoutSaveDetail(fresh.error || 'Server layout could not be checked. Retry when the connection is available.');
+      return;
+    }
+    const freshLayoutDiffers = Boolean(fresh.layout) && JSON.stringify({
+      floors: fresh.layout!.floors,
+      currentFloorId: fresh.layout!.currentFloorId,
+    }) !== retryStartFingerprint;
+    if (
+      fresh.layout
+      && (
+        fresh.version > retryStartVersion
+        || (fresh.version === retryStartVersion && freshLayoutDiffers)
+      )
+    ) {
+      await enqueueVerifiedLocalLayoutSave({
+        userId: currentUserId,
+        circleId,
+        floors: fresh.layout.floors,
+        currentFloorId: fresh.layout.currentFloorId,
+        updatedAt: fresh.version,
+      });
+      if (!retrySnapshotIsCurrent()) {
+        authoritativeLayoutReadRef.current = false;
+        setFloorLayoutSaveState('error');
+        setFloorLayoutSaveDetail('The Office changed while restoring the server snapshot. Your edit was kept; retry to compare again.');
+        return;
+      }
+      authoritativeLayoutReadRef.current = true;
+      pendingLayoutSaveRef.current = null;
+      layoutVersionRef.current = fresh.version;
+      skipNextLayoutPersistenceRef.current = true;
+      floorsRef.current = fresh.layout.floors;
+      setFloors(fresh.layout.floors);
+      setCurrentFloorId(fresh.layout.currentFloorId);
+      setFloorLayoutSaveState('error');
+      setFloorLayoutSaveDetail('A newer Office layout was loaded. Review it before making another edit.');
+      return;
+    }
+    authoritativeLayoutReadRef.current = true;
+    const waiting = pendingLayoutSaveRef.current;
+    if (waiting && waiting.scope === retryScope) {
+      // A successful fresh read proves the current session authority. Replace
+      // only the captured credential on the exact pending snapshot so an
+      // expired token cannot be replayed forever by Retry.
+      queueLatestOfficeLayoutSave({
+        pending: pendingLayoutSaveRef,
+        active: activeLayoutSaveRef,
+      }, { ...waiting, authScope: retryAuthScope });
+    } else if (!waiting) {
+      const version = Math.max(Date.now(), layoutVersionRef.current + 1);
+      const retryMutationEpoch = floorLayoutMutationEpochRef.current;
+      const validation = validateOfficeLayout({
+        floors: floorsRef.current,
+        currentFloorId: currentFloorIdRef.current,
+        updatedAt: version,
+      });
+      if (!validation.valid || !validation.sanitizedLayout) {
+        setFloorLayoutSaveState('error');
+        setFloorLayoutSaveDetail(validation.errors[0] || 'Layout validation failed.');
+        return;
+      }
+      layoutVersionRef.current = version;
+      const localBackupVerified = await enqueueVerifiedLocalLayoutSave({
+        userId: currentUserId,
+        circleId,
+        floors: validation.sanitizedLayout.floors as OfficeFloor[],
+        currentFloorId: validation.sanitizedLayout.currentFloorId,
+        updatedAt: version,
+      });
+      if (
+        !retrySnapshotIsCurrent()
+        || layoutSaveScopeRef.current !== retryScope
+        || layoutVersionRef.current !== version
+        || floorLayoutMutationEpochRef.current !== retryMutationEpoch
+      ) return;
+      queueLatestOfficeLayoutSave({
+        pending: pendingLayoutSaveRef,
+        active: activeLayoutSaveRef,
+      }, {
+        scope: retryScope,
+        circleId,
+        layout: validation.sanitizedLayout as OfficeLayoutDocument,
+        version,
+        localBackupVerified,
+        mutationEpoch: retryMutationEpoch,
+        authScope: retryAuthScope,
+      });
+    }
+    setFloorLayoutSaveState('saving');
+    setFloorLayoutSaveDetail('Retrying the latest floor, item, and tool snapshot…');
+    void flushPendingLayoutSave();
+  }, [circleId, currentUserId, enqueueVerifiedLocalLayoutSave, floorLayoutScope, flushPendingLayoutSave]);
+
+  // Auto-persist every floor item/tool edit locally immediately, then coalesce
+  // and serialize server writes. Monotonic versions plus the §37 RPC prevent an
+  // older drag/update response from overwriting a newer floor snapshot.
+  useEffect(() => {
+    if (!floorLayoutHydrated || !floorsInitializedRef.current) return; // skip unmerged defaults
+    if (skipNextLayoutPersistenceRef.current) {
+      skipNextLayoutPersistenceRef.current = false;
+      return;
+    }
+    const version = Math.max(Date.now(), layoutVersionRef.current + 1);
+    layoutVersionRef.current = version;
+    const mutationEpoch = floorLayoutMutationEpochRef.current;
+    const persistenceAuthScope = authAuthorityRef.current;
+    const layoutData = { floors, currentFloorId, updatedAt: version };
+    const validation = validateOfficeLayout(layoutData);
+    if (!validation.valid || !validation.sanitizedLayout) {
+      console.warn('[OfficeTab] Layout validation failed, skipping save:', validation.errors);
+      setFloorLayoutSaveState('error');
+      setFloorLayoutSaveDetail(validation.errors[0] || 'Layout validation failed.');
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const localBackupVerified = await enqueueVerifiedLocalLayoutSave({
+        userId: currentUserId,
+        circleId,
+        floors: validation.sanitizedLayout.floors as OfficeFloor[],
+        currentFloorId: validation.sanitizedLayout.currentFloorId,
+        updatedAt: version,
+      });
+      if (
+        cancelled
+        || !persistenceAuthScope
+        || persistenceAuthScope.userId !== currentUserId
+        || layoutSaveScopeRef.current !== floorLayoutScope
+        || layoutVersionRef.current !== version
+      ) return;
+      if (!authoritativeLayoutReadRef.current) {
+        setFloorLayoutSaveState('error');
+        setFloorLayoutSaveDetail(localBackupVerified
+          ? 'Saved locally. Server sync is paused until a fresh layout check succeeds.'
+          : 'Server sync is paused and the local backup could not be verified. Free device storage, then retry.');
+        return;
+      }
+      queueLatestOfficeLayoutSave({
+        pending: pendingLayoutSaveRef,
+        active: activeLayoutSaveRef,
+      }, {
+        scope: floorLayoutScope!,
+        circleId,
+        layout: validation.sanitizedLayout as OfficeLayoutDocument,
+        version,
+        localBackupVerified,
+        mutationEpoch,
+        authScope: persistenceAuthScope,
+      });
+      if (layoutSaveTimerRef.current) clearTimeout(layoutSaveTimerRef.current);
+      layoutSaveTimerRef.current = setTimeout(() => {
+        layoutSaveTimerRef.current = null;
+        void flushPendingLayoutSave();
+      }, 350);
+    })();
+    return () => { cancelled = true; };
+  }, [circleId, currentFloorId, currentUserId, enqueueVerifiedLocalLayoutSave, floorLayoutHydrated, floorLayoutScope, floors, flushPendingLayoutSave]);
+
+  useEffect(() => () => {
+    if (layoutSaveTimerRef.current) clearTimeout(layoutSaveTimerRef.current);
+    layoutSaveTimerRef.current = null;
+    pendingLayoutSaveRef.current = null;
+  }, [circleId]);
 
   const { width: winW } = useWindowDimensions();
   const isDesktop = winW > 900;
@@ -2041,123 +3836,179 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   // Get current floor data with safety checks (must be before agent filtering)
   const matchedFloor = floors.find(f => f.id === currentFloorId);
   const currentFloor = matchedFloor || floors[0] || DEFAULT_FLOORS[0];
+  const selectedFurniture = currentFloor.furniture.find((item) => item.id === selectedFurnitureId) || null;
   const currentThemeId = currentFloor?.themeId || 'underground';
   const currentTheme = useMemo(() => resolveTheme(currentThemeId), [resolveTheme, currentThemeId]);
+
+  const refreshFloorPresets = useCallback(async () => {
+    const requestedScope = floorLayoutScope;
+    const requestedGeneration = floorLayoutGenerationRef.current;
+    const requestedAuthority = captureOfficeAuthority();
+    if (!circleId || !currentUserId || !requestedScope || !requestedAuthority || layoutSaveScopeRef.current !== requestedScope) return;
+    const requestId = ++floorPresetLoadRequestRef.current;
+    const requestIsCurrent = () => (
+      floorPresetLoadRequestRef.current === requestId
+      && floorLayoutGenerationRef.current === requestedGeneration
+      && layoutSaveScopeRef.current === requestedScope
+      && isOfficeAuthorityCurrent(requestedAuthority)
+    );
+    setFloorPresetsLoading(true);
+    try {
+      const result = await listOfficeFloorPresets(
+        circleId,
+        toOfficeDashboardAuthority(requestedAuthority),
+        requestIsCurrent,
+      );
+      if (!requestIsCurrent()) return;
+      if (result.ok) {
+        setFloorPresets(result.presets);
+        setFloorPresetStatus(result.presets.length === 0 ? 'No saved floor presets yet.' : null);
+      } else {
+        setFloorPresets([]);
+        setFloorPresetStatus(result.error || 'Floor presets are unavailable.');
+      }
+    } catch {
+      if (!requestIsCurrent()) return;
+      setFloorPresets([]);
+      setFloorPresetStatus('The Office server could not load floor presets.');
+    } finally {
+      if (requestIsCurrent()) setFloorPresetsLoading(false);
+    }
+  }, [captureOfficeAuthority, circleId, currentUserId, floorLayoutScope, isOfficeAuthorityCurrent]);
+
+  useEffect(() => {
+    setFloorPresets([]);
+    setFloorPresetStatus(null);
+    void refreshFloorPresets();
+  }, [refreshFloorPresets]);
 
   // Fix stale currentFloorId that doesn't match any floor
   useEffect(() => {
     if (!matchedFloor && floors.length > 0) {
       const correctId = floors[0].id;
       setCurrentFloorId(correctId);
-      storage.setItem(STORAGE_KEY_CURRENT_FLOOR, correctId).catch(() => {});
     }
   }, [matchedFloor, floors]);
 
   // Derive agents from ALL connected sessions
-  const connectedConns = connections.filter(c => c.status === 'connected');
+  const connectedConns = useMemo(
+    () => connections.filter(c => c.status === 'connected'),
+    [connections],
+  );
   const anyConnected = connectedConns.length > 0;
+  const ownDbCostRows = useMemo(
+    () => mergedCircleAgents.filter(agent => agent.ownerId === currentUserId),
+    [currentUserId, mergedCircleAgents],
+  );
 
-  const rawAgents: OfficeAgent[] = [];
-  const seenSessionIds = new Set<string>();
-  let indexOffset = 0;
-  for (const conn of connectedConns) {
-    const sessions = sessionsRef.current.get(conn.id) || [];
-    const connAgents = sessionsToAgents(sessions, conn.id, conn.name, conn.provider);
-    for (const a of connAgents) {
-      if (!seenSessionIds.has(a.sessionKey)) {
-        seenSessionIds.add(a.sessionKey);
-        rawAgents.push(a);
-      }
-    }
-    indexOffset += connAgents.length;
-  }
-  // Merge auto-detected sessions — deduplicate by sessionKey to prevent duplicates
-  // when the same bridge is connected both manually and via auto-detect
-  const autoKeys = ['claude-code-auto', 'codex-auto', 'gemini-cli-auto', 'cursor-auto'] as const;
-  for (const key of autoKeys) {
-    const autoAgents = sessionsRef.current.get(key) as unknown as OfficeAgent[] | undefined;
-    if (autoAgents && autoAgents.length > 0) {
-      for (const a of autoAgents) {
-        if (!seenSessionIds.has(a.sessionKey)) {
-          seenSessionIds.add(a.sessionKey);
-          rawAgents.push(a);
+  // Roster projection is an identity boundary for the open Agent panel. A raw
+  // array rebuilt during every Office render makes the selected-agent sync
+  // effect store a fresh object, which renders Office again and creates an
+  // unbounded passive-effect loop. Session pollers advance `sessionsTick`, so
+  // this memo still publishes every real runtime update without coupling the
+  // roster to unrelated editor/modal state.
+  const rawAgents = useMemo<OfficeAgent[]>(() => {
+    const projected: OfficeAgent[] = [];
+    const seenSessionIds = new Set<string>();
+    for (const conn of connectedConns) {
+      const sessions = sessionsRef.current.get(conn.id) || [];
+      const connAgents = sessionsToAgents(sessions, conn.id, conn.name, conn.provider);
+      for (const agent of connAgents) {
+        const sessionIdentity = `${agent.connectionId}::${agent.sessionKey}`;
+        if (!seenSessionIds.has(sessionIdentity)) {
+          seenSessionIds.add(sessionIdentity);
+          projected.push(agent);
         }
       }
     }
-  }
-
-  // Merge DB-backed agents that have no corresponding live session
-  // Only show if active within the last 2 hours — stale agents are hidden
-  // Skip if a live agent already exists for this provider (prevents ghost duplicates)
-  const STALE_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
-  const now = Date.now();
-  const liveAgentNames = new Set(rawAgents.map(a => a.name));
-  const liveProviders = new Set(rawAgents.map(a => a.providerType));
-  const myDbAgents = mergedCircleAgents.filter(a => {
-    if (a.ownerId !== currentUserId) return false;
-    if (liveAgentNames.has(a.name)) return false;
-    // Skip if there's already a live agent for this provider type
-    if (a.provider && liveProviders.has(a.provider as any)) return false;
-    // Filter out stale agents — if no lastActiveAt or too old, hide them
-    if (!a.lastActiveAt) return false;
-    const age = now - new Date(a.lastActiveAt).getTime();
-    return age < STALE_THRESHOLD_MS;
-  });
-  for (const dbAgent of myDbAgents) {
-    rawAgents.push({
-      id: `db::${dbAgent.id}`,
-      name: dbAgent.name,
-      role: dbAgent.provider || 'Agent',
-      status: dbAgent.status,
-      color: dbAgent.color,
-      deskIndex: rawAgents.length,
-      activity: dbAgent.currentTask || 'Idling',
-      messagesProcessed: dbAgent.message_count_total || 0,
-      uptimeHours: 0,
-      uptime: '',
-      lastActive: dbAgent.lastActiveAt || '',
-      recentActions: [],
-      recentMessages: [],
-      costToday: dbAgent.estimated_cost_today || 0,
-      costTotal: dbAgent.estimated_cost_total || 0,
-      costWeek: 0,
-      tokensUsed: dbAgent.token_usage_total || 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      cachedTokens: 0,
-      newTokens: 0,
-      turns: dbAgent.message_count_total || 0,
-      sessionKey: dbAgent.id,
-      model: 'unknown',
-      connectionId: 'db-agent',
-      connectionName: dbAgent.name,
-      providerType: (dbAgent.provider || 'generic-agent') as ProviderType,
-      spirit: dbAgent.spirit ?? undefined,
-    });
-  }
-
-  // Enrich live agents with spirit + accumulated cost from their CircleOfficeAgent DB record
-  const dbDataByKey = new Map(
-    mergedCircleAgents
-      .filter(a => a.ownerId === currentUserId)
-      .map(a => [`${a.ownerId}::${a.name}`, a])
-  );
-  // Also index by provider for live agents with slug names (e.g. "Wandering Duckling" → claude-code)
-  const dbDataByProvider = new Map(
-    mergedCircleAgents
-      .filter(a => a.ownerId === currentUserId && a.provider)
-      .map(a => [a.provider!, a])
-  );
-  for (const agent of rawAgents) {
-    const key = `${currentUserId}::${agent.name}`;
-    const dbMatch = dbDataByKey.get(key) || dbDataByProvider.get(agent.providerType);
-    if (dbMatch) {
-      if (!agent.spirit && dbMatch.spirit) agent.spirit = dbMatch.spirit;
-      // DB aggregates are durable; live bridge snapshots can reset on restart.
-      agent.costToday = Math.max(agent.costToday || 0, dbMatch.estimated_cost_today || 0);
-      agent.costTotal = Math.max(agent.costTotal || 0, dbMatch.estimated_cost_total || 0, agent.costToday || 0);
+    // Merge auto-detected sessions by exact connection + session identity.
+    // Session keys are provider-local and may repeat on different bridges.
+    const autoKeys = ['claude-code-auto', 'codex-auto', 'gemini-cli-auto', 'cursor-auto'] as const;
+    for (const key of autoKeys) {
+      const autoAgents = sessionsRef.current.get(key) as unknown as OfficeAgent[] | undefined;
+      if (autoAgents && autoAgents.length > 0) {
+        for (const agent of autoAgents) {
+          const sessionIdentity = `${agent.connectionId}::${agent.sessionKey}`;
+          if (!seenSessionIds.has(sessionIdentity)) {
+            seenSessionIds.add(sessionIdentity);
+            projected.push(agent);
+          }
+        }
+      }
     }
-  }
+
+    // Merge DB-backed agents that have no corresponding live session. Only
+    // show recent rows, and avoid provider/name ghosts beside a live session.
+    const staleThresholdMs = 2 * 60 * 60 * 1000;
+    const now = Date.now();
+    const liveAgentNames = new Set(projected.map(agent => agent.name));
+    const liveProviders = new Set(projected.map(agent => agent.providerType));
+    const myDbAgents = mergedCircleAgents.filter(agent => {
+      if (agent.ownerId !== currentUserId) return false;
+      if (liveAgentNames.has(agent.name)) return false;
+      if (agent.provider && liveProviders.has(agent.provider as ProviderType)) return false;
+      if (!agent.lastActiveAt) return false;
+      const age = now - new Date(agent.lastActiveAt).getTime();
+      return age < staleThresholdMs;
+    });
+    for (const dbAgent of myDbAgents) {
+      projected.push({
+        id: `db::${dbAgent.id}`,
+        name: dbAgent.name,
+        role: dbAgent.provider || 'Agent',
+        status: dbAgent.status,
+        color: dbAgent.color,
+        deskIndex: projected.length,
+        activity: dbAgent.currentTask || 'Idling',
+        messagesProcessed: dbAgent.message_count_total || 0,
+        uptimeHours: 0,
+        uptime: '',
+        lastActive: dbAgent.lastActiveAt || '',
+        recentActions: [],
+        recentMessages: [],
+        costToday: dbAgent.estimated_cost_today || 0,
+        costTotal: dbAgent.estimated_cost_total || 0,
+        costWeek: 0,
+        tokensUsed: dbAgent.token_usage_total || 0,
+        tokensTotal: dbAgent.token_usage_total || 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cachedTokens: 0,
+        newTokens: 0,
+        turns: dbAgent.message_count_total || 0,
+        sessionKey: dbAgent.id,
+        model: 'unknown',
+        connectionId: 'db-agent',
+        connectionName: dbAgent.name,
+        providerType: (dbAgent.provider || 'generic-agent') as ProviderType,
+        spirit: dbAgent.spirit ?? undefined,
+      });
+    }
+
+    // Enrich live agents from one durable Circle Office row. Exact name/id
+    // wins; provider fallback is allowed only when both sides are singular.
+    const liveProviderAgentCounts = new Map<ProviderType, number>();
+    for (const agent of projected) {
+      if (agent.connectionId === 'db-agent') continue;
+      liveProviderAgentCounts.set(
+        agent.providerType,
+        (liveProviderAgentCounts.get(agent.providerType) || 0) + 1,
+      );
+    }
+    for (const agent of projected) {
+      const dbMatch = findDurableOfficeAgentCost(agent, ownDbCostRows, {
+        liveProviderAgentCount: liveProviderAgentCounts.get(agent.providerType) || 0,
+      });
+      if (dbMatch && !agent.spirit && dbMatch.spirit) agent.spirit = dbMatch.spirit;
+      Object.assign(agent, applyDurableOfficeAgentCost(agent, dbMatch));
+      Object.assign(
+        agent,
+        applyOfficeAgentLifetimeUsage(agent, agentUsageProfiles.get(agent.sessionKey)),
+      );
+    }
+
+    return projected;
+  }, [agentUsageProfiles, connectedConns, currentUserId, mergedCircleAgents, ownDbCostRows, sessionsTick]);
 
   // Apply custom names
   const allAgents = useMemo(() =>
@@ -2213,10 +4064,90 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   }, [terminalSize, officeTerminalModule]);
 
   const refreshAgentIdentities = useCallback(async () => {
+    const refreshGeneration = agentIdentityRefreshGenerationRef.current + 1;
+    agentIdentityRefreshGenerationRef.current = refreshGeneration;
+    const requestedAuthority = captureOfficeAuthority();
+    if (!requestedAuthority) return false;
+    const refreshIsCurrent = () => (
+      refreshGeneration === agentIdentityRefreshGenerationRef.current
+      && isOfficeAuthorityCurrent(requestedAuthority)
+    );
     try {
-      setAgentIdentities(await loadAgentIdentities());
-    } catch {}
-  }, []);
+      const localIdentities = await loadAgentIdentitiesExact(requestedAuthority);
+      if (!refreshIsCurrent()) return false;
+      const serverResult = await refreshAgentIdentitiesFromServerExact(
+        requestedAuthority,
+        isOfficeAuthorityCurrent,
+      );
+      if (!refreshIsCurrent()) return false;
+
+      const identities = resolveAgentIdentityRefreshSnapshot(localIdentities, serverResult);
+      if (!refreshIsCurrent()) return false;
+      setAgentIdentities(identities);
+      return serverResult.serverVerified;
+    } catch {
+      return false;
+    }
+  }, [captureOfficeAuthority, isOfficeAuthorityCurrent]);
+
+  const refreshAgentUsageProfiles = useCallback(async () => {
+    const refreshGeneration = agentUsageProfileAdoptionGenerationRef.current + 1;
+    agentUsageProfileAdoptionGenerationRef.current = refreshGeneration;
+    const requestedAuthority = captureOfficeAuthority();
+    if (!requestedAuthority) return false;
+    const result = await loadOfficeAgentUsageProfilesExact(
+      requestedAuthority,
+      isOfficeAuthorityCurrent,
+    );
+    if (
+      refreshGeneration !== agentUsageProfileAdoptionGenerationRef.current
+      || !isOfficeAuthorityCurrent(requestedAuthority)
+      || !result.ok
+    ) return false;
+    setAgentUsageProfiles(result.profiles);
+    return true;
+  }, [captureOfficeAuthority, isOfficeAuthorityCurrent]);
+
+  useEffect(() => {
+    setAgentUsageProfiles(new Map());
+    void refreshAgentUsageProfiles();
+  }, [committedAuthScopeKey, refreshAgentUsageProfiles]);
+
+  useEffect(() => {
+    const requestedAuthority = committedAuthAuthority;
+    if (
+      Platform.OS !== 'web'
+      || typeof window === 'undefined'
+      || !requestedAuthority
+      || !isOfficeAuthorityCurrent(requestedAuthority)
+    ) return;
+    const exactStorageKey = agentIdentityExactStorageKey(requestedAuthority);
+    if (!exactStorageKey) return;
+    let retired = false;
+    let loadGeneration = 0;
+    const onExactIdentityStorage = (event: StorageEvent) => {
+      if (event.key !== exactStorageKey || event.newValue === null) return;
+      const generation = loadGeneration + 1;
+      loadGeneration = generation;
+      void loadAgentIdentitiesExact(requestedAuthority, isOfficeAuthorityCurrent).then((identities) => {
+        if (
+          retired
+          || generation !== loadGeneration
+          || !isOfficeAuthorityCurrent(requestedAuthority)
+        ) return;
+        // Exact writers publish only a count-complete server snapshot under
+        // the cross-realm lock. Adopting that cache here is read-only and does
+        // not write storage again, so tabs converge without an event loop.
+        setAgentIdentities(identities);
+      });
+    };
+    window.addEventListener('storage', onExactIdentityStorage);
+    return () => {
+      retired = true;
+      loadGeneration += 1;
+      window.removeEventListener('storage', onExactIdentityStorage);
+    };
+  }, [committedAuthAuthority, isOfficeAuthorityCurrent]);
 
   const userAgentsStatusKey = useMemo(() => JSON.stringify(userAgents.map(agent => [
     agent.id,
@@ -2232,8 +4163,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     agent.messagesProcessed || 0,
     agent.turns || 0,
     agent.costToday || 0,
+    agent.costTotal || 0,
     agent.costWeek || 0,
     agent.tokensUsed || 0,
+    agent.tokensTotal || 0,
     agent.inputTokens || 0,
     agent.outputTokens || 0,
   ])), [userAgents]);
@@ -2273,35 +4206,155 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       return { ...agent, status: upgrade.status, activity: upgrade.activity ?? agent.activity };
     });
   }, [userAgents, currentUserId, mergedCircleAgents, connections, agentIdentities, selectedAgent?.id, opsRunNodesByAgent]);
+  // Sprite memoization may intentionally retain a prior visual object. Panel
+  // selection always resolves the id against this synchronously current roster
+  // so a connection/session refresh cannot reopen stale execution authority.
+  const displayAgentsRef = useRef<readonly OfficeAgent[]>(displayAgents);
+  displayAgentsRef.current = displayAgents;
+  useEffect(() => {
+    const retained = selectedAgentRefreshRetentionRef.current;
+    if (!floorLayoutHydrated || !floorLayoutScope || !retained) return;
+    if (retained.scope !== floorLayoutScope) {
+      selectedAgentRefreshRetentionRef.current = null;
+      setSelectedAgent(null);
+      return;
+    }
+    const matchCount = displayAgents.reduce(
+      (count, candidate) => count + (candidate.id === retained.agentId ? 1 : 0),
+      0,
+    );
+    const current = matchCount === 1
+      ? resolveUniqueOfficeAgentById(displayAgents, retained.agentId)
+      : null;
+    // The popup is a live projection of the newly hydrated canonical roster,
+    // never the Agent object captured by the retired bearer generation. A
+    // missing or duplicate subject closes and discards retention fail-closed.
+    if (!current) selectedAgentRefreshRetentionRef.current = null;
+    setSelectedAgent(previous => previous === current ? previous : current);
+  }, [displayAgents, floorLayoutHydrated, floorLayoutScope]);
+  const selectedAgentRuntimeConnectionCandidate = resolveAgentPanelRuntimeConnectionSnapshot(
+    selectedAgent,
+    connections,
+  );
+  const selectedAgentRuntimeConnectionIdCandidate = selectedAgentRuntimeConnectionCandidate?.connectionId || null;
+  const selectedAgentRuntimeAgentBotIdCandidate = selectedAgentRuntimeConnectionCandidate?.agentBotId || null;
+  const selectedAgentRuntimeEndpointCandidate = selectedAgentRuntimeConnectionCandidate?.normalizedEndpoint || null;
+  // Roster/session polling replaces otherwise equivalent agent and connection
+  // objects. Keep the captured live verdict referentially stable while its
+  // non-secret fingerprint is unchanged so mounted runtime panels do not retire
+  // and restart the same exact-authority read on every telemetry refresh.
+  const selectedAgentRuntimeConnectionSnapshot = useMemo<AgentPanelRuntimeConnectionSnapshot | null>(
+    () => selectedAgentRuntimeConnectionIdCandidate && selectedAgentRuntimeEndpointCandidate
+      ? Object.freeze({
+        connectionId: selectedAgentRuntimeConnectionIdCandidate,
+        agentBotId: selectedAgentRuntimeAgentBotIdCandidate,
+        normalizedEndpoint: selectedAgentRuntimeEndpointCandidate,
+        status: 'connected' as const,
+      })
+      : null,
+    [
+      selectedAgentRuntimeAgentBotIdCandidate,
+      selectedAgentRuntimeConnectionIdCandidate,
+      selectedAgentRuntimeEndpointCandidate,
+    ],
+  );
+  const selectedAgentRuntimeConnectionId = selectedAgentRuntimeConnectionSnapshot?.connectionId || null;
+  const isSelectedAgentRuntimeConnectionCurrent = useCallback((
+    snapshot: AgentPanelRuntimeConnectionSnapshot,
+  ): boolean => {
+    const connectionAuthority = connectionsAuthorityRef.current;
+    return !!connectionAuthority
+      && isOfficeAuthorityCurrent(connectionAuthority)
+      && isAgentPanelRuntimeConnectionSnapshotCurrent(snapshot, connectionsRef.current);
+  }, [isOfficeAuthorityCurrent]);
+  const terminalCommandAgents = useMemo<CircleOfficeAgent[]>(() => (
+    [
+      {
+        ...createBlackSwanAgent(circleId),
+        name: commandTargetAgents.find(target => target.id === BLACKSWAN_AGENT_ID)?.name || DEFAULT_AGENT.name,
+      },
+      ...terminalDispatchAgents,
+    ]
+  ), [circleId, commandTargetAgents, terminalDispatchAgents]);
+
+  const officeAgentOwnershipContext = useMemo(() => {
+    const authority = committedAuthAuthority;
+    const ownsCurrentScope = Boolean(
+      authority
+      && authority.userId === currentUserId
+      && authority.circleId === circleId
+      && isOfficeAuthorityCurrent(authority),
+    );
+    const connectionAuthority = connectionsAuthorityRef.current;
+    const ownsCurrentConnectionScope = Boolean(
+      ownsCurrentScope
+      && authority
+      && connectionAuthority
+      && connectionAuthority.userId === authority.userId
+      && connectionAuthority.circleId === authority.circleId
+      && connectionAuthority.accessToken === authority.accessToken
+      && connectionAuthority.generation === authority.generation,
+    );
+    const ownedDurableAgentIds = new Set<string>();
+    const ownedConnectionIds = new Set<string>();
+    const ownedProviderMainIds = new Set<string>();
+    if (ownsCurrentScope) {
+      for (const durableAgent of mergedCircleAgents) {
+        if (durableAgent.ownerId !== currentUserId) continue;
+        ownedDurableAgentIds.add(durableAgent.id);
+        ownedDurableAgentIds.add(`db::${durableAgent.id}`);
+        const provider = String(durableAgent.provider || '').trim();
+        if (provider) ownedProviderMainIds.add(`provider-main::${provider}`);
+      }
+    }
+    if (ownsCurrentConnectionScope) {
+      // The array and its provenance receipt must both match this exact
+      // generation. Its id is the structural custody link for live sessions.
+      for (const connection of connections) {
+        ownedConnectionIds.add(connection.id);
+        const provider = String(connection.provider || '').trim();
+        if (provider) ownedProviderMainIds.add(`provider-main::${provider}`);
+      }
+    }
+    return {
+      currentUserId: ownsCurrentScope ? currentUserId : null,
+      defaultAgentId: DEFAULT_AGENT.id,
+      ownedDurableAgentIds,
+      ownedConnectionIds,
+      ownedProviderMainIds,
+    };
+  }, [
+    circleId,
+    committedAuthAuthority,
+    connections,
+    currentUserId,
+    isOfficeAuthorityCurrent,
+    mergedCircleAgents,
+  ]);
+  const isDisplayAgentMine = useCallback(
+    (agent: OfficeAgent) => isOfficeAgentOwnedByCurrentUser(agent, officeAgentOwnershipContext),
+    [officeAgentOwnershipContext],
+  );
 
   // Precompute filter counts so every chip can show its hit count inline.
   // `mine` is bridge-pushed agents owned by the current user plus the default
   // OpenSwan (which conceptually belongs to every user who looks at it).
   // `bonded` is circle_office_agents rows — anything persisted vs synthetic.
   const agentFilterCounts = useMemo(() => {
-    const isMine = (a: OfficeAgent) => (
-      a.id === DEFAULT_AGENT.id
-      || (a as any).ownerId === currentUserId
-      || (currentUserId && mergedCircleAgents.find(c => c.name === a.name && (c as any).ownerId === currentUserId))
-    );
     const isBonded = (a: OfficeAgent) => !a.isSynthetic || a.id === DEFAULT_AGENT.id;
     const isActive = (a: OfficeAgent) => a.status === 'active' || a.status === 'building';
     return {
       all: displayAgents.length,
-      mine: displayAgents.filter(isMine).length,
+      mine: displayAgents.filter(isDisplayAgentMine).length,
       active: displayAgents.filter(isActive).length,
       bonded: displayAgents.filter(isBonded).length,
     };
-  }, [displayAgents, currentUserId, mergedCircleAgents]);
+  }, [displayAgents, isDisplayAgentMine]);
 
   const filteredDisplayAgents = useMemo(() => {
     if (agentFilterMode === 'all') return displayAgents;
     if (agentFilterMode === 'mine') {
-      return displayAgents.filter(a => (
-        a.id === DEFAULT_AGENT.id
-        || (a as any).ownerId === currentUserId
-        || (currentUserId && mergedCircleAgents.find(c => c.name === a.name && (c as any).ownerId === currentUserId))
-      ));
+      return displayAgents.filter(isDisplayAgentMine);
     }
     if (agentFilterMode === 'active') {
       return displayAgents.filter(a => a.status === 'active' || a.status === 'building');
@@ -2310,7 +4363,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       return displayAgents.filter(a => !a.isSynthetic || a.id === DEFAULT_AGENT.id);
     }
     return displayAgents;
-  }, [displayAgents, agentFilterMode, currentUserId, mergedCircleAgents]);
+  }, [displayAgents, agentFilterMode, isDisplayAgentMine]);
   const WhiteboardView = whiteboardModule?.default;
   const ServerRackView = serverRackModule?.default;
   const OfficeTerminalView = officeTerminalModule?.default;
@@ -2337,6 +4390,20 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     }
     return result;
   }, [agentIdentities, appearances]);
+  const selectedAgentPanelAppearances = useMemo(() => {
+    if (!selectedAgent) return appearances;
+    // The popup's explicit reload is server-truth recovery, so the freshly
+    // hydrated exact identity must outrank the older preference appearance.
+    const resolvedAppearance = getAgentIdentityByAgent(agentIdentities, selectedAgent)?.appearance
+      || getAppearance(selectedAgent);
+    if (!resolvedAppearance) return appearances;
+    const identityKey = getAgentIdentityKey(selectedAgent);
+    return {
+      ...appearances,
+      [selectedAgent.id]: resolvedAppearance,
+      [identityKey]: resolvedAppearance,
+    };
+  }, [agentIdentities, appearances, getAppearance, selectedAgent]);
 
   // Auto-assign random outfits to new agents + backfill pets/auras for existing agents
   useEffect(() => {
@@ -2418,8 +4485,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   // Filter agents for current floor using explicit per-floor assignments.
   const agents = useMemo(() => {
     const floorIds = currentFloor?.agentIds;
-    const hasAnyAssignments = floors.some(f => (f.agentIds?.length || 0) > 0);
-    if (!hasAnyAssignments) {
+    if (currentFloor?.agentAssignmentMode !== 'manual' && (!floorIds || floorIds.length === 0)) {
       return displayAgents.slice(0, OFFICE_DESK_POSITIONS.length);
     }
     if (!floorIds || floorIds.length === 0) return [];
@@ -2430,33 +4496,35 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     return displayAgents.filter(a => onFloor.has(a.id)).slice(0, OFFICE_DESK_POSITIONS.length);
   }, [displayAgents, currentFloor?.agentIds, floors]);
 
-  // Auto-distribute agents across floors by desk capacity so each floor gets a unique roster.
-  const prevAgentLayoutKeyRef = useRef('');
+  // Auto-distribute only automatically managed floors. Applying a preset makes
+  // that floor's captured roster manual, so a later bridge refresh cannot
+  // silently replace the user-owned assignment snapshot.
   useEffect(() => {
-    if (displayAgents.length === 0 || floors.length === 0) return;
-    const orderedFloors = [...floors].sort((a, b) => a.order - b.order);
-    const capacity = OFFICE_DESK_POSITIONS.length;
-    const nextAssignments = new Map<string, string[]>();
-    orderedFloors.forEach((floor, index) => {
-      const start = index * capacity;
-      nextAssignments.set(floor.id, displayAgents.slice(start, start + capacity).map(agent => agent.id));
-    });
-    const layoutKey = orderedFloors.map(floor => `${floor.id}:${(nextAssignments.get(floor.id) || []).join(',')}`).join('|');
-    if (layoutKey === prevAgentLayoutKeyRef.current) return;
-    prevAgentLayoutKeyRef.current = layoutKey;
-    setFloors(prev => prev.map(floor => {
-      const nextIds = nextAssignments.get(floor.id) || [];
-      return JSON.stringify(floor.agentIds || []) === JSON.stringify(nextIds)
-        ? floor
-        : { ...floor, agentIds: nextIds };
-    }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [displayAgents, floors]);
+    if (!floorLayoutHydrated || floorsRef.current.length === 0) return;
+    mutateFloorsDurably((current) => reconcileAutomaticOfficeFloorAssignments(
+      current,
+      displayAgents.map((agent) => agent.id),
+      OFFICE_DESK_POSITIONS.length,
+    ));
+  }, [displayAgents, floorLayoutHydrated, floors, mutateFloorsDurably]);
 
   // Update status history when agent state materially changes
   useEffect(() => {
-    if (userAgents.length === 0) return;
+    const requestedAuthority = committedAuthAuthority;
+    if (
+      !requestedAuthority
+      || !isOfficeAuthorityCurrent(requestedAuthority)
+      || !floorLayoutHydrated
+    ) {
+      setStatusHistory([]);
+      return;
+    }
+    if (userAgents.length === 0) {
+      setStatusHistory([]);
+      return;
+    }
     setStatusHistory(prev => {
+      if (!isOfficeAuthorityCurrent(requestedAuthority)) return [];
       const last = prev[prev.length - 1];
       if (last && JSON.stringify(last.map(agent => [
         agent.id,
@@ -2469,35 +4537,48 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       }
       return [...prev, userAgents].slice(-10);
     });
-  }, [userAgentsStatusKey]);
+  }, [committedAuthAuthority, floorLayoutHydrated, isOfficeAuthorityCurrent, userAgentsStatusKey]);
 
   // Enrich agents with cached data + restore identity
   useEffect(() => {
     let cancelled = false;
+    const requestedScope = floorLayoutScope;
+    const storageScope = officeSessionStorageScope;
+    const requestedAuthority = captureOfficeAuthority();
+    const requestIsCurrent = () => (
+      !cancelled
+      && requestedScope
+      && layoutSaveScopeRef.current === requestedScope
+      && isOfficeAuthorityCurrent(requestedAuthority)
+    );
     const cancelDeferred = runWhenIdle(() => {
       const doEnrich = async () => {
+        if (!requestedScope || !storageScope || !requestedAuthority || !requestIsCurrent()) return;
         if (allAgents.length === 0) {
-          if (!cancelled) setEnrichedAgents([]);
+          if (requestIsCurrent()) setEnrichedAgents([]);
           return;
         }
 
         try {
-          const cacheEnriched = await enrichAgentsWithCache(allAgents);
-          if (cancelled) return;
-          const fullyEnriched = await restoreAllAgents(cacheEnriched);
-          if (cancelled) return;
-          const identities = await loadAgentIdentities();
-          if (cancelled) return;
+          const cacheEnriched = await enrichAgentsWithCache(allAgents, storageScope);
+          if (!requestIsCurrent()) return;
+          const fullyEnriched = await restoreAllAgentsExact(cacheEnriched, requestedAuthority);
+          if (!requestIsCurrent()) return;
+          const identities = await loadAgentIdentitiesExact(requestedAuthority);
+          if (!requestIsCurrent()) return;
           setAgentIdentities(identities);
           setEnrichedAgents(fullyEnriched);
 
-          Promise.all([
-            ...fullyEnriched.map(agent => recordAgentActivity(agent)),
-            takeSnapshot(fullyEnriched, sessionTags),
-          ]).catch(() => {});
+          void (async () => {
+            for (const agent of fullyEnriched) {
+              if (!requestIsCurrent()) return;
+              await recordAgentActivityExact(agent, requestedAuthority, isOfficeAuthorityCurrent);
+            }
+          })().catch(() => {});
+          void takeSnapshot(fullyEnriched, sessionTags, storageScope).catch(() => {});
         } catch (error) {
           console.error('Failed to enrich agents:', error);
-          if (!cancelled) setEnrichedAgents(allAgents);
+          if (requestIsCurrent()) setEnrichedAgents(allAgents);
         }
       };
       void doEnrich();
@@ -2506,7 +4587,16 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       cancelled = true;
       cancelDeferred();
     };
-  }, [sessionsTick, agentNames, sessionTags]);
+  }, [
+    agentNames,
+    captureOfficeAuthority,
+    committedAuthScopeKey,
+    floorLayoutScope,
+    isOfficeAuthorityCurrent,
+    officeSessionStorageScope,
+    sessionTags,
+    sessionsTick,
+  ]);
 
   useEffect(() => {
     void refreshAgentIdentities();
@@ -2514,6 +4604,12 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
   // Enrich sessions for Cost Dashboard
   useEffect(() => {
+    const requestedScope = floorLayoutScope;
+    const storageScope = officeSessionStorageScope;
+    if (!requestedScope || !storageScope) {
+      setEnrichedSessions([]);
+      return undefined;
+    }
     const allSessions: OpenSwanSession[] = [];
     const sortedConnections = [...connectedConns].sort((a, b) => a.id.localeCompare(b.id));
 
@@ -2552,40 +4648,84 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
     let cancelled = false;
     const cancelDeferred = runWhenIdle(() => {
-      enrichSessionsWithCache(normalizedSessions).then(enriched => {
-        if (!cancelled) setEnrichedSessions(enriched);
+      enrichSessionsWithCache(normalizedSessions, storageScope).then(enriched => {
+        if (!cancelled && layoutSaveScopeRef.current === requestedScope) setEnrichedSessions(enriched);
       }).catch(err => {
         console.error('Failed to enrich sessions:', err);
-        if (!cancelled) setEnrichedSessions(normalizedSessions); // Fallback to raw sessions
+        if (!cancelled && layoutSaveScopeRef.current === requestedScope) {
+          setEnrichedSessions(normalizedSessions); // Fallback to raw sessions
+        }
       });
     }, 250);
     return () => {
       cancelled = true;
       cancelDeferred();
     };
-  }, [sessionsTick]); // Only re-run when sessions actually update
+  }, [floorLayoutScope, officeSessionStorageScope, sessionsTick]);
 
   // Combined 30-second sync: snapshot + DB token sync (single interval instead of two)
   useEffect(() => {
-    if (userAgents.length === 0 || !circleId) return;
+    const requestedScope = floorLayoutScope;
+    const storageScope = officeSessionStorageScope;
+    if (userAgents.length === 0 || !circleId || !requestedScope || !storageScope) return;
 
     const syncAll = async () => {
-      if (!isDocumentVisible()) return;
+      if (!isDocumentVisible() || agentUsageSyncInFlightRef.current) return;
+      const requestedAuthority = captureOfficeAuthority();
+      if (!requestedAuthority) return;
+      agentUsageSyncInFlightRef.current = true;
       try {
         // 1. Save local snapshot
-        await takeSnapshot(enrichedAgentsRef.current, sessionTagsRef.current).catch(() => {});
+        if (layoutSaveScopeRef.current !== requestedScope) return;
+        await takeSnapshot(
+          enrichedAgentsRef.current,
+          sessionTagsRef.current,
+          storageScope,
+        ).catch(() => {});
+        if (layoutSaveScopeRef.current !== requestedScope) return;
         // 2. Sync tokens to DB
         const agents = enrichedAgentsRef.current;
+        const syncedProfiles: OfficeAgentUsageProfile[] = [];
+        let publishedAgentChanged = false;
         for (const agent of agents) {
+          if (!isOfficeAuthorityCurrent(requestedAuthority)) return;
           if (agent.tokensUsed <= 0 && agent.messagesProcessed <= 0) continue;
           if (agent.connectionId === 'db-agent') continue;
-          await syncAgentTokenSnapshot(
-            circleId, agent.name, agent.inputTokens, agent.outputTokens,
-            agent.cachedTokens, agent.turns || agent.messagesProcessed,
-            agent.sessionCostToday ?? agent.costToday, agent.model, agent.sessionKey || agent.id,
-          );
+          const result = await syncAgentTokenSnapshot({
+            authority: requestedAuthority,
+            isCurrent: isOfficeAuthorityCurrent,
+            agentName: agent.name,
+            providerType: agent.providerType,
+            inputTokens: agent.inputTokens,
+            outputTokens: agent.outputTokens,
+            cachedTokens: agent.cachedTokens,
+            messageCount: agent.turns || agent.messagesProcessed,
+            estimatedCost: agent.sessionCostToday ?? agent.costToday,
+            model: agent.model,
+            snapshotKey: agent.sessionKey || agent.id,
+            observedAt: agent.lastActive,
+          });
+          if (result.ok) {
+            syncedProfiles.push(result.profile);
+            publishedAgentChanged ||= result.officeAgentUpdated;
+          }
         }
-      } catch {}
+        if (!isOfficeAuthorityCurrent(requestedAuthority)) return;
+        if (syncedProfiles.length > 0) {
+          agentUsageProfileAdoptionGenerationRef.current += 1;
+          setAgentUsageProfiles((current) => {
+            const next = new Map(current);
+            for (const profile of syncedProfiles) next.set(profile.sessionKey, profile);
+            return next;
+          });
+        }
+        if (publishedAgentChanged) scheduleCircleOfficeRefresh();
+      } catch {
+        // A failed passive sync must not replace the last verified lifetime
+        // snapshot with zero. The next interval/visibility event can retry.
+      } finally {
+        agentUsageSyncInFlightRef.current = false;
+      }
     };
     syncAll();
     const interval = setInterval(syncAll, 30000);
@@ -2601,7 +4741,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       clearInterval(interval);
       removeVisibilityListener?.();
     };
-  }, [userAgents.length > 0, circleId]);
+  }, [
+    captureOfficeAuthority,
+    circleId,
+    floorLayoutScope,
+    isOfficeAuthorityCurrent,
+    officeSessionStorageScope,
+    scheduleCircleOfficeRefresh,
+    userAgents.length > 0,
+  ]);
 
   // Push agent stats to parent using the merged live + cached view
   useEffect(() => {
@@ -2610,9 +4758,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         agentCount: userAgents.length,
         sessionCount: userAgents.filter(a => a.status === 'active' || a.status === 'building').length,
         costToday: userAgents.reduce((s, a) => s + a.costToday, 0),
+        costTotal: userAgents.reduce((s, a) => s + a.costTotal, 0),
         costWeek: userAgents.reduce((s, a) => s + a.costWeek, 0),
         tokens: userAgents.reduce((s, a) => s + a.tokensUsed, 0),
-        tokensTotal: userAgents.reduce((s, a) => s + a.tokensUsed, 0),
+        tokensTotal: userAgents.reduce((s, a) => s + (a.tokensTotal ?? a.tokensUsed), 0),
         messagesTotal: userAgents.reduce((s, a) => s + a.messagesProcessed, 0),
         messagesToday: userAgents.reduce((s, a) => s + a.turns, 0),
         inputTokens: userAgents.reduce((s, a) => s + a.inputTokens, 0),
@@ -2621,46 +4770,48 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     }
   }, [userAgentsMetricsKey, onAgentStats]);
 
-  // Save appearances when changed — localStorage + Supabase
+  // Save appearances for this exact user/circle. Server persistence uses the
+  // private Office preference row rather than the peer-readable profile row.
   useEffect(() => {
     if (!appearancesLoadedRef.current) return; // skip until init is done
-    storage.setItem(STORAGE_KEY_APPEARANCES, JSON.stringify(appearances)).catch(() => {});
-    // Async push to Supabase (skip if column doesn't exist)
-    if (_profileHasAgentAppearance && Object.keys(appearances).length > 0) {
-      supabase.auth.getUser().then(({ data: { user } }) => {
-        if (user) {
-          supabase.from('profiles').update({ agent_appearance: appearances }).eq('id', user.id).then(
-            ({ error }) => { if (error && isMissingProfileColumnError(error)) _profileHasAgentAppearance = false; },
-            () => {},
-          );
-        }
-      }).catch(() => {});
-    }
-  }, [appearances]);
+    storage.setItem(privateStorageKeys.appearances, JSON.stringify(appearances)).catch(() => {});
+    pushOfficePreferences({ appearances });
+  }, [appearances, privateStorageKeys.appearances, pushOfficePreferences]);
 
   // Save whiteboard notes when changed — localStorage + Supabase
   useEffect(() => {
     if (!prefsLoadedRef.current) return;
-    storage.setItem(STORAGE_KEY_WHITEBOARD_NOTES, JSON.stringify(whiteboardNotes)).catch(() => {});
+    storage.setItem(privateStorageKeys.whiteboardNotes, JSON.stringify(whiteboardNotes)).catch(() => {});
     pushOfficePreferences({ whiteboardNotes });
-  }, [whiteboardNotes]);
+  }, [privateStorageKeys.whiteboardNotes, pushOfficePreferences, whiteboardNotes]);
 
-  // Save budget config to office_preferences when it changes. Local
-  // copy is already maintained by handleBudgetConfigChange via
-  // saveBudgetConfig — this just adds the durable copy.
+  // Save budget config to the owner-and-circle Office preference row.
   useEffect(() => {
     if (!budgetLoadedRef.current) return;
     pushOfficePreferences({ budgetConfig });
   }, [budgetConfig, pushOfficePreferences]);
 
-  // Save idle config to office_preferences when it changes.
+  // Save idle config to the owner-and-circle Office preference row.
   useEffect(() => {
-    if (!idleLoadedRef.current) return;
-    pushOfficePreferences({ idleConfig });
-  }, [idleConfig, pushOfficePreferences]);
+    const requestedAuthority = authAuthorityRef.current;
+    if (
+      !idleLoadedRef.current
+      || !requestedAuthority
+      || idleConfigReadyAuthorityKey !== idleConfigAuthorityKey({
+        userId: requestedAuthority.userId,
+        circleId: requestedAuthority.circleId,
+        authorityGeneration: requestedAuthority.generation,
+      })
+    ) return;
+    if (remoteIdleAppliedRef.current) {
+      remoteIdleAppliedRef.current = false;
+      return;
+    }
+    pushOfficePreferences({ idleConfig }, requestedAuthority);
+  }, [idleConfig, idleConfigReadyAuthorityKey, pushOfficePreferences]);
 
   // Save agent filter mode (mine / all / active / bonded) to
-  // office_preferences too so the user's preferred view persists
+  // the private Office preference row so the user's preferred view persists
   // across devices.
   useEffect(() => {
     if (!prefsLoadedRef.current) return;
@@ -2698,18 +4849,34 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const scaledH = OFFICE_FLOOR_HEIGHT * officeScale;
   const needsHScroll = rawScale < 0.55;
 
-  const handleAgentPress = useCallback((agent: OfficeAgent, event?: any) => {
+  const handleAgentPress = useCallback((agentId: string) => {
     if (editMode) return;
-    // Capture click coordinates for pop-out animation origin (web only)
-    if (Platform.OS === 'web' && event) {
-      const x = event.nativeEvent?.pageX ?? event.pageX;
-      const y = event.nativeEvent?.pageY ?? event.pageY;
-      if (typeof x === 'number' && typeof y === 'number') {
-        setPanelOrigin({ x, y });
-      }
+    const agent = resolveUniqueOfficeAgentById(displayAgentsRef.current, agentId);
+    if (!agent) {
+      clearSelectedAgentPanel();
+      return;
     }
-    setSelectedAgent(prev => prev?.id === agent.id ? null : agent);
-  }, [editMode]);
+    setSelectedAgent(prev => {
+      if (prev?.id === agent.id) {
+        selectedAgentRefreshRetentionRef.current = null;
+        return null;
+      }
+      selectedAgentRefreshRetentionRef.current = floorLayoutScope
+        ? { scope: floorLayoutScope, agentId: agent.id }
+        : null;
+      return agent;
+    });
+  }, [clearSelectedAgentPanel, editMode, floorLayoutScope]);
+
+  const handleOpenAgentInChat = useCallback((agentId: string, draft?: string) => {
+    const focus = encodeEntityHandle({ surface: 'chat', kind: 'agent', id: agentId });
+    if (!focus) return;
+    // Office stays mounted after switching tabs. Retire its modal before the
+    // validated handoff so a hidden aria-modal/focus trap cannot reappear when
+    // the user returns from Chat.
+    clearSelectedAgentPanel();
+    onOpenAgentInChat?.(focus, normalizeChatAgentFocusDraft(draft) || undefined);
+  }, [clearSelectedAgentPanel, onOpenAgentInChat]);
 
   const handleOpenAutomate = useCallback(() => {
     setTerminalInitialTab('automations');
@@ -2717,76 +4884,313 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   }, []);
 
   const handleRemovePublishedAgent = useCallback(async (agent: OfficeAgent) => {
-    if (!circleId || !agent?.name) return;
-    if (agent.id === 'default::blackswan') return; // OpenSwan can't be removed
+    const requestedAuthority = captureOfficeAuthority();
+    const publishedAgentId = agent?.connectionId === 'db-agent' && isUuidLike(agent.sessionKey)
+      ? agent.sessionKey
+      : null;
+    if (!agent?.name || !publishedAgentId || !requestedAuthority || !isOfficeAuthorityCurrent(requestedAuthority)) return false;
+    if (agent.id === 'default::blackswan' || agent.id === 'blackswan-default' || agent.providerType === 'blackswan-local') return false;
     try {
-      const { data: auth } = await supabase.auth.getUser();
-      if (!auth?.user) return;
-      // Find the DB row for this agent (look up by circle + owner + name).
-      // Bridge agents publish themselves with the live name, so name is the
-      // most reliable join key across both bridge-pushed and DB-managed rows.
-      const { data: rows } = await supabase
+      // The panel opens published agents with their exact UUID in sessionKey.
+      // Never widen a destructive action to a same-name row or multiple rows.
+      // Use the captured-token client so this exact mutation cannot wait on a
+      // mutable browser auth lock held by another Office tab.
+      const exactClient = getSupabaseClientForAccessToken(requestedAuthority.accessToken);
+      const { data: removedRows, error } = await exactClient
         .from('circle_office_agents')
-        .select('id, name')
-        .eq('circle_id', circleId)
-        .eq('owner_id', auth.user.id)
-        .ilike('name', agent.name);
-      const matched = rows ?? [];
-      // Hide first so re-publishes from the bridge poller skip during deletion
-      hideAgentInOffice(circleId, agent.name);
-      if (matched.length > 0) {
-        const ids = matched.map(r => r.id);
-        const { error } = await supabase
-          .from('circle_office_agents')
-          .delete()
-          .in('id', ids);
-        if (error) {
-          console.error('[OfficeTab] Failed to remove published agent:', error);
-          return;
-        }
-        setCircleOfficeAgents(prev => prev.filter(a => !ids.includes(a.id)));
+        .delete()
+        .eq('id', publishedAgentId)
+        .eq('circle_id', requestedAuthority.circleId)
+        .eq('owner_id', requestedAuthority.userId)
+        .select('id');
+      if (!isOfficeAuthorityCurrent(requestedAuthority)) return false;
+      if (error) {
+        console.error('[OfficeTab] Failed to remove published agent:', error);
+        return false;
       }
-      setSelectedAgent(null);
+      const exactReceipt = removedRows?.length === 1 && removedRows[0]?.id === publishedAgentId;
+      if (!exactReceipt) {
+        console.error('[OfficeTab] Published agent removal returned no exact receipt.');
+        return false;
+      }
+      setCircleOfficeAgents(prev => prev.filter(row => row.id !== publishedAgentId));
+      // Suppress future bridge-poller republishes only after the exact durable
+      // mutation returned the exact UUID receipt.
+      hideAgentInOffice(requestedAuthority.userId, requestedAuthority.circleId, agent.name);
+      return isOfficeAuthorityCurrent(requestedAuthority);
     } catch (err) {
-      console.error('[OfficeTab] Remove agent error:', err);
+      if (isOfficeAuthorityCurrent(requestedAuthority)) {
+        console.error('[OfficeTab] Remove agent error:', err);
+      }
+      return false;
     }
-  }, [circleId]);
+  }, [captureOfficeAuthority, isOfficeAuthorityCurrent]);
+
+  // ─── Reversible floor editor helpers ────────────────────────────────────
+
+  const commitCurrentFloorEdit = useCallback((
+    label: string,
+    update: (floor: OfficeFloor) => OfficeFloor,
+  ): OfficeFloor | null => {
+    if (!floorLayoutScope || !floorLayoutHydrated || layoutSaveScopeRef.current !== floorLayoutScope) {
+      setFloorPresetStatus('Finishing the Office layout load. Try this edit again in a moment.');
+      return null;
+    }
+    const current = floorsRef.current.find((floor) => floor.id === currentFloorId);
+    if (!current) return null;
+    const next = update(current);
+    if (!next || next.id !== current.id) return null;
+
+    let history: OfficeEditorHistory | null | undefined = officeEditorHistoriesRef.current[current.id];
+    const layoutFingerprint = (floor: OfficeFloor) => JSON.stringify(floor.furniture.map((item) => ({
+      id: item.id,
+      type: item.type,
+      x: item.x,
+      y: item.y,
+      itemWidth: item.itemWidth,
+      itemHeight: item.itemHeight,
+      rotation: item.rotation,
+    })));
+    const historyMatchesCurrent = history
+      && layoutFingerprint(history.present.floor) === layoutFingerprint(current);
+    if (!historyMatchesCurrent) {
+      history = createOfficeEditorHistory(current, { label: 'Current floor' });
+    }
+    if (!history) return null;
+    const committed = commitOfficeEditorSnapshot(history, next, label);
+    if (!committed || committed === history) return null;
+
+    officeEditorHistoriesRef.current[current.id] = committed;
+    const nextFloors = floorsRef.current.map((floor) => floor.id === current.id ? committed.present.floor : floor);
+    floorsRef.current = nextFloors;
+    markFloorLayoutMutation('Saving every floor item and tool…');
+    setFloors(nextFloors);
+    setOfficeEditorHistoryRevision((revision) => revision + 1);
+    return committed.present.floor;
+  }, [currentFloorId, floorLayoutHydrated, floorLayoutScope, markFloorLayoutMutation]);
+
+  const officeEditorHistoryAvailability = useMemo(() => {
+    const history = officeEditorHistoriesRef.current[currentFloorId];
+    return history
+      ? getOfficeEditorHistoryAvailability(history)
+      : { canUndo: false, canRedo: false, undoLabel: null, redoLabel: null };
+    // The revision intentionally invalidates this ref-backed calculation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentFloorId, officeEditorHistoryRevision]);
+
+  const restoreOfficeEditorHistory = useCallback((direction: 'undo' | 'redo') => {
+    if (!floorLayoutScope || !floorLayoutHydrated || layoutSaveScopeRef.current !== floorLayoutScope) return;
+    const history = officeEditorHistoriesRef.current[currentFloorId];
+    const current = floorsRef.current.find((floor) => floor.id === currentFloorId);
+    if (!history || !current) return;
+    const nextHistory = direction === 'undo'
+      ? undoOfficeEditorHistory(history)
+      : redoOfficeEditorHistory(history);
+    if (nextHistory === history) return;
+    officeEditorHistoriesRef.current[currentFloorId] = nextHistory;
+    // Floor identity and live agent assignments can change outside this
+    // editor. Undo only the furniture payload it actually owns.
+    const cachedItems = Object.values(officeEditorItemStateRef.current[currentFloorId] || {});
+    const restoredFurniture = mergeOfficeEditorFurnitureState(
+      nextHistory.present.floor.furniture,
+      [...cachedItems, ...current.furniture],
+    );
+    const restored = { ...current, furniture: restoredFurniture };
+    const nextFloors = floorsRef.current.map((floor) => floor.id === currentFloorId ? restored : floor);
+    floorsRef.current = nextFloors;
+    markFloorLayoutMutation('Saving every floor item and tool…');
+    setFloors(nextFloors);
+    setSelectedFurnitureId(null);
+    setPlacingType(null);
+    setOfficeEditorHistoryRevision((revision) => revision + 1);
+  }, [currentFloorId, floorLayoutHydrated, floorLayoutScope, markFloorLayoutMutation, setPlacingType, setSelectedFurnitureId]);
+
+  const rememberOfficeAddonType = useCallback((type: FurnitureType) => {
+    if (currentUserId) officeAddonPreferencesMutatedForScopeRef.current = `${currentUserId}:${circleId}`;
+    setOfficeAddonPreferences((current) => recordOfficeAddonRecentType(current, type));
+  }, [circleId, currentUserId]);
+
+  const toggleOfficeAddonFavorite = useCallback((type: FurnitureType) => {
+    if (currentUserId) officeAddonPreferencesMutatedForScopeRef.current = `${currentUserId}:${circleId}`;
+    setOfficeAddonPreferences((current) => setOfficeAddonFavorite(current, type));
+  }, [circleId, currentUserId]);
+
+  const placeOfficeAddon = useCallback((type: FurnitureType, requestedX?: number, requestedY?: number) => {
+    const definition = getOfficeAddonDefinition(type);
+    const current = floorsRef.current.find((floor) => floor.id === currentFloorId);
+    if (!current || !definition) return;
+    const index = current.furniture.length;
+    const fallbackX = 32 + (index % 7) * 112;
+    const fallbackY = 208 + (Math.floor(index / 7) % 6) * 112;
+    const x = Math.max(0, Math.min(OFFICE_FLOOR_WIDTH - definition.width, Math.round((requestedX ?? fallbackX) / OFFICE_FLOOR_GRID_SIZE) * OFFICE_FLOOR_GRID_SIZE));
+    const y = Math.max(0, Math.min(OFFICE_FLOOR_HEIGHT - definition.height, Math.round((requestedY ?? fallbackY) / OFFICE_FLOOR_GRID_SIZE) * OFFICE_FLOOR_GRID_SIZE));
+    const usedIds = new Set(current.furniture.map((item) => item.id));
+    const seed = `f_${Date.now()}_${type}`;
+    let id = seed;
+    let suffix = 1;
+    while (usedIds.has(id)) id = `${seed}_${suffix++}`;
+    const newFurniture: FurnitureItem = {
+      id,
+      type,
+      x,
+      y,
+      itemWidth: definition.width,
+      itemHeight: definition.height,
+      dataState: definition.defaultDataState,
+    };
+    const committed = commitCurrentFloorEdit(`Add ${definition.name}`, (floor) => ({
+      ...floor,
+      furniture: [...floor.furniture, newFurniture],
+    }));
+    if (!committed) return;
+    rememberOfficeAddonType(type);
+    setSelectedFurnitureId(id);
+    setPlacingType(null);
+  }, [commitCurrentFloorEdit, currentFloorId, rememberOfficeAddonType, setPlacingType, setSelectedFurnitureId]);
+
+  const handleCatalogItemPress = useCallback((type: FurnitureType) => {
+    if (!isDesktop) {
+      placeOfficeAddon(type);
+      return;
+    }
+    // Arming a catalog item is not yet usage. Recording recency here caused
+    // the selected card to be re-sorted under the pointer before placement.
+    setSelectedFurnitureId(null);
+    setPlacingType((current) => current === type ? null : type);
+  }, [isDesktop, placeOfficeAddon, setPlacingType, setSelectedFurnitureId]);
 
   const handleFloorPress = (x: number, y: number) => {
     if (!editMode) return;
     // If something is selected and user taps floor, deselect
     if (selectedFurnitureId) { setSelectedFurnitureId(null); return; }
     if (!placingType) return;
-    const catalogEntry = FURNITURE_CATALOG.find(c => c.type === placingType);
-    const newFurniture = {
-      id: `f_${Date.now()}`, type: placingType as any, x, y,
-      itemWidth: catalogEntry?.width, itemHeight: catalogEntry?.height,
-    };
-    setFloors(prev => prev.map(f =>
-      f.id === currentFloorId ? { ...f, furniture: [...f.furniture, newFurniture] } : f
-    ));
-    setPlacingType(null);
+    if (!FURNITURE_CATALOG.some((entry) => entry.type === placingType)) return;
+    placeOfficeAddon(placingType as FurnitureType, x, y);
   };
 
-  const handleFurniturePress = (id: string) => {
-    if (!editMode) return;
-    const currentFloor = floors.find(f => f.id === currentFloorId);
-    const item = currentFloor?.furniture.find(f => f.id === id);
-    // Check if it's an NFT frame — open picker on first tap
-    if (item?.type === 'nft_frame' && selectedFurnitureId !== id) {
+  const closeServiceModal = useCallback(() => {
+    serviceOAuthDisconnectControllerRef.current?.controller.abort();
+    serviceOAuthDisconnectControllerRef.current = null;
+    oauthMutationTokenRef.current = null;
+    serviceOAuthGenerationRef.current += 1;
+    serviceModalVisibleRef.current = false;
+    serviceModalTargetIdRef.current = null;
+    serviceModalTypeRef.current = '';
+    setServiceModalVisible(false);
+    setServiceModalTargetId(null);
+    setServiceModalType('');
+    setServiceUrlError('');
+    setOauthStatus(null);
+    setOauthError('');
+    setOauthConnecting(false);
+  }, [setServiceModalVisible]);
+
+  const beginServiceOAuthScope = useCallback((input: {
+    targetId: string;
+    serviceType: 'calendar_widget' | 'email_hub';
+    provider: OfficeOAuthProvider;
+  }): ServiceOAuthScope => {
+    const authority = authAuthorityRef.current;
+    return {
+      generation: ++serviceOAuthGenerationRef.current,
+      circleId,
+      floorId: currentFloorIdRef.current,
+      targetId: input.targetId,
+      serviceType: input.serviceType,
+      provider: input.provider,
+      userId: authority?.userId || '',
+      accessToken: authority?.accessToken || '',
+      authorityGeneration: authority?.generation || 0,
+    };
+  }, [circleId]);
+
+  const isServiceOAuthScopeCurrent = useCallback((scope: ServiceOAuthScope): boolean => {
+    const provider = scope.serviceType === 'calendar_widget'
+      ? (serviceCalendarProviderRef.current === 'google' ? 'google' : 'microsoft')
+      : (serviceEmailProviderRef.current === 'gmail' ? 'google' : 'microsoft');
+    const authority = authAuthorityRef.current;
+    return Boolean(
+      authority
+      && authority.userId === scope.userId
+      && authority.circleId === scope.circleId
+      && authority.accessToken === scope.accessToken
+      && authority.generation === scope.authorityGeneration
+    ) && isOfficeServiceAsyncScopeCurrent(scope, {
+      generation: serviceOAuthGenerationRef.current,
+      circleId,
+      floorId: currentFloorIdRef.current,
+      targetId: serviceModalTargetIdRef.current || '',
+      serviceType: serviceModalTypeRef.current,
+      provider,
+      modalVisible: serviceModalVisibleRef.current,
+    });
+  }, [circleId]);
+
+  const refreshServiceOAuthStatus = useCallback(async (input: {
+    targetId: string;
+    serviceType: 'calendar_widget' | 'email_hub';
+    provider: OfficeOAuthProvider;
+  }) => {
+    const scope = beginServiceOAuthScope(input);
+    setOauthStatus({ state: 'checking', connected: false, email: '' });
+    setOauthError('');
+    const status = await checkOAuthStatus(
+      scope.provider,
+      scope.serviceType === 'calendar_widget' ? 'calendar' : 'email',
+      scope.accessToken,
+    ).catch((): OAuthConnectionStatus => ({
+      state: 'unavailable',
+      connected: false,
+      email: '',
+    }));
+    if (!isServiceOAuthScopeCurrent(scope)) return;
+    setOauthStatus(status);
+    if (status.state === 'unavailable') {
+      setOauthError('Could not verify this provider account. Existing Office setup was not changed.');
+    } else if (status.state === 'reconnect_required') {
+      setOauthError('This provider connection expired or needs additional permission. Sign in again for this Calendar or Email access.');
+    }
+  }, [beginServiceOAuthScope, isServiceOAuthScopeCurrent]);
+
+  useEffect(() => () => {
+    serviceOAuthDisconnectControllerRef.current?.controller.abort();
+    serviceOAuthDisconnectControllerRef.current = null;
+    serviceOAuthGenerationRef.current += 1;
+  }, []);
+
+  useEffect(() => () => {
+    serviceOAuthDisconnectControllerRef.current?.controller.abort();
+    serviceOAuthDisconnectControllerRef.current = null;
+  }, [committedAuthAuthority?.generation]);
+
+  useEffect(() => {
+    invalidateServiceWidgetRefreshes();
+    if (serviceModalVisibleRef.current) closeServiceModal();
+  }, [circleId, currentFloorId, closeServiceModal, invalidateServiceWidgetRefreshes]);
+
+  const openFurnitureConfiguration = useCallback((id: string): boolean => {
+    const item = floorsRef.current.find((floor) => floor.id === currentFloorId)?.furniture.find((entry) => entry.id === id);
+    if (!item) return false;
+    if (item.type === 'nft_frame') {
       setNftPickerTargetId(id);
       setSelectedFurnitureId(id);
       setImagePickerTab('upload');
       setNftPickerVisible(true);
-      return;
+      return true;
     }
-    // Connected items — open service connector on first tap
-    const connectedTypes = ['smart_tv', 'spotify_jukebox', 'discord_hub', 'twitch_stream', 'video_call', 'crypto_ticker', 'github_feed', 'calendar_widget', 'world_clock', 'music_visualizer', 'figma_board', 'email_hub'];
-    if (item && connectedTypes.includes(item.type) && selectedFurnitureId !== id) {
+    const connectedTypes = ['smart_tv', 'spotify_jukebox', 'discord_hub', 'twitch_stream', 'video_call', 'calendar_widget', 'figma_board', 'email_hub'];
+    if (connectedTypes.includes(item.type)) {
+      serviceOAuthGenerationRef.current += 1;
+      serviceModalTargetIdRef.current = id;
+      serviceModalTypeRef.current = item.type;
+      serviceCalendarProviderRef.current = item.calendarProvider || 'google';
+      serviceEmailProviderRef.current = item.emailProvider || 'outlook';
+      serviceModalVisibleRef.current = true;
       setServiceModalTargetId(id);
       setSelectedFurnitureId(id);
       setServiceModalType(item.type);
-      setServiceUrl(item.tvContentUrl || '');
+      setServiceUrl(item.tvContentUrl || item.spotifyUrl || item.discordUrl || item.videoCallLink || item.figmaBoardUrl || '');
+      setServiceUrlError('');
       setServiceTvApp(item.tvApp || 'youtube');
       setServiceTvWidth(String(item.tvWidth || 120));
       setServiceTvHeight(String(item.tvHeight || 80));
@@ -2794,23 +5198,22 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       setServiceTwitchChannel(item.twitchChannel || '');
       setServiceCallProvider(item.videoCallProvider || 'zoom');
       setServiceCalendarProvider(item.calendarProvider || 'google');
-      setServiceEmailProvider(item.emailProvider || 'outlook');
+      setServiceEmailProvider(item.emailProvider === 'gmail' ? 'gmail' : 'outlook');
       setOauthStatus(null);
       setOauthError('');
-      setOauthConnecting(false);
+      setOauthConnecting(oauthMutationTokenRef.current !== null);
       setServiceModalVisible(true);
       // Check OAuth status for calendar/email items
       if (item.type === 'calendar_widget') {
-        const prov = (item.calendarProvider === 'outlook' ? 'microsoft' : 'google') as OAuthProvider;
-        checkOAuthStatus(prov).then(s => setOauthStatus(s)).catch(() => {});
+        const prov = (item.calendarProvider === 'outlook' ? 'microsoft' : 'google') as OfficeOAuthProvider;
+        void refreshServiceOAuthStatus({ targetId: id, serviceType: item.type, provider: prov });
       } else if (item.type === 'email_hub') {
-        const prov = (item.emailProvider === 'gmail' ? 'google' : item.emailProvider === 'yahoo' ? 'yahoo' : 'microsoft') as OAuthProvider;
-        checkOAuthStatus(prov).then(s => setOauthStatus(s)).catch(() => {});
+        const prov = (item.emailProvider === 'gmail' ? 'google' : 'microsoft') as OfficeOAuthProvider;
+        void refreshServiceOAuthStatus({ targetId: id, serviceType: item.type, provider: prov });
       }
-      return;
+      return true;
     }
-    // Sticky note — open editor on first tap
-    if (item?.type === 'stickynote' && selectedFurnitureId !== id) {
+    if (item.type === 'stickynote') {
       setStickyEditorTargetId(id);
       setSelectedFurnitureId(id);
       setStickyText(item.noteText || '');
@@ -2819,64 +5222,125 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       setStickyGifSearch('');
       setStickyTab('write');
       setStickyEditorVisible(true);
-      return;
+      return true;
     }
-    if (selectedFurnitureId === id) {
-      // Second tap on selected item = delete it
-      setFloors(prev => prev.map(f =>
-        f.id === currentFloorId ? { ...f, furniture: f.furniture.filter(item => item.id !== id) } : f
-      ));
-      setSelectedFurnitureId(null);
-    } else {
-      // First tap = select it (shows delete button + enables drag)
-      setSelectedFurnitureId(id);
+    if (item.type === 'message_board') {
+      setActivePhoneItemId(id);
+      setPhoneVisible(true);
+      return true;
     }
+    if (item.type === 'scrabble_board') {
+      setActiveScrabbleItemId(id);
+      setScrabbleVisible(true);
+      return true;
+    }
+    if (item.type === 'poker_table') {
+      setActivePokerItemId(id);
+      setPokerVisible(true);
+      return true;
+    }
+    if (item.type === 'retro_console') {
+      setEmulatorSystem(item.emulatorSystem || 'gba');
+      setEmulatorVisible(true);
+      return true;
+    }
+    if (item.type === 'hf_explorer') {
+      setHfExplorerVisible(true);
+      return true;
+    }
+    if (item.type === 'hf_runner') {
+      setHfRunnerVisible(true);
+      return true;
+    }
+    return false;
+  }, [currentFloorId, refreshServiceOAuthStatus, setHfExplorerVisible, setHfRunnerVisible, setNftPickerVisible, setPhoneVisible, setPokerVisible, setScrabbleVisible, setSelectedFurnitureId, setServiceModalVisible, setStickyEditorVisible]);
+
+  const handleFurniturePress = (id: string) => {
+    if (!editMode) return;
+    if (openFurnitureConfiguration(id)) return;
+    // Selection is deliberately non-destructive. Older builds deleted a
+    // selected item on the second tap, which made ordinary keyboard/pointer
+    // exploration an irreversible action once the autosave ran.
+    setSelectedFurnitureId(id);
   };
 
+  const handleFurnitureDelete = useCallback(async (id: string) => {
+    const requestedScope = floorLayoutScope;
+    const requestedGeneration = floorLayoutGenerationRef.current;
+    const targetFloorId = currentFloorIdRef.current;
+    if (!requestedScope || layoutSaveScopeRef.current !== requestedScope) return;
+    const floor = floorsRef.current.find((entry) => entry.id === targetFloorId);
+    const item = floor?.furniture.find((entry) => entry.id === id);
+    if (!item) return;
+    const catalogItem = FURNITURE_CATALOG.find((entry) => entry.type === item.type);
+    const confirmed = await showConfirm({
+      title: `Remove ${catalogItem?.name || 'office item'}?`,
+      message: 'This removes the item from the current floor. You can use Undo immediately after removing it.',
+      confirmLabel: 'Remove item',
+      destructive: true,
+    });
+    if (
+      !confirmed
+      || layoutSaveScopeRef.current !== requestedScope
+      || floorLayoutGenerationRef.current !== requestedGeneration
+      || currentFloorIdRef.current !== targetFloorId
+    ) return;
+    const removed = commitCurrentFloorEdit(`Remove ${catalogItem?.name || 'office item'}`, (entry) => ({
+      ...entry,
+      furniture: entry.furniture.filter((candidate) => candidate.id !== id),
+    }));
+    if (!removed) return;
+    if (serviceModalTargetIdRef.current === id) closeServiceModal();
+    setSelectedFurnitureId(null);
+  }, [closeServiceModal, commitCurrentFloorEdit, floorLayoutScope, setSelectedFurnitureId]);
+
   const loadUserNfts = async () => {
+    const requestedAuthority = captureOfficeAuthority();
+    if (!requestedAuthority || !isOfficeAuthorityCurrent(requestedAuthority)) return;
     setNftsLoading(true);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) { setNftsLoading(false); return; }
       const { data: profile } = await supabase
         .from('profiles')
         .select('wallet_address_eth, wallet_address_sol')
-        .eq('id', user.id)
+        .eq('id', requestedAuthority.userId)
+        .setHeader('Authorization', `Bearer ${requestedAuthority.accessToken}`)
         .single();
-      if (!profile) { setNftsLoading(false); return; }
+      if (!isOfficeAuthorityCurrent(requestedAuthority)) return;
+      if (!profile) {
+        setNftsLoading(false);
+        return;
+      }
       const allNfts: NFT[] = [];
       if (profile.wallet_address_sol) {
         const solNfts = await fetchNFTs(profile.wallet_address_sol, 'solana');
+        if (!isOfficeAuthorityCurrent(requestedAuthority)) return;
         allNfts.push(...solNfts);
       }
       if (profile.wallet_address_eth) {
         const ethNfts = await fetchNFTs(profile.wallet_address_eth, 'ethereum');
+        if (!isOfficeAuthorityCurrent(requestedAuthority)) return;
         allNfts.push(...ethNfts);
       }
+      if (!isOfficeAuthorityCurrent(requestedAuthority)) return;
       setUserNfts(allNfts);
+      setNftsLoading(false);
     } catch (err) {
+      if (!isOfficeAuthorityCurrent(requestedAuthority)) return;
       console.error('Failed to load NFTs:', err);
+      setNftsLoading(false);
     }
-    setNftsLoading(false);
   };
 
   const handleNftSelect = (nft: NFT | null) => {
     if (!nftPickerTargetId) return;
-    setFloors(prev => prev.map(f =>
-      f.id === currentFloorId ? {
-        ...f,
-        furniture: f.furniture.map(item =>
-          item.id === nftPickerTargetId ? {
-            ...item,
-            nftMint: nft?.mint,
-            nftImageUrl: nft?.image,
-            nftName: nft?.name,
-            nftChain: nft?.chain as any,
-            imageSource: nft ? 'nft' as const : undefined,
-          } : item
-        ),
-      } : f
-    ));
+    patchFurnitureStateDurably(currentFloorId, nftPickerTargetId, (item) => ({
+      ...item,
+      nftMint: nft?.mint,
+      nftImageUrl: nft?.image,
+      nftName: nft?.name,
+      nftChain: nft?.chain as any,
+      imageSource: nft ? 'nft' as const : undefined,
+    }));
     setNftPickerVisible(false);
     setNftPickerTargetId(null);
   };
@@ -2907,39 +5371,41 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     });
   };
 
-  const handleImageUpload = (base64: string, name?: string) => {
-    if (!nftPickerTargetId) return;
-    setFloors(prev => prev.map(f =>
-      f.id === currentFloorId ? {
-        ...f,
-        furniture: f.furniture.map(item =>
-          item.id === nftPickerTargetId ? {
-            ...item,
-            nftMint: undefined,
-            nftImageUrl: base64,
-            nftName: name || 'Uploaded Image',
-            nftChain: undefined,
-            imageSource: 'upload' as const,
-          } : item
-        ),
-      } : f
-    ));
-    setNftPickerVisible(false);
-    setNftPickerTargetId(null);
-  };
-
   const handleFileInputChange = async (event: any) => {
+    const input = event.target;
     const file = event.target?.files?.[0];
     if (!file) return;
     if (!file.type?.startsWith('image/')) return;
     if (file.size > 5 * 1024 * 1024) return;
+    const requestedScope = floorLayoutScope;
+    const requestedGeneration = floorLayoutGenerationRef.current;
+    const targetFloorId = currentFloorIdRef.current;
+    const targetItemId = nftPickerTargetId;
+    if (!requestedScope || !targetItemId || layoutSaveScopeRef.current !== requestedScope) return;
     try {
       const base64 = await resizeImageToBase64(file);
-      handleImageUpload(base64, file.name?.replace(/\.[^/.]+$/, ''));
+      if (
+        layoutSaveScopeRef.current !== requestedScope
+        || floorLayoutGenerationRef.current !== requestedGeneration
+        || currentFloorIdRef.current !== targetFloorId
+        || nftPickerTargetId !== targetItemId
+      ) return;
+      const patched = patchFurnitureStateDurably(targetFloorId, targetItemId, (item) => ({
+        ...item,
+        nftMint: undefined,
+        nftImageUrl: base64,
+        nftName: file.name?.replace(/\.[^/.]+$/, '') || 'Uploaded Image',
+        nftChain: undefined,
+        imageSource: 'upload' as const,
+      }));
+      if (!patched) return;
+      setNftPickerVisible(false);
+      setNftPickerTargetId(null);
     } catch (err) {
       console.error('Failed to process image:', err);
+    } finally {
+      input.value = '';
     }
-    event.target.value = '';
   };
 
   // ── Sticky note save ─────────────────────────────────────────────────────
@@ -2958,83 +5424,141 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         if (hasContent) drawingData = canvas.toDataURL('image/png');
       }
     }
-    setFloors(prev => prev.map(f =>
-      f.id === currentFloorId ? {
-        ...f,
-        furniture: f.furniture.map(item =>
-          item.id === stickyEditorTargetId ? {
-            ...item,
-            noteText: stickyText || undefined,
-            noteColor: stickyColor,
-            noteDrawing: drawingData || (stickyTab !== 'draw' ? item.noteDrawing : undefined),
-            noteGifUrl: stickyGifUrl || undefined,
-          } : item
-        ),
-      } : f
-    ));
+    patchFurnitureStateDurably(currentFloorId, stickyEditorTargetId, (item) => ({
+      ...item,
+      noteText: stickyText || undefined,
+      noteColor: stickyColor,
+      noteDrawing: drawingData || (stickyTab !== 'draw' ? item.noteDrawing : undefined),
+      noteGifUrl: stickyGifUrl || undefined,
+    }));
     setStickyEditorVisible(false);
     setStickyEditorTargetId(null);
   };
 
   const handleServiceSave = () => {
     if (!serviceModalTargetId) return;
+    if (
+      (serviceModalType === 'calendar_widget' || serviceModalType === 'email_hub')
+      && (!oauthStatus
+        || oauthStatus.state === 'checking'
+        || oauthStatus.state === 'unavailable'
+        || oauthStatus.state === 'reconnect_required')
+    ) {
+      setOauthError(oauthStatus?.state === 'reconnect_required'
+        ? 'Sign in again before saving this provider. Existing Office setup was not changed.'
+        : 'Wait for a verified provider status before saving. Existing Office setup was not changed.');
+      return;
+    }
+    const candidateServiceUrl = serviceUrl.trim();
+    let safeServiceUrl: string | undefined;
+    if (candidateServiceUrl) {
+      try {
+        const parsed = new URL(candidateServiceUrl);
+        if (parsed.protocol !== 'https:') {
+          setServiceUrlError('Use a complete HTTPS link. Your previous setup has not been changed.');
+          return;
+        }
+        safeServiceUrl = parsed.toString();
+      } catch {
+        setServiceUrlError('Enter a valid HTTPS link. Your previous setup has not been changed.');
+        return;
+      }
+    }
+    setServiceUrlError('');
     const updates: Record<string, any> = {};
     switch (serviceModalType) {
       case 'smart_tv':
         updates.tvApp = serviceTvApp;
-        updates.tvContentUrl = serviceUrl || undefined;
-        updates.tvWidth = parseInt(serviceTvWidth) || 120;
-        updates.tvHeight = parseInt(serviceTvHeight) || 80;
+        updates.tvContentUrl = safeServiceUrl;
+        updates.tvWidth = Math.max(40, Math.min(OFFICE_FLOOR_WIDTH, parseInt(serviceTvWidth, 10) || 120));
+        updates.tvHeight = Math.max(40, Math.min(OFFICE_FLOOR_HEIGHT, parseInt(serviceTvHeight, 10) || 80));
         updates.tvPoweredOn = true;
+        updates.dataState = safeServiceUrl ? 'local' : 'setup';
+        updates.dataUpdatedAt = undefined;
         break;
       case 'spotify_jukebox':
-        updates.spotifyConnected = true;
-        updates.spotifyTrackName = 'Connected';
-        updates.spotifyArtist = 'Spotify';
+        updates.spotifyUrl = safeServiceUrl;
+        updates.spotifyConnected = false;
+        updates.spotifyTrackName = undefined;
+        updates.spotifyArtist = undefined;
         updates.spotifyPlaying = false;
+        updates.spotifyProgress = undefined;
+        updates.dataState = safeServiceUrl ? 'local' : 'setup';
+        updates.dataUpdatedAt = undefined;
         break;
       case 'discord_hub':
-        updates.discordConnected = true;
+        updates.discordUrl = safeServiceUrl;
+        updates.discordConnected = false;
         updates.discordChannel = serviceDiscordChannel || 'general';
-        updates.discordStatus = 'online';
-        updates.discordMemberCount = 1;
+        updates.discordStatus = 'offline';
+        updates.discordMemberCount = 0;
+        updates.dataState = safeServiceUrl ? 'local' : 'setup';
+        updates.dataUpdatedAt = undefined;
         break;
       case 'twitch_stream':
-        updates.twitchChannel = serviceTwitchChannel || 'stream';
-        updates.twitchLive = true;
+        updates.twitchChannel = serviceTwitchChannel.trim() || undefined;
+        updates.twitchLive = false;
         updates.twitchViewers = 0;
+        updates.dataState = serviceTwitchChannel.trim() ? 'local' : 'setup';
+        updates.dataUpdatedAt = undefined;
         break;
       case 'video_call':
         updates.videoCallProvider = serviceCallProvider;
-        updates.videoCallLink = serviceUrl || undefined;
+        updates.videoCallLink = safeServiceUrl;
+        updates.videoCallActive = false;
+        updates.videoCallParticipants = 0;
+        updates.dataState = safeServiceUrl ? 'local' : 'setup';
+        updates.dataUpdatedAt = undefined;
         break;
       case 'calendar_widget':
-        updates.calendarProvider = serviceCalendarProvider;
-        // Real data is applied via OAuth callback above; this is fallback
-        if (!oauthStatus?.connected) {
-          updates.calendarEvent = 'Tap to refresh';
-          updates.calendarTime = '';
-          updates.calendarEvents = 0;
+        {
+          const current = floorsRef.current
+            .find(floor => floor.id === currentFloorId)
+            ?.furniture.find(item => item.id === serviceModalTargetId);
+          const providerChanged = current?.calendarProvider !== serviceCalendarProvider;
+          if (providerChanged || oauthStatus?.state === 'disconnected') {
+            Object.assign(updates, buildOfficeOAuthWidgetReset({
+              serviceType: 'calendar_widget',
+              providerValue: serviceCalendarProvider,
+              connected: oauthStatus?.state === 'connected',
+            }));
+          } else {
+            updates.calendarProvider = serviceCalendarProvider;
+          }
         }
         break;
+      case 'figma_board':
+        updates.figmaBoardUrl = safeServiceUrl;
+        updates.figmaBoardConnected = false;
+        updates.figmaBoardPreview = safeServiceUrl ? 'Design link ready' : undefined;
+        updates.dataState = safeServiceUrl ? 'local' : 'setup';
+        updates.dataUpdatedAt = undefined;
+        break;
       case 'email_hub':
-        updates.emailProvider = serviceEmailProvider;
-        // Real data is applied via OAuth callback above; this is fallback
-        if (!oauthStatus?.connected) {
-          updates.emailConnected = false;
+        {
+          const current = floorsRef.current
+            .find(floor => floor.id === currentFloorId)
+            ?.furniture.find(item => item.id === serviceModalTargetId);
+          const providerChanged = current?.emailProvider !== serviceEmailProvider;
+          if (providerChanged || oauthStatus?.state === 'disconnected') {
+            Object.assign(updates, buildOfficeOAuthWidgetReset({
+              serviceType: 'email_hub',
+              providerValue: serviceEmailProvider,
+              connected: oauthStatus?.state === 'connected',
+            }));
+          } else {
+            updates.emailProvider = serviceEmailProvider;
+          }
         }
         break;
     }
-    setFloors(prev => prev.map(f =>
-      f.id === currentFloorId ? {
-        ...f,
-        furniture: f.furniture.map(item =>
-          item.id === serviceModalTargetId ? { ...item, ...updates } : item
-        ),
-      } : f
-    ));
-    setServiceModalVisible(false);
-    setServiceModalTargetId(null);
+    patchFurnitureStateDurably(currentFloorId, serviceModalTargetId, (item) => ({ ...item, ...updates }));
+    closeServiceModal();
+  };
+
+  const handleServiceUrlChange = (value: string) => {
+    setServiceUrl(value);
+    if (serviceUrlError) setServiceUrlError('');
   };
 
   const handleServiceOpen = (url: string) => {
@@ -3042,16 +5566,218 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     // Validate URL protocol to prevent javascript:/data:/file: injection
     try {
       const parsed = new URL(url);
-      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return;
+      if (parsed.protocol !== 'https:') return;
     } catch {
       return; // Invalid URL
     }
     if (Platform.OS === 'web') {
       window.open(url, '_blank', 'noopener,noreferrer');
     } else {
-      Linking.openURL(url);
+      void Linking.openURL(url).catch(() => {});
     }
   };
+
+  const invalidateOAuthProviderFurniture = useCallback((provider: OfficeOAuthProvider): boolean => (
+    mutateFloorsDurably((current) => {
+      let changed = false;
+      const updated = current.map((floor) => {
+        let floorChanged = false;
+        const furniture = floor.furniture.map((item) => {
+          const itemProvider: OfficeOAuthProvider | null = item.type === 'calendar_widget'
+            ? (item.calendarProvider === 'outlook' ? 'microsoft' : 'google')
+            : item.type === 'email_hub'
+              ? (item.emailProvider === 'gmail' ? 'google' : 'microsoft')
+              : null;
+          if (itemProvider !== provider) return item;
+          floorChanged = true;
+          changed = true;
+          return item.type === 'calendar_widget'
+            ? {
+                ...item,
+                calendarEvent: 'Connect a calendar',
+                calendarTime: '',
+                calendarEvents: 0,
+                dataState: 'setup' as const,
+                dataUpdatedAt: undefined,
+              }
+            : {
+                ...item,
+                emailConnected: false,
+                emailUnread: 0,
+                emailSender: undefined,
+                emailSubject: undefined,
+                emailTime: undefined,
+                dataState: 'setup' as const,
+                dataUpdatedAt: undefined,
+              };
+        });
+        return floorChanged ? { ...floor, furniture } : floor;
+      });
+      return changed ? updated : current;
+    }, 'Saving provider-wide Office connection status…')
+  ), [mutateFloorsDurably]);
+
+  const handleServiceOAuthProviderSelect = useCallback((input: {
+    serviceType: 'calendar_widget' | 'email_hub';
+    value: string;
+    provider: OfficeOAuthProvider;
+  }) => {
+    if (oauthMutationTokenRef.current !== null) return;
+    const targetId = serviceModalTargetIdRef.current;
+    if (!targetId || serviceModalTypeRef.current !== input.serviceType) return;
+    invalidateServiceWidgetRefreshes();
+    serviceOAuthGenerationRef.current += 1;
+    if (input.serviceType === 'calendar_widget') {
+      serviceCalendarProviderRef.current = input.value;
+      setServiceCalendarProvider(input.value);
+    } else {
+      serviceEmailProviderRef.current = input.value;
+      setServiceEmailProvider(input.value);
+    }
+    setOauthStatus(null);
+    setOauthError('');
+    void refreshServiceOAuthStatus({
+      targetId,
+      serviceType: input.serviceType,
+      provider: input.provider,
+    });
+  }, [invalidateServiceWidgetRefreshes, refreshServiceOAuthStatus]);
+
+  const handleServiceOAuthDisconnect = useCallback(async (serviceType: 'calendar_widget' | 'email_hub') => {
+    if (oauthMutationTokenRef.current !== null) return;
+    const targetId = serviceModalTargetIdRef.current;
+    if (!targetId || serviceModalTypeRef.current !== serviceType) return;
+    const provider: OfficeOAuthProvider = serviceType === 'calendar_widget'
+      ? (serviceCalendarProviderRef.current === 'google' ? 'google' : 'microsoft')
+      : (serviceEmailProviderRef.current === 'gmail' ? 'google' : 'microsoft');
+    const requestedLayoutScope = layoutSaveScopeRef.current;
+    invalidateServiceWidgetRefreshes();
+    const scope = beginServiceOAuthScope({ targetId, serviceType, provider });
+    serviceOAuthDisconnectControllerRef.current?.controller.abort();
+    const controller = new AbortController();
+    serviceOAuthDisconnectControllerRef.current = {
+      generation: scope.generation,
+      controller,
+    };
+    oauthMutationTokenRef.current = scope.generation;
+    setOauthConnecting(true);
+    setOauthError('');
+    try {
+      const disconnected = await disconnectOAuth(
+        provider,
+        scope.accessToken,
+        () => isServiceOAuthScopeCurrent(scope),
+        controller.signal,
+      );
+      if (!disconnected) {
+        if (isServiceOAuthScopeCurrent(scope)) {
+          setOauthError('Could not disconnect this provider account. Its saved credential may still be active.');
+        }
+        return;
+      }
+      // Credentials are provider-wide today, so every Calendar/Email widget
+      // backed by this provider must stop claiming a live connection.
+      if (
+        isServiceOAuthScopeCurrent(scope)
+        && requestedLayoutScope
+        && layoutSaveScopeRef.current === requestedLayoutScope
+      ) {
+        invalidateOAuthProviderFurniture(provider);
+      }
+      if (isServiceOAuthScopeCurrent(scope)) {
+        setOauthStatus({ state: 'disconnected', connected: false, email: '' });
+        setOauthError('');
+      }
+    } finally {
+      if (serviceOAuthDisconnectControllerRef.current?.controller === controller) {
+        serviceOAuthDisconnectControllerRef.current = null;
+      }
+      if (
+        oauthMutationTokenRef.current === scope.generation
+        && !controller.signal.aborted
+        && isServiceOAuthScopeCurrent(scope)
+      ) {
+        oauthMutationTokenRef.current = null;
+        setOauthConnecting(false);
+      } else if (oauthMutationTokenRef.current === scope.generation) {
+        oauthMutationTokenRef.current = null;
+      }
+    }
+  }, [beginServiceOAuthScope, invalidateOAuthProviderFurniture, invalidateServiceWidgetRefreshes, isServiceOAuthScopeCurrent]);
+
+  const handleServiceOAuthConnect = useCallback(async (serviceType: 'calendar_widget' | 'email_hub') => {
+    if (oauthMutationTokenRef.current !== null) return;
+    const targetId = serviceModalTargetIdRef.current;
+    if (!targetId || serviceModalTypeRef.current !== serviceType) return;
+    const providerValue = serviceType === 'calendar_widget'
+      ? serviceCalendarProviderRef.current
+      : serviceEmailProviderRef.current;
+    const provider: OfficeOAuthProvider = serviceType === 'calendar_widget'
+      ? (providerValue === 'google' ? 'google' : 'microsoft')
+      : (providerValue === 'gmail' ? 'google' : 'microsoft');
+    invalidateServiceWidgetRefreshes();
+    const scope = beginServiceOAuthScope({ targetId, serviceType, provider });
+    oauthMutationTokenRef.current = scope.generation;
+    setOauthConnecting(true);
+    setOauthError('');
+    try {
+      // Start the popup synchronously inside the click event. The shared helper
+      // refreshes the app session after opening its blank window, preserving
+      // browser user-gesture authority even when auth storage is slow.
+      const result = await openOAuthPopup(
+        provider,
+        serviceType === 'calendar_widget' ? 'calendar' : 'email',
+        scope.accessToken,
+        () => isServiceOAuthScopeCurrent(scope),
+      );
+      if (!isServiceOAuthScopeCurrent(scope)) return;
+      if (!result.success) {
+        if (result.error !== 'Window closed') setOauthError(result.error || 'Connection failed');
+        return;
+      }
+      setOauthStatus({ state: 'connected', connected: true, email: result.email });
+
+      if (serviceType === 'calendar_widget') {
+        const calendarData = await fetchCalendarEvents(provider, scope.accessToken);
+        if (!isServiceOAuthScopeCurrent(scope)) return;
+        patchFurnitureStateDurably(scope.floorId, scope.targetId, item => ({
+          ...item,
+          calendarProvider: providerValue,
+          calendarEvent: calendarData?.nextEvent?.title || 'No upcoming events',
+          calendarTime: calendarData?.nextEvent?.timeFormatted || '',
+          calendarEvents: calendarData?.count || 0,
+          dataState: calendarData ? 'live' : 'error',
+          dataUpdatedAt: calendarData ? Date.now() : undefined,
+        }));
+        if (!calendarData) setOauthError('Connected, but calendar events could not be refreshed yet.');
+      } else {
+        const emailData = await fetchEmails(provider, scope.accessToken);
+        if (!isServiceOAuthScopeCurrent(scope)) return;
+        const latest = emailData?.emails[0];
+        patchFurnitureStateDurably(scope.floorId, scope.targetId, item => ({
+          ...item,
+          emailProvider: providerValue,
+          emailConnected: !!emailData,
+          emailUnread: emailData?.unread || 0,
+          emailSender: latest?.sender || '',
+          emailSubject: latest?.subject || (emailData ? 'Inbox clear' : undefined),
+          emailTime: latest?.timeFormatted || '',
+          dataState: emailData ? 'live' : 'error',
+          dataUpdatedAt: emailData ? Date.now() : undefined,
+        }));
+        if (!emailData) setOauthError('Connected, but email could not be refreshed yet.');
+      }
+    } catch (error) {
+      if (isServiceOAuthScopeCurrent(scope)) {
+        setOauthError(error instanceof Error ? error.message : 'Connection failed');
+      }
+    } finally {
+      if (oauthMutationTokenRef.current === scope.generation) {
+        oauthMutationTokenRef.current = null;
+        setOauthConnecting(false);
+      }
+    }
+  }, [beginServiceOAuthScope, invalidateServiceWidgetRefreshes, isServiceOAuthScopeCurrent, patchFurnitureStateDurably]);
 
   const initStickyCanvas = (canvas: HTMLCanvasElement | null) => {
     if (!canvas || stickyCanvasRef.current === canvas) return;
@@ -3097,45 +5823,259 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   };
 
   const handleFurnitureMove = (id: string, x: number, y: number) => {
-    setFloors(prev => prev.map(f =>
-      f.id === currentFloorId ? {
-        ...f,
-        furniture: f.furniture.map(item => item.id === id ? { ...item, x, y } : item),
-      } : f
-    ));
+    const item = floorsRef.current.find((floor) => floor.id === currentFloorId)?.furniture.find((entry) => entry.id === id);
+    if (!item) return;
+    const definition = getOfficeAddonDefinition(item.type);
+    const geometry = constrainOfficeFurnitureGeometry({
+      x,
+      y,
+      itemWidth: item.itemWidth || definition.width,
+      itemHeight: item.itemHeight || definition.height,
+      rotation: item.rotation,
+    });
+    if (item.x === geometry.x && item.y === geometry.y) return;
+    commitCurrentFloorEdit(`Move ${getOfficeAddonDefinition(item.type).name}`, (floor) => ({
+      ...floor,
+      furniture: floor.furniture.map((entry) => entry.id === id
+        ? { ...entry, x: geometry.x, y: geometry.y }
+        : entry),
+    }));
   };
 
   const handleFurnitureResize = (id: string, w: number, h: number) => {
-    setFloors(prev => prev.map(f =>
-      f.id === currentFloorId ? {
-        ...f,
-        furniture: f.furniture.map(item => item.id === id ? { ...item, itemWidth: w, itemHeight: h } : item),
-      } : f
-    ));
+    const item = floorsRef.current.find((floor) => floor.id === currentFloorId)?.furniture.find((entry) => entry.id === id);
+    if (!item) return;
+    const geometry = constrainOfficeFurnitureGeometry({
+      x: item.x,
+      y: item.y,
+      itemWidth: w,
+      itemHeight: h,
+      rotation: item.rotation,
+    });
+    if (item.x === geometry.x && item.y === geometry.y
+      && item.itemWidth === geometry.itemWidth && item.itemHeight === geometry.itemHeight) return;
+    commitCurrentFloorEdit(`Resize ${getOfficeAddonDefinition(item.type).name}`, (floor) => ({
+      ...floor,
+      furniture: floor.furniture.map((entry) => entry.id === id ? {
+        ...entry,
+        x: geometry.x,
+        y: geometry.y,
+        itemWidth: geometry.itemWidth,
+        itemHeight: geometry.itemHeight,
+      } : entry),
+    }));
   };
 
+  const handleFurnitureTransform = useCallback((
+    id: string,
+    fields: { x: number; y: number; itemWidth: number; itemHeight: number },
+  ) => {
+    const item = floorsRef.current.find((floor) => floor.id === currentFloorId)?.furniture.find((entry) => entry.id === id);
+    if (!item) return;
+    const geometry = constrainOfficeFurnitureGeometry({
+      ...fields,
+      rotation: item.rotation,
+    });
+    commitCurrentFloorEdit(`Resize ${getOfficeAddonDefinition(item.type).name}`, (floor) => ({
+      ...floor,
+      furniture: floor.furniture.map((entry) => entry.id === id ? {
+        ...entry,
+        x: geometry.x,
+        y: geometry.y,
+        itemWidth: geometry.itemWidth,
+        itemHeight: geometry.itemHeight,
+      } : entry),
+    }));
+  }, [commitCurrentFloorEdit, currentFloorId]);
+
   const handleFurnitureItemUpdate = (id: string, fields: Partial<FurnitureItem>) => {
-    setFloors(prev => prev.map(f =>
-      f.id === currentFloorId ? {
-        ...f,
-        furniture: f.furniture.map(item => item.id === id ? { ...item, ...fields } : item),
-      } : f
-    ));
+    patchFurnitureStateDurably(currentFloorId, id, (item) => ({ ...item, ...fields }));
   };
+
+  const handleFurnitureDuplicate = useCallback((id: string) => {
+    const floor = floorsRef.current.find((entry) => entry.id === currentFloorId);
+    const item = floor?.furniture.find((entry) => entry.id === id);
+    if (!floor || !item) return;
+    const definition = getOfficeAddonDefinition(item.type);
+    const usedIds = new Set(floor.furniture.map((entry) => entry.id));
+    const seed = `${item.id}_copy`;
+    let copyId = seed;
+    let suffix = 2;
+    while (usedIds.has(copyId)) copyId = `${seed}_${suffix++}`;
+    const geometry = constrainOfficeFurnitureGeometry({
+      x: item.x + 16,
+      y: item.y + 16,
+      itemWidth: item.itemWidth || definition.width,
+      itemHeight: item.itemHeight || definition.height,
+      rotation: item.rotation,
+    });
+    const duplicate: FurnitureItem = {
+      ...item,
+      id: copyId,
+      x: geometry.x,
+      y: geometry.y,
+      itemWidth: geometry.itemWidth,
+      itemHeight: geometry.itemHeight,
+      rotation: geometry.rotation,
+    };
+    if (!commitCurrentFloorEdit(`Duplicate ${definition.name}`, (entry) => ({
+      ...entry,
+      furniture: [...entry.furniture, duplicate],
+    }))) return;
+    rememberOfficeAddonType(item.type);
+    setSelectedFurnitureId(copyId);
+  }, [commitCurrentFloorEdit, currentFloorId, rememberOfficeAddonType, setSelectedFurnitureId]);
+
+  const handleFurnitureRotate = useCallback((id: string) => {
+    const item = floorsRef.current.find((floor) => floor.id === currentFloorId)?.furniture.find((entry) => entry.id === id);
+    if (!item) return;
+    const nextRotation = ((item.rotation || 0) + 90) % 360;
+    const definition = getOfficeAddonDefinition(item.type);
+    const geometry = constrainOfficeFurnitureGeometry({
+      x: item.x,
+      y: item.y,
+      itemWidth: item.itemWidth || definition.width,
+      itemHeight: item.itemHeight || definition.height,
+      rotation: nextRotation,
+    });
+    commitCurrentFloorEdit(`Rotate ${getOfficeAddonDefinition(item.type).name}`, (floor) => ({
+      ...floor,
+      furniture: floor.furniture.map((entry) => entry.id === id ? {
+        ...entry,
+        x: geometry.x,
+        y: geometry.y,
+        itemWidth: geometry.itemWidth,
+        itemHeight: geometry.itemHeight,
+        rotation: geometry.rotation,
+      } : entry),
+    }));
+  }, [commitCurrentFloorEdit, currentFloorId]);
+
+  const handleFurnitureResetSize = useCallback((id: string) => {
+    const item = floorsRef.current.find((floor) => floor.id === currentFloorId)?.furniture.find((entry) => entry.id === id);
+    if (!item) return;
+    const definition = getOfficeAddonDefinition(item.type);
+    const geometry = constrainOfficeFurnitureGeometry({
+      x: item.x,
+      y: item.y,
+      itemWidth: definition.width,
+      itemHeight: definition.height,
+      rotation: item.rotation,
+    });
+    commitCurrentFloorEdit(`Reset ${definition.name} size`, (floor) => ({
+      ...floor,
+      furniture: floor.furniture.map((entry) => entry.id === id
+        ? {
+            ...entry,
+            x: geometry.x,
+            y: geometry.y,
+            itemWidth: geometry.itemWidth,
+            itemHeight: geometry.itemHeight,
+          }
+        : entry),
+    }));
+  }, [commitCurrentFloorEdit, currentFloorId]);
+
+  const handleFurnitureLayer = useCallback((id: string, direction: 'front' | 'back') => {
+    const item = floorsRef.current.find((floor) => floor.id === currentFloorId)?.furniture.find((entry) => entry.id === id);
+    if (!item) return;
+    commitCurrentFloorEdit(`${direction === 'front' ? 'Bring forward' : 'Send backward'} ${getOfficeAddonDefinition(item.type).name}`, (floor) => {
+      const without = floor.furniture.filter((entry) => entry.id !== id);
+      return { ...floor, furniture: direction === 'front' ? [...without, item] : [item, ...without] };
+    });
+  }, [commitCurrentFloorEdit, currentFloorId]);
+
+  const handleFurnitureNudge = useCallback((id: string, dx: number, dy: number) => {
+    const item = floorsRef.current.find((floor) => floor.id === currentFloorId)?.furniture.find((entry) => entry.id === id);
+    if (!item) return;
+    const definition = getOfficeAddonDefinition(item.type);
+    const geometry = constrainOfficeFurnitureGeometry({
+      x: item.x + dx,
+      y: item.y + dy,
+      itemWidth: item.itemWidth || definition.width,
+      itemHeight: item.itemHeight || definition.height,
+      rotation: item.rotation,
+    });
+    if (geometry.x === item.x && geometry.y === item.y) return;
+    commitCurrentFloorEdit(`Move ${definition.name}`, (floor) => ({
+      ...floor,
+      furniture: floor.furniture.map((entry) => entry.id === id
+        ? { ...entry, x: geometry.x, y: geometry.y }
+        : entry),
+    }));
+  }, [commitCurrentFloorEdit, currentFloorId]);
+
+  const handleFurnitureResizeBy = useCallback((id: string, dw: number, dh: number) => {
+    const item = floorsRef.current.find((floor) => floor.id === currentFloorId)?.furniture.find((entry) => entry.id === id);
+    if (!item) return;
+    const definition = getOfficeAddonDefinition(item.type);
+    const currentWidth = item.itemWidth || definition.width;
+    const currentHeight = item.itemHeight || definition.height;
+    const geometry = constrainOfficeFurnitureGeometry({
+      x: item.x,
+      y: item.y,
+      itemWidth: currentWidth + dw,
+      itemHeight: currentHeight + dh,
+      rotation: item.rotation,
+    });
+    if (geometry.x === item.x && geometry.y === item.y
+      && geometry.itemWidth === currentWidth && geometry.itemHeight === currentHeight) return;
+    commitCurrentFloorEdit(`Resize ${definition.name}`, (floor) => ({
+      ...floor,
+      furniture: floor.furniture.map((entry) => entry.id === id ? {
+        ...entry,
+        x: geometry.x,
+        y: geometry.y,
+        itemWidth: geometry.itemWidth,
+        itemHeight: geometry.itemHeight,
+      } : entry),
+    }));
+  }, [commitCurrentFloorEdit, currentFloorId]);
+
+  const handleApplyOfficeRoomKit = useCallback((kitId: OfficeRoomKitId) => {
+    const floor = floorsRef.current.find((entry) => entry.id === currentFloorId);
+    if (!floor) return;
+    const plan = planOfficeRoomKit({
+      floor,
+      kit: kitId,
+      catalog: FURNITURE_CATALOG,
+      idSeed: `${Date.now()}`,
+      origin: { x: 32 + (floor.furniture.length % 3) * 96, y: 208 + (floor.furniture.length % 4) * 88 },
+      bounds: { width: OFFICE_FLOOR_WIDTH, height: OFFICE_FLOOR_HEIGHT, padding: OFFICE_FLOOR_GRID_SIZE, gridSize: OFFICE_FLOOR_GRID_SIZE },
+    });
+    if (!plan.ok) {
+      const failureMessage = {
+        capacity: 'This floor has reached its item limit. Remove items before adding a room kit.',
+        invalid_template: 'This room kit is unavailable because its template is invalid.',
+        invalid_floor: 'The current floor data needs repair before a room kit can be added.',
+        invalid_bounds: 'The current floor bounds cannot contain this room kit.',
+        invalid_seed: 'The room kit could not create safe item identifiers. Try again.',
+        no_free_region: 'No open region can fit this room kit. Move or remove items and try again.',
+        scan_limit: 'Open regions may remain, but the bounded placement scan was exhausted. Move items closer together and retry.',
+      }[plan.reason];
+      setFloorPresetStatus(failureMessage);
+      return;
+    }
+    const application = plan.application;
+    if (!commitCurrentFloorEdit(`Add ${application.kit.name} kit`, () => application.floor)) return;
+    if (currentUserId) officeAddonPreferencesMutatedForScopeRef.current = `${currentUserId}:${circleId}`;
+    setOfficeAddonPreferences((current) => application.kit.items.reduce(
+      (next, entry) => recordOfficeAddonRecentType(next, entry.type),
+      current,
+    ));
+    setSelectedFurnitureId(application.addedItemIds[application.addedItemIds.length - 1] || null);
+    setFloorPresetStatus(`${application.kit.name} added with ${application.addedItemIds.length} items. Undo is available.`);
+  }, [circleId, commitCurrentFloorEdit, currentFloorId, currentUserId, setSelectedFurnitureId]);
 
   // ─── Interactive furniture handler ────────────────────────────────────────
   const handleFurnitureInteract = useCallback((id: string, type: FurnitureType) => {
+    if (!floorLayoutHydrated || interactSending) return;
     const currentFloor = floorsRef.current.find(f => f.id === currentFloorId);
     const item = currentFloor?.furniture.find(f => f.id === id);
     if (!item) return;
 
     const updateFurnitureField = (fields: Partial<FurnitureItem>) => {
-      setFloors(prev => prev.map(f =>
-        f.id === currentFloorId ? {
-          ...f,
-          furniture: f.furniture.map(fi => fi.id === id ? { ...fi, ...fields } : fi),
-        } : f
-      ));
+      patchFurnitureStateDurably(currentFloorId, id, (entry) => ({ ...entry, ...fields }));
     };
 
     const addFloorEffect = (effectType: string) => {
@@ -3150,10 +6090,12 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           setInteractInputId(null);
           setInteractInputText('');
           setInteractAgentTarget(null);
+          setInteractSendError('');
         } else {
           setInteractInputId(id);
           setInteractInputText('');
-          setInteractAgentTarget(type === 'command_console' ? (displayAgents[0]?.id || null) : null);
+          setInteractAgentTarget(type === 'command_console' ? (commandTargetAgents[0]?.id || null) : null);
+          setInteractSendError('');
         }
         break;
 
@@ -3161,13 +6103,12 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         const presets = item.buttonPresets?.length ? item.buttonPresets : ['Status update', 'Ship it', 'Stand up'];
         const current = (item.jukeboxTrack || 0) % presets.length;
         const cmd = presets[current];
-        updateFurnitureField({ jukeboxTrack: current + 1 });
-        if (currentUserId && currentUserName) {
-          sendTerminalCommand({
-            circleId, senderId: currentUserId, senderName: currentUserName,
-            commandText: cmd, targetAgentName: '@all',
-          });
-        }
+        // A preset click stages a reviewable, single-agent command. It must
+        // never silently broadcast a task or mutate its preset before Send.
+        setInteractInputId(id);
+        setInteractInputText(cmd);
+        setInteractAgentTarget(commandTargetAgents[0]?.id || null);
+        setInteractSendError('');
         break;
       }
 
@@ -3176,13 +6117,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         break;
 
       case 'launch_pad':
-        addFloorEffect('rocket');
-        if (currentUserId && currentUserName) {
-          sendTerminalCommand({
-            circleId, senderId: currentUserId, senderName: currentUserName,
-            commandText: 'Ship it! 🚀', targetAgentName: '@all',
-          });
-        }
+        // Launches are side-effecting agent work, so make the destination and
+        // exact command visible before dispatch. The rocket appears only once
+        // durable command persistence succeeds.
+        setInteractInputId(id);
+        setInteractInputText('Ship it! 🚀');
+        setInteractAgentTarget(commandTargetAgents[0]?.id || null);
+        setInteractSendError('');
         break;
 
       case 'jukebox': {
@@ -3256,7 +6197,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         break;
 
       case 'lava_lamp': {
-        const colors = ['#ef4444', '#22c55e', '#6366f1', '#f59e0b', '#a855f7', '#22d3ee', '#ffffff'];
+        const colors = ['#ef4444', '#22c55e', '#6366f1', '#f59e0b', '#a855f7', '#ffffff'];
         const currentIdx = colors.indexOf(item.lavaColor || '#ef4444');
         const nextColor = colors[(currentIdx + 1) % colors.length];
         updateFurnitureField({ lavaColor: nextColor });
@@ -3340,57 +6281,28 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       }
 
       case 'spotify_jukebox': {
-        if (!item.spotifyConnected) {
-          // Open Spotify auth — for now toggle connected state to demo
-          updateFurnitureField({
-            spotifyConnected: true,
-            spotifyTrackName: 'Lo-fi Beats',
-            spotifyArtist: 'ChillHop',
-            spotifyPlaying: true,
-            spotifyProgress: 35,
-          });
-        } else {
-          // Toggle playback
-          updateFurnitureField({ spotifyPlaying: !item.spotifyPlaying });
-          if (!item.spotifyPlaying) addFloorEffect('pulse');
-        }
+        if (item.spotifyUrl) handleServiceOpen(item.spotifyUrl);
+        else openFurnitureConfiguration(id);
+        updateFurnitureField({ dataState: item.spotifyUrl ? 'local' : 'setup', spotifyConnected: false, spotifyPlaying: false });
         break;
       }
 
       case 'discord_hub': {
-        if (!item.discordConnected) {
-          updateFurnitureField({
-            discordConnected: true,
-            discordChannel: 'general',
-            discordStatus: 'online',
-            discordMemberCount: 12,
-          });
-        } else {
-          const statuses = ['online', 'idle', 'dnd', 'offline'];
-          const curIdx = statuses.indexOf(item.discordStatus || 'online');
-          updateFurnitureField({ discordStatus: statuses[(curIdx + 1) % statuses.length] });
-        }
+        if (item.discordUrl) handleServiceOpen(item.discordUrl);
+        else openFurnitureConfiguration(id);
+        updateFurnitureField({ dataState: item.discordUrl ? 'local' : 'setup', discordConnected: false, discordStatus: 'offline', discordMemberCount: 0 });
         break;
       }
 
       case 'video_call': {
-        if (!item.videoCallActive) {
-          const providers = ['zoom', 'meet', 'teams'];
-          const curIdx = providers.indexOf(item.videoCallProvider || 'meet');
-          const provider = providers[(curIdx + 1) % providers.length];
-          updateFurnitureField({
-            videoCallActive: true,
-            videoCallProvider: provider,
-            videoCallParticipants: Math.floor(Math.random() * 4) + 2,
-          });
-          addFloorEffect('pulse');
-        } else {
-          updateFurnitureField({ videoCallActive: false, videoCallParticipants: 0 });
-        }
+        if (item.videoCallLink) handleServiceOpen(item.videoCallLink);
+        else openFurnitureConfiguration(id);
+        updateFurnitureField({ dataState: item.videoCallLink ? 'local' : 'setup', videoCallActive: false, videoCallParticipants: 0 });
         break;
       }
 
       case 'message_board': {
+        setActivePhoneItemId(id);
         setPhoneVisible(true);
         break;
       }
@@ -3402,11 +6314,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           // For non-embeddable apps with a URL, open in new tab on tap
           const nonEmbeddable = ['netflix', 'hulu', 'disney'];
           if (nonEmbeddable.includes(item.tvApp || '') && item.tvContentUrl) {
-            if (Platform.OS === 'web') {
-              window.open(item.tvContentUrl, '_blank', 'noopener,noreferrer');
-            } else {
-              Linking.openURL(item.tvContentUrl);
-            }
+            handleServiceOpen(item.tvContentUrl);
           } else {
             const apps = ['youtube', 'netflix', 'hulu', 'disney', 'twitch'];
             const curIdx = apps.indexOf(item.tvApp || 'youtube');
@@ -3430,16 +6338,16 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           weatherCondition: nextCond,
           weatherTemp: tempArr[Math.floor(Math.random() * tempArr.length)],
           weatherCity: cities[Math.floor(Math.random() * cities.length)],
+          dataState: 'demo',
+          dataUpdatedAt: Date.now(),
         });
         break;
       }
 
       case 'twitch_stream': {
-        updateFurnitureField({
-          twitchLive: !item.twitchLive,
-          twitchChannel: item.twitchChannel || 'stream',
-          twitchViewers: item.twitchLive ? 0 : Math.floor(Math.random() * 5000) + 100,
-        });
+        if (item.twitchChannel) handleServiceOpen(`https://twitch.tv/${encodeURIComponent(item.twitchChannel)}`);
+        else openFurnitureConfiguration(id);
+        updateFurnitureField({ dataState: item.twitchChannel ? 'local' : 'setup', twitchLive: false, twitchViewers: 0 });
         break;
       }
 
@@ -3464,6 +6372,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       }
 
       case 'scrabble_board': {
+        setActiveScrabbleItemId(id);
         setScrabbleVisible(true);
         break;
       }
@@ -3471,6 +6380,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       // ─── Game Items ──────────────────────────────────────────────────
 
       case 'poker_table': {
+        setActivePokerItemId(id);
         setPokerVisible(true);
         break;
       }
@@ -3497,15 +6407,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
       case 'roulette_wheel': {
         if (item.rouletteSpinning) break;
-        // Cycle crypto type on each spin
-        const cryptos = ['SOL', 'ETH', 'BTC', 'USDC', 'MATIC'];
-        const curCrypto = item.rouletteCryptoType || item.gameCryptoType || 'SOL';
-        const nextCrypto = cryptos[(cryptos.indexOf(curCrypto) + 1) % cryptos.length];
         updateFurnitureField({
           rouletteSpinning: true,
           rouletteBetType: item.rouletteBetType || 'red',
-          rouletteCryptoType: nextCrypto,
-          rouletteCryptoAmount: item.rouletteCryptoAmount || 0.1,
         });
         setTimeout(() => {
           const number = Math.floor(Math.random() * 37);
@@ -3743,6 +6647,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           cryptoTickerCoins: newCoins.join(','),
           cryptoTickerPrices: newCoins.map(c => mockPrices[c] || 0).join(','),
           cryptoTickerChanges: newCoins.map(c => mockChanges[c] || 0).join(','),
+          dataState: 'demo',
+          dataUpdatedAt: Date.now(),
         });
         addFloorEffect('pulse');
         break;
@@ -3760,82 +6666,104 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           githubActivity: activities[Math.floor(Math.random() * activities.length)],
           githubCommits: Math.floor(Math.random() * 20) + 1,
           githubPRs: Math.floor(Math.random() * 5),
+          dataState: 'demo',
+          dataUpdatedAt: Date.now(),
         });
         break;
       }
 
       case 'calendar_widget': {
-        // Try to fetch real calendar events
-        const calProv = item.calendarProvider === 'outlook' ? 'microsoft' : 'google' as OAuthProvider;
-        fetchCalendarEvents(calProv).then(calData => {
-          if (calData && calData.nextEvent) {
+        if (item.dataState !== 'live' && item.dataState !== 'stale') {
+          openFurnitureConfiguration(id);
+          break;
+        }
+        const calProv = item.calendarProvider === 'outlook' ? 'microsoft' : 'google' as OfficeOAuthProvider;
+        const widgetAuthority = captureOfficeAuthority();
+        if (!widgetAuthority) break;
+        const refreshKey = `${circleId}:${currentFloorId}:${id}:calendar_widget:${calProv}`;
+        const refreshEpoch = serviceWidgetRefreshEpochRef.current;
+        const refreshGeneration = (serviceWidgetRefreshGenerationsRef.current.get(refreshKey) || 0) + 1;
+        serviceWidgetRefreshGenerationsRef.current.set(refreshKey, refreshGeneration);
+        const refreshIsCurrent = () => {
+          const current = floorsRef.current.find(floor => floor.id === currentFloorId)?.furniture.find(entry => entry.id === id);
+          return serviceWidgetRefreshEpochRef.current === refreshEpoch
+            && isOfficeAuthorityCurrent(widgetAuthority)
+            && serviceWidgetRefreshGenerationsRef.current.get(refreshKey) === refreshGeneration
+            && current?.type === 'calendar_widget'
+            && (current.calendarProvider === 'outlook' ? 'microsoft' : 'google') === calProv;
+        };
+        fetchCalendarEvents(calProv, widgetAuthority.accessToken).then(calData => {
+          if (!refreshIsCurrent()) return;
+          if (calData) {
             updateFurnitureField({
-              calendarEvent: calData.nextEvent.title,
-              calendarTime: calData.nextEvent.timeFormatted || '',
+              calendarEvent: calData.nextEvent?.title || 'No upcoming events',
+              calendarTime: calData.nextEvent?.timeFormatted || '',
               calendarEvents: calData.count,
+              dataState: 'live',
+              dataUpdatedAt: Date.now(),
             });
           } else {
-            // Fallback: cycle demo events
-            const events = [
-              { name: 'Team Standup', time: '10:00 AM' },
-              { name: 'Design Review', time: '2:00 PM' },
-              { name: 'Sprint Planning', time: '11:30 AM' },
-              { name: '1:1 with Lead', time: '4:00 PM' },
-              { name: 'Deploy Window', time: '6:00 PM' },
-            ];
-            const curIdx = events.findIndex(e => e.name === item.calendarEvent);
-            const next = events[(curIdx + 1) % events.length];
             updateFurnitureField({
-              calendarEvent: next.name,
-              calendarTime: next.time,
-              calendarEvents: Math.floor(Math.random() * 6) + 1,
+              dataState: 'error', dataUpdatedAt: undefined,
             });
           }
         }).catch(() => {
-          // Fallback to demo
+          if (!refreshIsCurrent()) return;
           updateFurnitureField({
-            calendarEvent: 'No connection',
-            calendarTime: '',
-            calendarEvents: 0,
+            dataState: 'error', dataUpdatedAt: undefined,
           });
         });
         break;
       }
 
       case 'email_hub': {
-        // Try to fetch real emails
-        const emailProv = item.emailProvider === 'gmail' ? 'google' : item.emailProvider === 'outlook' ? 'microsoft' : 'yahoo' as OAuthProvider;
-        fetchEmails(emailProv).then(emailData => {
-          if (emailData && emailData.emails.length > 0) {
+        if (item.dataState !== 'live' && item.dataState !== 'stale') {
+          openFurnitureConfiguration(id);
+          break;
+        }
+        if (item.emailProvider && item.emailProvider !== 'gmail' && item.emailProvider !== 'outlook') {
+          openFurnitureConfiguration(id);
+          break;
+        }
+        const emailProv = item.emailProvider === 'gmail' ? 'google' : 'microsoft' as OfficeOAuthProvider;
+        const widgetAuthority = captureOfficeAuthority();
+        if (!widgetAuthority) break;
+        const refreshKey = `${circleId}:${currentFloorId}:${id}:email_hub:${emailProv}`;
+        const refreshEpoch = serviceWidgetRefreshEpochRef.current;
+        const refreshGeneration = (serviceWidgetRefreshGenerationsRef.current.get(refreshKey) || 0) + 1;
+        serviceWidgetRefreshGenerationsRef.current.set(refreshKey, refreshGeneration);
+        const refreshIsCurrent = () => {
+          const current = floorsRef.current.find(floor => floor.id === currentFloorId)?.furniture.find(entry => entry.id === id);
+          const currentProvider = current?.emailProvider === 'gmail'
+            ? 'google'
+            : 'microsoft';
+          return serviceWidgetRefreshEpochRef.current === refreshEpoch
+            && isOfficeAuthorityCurrent(widgetAuthority)
+            && serviceWidgetRefreshGenerationsRef.current.get(refreshKey) === refreshGeneration
+            && current?.type === 'email_hub'
+            && currentProvider === emailProv;
+        };
+        fetchEmails(emailProv, widgetAuthority.accessToken).then(emailData => {
+          if (!refreshIsCurrent()) return;
+          if (emailData) {
             const latest = emailData.emails[0];
             updateFurnitureField({
-              emailSender: latest.sender,
-              emailSubject: latest.subject,
-              emailTime: latest.timeFormatted || '',
+              emailSender: latest?.sender || '',
+              emailSubject: latest?.subject || 'Inbox clear',
+              emailTime: latest?.timeFormatted || '',
               emailUnread: emailData.unread,
               emailConnected: true,
+              dataState: 'live',
+              dataUpdatedAt: Date.now(),
             });
           } else {
-            // Fallback: cycle demo emails
-            const emails = [
-              { sender: 'Team Updates', subject: 'Weekly sync notes', time: '9:30 AM' },
-              { sender: 'GitHub', subject: 'PR #142 merged to main', time: '10:15 AM' },
-              { sender: 'Jira', subject: 'PROJ-89 moved to In Review', time: '11:00 AM' },
-              { sender: 'Design Team', subject: 'New mockups ready', time: '1:45 PM' },
-              { sender: 'DevOps Alert', subject: 'Deploy succeeded: v2.4.1', time: '3:20 PM' },
-            ];
-            const curSender = item.emailSender || '';
-            const curIdx = emails.findIndex(e => e.sender === curSender);
-            const next = emails[(curIdx + 1) % emails.length];
             updateFurnitureField({
-              emailSender: next.sender,
-              emailSubject: next.subject,
-              emailTime: next.time,
-              emailUnread: Math.floor(Math.random() * 12) + 1,
+              dataState: 'error', dataUpdatedAt: undefined,
             });
           }
         }).catch(() => {
-          updateFurnitureField({ emailConnected: false });
+          if (!refreshIsCurrent()) return;
+          updateFurnitureField({ dataState: 'error', dataUpdatedAt: undefined });
         });
         break;
       }
@@ -3871,12 +6799,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       }
 
       case 'figma_board': {
-        // Toggle connected state
-        updateFurnitureField({
-          figmaBoardConnected: !item.figmaBoardConnected,
-          figmaBoardUrl: item.figmaBoardUrl || 'https://figma.com/file/demo',
-        });
-        if (!item.figmaBoardConnected) addFloorEffect('pulse');
+        if (item.figmaBoardUrl) handleServiceOpen(item.figmaBoardUrl);
+        else openFurnitureConfiguration(id);
+        updateFurnitureField({ figmaBoardConnected: false, dataState: item.figmaBoardUrl ? 'local' : 'setup' });
         break;
       }
 
@@ -3891,57 +6816,177 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       default:
         break;
     }
-  }, [currentFloorId, interactInputId, currentUserId, currentUserName, circleId, displayAgents]);
+  }, [captureOfficeAuthority, circleId, commandTargetAgents, currentFloorId, floorLayoutHydrated, interactInputId, interactSending, isOfficeAuthorityCurrent, openFurnitureConfiguration, patchFurnitureStateDurably]);
 
   // ─── Poker player action handler (legacy — game now runs in fullscreen modal) ──
   const handlePokerAction = useCallback((_id: string, _action: string, _amount?: number) => {
     // Poker actions now handled by PokerGame component
   }, []);
 
-  const handleInteractSubmit = useCallback(() => {
-    if (!interactInputId || !interactInputText.trim() || !currentUserId || !currentUserName) return;
-    const currentFloor = floors.find(f => f.id === currentFloorId);
+  const handleInteractSubmit = useCallback(async () => {
+    const commandText = interactInputText.trim();
+    const requestedAuthority = captureOfficeAuthority();
+    if (
+      interactSending
+      || !interactInputId
+      || !commandText
+      || !requestedAuthority
+      || !currentUserName
+    ) return;
+
+    const currentFloor = floorsRef.current.find(f => f.id === currentFloorIdRef.current);
     const item = currentFloor?.furniture.find(f => f.id === interactInputId);
-
-    const params: any = {
-      circleId,
-      senderId: currentUserId,
-      senderName: currentUserName,
-      commandText: interactInputText.trim(),
-    };
-
-    if (item?.type === 'command_console' && interactAgentTarget) {
-      const agent = displayAgents.find(a => a.id === interactAgentTarget);
-      if (agent) {
-        params.targetAgentId = agent.id;
-        params.targetAgentName = `@${agent.name}`;
-        params.targetAgentIds = [agent.id];
-      }
-    } else {
-      params.targetAgentName = '@all';
+    if (!item) {
+      setInteractSendError('This Office item is no longer available. Close the review and try again.');
+      return;
     }
 
-    sendTerminalCommand(params);
-    setInteractInputId(null);
-    setInteractInputText('');
-    setInteractAgentTarget(null);
-  }, [interactInputId, interactInputText, currentUserId, currentUserName, circleId, floors, currentFloorId, interactAgentTarget, displayAgents]);
+    const params: SendCommandParams = {
+      circleId: requestedAuthority.circleId,
+      senderId: requestedAuthority.userId,
+      senderName: currentUserName,
+      commandText,
+      targetAgentName: '@all',
+    };
+
+    const requiresExactAgent = item.type === 'command_console'
+      || item.type === 'button_panel'
+      || item.type === 'launch_pad';
+    const target = requiresExactAgent
+      ? commandTargetAgents.find(agent => agent.id === interactAgentTarget)
+      : null;
+    if (requiresExactAgent && !target) {
+      setInteractSendError('Choose an available exact agent before sending.');
+      return;
+    }
+    if (target) {
+      params.targetAgentId = target.id;
+      params.targetAgentName = target.terminalTargetName;
+      params.targetAgentIds = [target.id];
+    }
+
+    setInteractSending(true);
+    setInteractSendError('');
+    try {
+      const result = await sendTerminalCommandExact(
+        params,
+        requestedAuthority,
+        isOfficeAuthorityCurrent,
+      );
+      if (!isOfficeAuthorityCurrent(requestedAuthority)) return;
+      if (!result.messageId || !result.receipt) {
+        setInteractSendError(result.error || 'The command could not be saved. Your review is still here.');
+        return;
+      }
+      if (!isTerminalCommandDispatchReceiptCurrent({
+        receipt: result.receipt,
+        expectedAuthority: requestedAuthority,
+        expectedTargetFingerprint: result.receipt.target.fingerprint,
+        isCurrent: isOfficeAuthorityCurrent,
+      })) return;
+
+      // Reuse the full terminal's immediate invocation seam. The durable row
+      // remains authoritative; the broadcast is only a wake-up for peers.
+      handleCommandSent({
+        messageId: result.messageId,
+        command: commandText,
+        targetAgentId: params.targetAgentId ?? null,
+        targetAgentIds: params.targetAgentIds ?? null,
+        targetAgentName: params.targetAgentName || '@all',
+        model: null,
+        senderId: requestedAuthority.userId,
+        authority: result.receipt.authority,
+        targetFingerprint: result.receipt.target.fingerprint,
+        receipt: result.receipt,
+      });
+
+      if (item.type === 'button_panel') {
+        const presets = item.buttonPresets?.length ? item.buttonPresets : ['Status update', 'Ship it', 'Stand up'];
+        const current = (item.jukeboxTrack || 0) % presets.length;
+        patchFurnitureStateDurably(currentFloorIdRef.current, item.id, entry => ({
+          ...entry,
+          jukeboxTrack: current + 1,
+        }));
+      } else if (item.type === 'launch_pad') {
+        const createdAt = Date.now();
+        setFloorEffects(prev => [...prev, {
+          id: `eff_${createdAt}_${Math.random().toString(36).slice(2, 6)}`,
+          type: 'rocket',
+          x: item.x,
+          y: item.y,
+          createdAt,
+        }]);
+      }
+
+      handleActionResult(result.error
+        ? `Command saved for ${params.targetAgentName || '@all'}; the real-time wake-up was not confirmed.`
+        : `Command queued for ${params.targetAgentName || '@all'}.`);
+      setInteractInputId(null);
+      setInteractInputText('');
+      setInteractAgentTarget(null);
+      setInteractSendError('');
+    } catch (error) {
+      setInteractSendError(error instanceof Error
+        ? error.message
+        : 'The command could not be saved. Your review is still here.');
+    } finally {
+      setInteractSending(false);
+    }
+  }, [
+    captureOfficeAuthority,
+    circleId,
+    commandTargetAgents,
+    currentUserName,
+    handleActionResult,
+    handleCommandSent,
+    interactAgentTarget,
+    interactInputId,
+    interactInputText,
+    interactSending,
+    isOfficeAuthorityCurrent,
+    patchFurnitureStateDurably,
+  ]);
 
   const handleCommand = (cmd: OfficeCommand) => {
     if (cmd.type === 'theme') handleChangeFloorTheme(currentFloor.id, cmd.value);
     if (cmd.type === 'info') {
       const agent = agents.find(a => a.name === cmd.query);
-      if (agent) setSelectedAgent(agent);
+      if (agent && floorLayoutScope) {
+        selectedAgentRefreshRetentionRef.current = {
+          scope: floorLayoutScope,
+          agentId: agent.id,
+        };
+        setSelectedAgent(agent);
+      }
     }
   };
 
-  const handleRenameAgent = useCallback(async (agent: OfficeAgent, newName: string) => {
+  const handleRenameAgent = useCallback(async (
+    agent: OfficeAgent,
+    newName: string,
+  ): Promise<AgentIdentityExactSaveResult> => {
     const normalizedName = newName.trim();
-    if (!normalizedName) return;
+    if (!normalizedName) {
+      return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_payload' };
+    }
+    const requestedAuthority = captureOfficeAuthority();
+    if (!requestedAuthority) {
+      return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_authority' };
+    }
 
     const identityKey = getAgentIdentityKey(agent);
-
-    await renameAgentIdentity(identityKey, normalizedName);
+    const identitySave = await renameAgentExact(
+      identityKey,
+      normalizedName,
+      requestedAuthority,
+      isOfficeAuthorityCurrent,
+    );
+    if (!isOfficeAuthorityCurrent(requestedAuthority)) return identitySave;
+    if (
+      !identitySave.ok
+      || !identitySave.localSaved
+      || identitySave.serverSaved !== true
+    ) return identitySave;
 
     const updated = {
       ...agentNames,
@@ -3949,8 +6994,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       [identityKey]: normalizedName,
     };
     setAgentNames(updated);
-    storage.setItem(STORAGE_KEY_AGENT_NAMES, JSON.stringify(updated)).catch(() => {});
-    pushOfficePreferences({ agentNames: updated });
+    storage.setItem(privateStorageKeys.agentNames, JSON.stringify(updated)).catch(() => {});
+    pushOfficePreferences({ agentNames: updated }, requestedAuthority);
 
     if (selectedAgent?.id === agent.id) {
       setSelectedAgent(prev => prev ? { ...prev, name: normalizedName, sessionKey: identityKey } : null);
@@ -3962,61 +7007,287 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         : existing
     )));
 
-    setAgentIdentities(await loadAgentIdentities());
-  }, [agentNames, selectedAgent, pushOfficePreferences]);
+    const identities = await loadAgentIdentitiesExact(requestedAuthority);
+    if (isOfficeAuthorityCurrent(requestedAuthority)) setAgentIdentities(identities);
+    return identitySave;
+  }, [
+    agentNames,
+    captureOfficeAuthority,
+    isOfficeAuthorityCurrent,
+    privateStorageKeys.agentNames,
+    pushOfficePreferences,
+    selectedAgent,
+  ]);
 
   // ─── Floor action handlers ──────────────────────────────
 
   const handleAddFloor = useCallback(() => {
-    setFloors(prev => {
-      const nextNum = prev.length + 1;
-      const newFloor = createDefaultFloor(
-        `floor_${Date.now()}`,
-        `${nextNum}F - New Floor`,
-        'underground',
-        prev.length
-      );
-      return [...prev, newFloor];
-    });
-  }, []);
+    if (!floorLayoutHydrated) {
+      setFloorPresetStatus('Finishing the Office layout load. Try adding a floor again in a moment.');
+      return;
+    }
+    if (floorsRef.current.length >= 10) {
+      setFloorPresetStatus('Office supports up to 10 floors. Remove one before adding another.');
+      return;
+    }
+    const currentFloors = floorsRef.current;
+    const usedIds = new Set(currentFloors.map((floor) => floor.id));
+    let newFloorId = '';
+    do {
+      officeFloorIdSequenceRef.current += 1;
+      newFloorId = `floor_${Date.now()}_${officeFloorIdSequenceRef.current}`;
+    } while (usedIds.has(newFloorId));
+    const nextNum = currentFloors.length + 1;
+    const newFloor = createDefaultFloor(
+      newFloorId,
+      `${nextNum}F - New Floor`,
+      'underground',
+      currentFloors.length,
+    );
+    const nextFloors = [...currentFloors, newFloor];
+    // Update the authority ref synchronously so rapid activations observe the
+    // reservation and cannot exceed the ten-floor limit or reuse an id.
+    floorsRef.current = nextFloors;
+    markFloorLayoutMutation('Saving every floor item and tool…');
+    setFloors(nextFloors);
+    setCurrentFloorId(newFloorId);
+    setEditMode(true);
+    setPlacingType(null);
+    setSelectedFurnitureId(null);
+    setFloorPresetStatus('New floor opened. Choose a room kit or add individual items.');
+  }, [circleId, floorLayoutHydrated, markFloorLayoutMutation, setPlacingType, setSelectedFurnitureId]);
 
-  const handleDeleteFloor = useCallback((floorId: string) => {
-    setFloors(prev => {
-      if (prev.length <= 1) return prev;
-      const updated = prev.filter(f => f.id !== floorId).map((f, i) => ({ ...f, order: i }));
-      if (currentFloorId === floorId) {
-        setCurrentFloorId(updated[0].id);
-        storage.setItem(STORAGE_KEY_CURRENT_FLOOR, updated[0].id).catch(() => {});
-      }
-      return updated;
+  const handleDeleteFloor = useCallback(async (floorId: string) => {
+    const requestedScope = floorLayoutScope;
+    const requestedGeneration = floorLayoutGenerationRef.current;
+    if (!requestedScope || !floorLayoutHydrated || layoutSaveScopeRef.current !== requestedScope) return;
+    const target = floorsRef.current.find((floor) => floor.id === floorId);
+    if (!target || floorsRef.current.length <= 1) return;
+    const confirmed = await showConfirm({
+      title: `Remove ${target.name}?`,
+      message: `This removes ${target.furniture.length} item${target.furniture.length === 1 ? '' : 's'} and unassigns ${target.agentIds.length} agent${target.agentIds.length === 1 ? '' : 's'} from this floor.`,
+      confirmLabel: 'Remove floor',
+      destructive: true,
     });
-  }, [currentFloorId]);
+    if (
+      !confirmed
+      || layoutSaveScopeRef.current !== requestedScope
+      || floorLayoutGenerationRef.current !== requestedGeneration
+    ) return;
+    const currentFloors = floorsRef.current;
+    if (currentFloors.length <= 1 || !currentFloors.some((floor) => floor.id === floorId)) return;
+    const updated = currentFloors
+      .filter((floor) => floor.id !== floorId)
+      .map((floor, index) => ({ ...floor, order: index }));
+    floorsRef.current = updated;
+    markFloorLayoutMutation('Saving every floor item and tool…');
+    setFloors(updated);
+    if (currentFloorIdRef.current === floorId) {
+      setCurrentFloorId(updated[0].id);
+    }
+    setFloorPresetStatus(`Removed ${target.name}.`);
+  }, [floorLayoutHydrated, floorLayoutScope, markFloorLayoutMutation]);
 
-  const handleRenameFloor = useCallback((floorId: string, newName: string) => {
-    setFloors(prev => prev.map(f => f.id === floorId ? { ...f, name: newName } : f));
-  }, []);
+  const handleClearFloorFurniture = useCallback(async () => {
+    const requestedScope = floorLayoutScope;
+    const requestedGeneration = floorLayoutGenerationRef.current;
+    const targetFloorId = currentFloorIdRef.current;
+    if (!requestedScope || layoutSaveScopeRef.current !== requestedScope) return;
+    const floor = floorsRef.current.find((entry) => entry.id === targetFloorId);
+    if (!floor || floor.furniture.length === 0) return;
+    const confirmed = await showConfirm({
+      title: `Clear every item from ${floor.name}?`,
+      message: `This removes all ${floor.furniture.length} placed items and tools from the current floor.`,
+      confirmLabel: 'Clear floor',
+      destructive: true,
+    });
+    if (
+      !confirmed
+      || layoutSaveScopeRef.current !== requestedScope
+      || floorLayoutGenerationRef.current !== requestedGeneration
+      || currentFloorIdRef.current !== targetFloorId
+    ) return;
+    const cleared = commitCurrentFloorEdit(`Clear ${floor.name}`, (entry) => ({
+      ...entry,
+      furniture: [],
+    }));
+    if (!cleared) return;
+    setSelectedFurnitureId(null);
+    setPlacingType(null);
+  }, [commitCurrentFloorEdit, floorLayoutScope, setPlacingType, setSelectedFurnitureId]);
+
+  const handleRenameFloor = useCallback((floorId: string, newName: string): boolean => {
+    if (!floorLayoutHydrated) return false;
+    const safeName = sanitizeOfficeText(newName, 80);
+    if (!safeName) {
+      setFloorPresetStatus('Floor name cannot be empty.');
+      return false;
+    }
+    const updated = floorsRef.current.map((floor) => floor.id === floorId ? { ...floor, name: safeName } : floor);
+    floorsRef.current = updated;
+    markFloorLayoutMutation('Saving every floor item and tool…');
+    setFloors(updated);
+    setFloorPresetStatus(`Renamed floor to “${safeName}”.`);
+    return true;
+  }, [floorLayoutHydrated, markFloorLayoutMutation]);
 
   const handleChangeFloorTheme = useCallback((floorId: string, themeId: string) => {
-    setFloors(prev => prev.map(f => f.id === floorId ? { ...f, themeId } : f));
-  }, []);
+    if (!floorLayoutHydrated) return;
+    const updated = floorsRef.current.map((floor) => floor.id === floorId ? { ...floor, themeId } : floor);
+    floorsRef.current = updated;
+    markFloorLayoutMutation('Saving every floor item and tool…');
+    setFloors(updated);
+  }, [floorLayoutHydrated, markFloorLayoutMutation]);
 
   const handleSwitchFloor = useCallback((floorId: string) => {
+    if (!floorLayoutHydrated || !floorsRef.current.some((floor) => floor.id === floorId)) return;
+    if (floorId === currentFloorId) return;
+    markFloorLayoutMutation('Saving the active floor…');
     setCurrentFloorId(floorId);
-    storage.setItem(STORAGE_KEY_CURRENT_FLOOR, floorId).catch(() => {});
     // Supabase sync handled by floors persistence useEffect
-  }, []);
+  }, [currentFloorId, floorLayoutHydrated, markFloorLayoutMutation]);
+
+  const handleSaveCurrentFloorPreset = useCallback(async (name: string): Promise<boolean> => {
+    if (floorPresetSaving) return false;
+    const requestedScope = floorLayoutScope;
+    const requestedGeneration = floorLayoutGenerationRef.current;
+    const requestedAuthority = captureOfficeAuthority();
+    if (!requestedScope || !requestedAuthority || layoutSaveScopeRef.current !== requestedScope) return false;
+    const targetFloor = floorsRef.current.find((floor) => floor.id === currentFloorIdRef.current);
+    if (!targetFloor) return false;
+    const requestId = ++floorPresetRequestRef.current;
+    const requestIsCurrent = () => (
+      floorPresetRequestRef.current === requestId
+      && floorLayoutGenerationRef.current === requestedGeneration
+      && layoutSaveScopeRef.current === requestedScope
+      && isOfficeAuthorityCurrent(requestedAuthority)
+    );
+    setFloorPresetSaving(true);
+    setFloorPresetStatus('Saving complete floor preset…');
+    try {
+      const result = await saveOfficeFloorPreset(
+        { circleId, name, floor: targetFloor },
+        toOfficeDashboardAuthority(requestedAuthority),
+        requestIsCurrent,
+      );
+      if (!requestIsCurrent()) return false;
+      if (!result.ok || !result.preset) {
+        setFloorPresetStatus(result.error || 'Could not save this floor preset.');
+        return false;
+      }
+      setFloorPresets((current) => [
+        result.preset!,
+        ...current.filter((preset) => preset.id !== result.preset!.id),
+      ]);
+      setFloorPresetStatus(`Saved “${result.preset.name}” with ${result.preset.snapshot.floor.furniture.length} items/tools.`);
+      return true;
+    } catch {
+      if (!requestIsCurrent()) return false;
+      setFloorPresetStatus('The Office server could not save this floor preset.');
+      return false;
+    } finally {
+      if (requestIsCurrent()) setFloorPresetSaving(false);
+    }
+  }, [captureOfficeAuthority, circleId, floorLayoutScope, floorPresetSaving, isOfficeAuthorityCurrent]);
+
+  const handleApplyFloorPreset = useCallback(async (presetId: string) => {
+    const requestedScope = floorLayoutScope;
+    const requestedGeneration = floorLayoutGenerationRef.current;
+    if (!requestedScope || layoutSaveScopeRef.current !== requestedScope) return;
+    const preset = floorPresets.find((entry) => entry.id === presetId);
+    if (!preset || preset.circleId !== circleId) return;
+    const targetFloorId = currentFloorIdRef.current;
+    const targetFloor = floorsRef.current.find((floor) => floor.id === targetFloorId);
+    if (!targetFloor) return;
+    const confirmed = await showConfirm({
+      title: `Apply “${preset.name}”?`,
+      message: `This replaces the theme, assigned agents, and all ${preset.snapshot.floor.furniture.length} items/tools on “${targetFloor.name}”. The floor name stays the same.`,
+      confirmLabel: 'Apply preset',
+    });
+    if (
+      !confirmed
+      || layoutSaveScopeRef.current !== requestedScope
+      || floorLayoutGenerationRef.current !== requestedGeneration
+    ) return;
+    const liveTargetFloor = floorsRef.current.find((floor) => floor.id === targetFloorId);
+    if (!liveTargetFloor) return;
+    const seed = `${Date.now()}_${preset.id.slice(0, 8)}`;
+    const nextFloor = applyOfficeFloorPreset(preset.snapshot, liveTargetFloor, seed);
+    if (!nextFloor) {
+      setFloorPresetStatus('This preset is malformed and was not applied.');
+      return;
+    }
+    if (!mutateFloorsDurably((current) => current.map((floor) => floor.id === targetFloorId ? nextFloor : floor))) return;
+    setFloorPresetStatus(`Applied “${preset.name}” to ${liveTargetFloor.name}. Saving to the server…`);
+  }, [floorLayoutScope, floorPresets, mutateFloorsDurably]);
+
+  const handleDeleteFloorPreset = useCallback(async (presetId: string) => {
+    const requestedScope = floorLayoutScope;
+    const requestedGeneration = floorLayoutGenerationRef.current;
+    const requestedAuthority = captureOfficeAuthority();
+    if (!requestedScope || !requestedAuthority || layoutSaveScopeRef.current !== requestedScope) return;
+    const preset = floorPresets.find((entry) => entry.id === presetId);
+    if (!preset || preset.circleId !== circleId) return;
+    const confirmed = await showConfirm({
+      title: `Delete “${preset.name}”?`,
+      message: 'This removes the saved preset. Floors that already used it are unchanged.',
+      confirmLabel: 'Delete preset',
+      destructive: true,
+    });
+    if (
+      !confirmed
+      || layoutSaveScopeRef.current !== requestedScope
+      || floorLayoutGenerationRef.current !== requestedGeneration
+      || !isOfficeAuthorityCurrent(requestedAuthority)
+    ) return;
+    const requestIsCurrent = () => (
+      layoutSaveScopeRef.current === requestedScope
+      && floorLayoutGenerationRef.current === requestedGeneration
+      && isOfficeAuthorityCurrent(requestedAuthority)
+    );
+    const result = await deleteOfficeFloorPreset(
+      preset.id,
+      circleId,
+      toOfficeDashboardAuthority(requestedAuthority),
+      requestIsCurrent,
+    );
+    if (
+      layoutSaveScopeRef.current !== requestedScope
+      || floorLayoutGenerationRef.current !== requestedGeneration
+    ) return;
+    if (!result.ok) {
+      setFloorPresetStatus(result.error || 'Could not delete this preset.');
+      return;
+    }
+    setFloorPresets((current) => current.filter((entry) => entry.id !== preset.id));
+    setFloorPresetStatus(`Deleted “${preset.name}”.`);
+  }, [captureOfficeAuthority, circleId, floorLayoutScope, floorPresets, isOfficeAuthorityCurrent]);
 
   // ─── Session tagging handlers ──────────────────────────────
 
   const handleAddSessionTag = useCallback(async (sessionKey: string, tag: SessionTag) => {
-    const updated = await addSessionTag(sessionKey, tag, sessionTags);
-    setSessionTags(updated);
-  }, [sessionTags]);
+    const requestedScope = floorLayoutScope;
+    if (!requestedScope || !officeSessionStorageScope) return;
+    const updated = await addSessionTag(
+      sessionKey,
+      tag,
+      sessionTags,
+      officeSessionStorageScope,
+    );
+    if (layoutSaveScopeRef.current === requestedScope) setSessionTags(updated);
+  }, [floorLayoutScope, officeSessionStorageScope, sessionTags]);
 
   const handleRemoveSessionTag = useCallback(async (sessionKey: string, tagKey: string) => {
-    const updated = await removeSessionTag(sessionKey, tagKey, sessionTags);
-    setSessionTags(updated);
-  }, [sessionTags]);
+    const requestedScope = floorLayoutScope;
+    if (!requestedScope || !officeSessionStorageScope) return;
+    const updated = await removeSessionTag(
+      sessionKey,
+      tagKey,
+      sessionTags,
+      officeSessionStorageScope,
+    );
+    if (layoutSaveScopeRef.current === requestedScope) setSessionTags(updated);
+  }, [floorLayoutScope, officeSessionStorageScope, sessionTags]);
 
   // ─── Action panel handlers ──────────────────────────────
 
@@ -4024,26 +7295,103 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
   const handleBudgetConfigChange = useCallback(async (config: BudgetConfig) => {
     setBudgetConfig(config);
-    await saveBudgetConfig(config);
     setBudgetAlertsDismissed(false); // Re-show alerts when config changes
   }, []);
 
   // ─── Idle behavior handlers ──────────────────────────────
 
   const handleIdleConfigChange = useCallback(async (config: IdleBehaviorConfig) => {
-    setIdleConfig(config);
-    idleConfigRef.current = config;
-    await saveIdleConfig(config);
+    const normalized = normalizeIdleConfig(config);
+    setIdleConfig(normalized);
+    idleConfigRef.current = normalized;
   }, []);
 
-  // Calculate budget alerts using real session costs
-  const periodCosts = calculatePeriodCosts(enrichedSessions);
+  // Rolling spend is server-backed. Session `totalCost` is cumulative and its
+  // last-activity timestamp is not a billing ledger; assigning that whole
+  // amount to a period made these values change whenever login rebuilt the
+  // local session list. The Office daily aggregate covers connected-agent
+  // snapshots, while claude_api_usage covers hosted work; MAX avoids counting
+  // the same work twice and provides a stable tracked lower bound.
+  const durableOfficeCostToday = ownDbCostRows.reduce((sum, row) => {
+    const value = Number(row.estimated_cost_today || 0);
+    return sum + (Number.isFinite(value) ? Math.max(0, value) : 0);
+  }, 0);
+  const trackedToday = Math.max(durableOfficeCostToday, opsDurableSpendPeriods?.today || 0);
+  const trackedWeek = Math.max(trackedToday, opsDurableSpendPeriods?.week || 0);
+  const trackedMonth = Math.max(trackedWeek, opsDurableSpendPeriods?.month || 0);
+  const periodCosts = {
+    today: trackedToday,
+    week: trackedWeek,
+    month: trackedMonth,
+  };
   const budgetAlerts = calculateBudgetAlerts(
     budgetConfig,
     periodCosts.today,
     periodCosts.week,
     periodCosts.month
   );
+
+  if (authReady && floorLayoutScope && officeAccessError) {
+    return (
+      <View
+        style={[
+          styles.container,
+          { alignItems: 'center', justifyContent: 'center', gap: 12, padding: 24 },
+        ]}
+        testID="office-private-scope-blocked"
+        accessibilityLabel="Office access could not be verified"
+      >
+        <Text style={{ color: '#f1f3f8', fontSize: 15, fontWeight: '700', textAlign: 'center' }}>
+          Office access could not be verified
+        </Text>
+        <Text style={{ color: '#b8bac7', fontSize: 13, textAlign: 'center', maxWidth: 420 }}>
+          {officeAccessError}
+        </Text>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Retry Office access check"
+          onPress={() => {
+            initRef.current = null;
+            setOfficeAccessError(null);
+            setAuthAuthorityRetry((value) => value + 1);
+            setOfficeAccessRetry((value) => value + 1);
+          }}
+          style={{
+            borderRadius: 8,
+            borderWidth: 1,
+            borderColor: accentColor,
+            paddingHorizontal: 16,
+            paddingVertical: 9,
+          }}
+        >
+          <Text style={{ color: accentColor, fontSize: 13, fontWeight: '700' }}>Retry access check</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
+  // Privacy boundary: none of the prior account/circle's roster, terminal,
+  // furniture, notes, integrations, panels, or modal state may render while a
+  // new exact scope is hydrating. Comparing the render-time scope with the
+  // committed hydration receipt makes an account switch fail closed before
+  // the reset effect has a chance to run.
+  if (!authReady || !floorLayoutScope || !floorLayoutHydrated) {
+    return (
+      <View
+        style={[
+          styles.container,
+          { alignItems: 'center', justifyContent: 'center', gap: 12, padding: 24 },
+        ]}
+        testID="office-private-scope-loading"
+        accessibilityLabel="Loading your private Office workspace"
+      >
+        <ActivityIndicator color={accentColor} size="small" />
+        <Text style={{ color: '#b8bac7', fontSize: 13, textAlign: 'center' }}>
+          Loading your private Office workspace…
+        </Text>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -4061,15 +7409,25 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         approvals={pendingApprovals.filter((approval) =>
           // Shared liveness predicate (approvalCardModelCore); no-timeout rows
           // age out at the 30-min staleness cap too — narrows-only.
-          isApprovalRowLive(approval.requested_at, approval.timeout_seconds, Date.now()),
+          isRuntimeOwnedAgentApprovalActionType(approval.action_type)
+          && isApprovalRowLive(approval.requested_at, approval.timeout_seconds, Date.now()),
         )}
         circleId={circleId}
+        exactAuthority={approvalsAuthority}
+        isExactAuthorityCurrent={isApprovalAuthorityCurrent}
       />
 
       {/* Tool-loop run approvals — visible + resolvable from the dashboard.
           Gated on currentUserId (mirrors ChatTab): an empty userId would make
           approve/reject a silent no-op (uuid column rejects ''). */}
-      {currentUserId ? <RunApprovalBanner circleId={circleId} userId={currentUserId} /> : null}
+      {currentUserId ? (
+        <RunApprovalBanner
+          circleId={circleId}
+          userId={currentUserId}
+          exactAuthority={approvalsAuthority}
+          isExactAuthorityCurrent={isApprovalAuthorityCurrent}
+        />
+      ) : null}
 
       {/* Standing "always allow" grants — review + revoke (plan §4d) */}
       <StandingGrantsPanel accentColor={accentColor} userId={currentUserId} />
@@ -4079,11 +7437,14 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
       {/* Run detail drawer for open_run attention items (plan §6b) */}
       <RunHistoryDrawer
+        key={`office-run-detail-${officeRunDetailRequestId}`}
         visible={showOfficeRunDetail}
         circleId={circleId}
         currentUserId={currentUserId}
         title="Circle Runs"
         initialRunId={officeRunDetailRefId}
+        exactAuthority={committedAuthAuthority}
+        isExactAuthorityCurrent={isOfficeAuthorityCurrent}
         onClose={() => setShowOfficeRunDetail(false)}
       />
 
@@ -4142,18 +7503,23 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       {/* O5 (P39): fail-visible bridge readiness on the main view — warns when
           the core proxy or all execution bridges are down; silent when healthy
           (the connect panel's "✓ Connected" chip owns the happy state). */}
-      <OfficeBridgeReadinessStrip snapshot={bridgeReadinessStrip} />
-      {/* X7 tail (P53): per-lane chat quality — warn/danger-only, silent when
-          healthy; self-polls the session lane-health registry (P48). */}
-      <OfficeLaneHealthStrip />
-      {/* Passive bridge/pairing status — always-on collapsed strip, expandable
-          to per-bridge rows; self-polls, no OfficeTab state. */}
-      <OfficeBridgeDiagPanel />
-      <OfficeConnectBridgesSection circleId={circleId} />
+      {!editMode ? (
+        <>
+          <OfficeBridgeReadinessStrip snapshot={bridgeReadinessStrip} />
+          {/* X7 tail (P53): per-lane chat quality — warn/danger-only, silent when
+              healthy; self-polls the session lane-health registry (P48). */}
+          <OfficeLaneHealthStrip />
+          {/* Passive bridge/pairing status — always-on collapsed strip, expandable
+              to per-bridge rows; self-polls, no OfficeTab state. */}
+          <OfficeBridgeDiagPanel />
+          <OfficeConnectBridgesSection circleId={circleId} />
+        </>
+      ) : null}
 
       {/* Marquee ticker removed — too noisy for the Office view */}
 
       <OfficeWorkspaceSection
+        floorLayoutHydrated={floorLayoutHydrated}
         viewMode={viewMode}
         floors={floors}
         displayAgents={displayAgents}
@@ -4171,10 +7537,23 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         showGitHubFeed={showGitHubFeed}
         showSoundMixer={showSoundMixer}
         showVault={showVault}
+        layoutSaveState={floorLayoutSaveState}
+        layoutSaveDetail={floorLayoutSaveDetail}
+        floorPresets={floorPresets}
+        floorPresetsLoading={floorPresetsLoading}
+        floorPresetSaving={floorPresetSaving}
+        floorPresetStatus={floorPresetStatus}
+        onRetryLayoutSave={handleRetryFloorLayoutSave}
         onSwitchFloor={handleSwitchFloor}
+        onRenameFloor={handleRenameFloor}
         onDeleteFloor={handleDeleteFloor}
         onAddFloor={handleAddFloor}
-        onToggleEditMode={() => { setEditMode(!editMode); setPlacingType(null); setSelectedFurnitureId(null); }}
+        onToggleEditMode={() => {
+          if (!floorLayoutHydrated) return;
+          setEditMode(!editMode);
+          setPlacingType(null);
+          setSelectedFurnitureId(null);
+        }}
         onReconnectAll={handleReconnectAll}
         onShowRewards={() => setShowRewards(true)}
         onShowConnectAgent={() => setShowConnectAgent(true)}
@@ -4185,11 +7564,34 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         onToggleSoundMixer={() => setShowSoundMixer(!showSoundMixer)}
         onToggleVault={() => setShowVault(v => !v)}
         onCancelPlacing={() => setPlacingType(null)}
-        onClearFloorFurniture={() => setFloors(prev => prev.map(f => f.id === currentFloorId ? { ...f, furniture: [] } : f))}
+        onClearFloorFurniture={handleClearFloorFurniture}
+        onSaveFloorPreset={handleSaveCurrentFloorPreset}
+        onApplyFloorPreset={handleApplyFloorPreset}
+        onDeleteFloorPreset={handleDeleteFloorPreset}
         setPlacingType={setPlacingType}
         setActiveCatalogCat={setActiveCatalogCat}
         catalogScrollRef={catalogScrollRef}
         activeCatalogCat={activeCatalogCat}
+        isDesktop={isDesktop}
+        selectedFurniture={selectedFurniture}
+        favoriteOfficeAddonTypes={officeAddonPreferences.favoriteTypes}
+        recentOfficeAddonTypes={officeAddonPreferences.recentTypes}
+        catalogPreferencesReady={officeAddonPreferencesLoadedScope === floorLayoutScope}
+        historyAvailability={officeEditorHistoryAvailability}
+        onUndo={() => restoreOfficeEditorHistory('undo')}
+        onRedo={() => restoreOfficeEditorHistory('redo')}
+        onCatalogItemPress={handleCatalogItemPress}
+        onToggleCatalogFavorite={toggleOfficeAddonFavorite}
+        onApplyRoomKit={handleApplyOfficeRoomKit}
+        onConfigureSelected={() => selectedFurnitureId && openFurnitureConfiguration(selectedFurnitureId)}
+        onDuplicateSelected={() => selectedFurnitureId && handleFurnitureDuplicate(selectedFurnitureId)}
+        onRotateSelected={() => selectedFurnitureId && handleFurnitureRotate(selectedFurnitureId)}
+        onResetSelectedSize={() => selectedFurnitureId && handleFurnitureResetSize(selectedFurnitureId)}
+        onNudgeSelected={(dx: number, dy: number) => selectedFurnitureId && handleFurnitureNudge(selectedFurnitureId, dx, dy)}
+        onResizeSelected={(dw: number, dh: number) => selectedFurnitureId && handleFurnitureResizeBy(selectedFurnitureId, dw, dh)}
+        onMoveSelectedLayer={(direction: 'front' | 'back') => selectedFurnitureId && handleFurnitureLayer(selectedFurnitureId, direction)}
+        onDeleteSelected={() => selectedFurnitureId ? handleFurnitureDelete(selectedFurnitureId) : Promise.resolve()}
+        onSelectFurniture={(id: string) => setSelectedFurnitureId(id)}
         styles={styles}
         FURNITURE_CATALOG={FURNITURE_CATALOG}
       />
@@ -4209,9 +7611,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
 
       {/* Main Content — Office Floor View */}
-      <View style={styles.mainContent}>
+      <View style={[styles.mainContent, !isDesktop && editMode && { minHeight: 360 }]}>
         {/* Mobile: Card-based agent list */}
-        {!isDesktop ? (
+        {!isDesktop && !editMode ? (
           <ScrollView style={styles.mobileAgentScroll} showsVerticalScrollIndicator={true} contentContainerStyle={styles.mobileAgentList}>
             {/* Ops board: live builds + token spend (after the computer-task
                 card above, before the agent roster). Hidden when empty. */}
@@ -4403,23 +7805,45 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                 const statusColor = getOfficeStatusColor(agent.status);
                 const statusLabel = getOfficeStatusLabel(agent.status);
                 const opsNodes = getOpsRunNodesForAgent(agent, opsRunNodesByAgent);
+                const ordinaryOpsNodes = opsNodes.filter((node) => !node.awaitingExternalResult);
                 // Shared run freshness for this agent's live/blocked run(s) —
                 // freshnessRank picks the most-alive one so the roster paints
                 // the same bucket/label Feed shows (reveals a wedged run a
-                // static agent status can't).
+                // static agent status can't). Acceptance-only ledgers are
+                // excluded: their fresh timestamp proves receipt persistence,
+                // not live provider execution.
                 const runFreshness = pickFreshestRunFreshness(
-                  opsNodes,
+                  ordinaryOpsNodes,
                   opsRunFreshness,
                 );
+                const awaitingConnectedAgentUpdate = opsNodes.some((node) => node.awaitingExternalResult);
+                // When both kinds exist, show both and let the runtime-owned
+                // freshness lead. An older accepted ledger must never hide a
+                // genuinely live (or stalled) run for the same agent.
+                const runStateLabel = runFreshness
+                  ? awaitingConnectedAgentUpdate
+                    ? `${runFreshness.label} · accepted update pending`
+                    : runFreshness.label
+                  : awaitingConnectedAgentUpdate
+                    ? 'Accepted · awaiting update'
+                    : null;
+                const runStateColor = runFreshness
+                  ? FRESHNESS_DOT_COLORS[runFreshness.freshness]
+                  : awaitingConnectedAgentUpdate
+                    ? '#38bdf8'
+                    : '#64748b';
                 const isSelected = selectedAgent?.id === agent.id;
                 return (
                   <Pressable
                     key={agent.id}
-                    onPress={() => handleAgentPress(agent)}
+                    onPress={() => handleAgentPress(agent.id)}
                     style={[styles.mobileAgentCard, isSelected && { borderColor: agent.color + '60', backgroundColor: agent.color + '08' },
                       Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                     accessibilityRole="button"
-                    accessibilityLabel={`${agent.name}, ${statusLabel.toLowerCase()}, ${agent.role}`}
+                    accessibilityLabel={`Open ${agent.name} agent panel`}
+                    accessibilityHint={`${statusLabel}, ${agent.role}. Shows current work, controls, activity, memory, runs, and agent settings.`}
+                    accessibilityState={{ selected: isSelected }}
+                    {...(Platform.OS === 'web' ? ({ tabIndex: 0 } as any) : {})}
                   >
                     <View style={styles.mobileCardRow}>
                       <View style={[styles.mobileCardAvatar, { backgroundColor: agent.color + '20', borderColor: agent.color + '50' }]}>
@@ -4433,14 +7857,14 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                           ) : null}
                           <View style={[styles.mobileCardStatus, { backgroundColor: statusColor }]} />
                           <Text style={[styles.mobileCardStatusText, { color: statusColor }]}>{statusLabel}</Text>
-                          {runFreshness ? (
+                          {runStateLabel ? (
                             <>
-                              <View style={[styles.mobileCardStatus, { backgroundColor: FRESHNESS_DOT_COLORS[runFreshness.freshness] }]} />
+                              <View style={[styles.mobileCardStatus, { backgroundColor: runStateColor }]} />
                               <Text
-                                style={[styles.mobileCardStatusText, { color: FRESHNESS_DOT_COLORS[runFreshness.freshness] }]}
+                                style={[styles.mobileCardStatusText, { color: runStateColor }]}
                                 numberOfLines={1}
                               >
-                                {runFreshness.label}
+                                {runStateLabel}
                               </Text>
                             </>
                           ) : null}
@@ -4449,7 +7873,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                         <Text style={styles.mobileCardModel}>{agent.model}</Text>
                       </View>
                       <View style={styles.mobileCardRight}>
-                        <Text style={styles.mobileCardCost}>${(agent.costTotal || agent.costToday).toFixed(2)}</Text>
+                        <Text style={styles.mobileCardCost}>${agent.costToday.toFixed(2)}</Text>
                         <Text style={styles.mobileCardCostLabel}>today</Text>
                       </View>
                     </View>
@@ -4497,13 +7921,62 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                       editMode={editMode}
                       onFloorPress={editMode ? handleFloorPress : undefined}
                       onFurniturePress={editMode ? handleFurniturePress : undefined}
+                      onFurnitureDelete={editMode ? handleFurnitureDelete : undefined}
                       onFurnitureMove={editMode ? handleFurnitureMove : undefined}
                       onFurnitureResize={editMode ? handleFurnitureResize : undefined}
-                      onFurnitureInteract={handleFurnitureInteract}
-                      onFurnitureItemUpdate={handleFurnitureItemUpdate}
-                      onPokerAction={handlePokerAction}
+                      onFurnitureTransform={editMode ? handleFurnitureTransform : undefined}
+                      onFurnitureInteract={floorLayoutHydrated ? handleFurnitureInteract : undefined}
+                      onFurnitureItemUpdate={floorLayoutHydrated ? handleFurnitureItemUpdate : undefined}
+                      onPokerAction={floorLayoutHydrated ? handlePokerAction : undefined}
                       agents={agents}
                       selectedFurnitureId={editMode ? selectedFurnitureId : null}
+                      agentLayer={agents.map((agent, i) => {
+                        const pos = OFFICE_DESK_POSITIONS[i];
+                        if (!pos) return null;
+                        const opsNodes = getOpsRunNodesForAgent(agent, opsRunNodesByAgent);
+                        const opsBuilding =
+                          opsNodes.some((n) => !n.isSubagent) ||
+                          buildAgentLiveOps(agent, opsNodes, Date.now()).subagents.active > 0;
+                        const deskPlaque = buildOfficeDeskAccountabilityPlaque(
+                          getOpsAccountabilityForAgent(agent, opsAccountability),
+                          agent.statusNote,
+                        );
+                        const deskXp = buildOfficeAgentXp(
+                          agent.turns || agent.messagesProcessed || 0,
+                          agent.tokensUsed || 0,
+                        );
+                        return (
+                          <View
+                            key={agent.id}
+                            pointerEvents={editMode ? 'none' : 'auto'}
+                            accessibilityElementsHidden={editMode}
+                            importantForAccessibility={editMode ? 'no-hide-descendants' : 'auto'}
+                            style={[styles.agentPosition, { left: pos.x - 2, top: pos.y - 50 }]}
+                          >
+                            {opsBuilding ? <OfficeBuildingBadge /> : null}
+                            <PixelAgent
+                              agent={agent}
+                              appearance={getAppearance(agent)}
+                              environmentType={currentTheme.environmentType}
+                              onPress={handleAgentPress}
+                              selected={selectedAgent?.id === agent.id}
+                              showThoughts={!editMode}
+                              totalAgents={agents.length}
+                              dancing={dancingAgentId === 'all' || dancingAgentId === agent.id}
+                              xp={deskXp.total}
+                              xpNext={deskXp.nextTotal}
+                              xpLevel={deskXp.level}
+                              xpIntoLevel={deskXp.intoLevel}
+                              xpLevelSpan={deskXp.levelSpan}
+                              xpMaxed={deskXp.maxed}
+                              turns={agent.turns || agent.messagesProcessed || 0}
+                              tokens={agent.tokensUsed || 0}
+                              onAutomate={handleOpenAutomate}
+                              plaque={deskPlaque}
+                            />
+                          </View>
+                        );
+                      })}
                     />
                     {WhiteboardView ? (
                       <WhiteboardView
@@ -4519,7 +7992,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                         connections={connections}
                         pendingApprovals={pendingApprovals}
                         budgetAlerts={budgetAlerts}
-                        periodCosts={periodCosts}
+                        periodCosts={opsDurableSpendPeriods ? periodCosts : undefined}
                       />
                     ) : (
                       <View style={styles.desktopWidgetPlaceholder}>
@@ -4554,77 +8027,33 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                         )}
                       </View>
                     )}
-                    {agents.map((agent, i) => {
-                      const pos = OFFICE_DESK_POSITIONS[i];
-                      if (!pos) return null;
-                      // Ops board: small "building" badge when this agent has a
-                      // matching building root or active subagents. Sprite and
-                      // its own status indicator are untouched.
-                      const opsNodes = getOpsRunNodesForAgent(agent, opsRunNodesByAgent);
-                      const opsBuilding =
-                        opsNodes.some((n) => !n.isSubagent) ||
-                        buildAgentLiveOps(agent, opsNodes, Date.now()).subagents.active > 0;
-                      // Desk plaque: same accountability index + fail-visible
-                      // status note the mobile card renders, compressed to what
-                      // fits under a sprite (24h ✓/✗ + bridge warning).
-                      const deskPlaque = buildOfficeDeskAccountabilityPlaque(
-                        getOpsAccountabilityForAgent(agent, opsAccountability),
-                        agent.statusNote,
-                      );
-                      // Per-agent build XP — same currency as the sprite's own
-                      // "+N BUILD XP" floats. Previously every desk rendered
-                      // the circle USER's lifetime points, so all 16 bars were
-                      // identical and none of them moved with the floats.
-                      const deskXp = buildOfficeAgentXp(
-                        agent.turns || agent.messagesProcessed || 0,
-                        agent.tokensUsed || 0,
-                      );
-                      return (
-                        <View key={agent.id} style={[styles.agentPosition, { left: pos.x - 2, top: pos.y - 50 }]}>
-                          {opsBuilding ? <OfficeBuildingBadge /> : null}
-                          <PixelAgent
-                            agent={agent}
-                            appearance={getAppearance(agent)}
-                            environmentType={currentTheme.environmentType}
-                            onPress={() => handleAgentPress(agent)}
-                            selected={selectedAgent?.id === agent.id}
-                            showThoughts={!editMode}
-                            totalAgents={agents.length}
-                            dancing={dancingAgentId === 'all' || dancingAgentId === agent.id}
-                            xp={deskXp.total}
-                            xpNext={deskXp.nextTotal}
-                            xpLevel={deskXp.level}
-                            xpIntoLevel={deskXp.intoLevel}
-                            xpLevelSpan={deskXp.levelSpan}
-                            xpMaxed={deskXp.maxed}
-                            turns={agent.turns || agent.messagesProcessed || 0}
-                            tokens={agent.tokensUsed || 0}
-                            onAutomate={handleOpenAutomate}
-                            plaque={deskPlaque}
-                          />
-                        </View>
-                      );
-                    })}
-
                     {/* Interactive furniture input overlay */}
                     {interactInputId && (() => {
                       const curFloor = floors.find(f => f.id === currentFloorId);
                       const fi = curFloor?.furniture.find(f => f.id === interactInputId);
                       if (!fi) return null;
-                      const isConsole = fi.type === 'command_console';
+                      const isTargetedCommand = fi.type === 'command_console'
+                        || fi.type === 'button_panel'
+                        || fi.type === 'launch_pad';
                       return (
                         <View style={{ position: 'absolute', left: fi.x - 10, top: fi.y + (FURNITURE_CATALOG.find(c => c.type === fi.type)?.height || 50) + 4, zIndex: 50, flexDirection: 'column', gap: 3 }} pointerEvents="box-none">
-                          {isConsole && (
+                          {isTargetedCommand && (
                             <View style={{ flexDirection: 'row', gap: 2, marginBottom: 2 }}>
-                              {displayAgents.slice(0, 6).map(a => (
+                              {commandTargetAgents.slice(0, 6).map(a => (
                                 <Pressable
                                   key={a.id}
                                   onPress={() => setInteractAgentTarget(a.id)}
+                                  disabled={interactSending}
+                                  accessibilityRole="button"
+                                  accessibilityLabel={`Send reviewed command to ${a.name}`}
+                                  accessibilityState={{ selected: interactAgentTarget === a.id, disabled: interactSending }}
+                                  {...(Platform.OS === 'web' ? ({ 'aria-pressed': interactAgentTarget === a.id } as any) : {})}
                                   style={{
-                                    paddingHorizontal: 4, paddingVertical: 2, borderRadius: 3,
+                                    minHeight: 28, justifyContent: 'center', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 3,
                                     backgroundColor: interactAgentTarget === a.id ? (currentTheme.accentGlow + '40') : '#161616',
                                     borderWidth: 1, borderColor: interactAgentTarget === a.id ? currentTheme.accentGlow : '#252525',
                                     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+                                    opacity: interactSending ? 0.55 : 1,
                                   }}
                                 >
                                   <Text style={{ color: interactAgentTarget === a.id ? currentTheme.accentGlow : '#9e9e9e', fontSize: 6, fontFamily: 'monospace' }}>@{a.name}</Text>
@@ -4632,16 +8061,35 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                               ))}
                             </View>
                           )}
+                          {isTargetedCommand && commandTargetAgents.length === 0 ? (
+                            <Text
+                              style={{ color: '#fca5a5', fontSize: 7, fontFamily: 'monospace' }}
+                              accessibilityRole="alert"
+                            >
+                              CONNECT AN AGENT BEFORE SENDING
+                            </Text>
+                          ) : null}
+                          {interactSendError ? (
+                            <Text
+                              style={{ color: '#fca5a5', fontSize: 7, fontFamily: 'monospace', maxWidth: 210 }}
+                              accessibilityRole="alert"
+                            >
+                              {interactSendError}
+                            </Text>
+                          ) : null}
                           <View style={{ flexDirection: 'row', gap: 2, alignItems: 'center' }}>
                             <TextInput
+                              testID="office-command-review-input"
                               value={interactInputText}
                               onChangeText={setInteractInputText}
                               onSubmitEditing={handleInteractSubmit}
-                              placeholder={isConsole ? 'Command...' : 'Task for all agents...'}
+                              editable={!interactSending}
+                              placeholder={isTargetedCommand ? 'Review command…' : 'Task for all agents…'}
                               placeholderTextColor="#6f6f6f"
                               autoFocus
+                              accessibilityLabel={isTargetedCommand ? 'Review exact agent command' : 'Task for all agents'}
                               style={{
-                                width: 120, height: 20, fontSize: 8, fontFamily: 'monospace',
+                                width: 136, height: 28, fontSize: 8, fontFamily: 'monospace',
                                 color: '#e8e8e8', backgroundColor: '#000000', borderWidth: 1,
                                 borderColor: currentTheme.accentGlow + '60', borderRadius: 4,
                                 paddingHorizontal: 4, paddingVertical: 2,
@@ -4649,16 +8097,25 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                             />
                             <Pressable
                               onPress={handleInteractSubmit}
+                              disabled={interactSending || (isTargetedCommand && !interactAgentTarget)}
+                              accessibilityRole="button"
+                              accessibilityLabel={isTargetedCommand ? 'Send reviewed command to selected agent' : 'Send task to all agents'}
+                              accessibilityState={{ disabled: interactSending || (isTargetedCommand && !interactAgentTarget), busy: interactSending }}
                               style={{
-                                paddingHorizontal: 6, paddingVertical: 3, backgroundColor: currentTheme.accentGlow,
+                                minWidth: 32, minHeight: 28, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 6, paddingVertical: 3, backgroundColor: currentTheme.accentGlow,
                                 borderRadius: 3, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+                                opacity: interactSending || (isTargetedCommand && !interactAgentTarget) ? 0.45 : 1,
                               }}
                             >
-                              <Text style={{ color: '#000', fontSize: 7, fontWeight: '900', fontFamily: 'monospace' }}>GO</Text>
+                              <Text style={{ color: '#000', fontSize: 7, fontWeight: '900', fontFamily: 'monospace' }}>{interactSending ? '…' : 'GO'}</Text>
                             </Pressable>
                             <Pressable
-                              onPress={() => { setInteractInputId(null); setInteractInputText(''); }}
-                              style={{ paddingHorizontal: 4, paddingVertical: 3, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}
+                              onPress={() => { setInteractInputId(null); setInteractInputText(''); setInteractAgentTarget(null); setInteractSendError(''); }}
+                              disabled={interactSending}
+                              accessibilityRole="button"
+                              accessibilityLabel="Close command review"
+                              accessibilityState={{ disabled: interactSending }}
+                              style={{ minWidth: 28, minHeight: 28, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4, paddingVertical: 3, opacity: interactSending ? 0.45 : 1, ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}) }}
                             >
                               <Text style={{ color: '#9e9e9e', fontSize: 7, fontWeight: '900', fontFamily: 'monospace' }}>✕</Text>
                             </Pressable>
@@ -4764,7 +8221,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                   {displayAgents.map((agent) => (
                     <Pressable
                       key={agent.id}
-                      onPress={() => handleAgentPress(agent)}
+                      onPress={() => handleAgentPress(agent.id)}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Open ${agent.name} agent panel`}
+                      accessibilityHint="Shows current work, controls, activity, memory, runs, and agent settings."
+                      accessibilityState={{ selected: selectedAgent?.id === agent.id }}
                       style={[styles.quickChip,
                         selectedAgent?.id === agent.id && { backgroundColor: agent.color + '20', borderColor: agent.color + '60' },
                         Platform.OS === 'web' && { cursor: 'pointer' } as any]}
@@ -4775,7 +8236,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                         backgroundColor: getOfficeStatusColor(agent.status),
                       }]} />
                       <Text style={[styles.quickName, selectedAgent?.id === agent.id && { color: agent.color }]}>{agent.name}</Text>
-                      <Text style={styles.quickCost}>${(agent.costTotal || agent.costToday).toFixed(2)}</Text>
+                      <Text style={styles.quickCost}>${agent.costToday.toFixed(2)} today</Text>
                       {/* O1 (P38): 24h finished-run counts, tone by last outcome. */}
                       {(() => {
                         const acct = opsAccountability?.get(agent.name.trim().toLowerCase());
@@ -4795,55 +8256,83 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           </>
         )}
 
-        <OfficeRuntimeSection
-          terminalSize={terminalSize}
-          setTerminalSize={setTerminalSize}
-          setTerminalInitialTab={setTerminalInitialTab}
-          styles={styles}
-          accentColor={accentColor}
-          OfficeTerminalView={OfficeTerminalView}
-          terminalInitialTab={terminalInitialTab}
-          terminalInput={terminalInput}
-          setTerminalInput={setTerminalInput}
-          terminalTargetId={terminalTargetId}
-          terminalTargetName={terminalTargetName}
-          setTerminalTargetId={setTerminalTargetId}
-          setTerminalTargetName={setTerminalTargetName}
-          terminalModel={terminalModel}
-          setTerminalModel={setTerminalModel}
-          terminalTargetIds={terminalTargetIds}
-          setTerminalTargetIds={setTerminalTargetIds}
-          circleId={circleId}
-          currentUserId={currentUserId}
-          currentUserName={currentUserName}
-          mergedCircleAgents={mergedCircleAgents}
-          handleCommandSent={handleCommandSent}
-          providerKeys={providerKeys}
-        />
+        {/* Keep the runtime mounted while editing so terminal history,
+            subscriptions, and an in-flight response survive the mode switch.
+            Its presentation is hidden to leave the full floor unobstructed. */}
+          <OfficeRuntimeSection
+            presentationHidden={editMode}
+            terminalSize={terminalSize}
+            setTerminalSize={setTerminalSize}
+            setTerminalInitialTab={setTerminalInitialTab}
+            styles={styles}
+            accentColor={accentColor}
+            OfficeTerminalView={OfficeTerminalView}
+            terminalInitialTab={terminalInitialTab}
+            terminalInput={terminalInput}
+            setTerminalInput={setTerminalInput}
+            terminalTargetId={terminalTargetId}
+            terminalTargetName={terminalTargetName}
+            setTerminalTargetId={setTerminalTargetId}
+            setTerminalTargetName={setTerminalTargetName}
+            terminalModel={terminalModel}
+            setTerminalModel={setTerminalModel}
+            terminalTargetIds={terminalTargetIds}
+            setTerminalTargetIds={setTerminalTargetIds}
+            circleId={circleId}
+            currentUserId={currentUserId}
+            currentUserName={currentUserName}
+            terminalAuthority={committedAuthAuthority}
+            isTerminalAuthorityCurrent={isOfficeAuthorityCurrent}
+            mergedCircleAgents={terminalCommandAgents}
+            handleCommandSent={handleCommandSent}
+            providerKeys={providerKeys}
+          />
       </View>
 
       {/* Agent detail panel (includes bridge status + power controls + remote shell) */}
       {!editMode && (
         <AgentPanel
           agent={selectedAgent}
-          onClose={() => { setSelectedAgent(null); setPanelOrigin(null); }}
+          onClose={clearSelectedAgentPanel}
           isDesktop={isDesktop}
           onRenameAgent={handleRenameAgent}
           onAgentIdentityChange={refreshAgentIdentities}
           onRemoveAgent={handleRemovePublishedAgent}
           sessionTags={sessionTags}
+          sessionStorageScope={officeSessionStorageScope || undefined}
+          identityAuthority={captureOfficeAuthority()}
+          runtimeConnectionId={selectedAgentRuntimeConnectionId}
+          runtimeConnectionSnapshot={selectedAgentRuntimeConnectionSnapshot}
+          isRuntimeConnectionSnapshotCurrent={isSelectedAgentRuntimeConnectionCurrent}
           onAddSessionTag={handleAddSessionTag}
           onRemoveSessionTag={handleRemoveSessionTag}
           circleId={circleId}
-          appearances={appearances}
-          onAppearanceChange={(id, a) => {
+          appearances={selectedAgentPanelAppearances}
+          onAppearanceChange={async (id, a): Promise<AgentIdentityExactSaveResult> => {
+            const requestedAuthority = captureOfficeAuthority();
+            if (!requestedAuthority) {
+              return { ok: false, localSaved: false, serverSaved: false, error: 'invalid_authority' };
+            }
             const identityKey = getAgentIdentityKey(selectedAgent) || id;
+            const receipt = await updateAgentIdentityExact(
+              identityKey,
+              { appearance: a, isCustomized: true },
+              requestedAuthority,
+              isOfficeAuthorityCurrent,
+            );
+            if (!isOfficeAuthorityCurrent(requestedAuthority)) {
+              return receipt;
+            }
+            if (!receipt.ok || !receipt.localSaved || receipt.serverSaved !== true) {
+              return receipt;
+            }
             setAppearances(prev => ({ ...prev, [id]: a, [identityKey]: a }));
-            void updateAgentIdentity(identityKey, { appearance: a, isCustomized: true });
+            await refreshAgentIdentities();
+            return receipt;
           }}
           environmentType={currentTheme.environmentType}
           onRunCommand={handleRunCommand}
-          popoutOrigin={panelOrigin}
+          onOpenAgentInChat={onOpenAgentInChat ? handleOpenAgentInChat : undefined}
         />
       )}
 
@@ -4927,7 +8416,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
       {/* Rewards Panel Modal (lazy) */}
       {showRewards && (
-        <Modal visible={showRewards} animationType="slide" presentationStyle="pageSheet">
+        <Modal visible={showRewards} animationType="fade" presentationStyle="pageSheet">
             <RewardsPanel onClose={() => setShowRewards(false)} />
         </Modal>
       )}
@@ -4993,6 +8482,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         onCustomThemesRefresh={refreshCustomThemes}
         circleId={circleId}
         userEmail={userEmail}
+        exactAuthority={committedAuthAuthority}
+        isExactAuthorityCurrent={isOfficeAuthorityCurrent}
       />
 
       {/* MCP Hub Panel */}
@@ -5231,17 +8722,16 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       {scrabbleVisible && (
           <ScrabbleGame
             visible={scrabbleVisible}
-            onClose={() => setScrabbleVisible(false)}
+            onClose={() => { setScrabbleVisible(false); setActiveScrabbleItemId(null); }}
             onStateChange={(state) => {
-              const fl = floors.find((f: OfficeFloor) => f.id === currentFloorId);
-              const fi = fl?.furniture.find((f: FurnitureItem) => f.type === 'scrabble_board');
-              if (fi) {
-                fi.scrabbleActive = !state.gameOver;
-                fi.scrabbleScore1 = state.score1;
-                fi.scrabbleScore2 = state.score2;
-                fi.scrabbleTurn = state.turn;
-                fi.scrabbleWinner = state.gameOver ? state.winner : undefined;
-              }
+              patchFurnitureStateDurably(currentFloorId, activeScrabbleItemId, (item) => ({
+                ...item,
+                scrabbleActive: !state.gameOver,
+                scrabbleScore1: state.score1,
+                scrabbleScore2: state.score2,
+                scrabbleTurn: state.turn,
+                scrabbleWinner: state.gameOver ? state.winner : undefined,
+              }));
             }}
           />
       )}
@@ -5250,20 +8740,19 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       {pokerVisible && (
           <PokerGame
             visible={pokerVisible}
-            onClose={() => setPokerVisible(false)}
+            onClose={() => { setPokerVisible(false); setActivePokerItemId(null); }}
             agents={displayAgents}
             circleId={circleId}
             currentUserId={currentUserId || ''}
             currentUserName={currentUserName || ''}
             onStateChange={(summary) => {
-              const fl = floors.find((f: OfficeFloor) => f.id === currentFloorId);
-              const fi = fl?.furniture.find((f: FurnitureItem) => f.type === 'poker_table');
-              if (fi) {
-                fi.pokerChips = summary.playerChips;
-                fi.pokerPhase = summary.phase;
-                fi.pokerHandsWon = summary.handsWon;
-                fi.pokerHandsPlayed = summary.handsPlayed;
-              }
+              patchFurnitureStateDurably(currentFloorId, activePokerItemId, (item) => ({
+                ...item,
+                pokerChips: summary.playerChips,
+                pokerPhase: summary.phase,
+                pokerHandsWon: summary.handsWon,
+                pokerHandsPlayed: summary.handsPlayed,
+              }));
             }}
           />
       )}
@@ -5271,23 +8760,35 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       {/* ─── Phone Messenger Modal (lazy) ──────────────────────────────── */}
       {phoneVisible && (
           <PhoneMessenger
+            key={committedAuthScopeKey}
             visible={phoneVisible}
-            onClose={() => setPhoneVisible(false)}
-            onUnreadCount={(count) => {
-              const fl = floors.find((f: OfficeFloor) => f.id === currentFloorId);
-              const fi = fl?.furniture.find((f: FurnitureItem) => f.type === 'message_board');
-              if (fi) {
-                fi.messageCount = count;
-                fi.messageSource = 'imessage';
-                fi.messagePreview = 'Connected via BlueBubbles';
-              }
+            onClose={() => { setPhoneVisible(false); setActivePhoneItemId(null); }}
+            exactAuthority={committedAuthAuthority}
+            isExactAuthorityCurrent={isOfficeAuthorityCurrent}
+            onUnreadCount={({ unreadCount, platform, providerLabel, userId: statusUserId, circleId: statusCircleId, generation }) => {
+              const requestedAuthority = committedAuthAuthority;
+              if (
+                !requestedAuthority
+                || statusUserId !== requestedAuthority.userId
+                || statusCircleId !== requestedAuthority.circleId
+                || generation !== requestedAuthority.generation
+                || !isOfficeAuthorityCurrent(requestedAuthority)
+              ) return;
+              patchFurnitureStateDurably(currentFloorId, activePhoneItemId, (item) => ({
+                ...item,
+                messageCount: unreadCount,
+                messageSource: platform,
+                messagePreview: `${providerLabel} connected`,
+                dataState: 'live',
+                dataUpdatedAt: Date.now(),
+              }));
             }}
           />
       )}
 
       {/* ─── Hugging Face Explorer Modal (lazy) ────────────────────────── */}
       {hfExplorerVisible && (
-        <Modal visible={hfExplorerVisible} animationType="slide" transparent={false}>
+        <Modal visible={hfExplorerVisible} animationType="fade" transparent={false}>
             <HuggingFaceExplorer
               circleId={circleId}
               onClose={() => setHfExplorerVisible(false)}
@@ -5301,7 +8802,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
       {/* ─── Hugging Face Runner Modal (lazy) ─────────────────────────── */}
       {hfRunnerVisible && (
-        <Modal visible={hfRunnerVisible} animationType="slide" transparent={false}>
+        <Modal visible={hfRunnerVisible} animationType="fade" transparent={false}>
             <HfToolRunner
               circleId={circleId}
               onClose={() => setHfRunnerVisible(false)}
@@ -5310,23 +8811,44 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       )}
 
       {/* ─── Service Connector Modal ──────────────────────────────────────── */}
-      <Modal visible={serviceModalVisible} animationType="fade" transparent onRequestClose={() => { setServiceModalVisible(false); setServiceModalTargetId(null); }}>
-        <Pressable style={nftStyles.overlay} onPress={() => { setServiceModalVisible(false); setServiceModalTargetId(null); }}>
-          <Pressable style={[nftStyles.card, { maxHeight: 600 }]} onPress={(e) => e.stopPropagation()}>
+      <Modal visible={serviceModalVisible} animationType="fade" transparent onRequestClose={closeServiceModal}>
+        <Pressable style={nftStyles.overlay} onPress={closeServiceModal}>
+          <Pressable
+            style={[nftStyles.card, { maxHeight: 600 }]}
+            onPress={(e) => e.stopPropagation()}
+            accessibilityViewIsModal
+            accessibilityLabel="Office service setup"
+          >
             <View style={nftStyles.header}>
-              <Text style={nftStyles.headerText}>
-                {serviceModalType === 'smart_tv' ? '📺 CONNECT TV' :
-                 serviceModalType === 'spotify_jukebox' ? '🎧 CONNECT SPOTIFY' :
-                 serviceModalType === 'discord_hub' ? '💬 CONNECT DISCORD' :
-                 serviceModalType === 'twitch_stream' ? '🟣 CONNECT TWITCH' :
+              <Text style={nftStyles.headerText} accessibilityRole="header">
+                {serviceModalType === 'smart_tv' ? '📺 SET UP TV' :
+                 serviceModalType === 'spotify_jukebox' ? '🎧 SET UP SPOTIFY' :
+                 serviceModalType === 'discord_hub' ? '💬 SET UP DISCORD' :
+                 serviceModalType === 'twitch_stream' ? '🟣 SET UP TWITCH' :
                  serviceModalType === 'video_call' ? '📹 SET UP CALL' :
                  serviceModalType === 'calendar_widget' ? '📅 CONNECT CALENDAR' :
-                 serviceModalType === 'email_hub' ? '📧 CONNECT EMAIL' : '🔗 CONNECT SERVICE'}
+                 serviceModalType === 'email_hub' ? '📧 CONNECT EMAIL' :
+                 serviceModalType === 'figma_board' ? '🎨 SET UP FIGMA' : '🔗 SET UP SERVICE'}
               </Text>
-              <Pressable onPress={() => { setServiceModalVisible(false); setServiceModalTargetId(null); }} style={nftStyles.closeBtn}>
+              <Pressable
+                onPress={closeServiceModal}
+                style={[nftStyles.closeBtn, { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' }]}
+                accessibilityRole="button"
+                accessibilityLabel="Close service setup"
+              >
                 <Text style={nftStyles.closeText}>✕</Text>
               </Pressable>
             </View>
+
+            {serviceUrlError ? (
+              <Text
+                style={{ color: '#fca5a5', fontSize: 11, paddingHorizontal: 16, paddingTop: 12 }}
+                accessibilityRole="alert"
+                accessibilityLiveRegion="assertive"
+              >
+                {serviceUrlError}
+              </Text>
+            ) : null}
 
             <ScrollView style={{ padding: 16 }} contentContainerStyle={{ gap: 16, paddingBottom: 20 }}>
               {/* ── Smart TV ── */}
@@ -5343,7 +8865,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                     ] as const).map(app => (
                       <Pressable
                         key={app.id}
-                        onPress={() => { setServiceTvApp(app.id); setServiceUrl(app.url); }}
+                        onPress={() => { setServiceTvApp(app.id); handleServiceUrlChange(app.url); }}
                         style={[svcStyles.appCard, serviceTvApp === app.id && { borderColor: app.color, backgroundColor: app.color + '15' },
                           Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                       >
@@ -5357,9 +8879,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                   <Text style={svcStyles.sectionLabel}>CONTENT URL (optional)</Text>
                   <TextInput
                     value={serviceUrl}
-                    onChangeText={setServiceUrl}
+                    onChangeText={handleServiceUrlChange}
                     placeholder="https://youtube.com/watch?v=..."
                     placeholderTextColor="#444"
+                    accessibilityLabel="TV content URL"
                     style={svcStyles.input}
                   />
 
@@ -5367,12 +8890,12 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                   <View style={svcStyles.sizeRow}>
                     <View style={svcStyles.sizeField}>
                       <Text style={svcStyles.sizeLabel}>Width</Text>
-                      <TextInput value={serviceTvWidth} onChangeText={setServiceTvWidth} keyboardType="number-pad" style={svcStyles.sizeInput} />
+                      <TextInput value={serviceTvWidth} onChangeText={setServiceTvWidth} keyboardType="number-pad" accessibilityLabel="TV width" style={svcStyles.sizeInput} />
                     </View>
                     <Text style={svcStyles.sizeX}>×</Text>
                     <View style={svcStyles.sizeField}>
                       <Text style={svcStyles.sizeLabel}>Height</Text>
-                      <TextInput value={serviceTvHeight} onChangeText={setServiceTvHeight} keyboardType="number-pad" style={svcStyles.sizeInput} />
+                      <TextInput value={serviceTvHeight} onChangeText={setServiceTvHeight} keyboardType="number-pad" accessibilityLabel="TV height" style={svcStyles.sizeInput} />
                     </View>
                   </View>
 
@@ -5391,7 +8914,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                   <View style={svcStyles.serviceHero}>
                     <Text style={{ fontSize: 40 }}>🎧</Text>
                     <Text style={[svcStyles.heroTitle, { color: '#1DB954' }]}>Spotify</Text>
-                    <Text style={svcStyles.heroDesc}>Connect your Spotify account to control playback from your office</Text>
+                    <Text style={svcStyles.heroDesc}>Save a Spotify link for quick access. Playback is not controlled by OpenSwan.</Text>
                   </View>
 
                   <Pressable
@@ -5404,9 +8927,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                   <Text style={svcStyles.sectionLabel}>SPOTIFY URL (playlist, track, or album)</Text>
                   <TextInput
                     value={serviceUrl}
-                    onChangeText={setServiceUrl}
+                    onChangeText={handleServiceUrlChange}
                     placeholder="https://open.spotify.com/playlist/..."
                     placeholderTextColor="#444"
+                    accessibilityLabel="Spotify URL"
                     style={svcStyles.input}
                   />
                 </>
@@ -5418,7 +8942,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                   <View style={svcStyles.serviceHero}>
                     <Text style={{ fontSize: 40 }}>💬</Text>
                     <Text style={[svcStyles.heroTitle, { color: '#5865F2' }]}>Discord</Text>
-                    <Text style={svcStyles.heroDesc}>Connect your Discord server to show activity in your office</Text>
+                    <Text style={svcStyles.heroDesc}>Save a Discord link for quick access. Member presence is not read by OpenSwan.</Text>
                   </View>
 
                   <Text style={svcStyles.sectionLabel}>CHANNEL NAME</Text>
@@ -5427,15 +8951,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                     onChangeText={setServiceDiscordChannel}
                     placeholder="general"
                     placeholderTextColor="#444"
+                    accessibilityLabel="Discord channel name"
                     style={svcStyles.input}
                   />
 
                   <Text style={svcStyles.sectionLabel}>DISCORD INVITE OR WEBHOOK URL</Text>
                   <TextInput
                     value={serviceUrl}
-                    onChangeText={setServiceUrl}
+                    onChangeText={handleServiceUrlChange}
                     placeholder="https://discord.gg/..."
                     placeholderTextColor="#444"
+                    accessibilityLabel="Discord URL"
                     style={svcStyles.input}
                   />
 
@@ -5463,6 +8989,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                     onChangeText={setServiceTwitchChannel}
                     placeholder="ninja"
                     placeholderTextColor="#444"
+                    accessibilityLabel="Twitch channel name"
                     style={svcStyles.input}
                   />
 
@@ -5501,9 +9028,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                   <Text style={svcStyles.sectionLabel}>MEETING LINK</Text>
                   <TextInput
                     value={serviceUrl}
-                    onChangeText={setServiceUrl}
+                    onChangeText={handleServiceUrlChange}
                     placeholder={serviceCallProvider === 'zoom' ? 'https://zoom.us/j/...' : serviceCallProvider === 'meet' ? 'https://meet.google.com/...' : 'https://teams.microsoft.com/...'}
                     placeholderTextColor="#444"
+                    accessibilityLabel="Meeting URL"
                     style={svcStyles.input}
                   />
 
@@ -5512,6 +9040,33 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                     style={[svcStyles.openBtn, !serviceUrl && { opacity: 0.4 }, Platform.OS === 'web' && { cursor: serviceUrl ? 'pointer' : 'default' } as any]}
                   >
                     <Text style={svcStyles.openBtnText}>JOIN CALL ↗</Text>
+                  </Pressable>
+                </>
+              )}
+
+              {/* ── Figma link ── */}
+              {serviceModalType === 'figma_board' && (
+                <>
+                  <View style={svcStyles.serviceHero}>
+                    <Text style={{ fontSize: 40 }}>🎨</Text>
+                    <Text style={[svcStyles.heroTitle, { color: '#a259ff' }]}>Figma</Text>
+                    <Text style={svcStyles.heroDesc}>Save a Figma file or prototype link. The Office opens it without claiming a live design sync.</Text>
+                  </View>
+                  <Text style={svcStyles.sectionLabel}>FIGMA FILE OR PROTOTYPE URL</Text>
+                  <TextInput
+                    value={serviceUrl}
+                    onChangeText={handleServiceUrlChange}
+                    placeholder="https://www.figma.com/design/..."
+                    placeholderTextColor="#444"
+                    style={svcStyles.input}
+                    autoCapitalize="none"
+                    accessibilityLabel="Figma file or prototype URL"
+                  />
+                  <Pressable
+                    onPress={() => serviceUrl ? handleServiceOpen(serviceUrl) : null}
+                    style={[svcStyles.openBtn, !serviceUrl && { opacity: 0.4 }, Platform.OS === 'web' && { cursor: serviceUrl ? 'pointer' : 'default' } as any]}
+                  >
+                    <Text style={svcStyles.openBtnText}>OPEN FIGMA LINK ↗</Text>
                   </Pressable>
                 </>
               )}
@@ -5530,14 +9085,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                   <Text style={svcStyles.sectionLabel}>SELECT PROVIDER</Text>
                   <View style={svcStyles.appGrid}>
                     {([
-                      { id: 'google', name: 'Google', icon: '📅', color: '#4285F4', oauth: 'google' as OAuthProvider },
-                      { id: 'outlook', name: 'Outlook', icon: '📆', color: '#0078D4', oauth: 'microsoft' as OAuthProvider },
+                      { id: 'google', name: 'Google', icon: '📅', color: '#4285F4', oauth: 'google' as OfficeOAuthProvider },
+                      { id: 'outlook', name: 'Outlook', icon: '📆', color: '#0078D4', oauth: 'microsoft' as OfficeOAuthProvider },
                     ] as const).map(cal => (
                       <Pressable
                         key={cal.id}
-                        onPress={() => { setServiceCalendarProvider(cal.id); setOauthStatus(null); setOauthError(''); }}
+                        onPress={() => handleServiceOAuthProviderSelect({ serviceType: 'calendar_widget', value: cal.id, provider: cal.oauth })}
+                        disabled={oauthConnecting}
+                        accessibilityState={{ selected: serviceCalendarProvider === cal.id, disabled: oauthConnecting }}
                         style={[svcStyles.appCard, serviceCalendarProvider === cal.id && { borderColor: cal.color, backgroundColor: cal.color + '15' },
-                          Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                          Platform.OS === 'web' && { cursor: oauthConnecting ? 'wait' : 'pointer' } as any,
+                          oauthConnecting && { opacity: 0.55 }]}
                       >
                         <Text style={svcStyles.appIcon}>{cal.icon}</Text>
                         <Text style={[svcStyles.appName, serviceCalendarProvider === cal.id && { color: cal.color }]}>{cal.name}</Text>
@@ -5554,12 +9112,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                       </View>
                       {oauthStatus.email ? <Text style={{ color: '#888', fontSize: 10, fontFamily: 'monospace', marginTop: 4 }}>{oauthStatus.email}</Text> : null}
                       <Pressable
-                        onPress={async () => {
-                          const prov = serviceCalendarProvider === 'google' ? 'google' : 'microsoft' as OAuthProvider;
-                          await disconnectOAuth(prov);
-                          setOauthStatus(null);
-                        }}
-                        style={[{ marginTop: 8, paddingVertical: 6, paddingHorizontal: 12, backgroundColor: '#ef444415', borderRadius: 6, alignSelf: 'flex-start', borderWidth: 1, borderColor: '#ef444430' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                        onPress={() => void handleServiceOAuthDisconnect('calendar_widget')}
+                        disabled={oauthConnecting}
+                        accessibilityState={{ disabled: oauthConnecting, busy: oauthConnecting }}
+                        style={[{ marginTop: 8, paddingVertical: 6, paddingHorizontal: 12, backgroundColor: '#ef444415', borderRadius: 6, alignSelf: 'flex-start', borderWidth: 1, borderColor: '#ef444430', opacity: oauthConnecting ? 0.55 : 1 }, Platform.OS === 'web' && { cursor: oauthConnecting ? 'wait' : 'pointer' } as any]}
                       >
                         <Text style={{ color: '#ef4444', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>DISCONNECT</Text>
                       </Pressable>
@@ -5573,39 +9129,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                   ) : null}
 
                   <Pressable
-                    onPress={async () => {
-                      if (oauthConnecting) return;
-                      setOauthConnecting(true);
-                      setOauthError('');
-                      try {
-                        const { data: { session } } = await supabase.auth.getSession();
-                        if (!session) { setOauthError('Please sign in first'); return; }
-                        const prov = serviceCalendarProvider === 'google' ? 'google' : 'microsoft' as OAuthProvider;
-                        const result = await openOAuthPopup(prov, 'calendar', session.access_token);
-                        if (result.success) {
-                          setOauthStatus({ connected: true, email: result.email });
-                          // Fetch real events and update furniture
-                          const calData = await fetchCalendarEvents(prov);
-                          if (calData && calData.nextEvent && serviceModalTargetId) {
-                            const updates: Record<string, any> = {
-                              calendarProvider: serviceCalendarProvider,
-                              calendarEvent: calData.nextEvent.title,
-                              calendarTime: calData.nextEvent.timeFormatted || '',
-                              calendarEvents: calData.count,
-                            };
-                            setFloors(prev => prev.map(f =>
-                              f.id === currentFloorId ? { ...f, furniture: f.furniture.map(item => item.id === serviceModalTargetId ? { ...item, ...updates } : item) } : f
-                            ));
-                          }
-                        } else if (result.error !== 'Window closed') {
-                          setOauthError(result.error || 'Connection failed');
-                        }
-                      } catch (err: any) {
-                        setOauthError(err.message || 'Connection failed');
-                      } finally {
-                        setOauthConnecting(false);
-                      }
-                    }}
+                    onPress={() => void handleServiceOAuthConnect('calendar_widget')}
+                    disabled={oauthConnecting}
+                    accessibilityState={{ disabled: oauthConnecting, busy: oauthConnecting }}
                     style={[svcStyles.connectBtn, {
                       backgroundColor: oauthConnecting ? '#333' : (serviceCalendarProvider === 'google' ? '#4285F4' : '#0078D4'),
                       flexDirection: 'row', justifyContent: 'center', gap: 8,
@@ -5631,8 +9157,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                 <>
                   <View style={svcStyles.serviceHero}>
                     <Text style={{ fontSize: 40 }}>📧</Text>
-                    <Text style={[svcStyles.heroTitle, { color: serviceEmailProvider === 'outlook' ? '#0078D4' : serviceEmailProvider === 'gmail' ? '#EA4335' : '#6001D2' }]}>
-                      {serviceEmailProvider === 'outlook' ? 'Outlook' : serviceEmailProvider === 'gmail' ? 'Gmail' : 'Yahoo Mail'}
+                    <Text style={[svcStyles.heroTitle, { color: serviceEmailProvider === 'outlook' ? '#0078D4' : '#EA4335' }]}>
+                      {serviceEmailProvider === 'outlook' ? 'Outlook' : 'Gmail'}
                     </Text>
                     <Text style={svcStyles.heroDesc}>Connect your real inbox to see emails and unread count in your office</Text>
                   </View>
@@ -5640,15 +9166,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                   <Text style={svcStyles.sectionLabel}>SELECT EMAIL PROVIDER</Text>
                   <View style={svcStyles.appGrid}>
                     {([
-                      { id: 'outlook', name: 'Outlook', icon: '📧', color: '#0078D4', oauth: 'microsoft' as OAuthProvider, desc: 'Outlook, Hotmail, Live, Work' },
-                      { id: 'gmail', name: 'Gmail', icon: '✉️', color: '#EA4335', oauth: 'google' as OAuthProvider, desc: 'Gmail, Google Workspace' },
-                      { id: 'yahoo', name: 'Yahoo', icon: '📬', color: '#6001D2', oauth: 'yahoo' as OAuthProvider, desc: 'Yahoo Mail, AOL Mail' },
+                      { id: 'outlook', name: 'Outlook', icon: '📧', color: '#0078D4', oauth: 'microsoft' as OfficeOAuthProvider, desc: 'Outlook, Hotmail, Live, Work' },
+                      { id: 'gmail', name: 'Gmail', icon: '✉️', color: '#EA4335', oauth: 'google' as OfficeOAuthProvider, desc: 'Gmail, Google Workspace' },
                     ] as const).map(em => (
                       <Pressable
                         key={em.id}
-                        onPress={() => { setServiceEmailProvider(em.id); setOauthStatus(null); setOauthError(''); }}
+                        onPress={() => handleServiceOAuthProviderSelect({ serviceType: 'email_hub', value: em.id, provider: em.oauth })}
+                        disabled={oauthConnecting}
+                        accessibilityState={{ selected: serviceEmailProvider === em.id, disabled: oauthConnecting }}
                         style={[svcStyles.appCard, serviceEmailProvider === em.id && { borderColor: em.color, backgroundColor: em.color + '15' },
-                          Platform.OS === 'web' && { cursor: 'pointer' } as any, { minWidth: 85 }]}
+                          Platform.OS === 'web' && { cursor: oauthConnecting ? 'wait' : 'pointer' } as any, { minWidth: 85 },
+                          oauthConnecting && { opacity: 0.55 }]}
                       >
                         <Text style={svcStyles.appIcon}>{em.icon}</Text>
                         <Text style={[svcStyles.appName, serviceEmailProvider === em.id && { color: em.color }]}>{em.name}</Text>
@@ -5666,12 +9194,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                       </View>
                       {oauthStatus.email ? <Text style={{ color: '#888', fontSize: 10, fontFamily: 'monospace', marginTop: 4 }}>{oauthStatus.email}</Text> : null}
                       <Pressable
-                        onPress={async () => {
-                          const prov = serviceEmailProvider === 'gmail' ? 'google' : serviceEmailProvider === 'outlook' ? 'microsoft' : 'yahoo' as OAuthProvider;
-                          await disconnectOAuth(prov);
-                          setOauthStatus(null);
-                        }}
-                        style={[{ marginTop: 8, paddingVertical: 6, paddingHorizontal: 12, backgroundColor: '#ef444415', borderRadius: 6, alignSelf: 'flex-start', borderWidth: 1, borderColor: '#ef444430' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                        onPress={() => void handleServiceOAuthDisconnect('email_hub')}
+                        disabled={oauthConnecting}
+                        accessibilityState={{ disabled: oauthConnecting, busy: oauthConnecting }}
+                        style={[{ marginTop: 8, paddingVertical: 6, paddingHorizontal: 12, backgroundColor: '#ef444415', borderRadius: 6, alignSelf: 'flex-start', borderWidth: 1, borderColor: '#ef444430', opacity: oauthConnecting ? 0.55 : 1 }, Platform.OS === 'web' && { cursor: oauthConnecting ? 'wait' : 'pointer' } as any]}
                       >
                         <Text style={{ color: '#ef4444', fontSize: 9, fontWeight: '800', fontFamily: 'monospace' }}>DISCONNECT</Text>
                       </Pressable>
@@ -5685,44 +9211,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                   ) : null}
 
                   <Pressable
-                    onPress={async () => {
-                      if (oauthConnecting) return;
-                      setOauthConnecting(true);
-                      setOauthError('');
-                      try {
-                        const { data: { session } } = await supabase.auth.getSession();
-                        if (!session) { setOauthError('Please sign in first'); return; }
-                        const prov = serviceEmailProvider === 'gmail' ? 'google' : serviceEmailProvider === 'outlook' ? 'microsoft' : 'yahoo' as OAuthProvider;
-                        const result = await openOAuthPopup(prov, 'email', session.access_token);
-                        if (result.success) {
-                          setOauthStatus({ connected: true, email: result.email });
-                          // Fetch real emails and update furniture
-                          const emailData = await fetchEmails(prov);
-                          if (emailData && serviceModalTargetId) {
-                            const latest = emailData.emails[0];
-                            const updates: Record<string, any> = {
-                              emailProvider: serviceEmailProvider,
-                              emailConnected: true,
-                              emailUnread: emailData.unread,
-                              emailSender: latest?.sender || '',
-                              emailSubject: latest?.subject || 'No new mail',
-                              emailTime: latest?.timeFormatted || '',
-                            };
-                            setFloors(prev => prev.map(f =>
-                              f.id === currentFloorId ? { ...f, furniture: f.furniture.map(item => item.id === serviceModalTargetId ? { ...item, ...updates } : item) } : f
-                            ));
-                          }
-                        } else if (result.error !== 'Window closed') {
-                          setOauthError(result.error || 'Connection failed');
-                        }
-                      } catch (err: any) {
-                        setOauthError(err.message || 'Connection failed');
-                      } finally {
-                        setOauthConnecting(false);
-                      }
-                    }}
+                    onPress={() => void handleServiceOAuthConnect('email_hub')}
+                    disabled={oauthConnecting}
+                    accessibilityState={{ disabled: oauthConnecting, busy: oauthConnecting }}
                     style={[svcStyles.connectBtn, {
-                      backgroundColor: oauthConnecting ? '#333' : (serviceEmailProvider === 'outlook' ? '#0078D4' : serviceEmailProvider === 'gmail' ? '#EA4335' : '#6001D2'),
+                      backgroundColor: oauthConnecting ? '#333' : (serviceEmailProvider === 'outlook' ? '#0078D4' : '#EA4335'),
                       flexDirection: 'row', justifyContent: 'center', gap: 8,
                     }, Platform.OS === 'web' && { cursor: oauthConnecting ? 'wait' : 'pointer' } as any]}
                   >
@@ -5730,20 +9223,18 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                     <Text style={svcStyles.connectBtnText}>
                       {oauthConnecting ? 'CONNECTING...' :
                         oauthStatus?.connected ? 'RECONNECT' :
-                        `SIGN IN WITH ${serviceEmailProvider === 'gmail' ? 'GOOGLE' : serviceEmailProvider === 'outlook' ? 'MICROSOFT' : 'YAHOO'}`}
+                        `SIGN IN WITH ${serviceEmailProvider === 'gmail' ? 'GOOGLE' : 'MICROSOFT'}`}
                     </Text>
                   </Pressable>
 
                   <Pressable
                     onPress={() => handleServiceOpen(
-                      serviceEmailProvider === 'outlook' ? 'https://outlook.live.com' :
-                      serviceEmailProvider === 'gmail' ? 'https://mail.google.com' :
-                      'https://mail.yahoo.com'
+                      serviceEmailProvider === 'gmail' ? 'https://mail.google.com' : 'https://outlook.live.com'
                     )}
                     style={[svcStyles.openBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                   >
                     <Text style={svcStyles.openBtnText}>
-                      OPEN {serviceEmailProvider === 'outlook' ? 'OUTLOOK' : serviceEmailProvider === 'gmail' ? 'GMAIL' : 'YAHOO MAIL'} ↗
+                      OPEN {serviceEmailProvider === 'gmail' ? 'GMAIL' : 'OUTLOOK'} ↗
                     </Text>
                   </Pressable>
                 </>
@@ -5751,8 +9242,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
             </ScrollView>
 
             {/* Save button */}
-            <Pressable onPress={handleServiceSave} style={[svcStyles.saveBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-              <Text style={svcStyles.saveBtnText}>SAVE & CONNECT</Text>
+            <Pressable
+              onPress={handleServiceSave}
+              disabled={oauthConnecting || oauthStatus?.state === 'checking'}
+              style={[svcStyles.saveBtn, { minHeight: 44, justifyContent: 'center', opacity: oauthConnecting || oauthStatus?.state === 'checking' ? 0.55 : 1 }, Platform.OS === 'web' && { cursor: oauthConnecting || oauthStatus?.state === 'checking' ? 'wait' : 'pointer' } as any]}
+              accessibilityRole="button"
+              accessibilityLabel="Save service setup"
+              accessibilityState={{ disabled: oauthConnecting || oauthStatus?.state === 'checking', busy: oauthConnecting || oauthStatus?.state === 'checking' }}
+            >
+              <Text style={svcStyles.saveBtnText}>SAVE SETUP</Text>
             </Pressable>
           </Pressable>
         </Pressable>

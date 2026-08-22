@@ -1,7 +1,11 @@
 import type { Action } from 'kbar';
 import { navigateToUnifiedProfile } from '../../lib/profileNavigation';
 
-export function buildAppActions(navigate: (screen: string, params?: any) => void, circleId?: string): Action[] {
+export function buildAppActions(
+  navigate: (screen: string, params?: any) => void,
+  circleId?: string,
+  opts?: { showOwnerTabs?: boolean },
+): Action[] {
   const actions: Action[] = [];
 
   // Helper: navigate to a circle tab
@@ -19,7 +23,10 @@ export function buildAppActions(navigate: (screen: string, params?: any) => void
       { id: 'circle-chat',         name: 'Chat',         shortcut: ['g', 'h'], section: 'Circle Dashboard', perform: goTab('CHAT'),         keywords: 'chat messages conversation ai agent talk' },
       { id: 'circle-office',       name: 'Office',       shortcut: ['g', 'o'], section: 'Circle Dashboard', perform: goTab('OFFICE'),       keywords: 'office pixel agents desk floor customize theme' },
       { id: 'circle-rooms',        name: 'Rooms',        shortcut: ['g', 'r'], section: 'Circle Dashboard', perform: goTab('ROOMS'),        keywords: 'rooms workspace projects files github repo code' },
+      // Backpack is owner-only — mirror the CircleDetailScreen OWNER_ONLY_TABS gate.
+      ...(opts?.showOwnerTabs ? [
       { id: 'circle-backpack',     name: 'Backpack',     shortcut: ['g', 'b'], section: 'Circle Dashboard', perform: goTab('BACKPACK'),     keywords: 'backpack tools bench models llm cost performance' },
+      ] : []),
       { id: 'circle-feed',         name: 'Feed',         shortcut: ['g', 'f'], section: 'Circle Dashboard', perform: goTab('FEED'),         keywords: 'feed kanban tasks board todo work items' },
       { id: 'circle-wallet',       name: 'Wallet',       shortcut: ['g', 'w'], section: 'Circle Dashboard', perform: goTab('WALLET'),       keywords: 'wallet crypto ethereum solana tokens send receive' },
       { id: 'circle-integrations', name: 'Marketplace', shortcut: ['g', 'i'], section: 'Circle Dashboard', perform: goTab('INTEGRATIONS'), keywords: 'marketplace integrations github slack wordpress connect api webhook apps' },

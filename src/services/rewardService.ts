@@ -1,6 +1,6 @@
 import { supabase } from '../lib/supabase';
 import { useEffect, useState, useRef, useCallback } from 'react';
-import { BADGES, Badge, getPointsForModel } from '../lib/badges';
+import { type Badge, getPointsForModel } from '../lib/badges';
 import type { OfficeAgent } from '../lib/officeAgents';
 
 export interface UserPoints {
@@ -19,65 +19,18 @@ export interface UserBadge {
 
 // ─── Core mutations ────────────────────────────────────────────────────────
 
+// The 2026-08-06 security lockdown revoked client EXECUTE on award_points: a
+// SECURITY DEFINER function taking an arbitrary p_user_id was a self-award
+// exploit. Keep every client award site dormant before network I/O until a
+// server-owned event ledger replaces this mutation path.
+
 export async function awardPoints(
-  userId: string,
-  points: number,
-  reason: string,
-  metadata?: Record<string, any>,
+  _userId: string,
+  _points: number,
+  _reason: string,
+  _metadata?: Record<string, any>,
 ): Promise<{ newTotal: number; newBadges: Badge[] }> {
-  // Single atomic DB call — no more JS read→calculate→write race condition.
-  // The Postgres function handles the increment and audit trail atomically.
-  const { data, error } = await supabase.rpc('award_points', {
-    p_user_id:  userId,
-    p_amount:   points,
-    p_reason:   reason,
-    p_metadata: metadata ?? {},
-  });
-
-  if (error) {
-    console.error('awardPoints RPC error — falling back to direct increment:', error);
-    // Fallback: read current value, then increment (not atomic but better than overwriting)
-    const { data: existing } = await supabase
-      .from('user_points')
-      .select('total_points, lifetime_points')
-      .eq('user_id', userId)
-      .maybeSingle();
-    const prevTotal = existing?.total_points ?? 0;
-    const prevLifetime = existing?.lifetime_points ?? 0;
-    await supabase.from('user_points').upsert(
-      {
-        user_id: userId,
-        total_points: prevTotal + points,
-        lifetime_points: prevLifetime + points,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: 'user_id' },
-    );
-    return { newTotal: prevLifetime + points, newBadges: [] };
-  }
-
-  const newLifetime: number = Array.isArray(data) ? (data[0]?.new_lifetime ?? 0) : (data?.new_lifetime ?? 0);
-
-  // Check for newly unlocked badges (client-side, non-critical — DB already has the points)
-  const { data: alreadyEarned } = await supabase
-    .from('user_badges').select('badge_id').eq('user_id', userId);
-
-  const earnedIds = new Set((alreadyEarned || []).map((b: any) => b.badge_id));
-  const newBadges: Badge[] = [];
-
-  for (const badge of BADGES) {
-    if (!earnedIds.has(badge.id) && newLifetime >= badge.pointsRequired) {
-      const { error: badgeErr } = await supabase.from('user_badges').insert({
-        user_id: userId,
-        badge_id: badge.id,
-        earned_at: new Date().toISOString(),
-        points_at_earn: newLifetime,
-      });
-      if (!badgeErr) newBadges.push(badge);
-    }
-  }
-
-  return { newTotal: newLifetime, newBadges };
+  return { newTotal: 0, newBadges: [] };
 }
 
 export async function awardAgentTurnPoints(
@@ -95,7 +48,10 @@ export async function getUserPoints(userId: string): Promise<UserPoints | null> 
     .from('user_points')
     .select('*')
     .eq('user_id', userId)
-    .single();
+    // A newly created account legitimately has no points row until its first
+    // server-owned reward event. Preserve that as the uninitialized `null`
+    // state instead of asking PostgREST for exactly one row and emitting 406.
+    .maybeSingle();
   return data;
 }
 

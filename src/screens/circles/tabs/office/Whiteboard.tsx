@@ -7,9 +7,11 @@ import {
   OfficeAgent,
   STATUS_COLORS,
   calculateDailyScore,
+  formatOfficeTrackedCost,
+  normalizeOfficeTrackedCost,
 } from '../../../../lib/officeAgents';
 import { isBlackSwanAvailable } from '../../../../lib/blackswanLLM';
-import { CronJob } from '../../../../lib/openswanService';
+import { CronJob, formatCronSchedule } from '../../../../lib/openswanService';
 import { useAgentActivity, AgentActivity } from '../../../../services/agentActivityLogger';
 import { supabase } from '../../../../lib/supabase';
 import { safeGetUser } from '../../../../lib/authSession';
@@ -115,7 +117,10 @@ function useRewardState(): RewardState {
     void safeGetUser().then(({ value: user }) => {
       if (!user || cancelled) return;
       const loadXp = () => {
-        void supabase.from('user_points').select('lifetime_points').eq('user_id', user.id).single()
+        // A new account has no reward row until its first server-owned award.
+        // Treat that as zero instead of requiring exactly one row, which makes
+        // PostgREST emit a noisy 406 during every Office load.
+        void supabase.from('user_points').select('lifetime_points').eq('user_id', user.id).maybeSingle()
           .then(({ data }) => { if (data && !cancelled) setLifetimeXP(data.lifetime_points ?? 0); });
       };
       loadXp();
@@ -229,15 +234,18 @@ export default function Whiteboard({
   // ── BlackSwan status ──
   const [bsStatus, setBsStatus] = useState<'local' | 'offline' | 'checking'>('checking');
   useEffect(() => {
+    // The collapsed header still renders the BlackSwan pill, so keep one
+    // lightweight health signal. Refresh it slowly while collapsed and more
+    // often only while the diagnostics board is open.
     let alive = true;
     const check = async () => {
       const ok = await isBlackSwanAvailable();
       if (alive) setBsStatus(ok ? 'local' : 'offline');
     };
     check();
-    const t = setInterval(check, 30_000);
+    const t = setInterval(check, expanded ? 30_000 : 120_000);
     return () => { alive = false; clearInterval(t); };
-  }, []);
+  }, [expanded]);
 
   // Animated values
   const expandAnim = useRef(new Animated.Value(0)).current; // 0 = collapsed, 1 = expanded
@@ -339,13 +347,20 @@ export default function Whiteboard({
   }, []);
 
   useEffect(() => {
+    // Full bridge diagnostics import and probe multiple local runtimes. The
+    // collapsed strip already has Office connection counts, so keep this work
+    // dormant until the operator expands the board.
+    if (!expanded) {
+      setBridgeLoading(false);
+      return;
+    }
     let alive = true;
     const run = async () => {
       if (!alive) return;
       await refreshBridgeReadiness();
     };
     run();
-    const timer = setInterval(run, expanded ? 45_000 : 120_000);
+    const timer = setInterval(run, 45_000);
     return () => {
       alive = false;
       clearInterval(timer);
@@ -369,6 +384,11 @@ export default function Whiteboard({
 
   // Farm metrics
   const farmMetrics = useMemo(() => calculateFarmMetrics(agents, []), [agents]);
+  // The parent merges the durable published-agent daily ledger with the
+  // circle-wide server usage aggregate. Do not substitute the compact roster
+  // total here: missing/ambiguous agent rows are exactly what made this tile
+  // show $0.00 beside real tracked spend.
+  const trackedCost24h = normalizeOfficeTrackedCost(periodCosts?.today);
   const healthCheck = useMemo(() => performHealthCheck(agents, []), [agents]);
   const workloads = useMemo(() => analyzeWorkloadDistribution(agents), [agents]);
   const costOpts = useMemo(() => generateCostOptimizations(agents, []), [agents]);
@@ -526,11 +546,7 @@ export default function Whiteboard({
     if (actionCues.length === 0) actionCues.push({ label: 'Ready for work', detail: 'No blockers detected. Agents are ready for the next mission.', tone: 'good' });
 
     const highestAlert = budgetAlerts[0];
-    const costs = periodCosts ?? {
-      today: farmMetrics.totalCostToday,
-      week: farmMetrics.totalCostWeek,
-      month: 0,
-    };
+    const costs = periodCosts;
     const missionCards: MissionCardVm[] = [
       {
         title: 'Active Runs',
@@ -555,10 +571,10 @@ export default function Whiteboard({
       },
       {
         title: 'Spend',
-        value: `$${costs.today.toFixed(2)}`,
-        detail: highestAlert?.message || `$${costs.week.toFixed(2)} this week`,
-        tone: dangerBudgetAlerts.length > 0 ? 'danger' : warningBudgetAlerts.length > 0 ? 'warn' : costs.today > 0 ? 'info' : 'muted',
-        foot: costs.month > 0 ? `$${costs.month.toFixed(2)} month` : 'Budget ledger',
+        value: costs ? formatOfficeTrackedCost(costs.today) : '—',
+        detail: highestAlert?.message || (costs ? `${formatOfficeTrackedCost(costs.week)} over 7 days` : 'Tracked spend is loading or unavailable'),
+        tone: dangerBudgetAlerts.length > 0 ? 'danger' : warningBudgetAlerts.length > 0 ? 'warn' : costs && costs.today > 0 ? 'info' : 'muted',
+        foot: costs && costs.month > 0 ? `${formatOfficeTrackedCost(costs.month)} over 30 days` : 'Budget ledger',
       },
       {
         title: 'Auto Ready',
@@ -614,8 +630,6 @@ export default function Whiteboard({
     connectedCount,
     connections,
     cronJobs,
-    farmMetrics.totalCostToday,
-    farmMetrics.totalCostWeek,
     healthCheck,
     pendingApprovals,
     periodCosts,
@@ -721,13 +735,14 @@ export default function Whiteboard({
               <Text style={s.statLabel}>TOKENS</Text>
             </View>
 
-            {/* Cost cell */}
-            <View style={[s.statCell, { backgroundColor: farmMetrics.totalCostToday > 0 ? '#22c55e10' : '#ffffff04', borderColor: farmMetrics.totalCostToday > 0 ? '#22c55e20' : '#ffffff10' }]}>
-              <Text style={[s.statValue, { color: farmMetrics.totalCostToday > 0 ? '#22c55e' : '#444' }]}>
-                ${farmMetrics.totalCostToday.toFixed(2)}
+            {/* Durable rolling spend. Null means the server snapshot has not
+                been verified, while a verified zero remains a real $0.00. */}
+            <View style={[s.statCell, { backgroundColor: trackedCost24h !== null && trackedCost24h > 0 ? '#22c55e10' : '#ffffff04', borderColor: trackedCost24h !== null && trackedCost24h > 0 ? '#22c55e20' : '#ffffff10' }]}>
+              <Text style={[s.statValue, { color: trackedCost24h !== null && trackedCost24h > 0 ? '#22c55e' : '#444' }]}>
+                {trackedCost24h === null ? '—' : formatOfficeTrackedCost(trackedCost24h)}
               </Text>
-              <CostBurnSparkline cost={farmMetrics.totalCostToday} />
-              <Text style={s.statLabel}>COST</Text>
+              {trackedCost24h !== null ? <CostBurnSparkline cost={trackedCost24h} /> : null}
+              <Text style={s.statLabel}>24H COST</Text>
             </View>
 
             {/* Output cell */}
@@ -739,8 +754,8 @@ export default function Whiteboard({
             </View>
 
             {/* Connections cell */}
-            <View style={[s.statCell, { backgroundColor: '#22d3ee10', borderColor: '#22d3ee20' }]}>
-              <Text style={[s.statValue, { color: connectedCount > 0 ? '#22d3ee' : '#555' }]}>{connectedCount}/{totalConnections || 0}</Text>
+            <View style={[s.statCell, { backgroundColor: '#6366f110', borderColor: '#6366f120' }]}>
+              <Text style={[s.statValue, { color: connectedCount > 0 ? '#6366f1' : '#555' }]}>{connectedCount}/{totalConnections || 0}</Text>
               <Text style={s.statLabel}>LINKS</Text>
             </View>
           </View>
@@ -805,6 +820,7 @@ export default function Whiteboard({
               agents={agents} sortedAgents={sortedAgents} activities={activities}
               runningTasks={runningTasks} farmMetrics={farmMetrics} healthCheck={healthCheck}
               workloads={workloads} costOpts={costOpts} todayStats={todayStats}
+              periodCosts={periodCosts}
               reward={reward} badgeColor={badgeColor} commandCenter={commandCenter}
               readinessLoading={readinessLoading} readinessError={readinessError} onRefreshReadiness={refreshReadiness}
               bridgeLoading={bridgeLoading} bridgeError={bridgeError} onRefreshBridgeReadiness={refreshBridgeReadiness}
@@ -1351,6 +1367,7 @@ function OverviewTab({
   workloads,
   costOpts,
   todayStats,
+  periodCosts,
   reward,
   badgeColor,
   commandCenter,
@@ -1441,8 +1458,8 @@ function OverviewTab({
       <View style={s.sec}>
         <Text style={s.secTitle}>FARM METRICS</Text>
         <View style={s.metricGrid}>
-          <MetricCell label="COST TODAY" value={`$${farmMetrics.totalCostToday.toFixed(2)}`} color={C.error} />
-          <MetricCell label="COST WEEK" value={`$${farmMetrics.totalCostWeek.toFixed(2)}`} color={C.amber} />
+          <MetricCell label="COST 24H" value={periodCosts ? formatOfficeTrackedCost(periodCosts.today) : '—'} color={C.error} />
+          <MetricCell label="COST 7D" value={periodCosts ? formatOfficeTrackedCost(periodCosts.week) : '—'} color={C.amber} />
           <MetricCell label="TOKENS" value={farmMetrics.totalTokensUsed > 0 ? `${(farmMetrics.totalTokensUsed / 1000).toFixed(0)}K` : '0'} color={C.pink} />
           <MetricCell label="MESSAGES" value={String(farmMetrics.totalMessagesProcessed)} color={C.accent} />
           <MetricCell label="AVG SCORE" value={String(farmMetrics.averageScore)} color={C.idle} />
@@ -1908,11 +1925,11 @@ function OpsTab({ cronJobs, activities, costOpts, commandCenter, budgetAlerts, p
       </View>
 
       <View style={s.sec}>
-        <Text style={s.secTitle}>SPEND LEDGER</Text>
+        <Text style={s.secTitle}>TRACKED SPEND</Text>
         <View style={s.ledgerRow}>
-          <MetricCell label="TODAY" value={`$${(periodCosts?.today ?? 0).toFixed(2)}`} color={budgetAlerts.some(a => a.period === 'daily' && (a.level === 'danger' || a.level === 'critical')) ? C.error : C.active} />
-          <MetricCell label="WEEK" value={`$${(periodCosts?.week ?? 0).toFixed(2)}`} color={budgetAlerts.some(a => a.period === 'weekly' && (a.level === 'danger' || a.level === 'critical')) ? C.error : C.amber} />
-          <MetricCell label="MONTH" value={`$${(periodCosts?.month ?? 0).toFixed(2)}`} color={budgetAlerts.some(a => a.period === 'monthly' && (a.level === 'danger' || a.level === 'critical')) ? C.error : C.accent} />
+          <MetricCell label="24H" value={periodCosts ? formatOfficeTrackedCost(periodCosts.today) : '—'} color={budgetAlerts.some(a => a.period === 'daily' && (a.level === 'danger' || a.level === 'critical')) ? C.error : C.active} />
+          <MetricCell label="7D" value={periodCosts ? formatOfficeTrackedCost(periodCosts.week) : '—'} color={budgetAlerts.some(a => a.period === 'weekly' && (a.level === 'danger' || a.level === 'critical')) ? C.error : C.amber} />
+          <MetricCell label="30D" value={periodCosts ? formatOfficeTrackedCost(periodCosts.month) : '—'} color={budgetAlerts.some(a => a.period === 'monthly' && (a.level === 'danger' || a.level === 'critical')) ? C.error : C.accent} />
         </View>
         {budgetAlerts.length > 0 ? (
           budgetAlerts.slice(0, 3).map(alert => (
@@ -1922,7 +1939,9 @@ function OpsTab({ cronJobs, activities, costOpts, commandCenter, budgetAlerts, p
             </View>
           ))
         ) : (
-          <Text style={s.emptyInline}>No budget alerts active</Text>
+          <Text style={s.emptyInline}>
+            {periodCosts ? 'No budget alerts active' : 'Tracked spend is loading or unavailable'}
+          </Text>
         )}
       </View>
 
@@ -1952,7 +1971,7 @@ function OpsTab({ cronJobs, activities, costOpts, commandCenter, budgetAlerts, p
             <View key={job.id} style={s.cronRow}>
               <View style={[s.cronDot, { backgroundColor: job.enabled ? C.active : C.offline }]} />
               <Text style={[s.cronName, !job.enabled && { color: C.textTert }]} numberOfLines={1}>{job.name || job.id.slice(0, 10)}</Text>
-              <Text style={s.cronSched}>{job.schedule?.expr || job.schedule?.kind || ''}</Text>
+              <Text style={s.cronSched}>{formatCronSchedule(job.schedule)}</Text>
             </View>
           ))}
         </View>
@@ -2182,6 +2201,13 @@ const s = StyleSheet.create({
     color: '#6f6f6f',
     letterSpacing: 0.8,
     marginTop: 1,
+  } as any,
+  statSubLabel: {
+    fontSize: 4,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+    color: '#484f58',
+    letterSpacing: 0.4,
   } as any,
   statsTrailing: {
     flexDirection: 'row',

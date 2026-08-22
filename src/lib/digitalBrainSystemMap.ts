@@ -387,7 +387,7 @@ export function buildDigitalBrainSystemMap(input: {
   const nodes: DigitalBrainSystemNode[] = [...STATIC_NODES];
   const edges: DigitalBrainSystemEdge[] = [...STATIC_EDGES];
   const clusters = new Map<string, DigitalBrainSystemCluster>([
-    ['site', { id: 'site', label: 'Site surfaces', color: '#22d3ee', description: 'Primary app surfaces and navigation routes.', nodeIds: [] }],
+    ['site', { id: 'site', label: 'Site surfaces', color: '#6366f1', description: 'Primary app surfaces and navigation routes.', nodeIds: [] }],
     ['chat', { id: 'chat', label: 'Chat + prompts', color: '#38bdf8', description: 'Chat, model selection, and prompt execution.', nodeIds: [] }],
     ['automation', { id: 'automation', label: 'Automation', color: '#f59e0b', description: 'OpenSwan, browser use, computer use, and tool execution.', nodeIds: [] }],
     ['agents', { id: 'agents', label: 'Agents', color: '#a855f7', description: 'Office, terminal agents, Codex/Claude sessions, and agent identities.', nodeIds: [] }],

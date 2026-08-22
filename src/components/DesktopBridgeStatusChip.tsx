@@ -3,11 +3,14 @@
  * Code bridge's desktop-automation state. Mounted next to the Cost
  * Footer in `ChatTab.tsx`'s `EnhancedInput` toolbar.
  *
- * Three states:
+ * Readiness states:
  *   - 🔴 OFFLINE  — bridge not reachable (host down, or pre-Phase-1a version)
  *   - 🟡 OFFLINE  — bridge is up but this platform isn't supported (e.g. Linux)
  *   - 🟡 PAIR     — bridge up + supported, but we haven't called pairDesktopBridge()
  *   - 🟢 READY    — paired + healthy
+ *   - 🟡 UPDATE   — ordinary tools work, but the attachment-open capability is missing
+ *   - 🔵 REFRESH  — newer source is present and health reports an idle-safe refresh
+ *   - 🟠 WAIT     — refresh evidence is missing/malformed or current work blocks it
  *
  * Tapping the chip triggers the pairing flow + opens diagnostics when
  * offline. Polls health every 10s so the chip reflects state after the
@@ -22,6 +25,10 @@ import {
   type DesktopHealth,
 } from '../lib/desktopBridge';
 import {
+  classifyDesktopBridgeHealth,
+  type DesktopBridgeHealthClassification,
+} from '../lib/desktopBridgeProtocol';
+import {
   buildDesktopBridgeRecoveryPayload,
   type DesktopBridgeRecoveryPayload,
 } from '../lib/desktopBridgeRecovery';
@@ -31,6 +38,9 @@ type ChipState =
   | { kind: 'loading' }
   | { kind: 'offline'; reason: 'unreachable' | 'unsupported' }
   | { kind: 'needs_pair' }
+  | { kind: 'capability_missing'; classification: DesktopBridgeHealthClassification }
+  | { kind: 'source_changed'; classification: DesktopBridgeHealthClassification }
+  | { kind: 'restart_blocked'; classification: DesktopBridgeHealthClassification }
   | { kind: 'ready' };
 
 type ChipPhase = 'starting' | 'pairing' | 'checking' | null;
@@ -49,8 +59,26 @@ export default function DesktopBridgeStatusChip({ onMessage, accentColor = '#22c
 
   const probe = useCallback(async () => {
     const health: DesktopHealth | null = await getDesktopBridgeHealth();
-    if (!health) { setState({ kind: 'offline', reason: 'unreachable' }); return; }
-    if (!health.supported) { setState({ kind: 'offline', reason: 'unsupported' }); return; }
+    const classification = classifyDesktopBridgeHealth(health);
+    if (classification.state === 'unavailable') {
+      setState({
+        kind: 'offline',
+        reason: classification.recoveryCode === 'platform_unsupported' ? 'unsupported' : 'unreachable',
+      });
+      return;
+    }
+    if (classification.state === 'capability_missing') {
+      setState({ kind: 'capability_missing', classification });
+      return;
+    }
+    if (classification.state === 'source_changed') {
+      setState({ kind: 'source_changed', classification });
+      return;
+    }
+    if (classification.state === 'restart_blocked') {
+      setState({ kind: 'restart_blocked', classification });
+      return;
+    }
     if (!isDesktopBridgePaired()) { setState({ kind: 'needs_pair' }); return; }
     setState({ kind: 'ready' });
   }, []);
@@ -108,8 +136,14 @@ export default function DesktopBridgeStatusChip({ onMessage, accentColor = '#22c
         await probe();
         return;
       }
-      if (state.kind === 'needs_pair' || state.kind === 'ready') {
-        setPhase('pairing');
+      if (
+        state.kind === 'needs_pair'
+        || state.kind === 'ready'
+        || state.kind === 'capability_missing'
+        || state.kind === 'source_changed'
+        || state.kind === 'restart_blocked'
+      ) {
+        setPhase(state.kind === 'needs_pair' || state.kind === 'ready' ? 'pairing' : 'checking');
         const result = await autoConnectDesktopBridge();
         onMessage?.(result.recoveryPayload ? { ...result.recoveryPayload, content: result.content } : result.content);
         setPhase('checking');
@@ -124,12 +158,15 @@ export default function DesktopBridgeStatusChip({ onMessage, accentColor = '#22c
   if (Platform.OS !== 'web') return null;
 
   const { label, dot, textColor } = visualFor(state, accentColor, phase);
+  const accessibilityHint = hintFor(state);
 
   return (
     <Pressable
       onPress={handlePress}
       accessibilityRole="button"
       accessibilityLabel={`Desktop bridge: ${label}`}
+      accessibilityHint={accessibilityHint}
+      accessibilityState={{ busy }}
       style={({ hovered }: any) => [
         styles.chip,
         hovered && ({ backgroundColor: '#0f172a' } as any),
@@ -143,6 +180,27 @@ export default function DesktopBridgeStatusChip({ onMessage, accentColor = '#22c
   );
 }
 
+function hintFor(state: ChipState): string {
+  switch (state.kind) {
+    case 'loading':
+      return 'Checking the local desktop bridge.';
+    case 'offline':
+      return state.reason === 'unsupported'
+        ? 'Desktop automation is not supported on this platform. Activate for details.'
+        : 'The local desktop bridge is offline. Activate for safe startup instructions and a health recheck.';
+    case 'needs_pair':
+      return 'The bridge is reachable and needs local pairing. Activate to pair it.';
+    case 'capability_missing':
+      return 'Ordinary desktop tools remain available, but uploaded-file opening needs a bridge update. Activate for exact recovery steps.';
+    case 'source_changed':
+      return 'New bridge source is ready for a user-owned supervisor restart. Activate for exact recovery steps.';
+    case 'restart_blocked':
+      return 'Current work or incomplete safety evidence blocks a bridge refresh. Activate to review the blocker without restarting anything.';
+    case 'ready':
+      return 'The current local desktop bridge is paired and ready. Activate to recheck it.';
+  }
+}
+
 function visualFor(state: ChipState, accent: string, phase: ChipPhase): { label: string; dot: string; textColor: string } {
   if (phase === 'starting') return { label: 'START', dot: '#38bdf8', textColor: '#38bdf8' };
   if (phase === 'pairing') return { label: 'PAIRING', dot: '#f59e0b', textColor: '#f59e0b' };
@@ -151,6 +209,9 @@ function visualFor(state: ChipState, accent: string, phase: ChipPhase): { label:
     case 'loading':   return { label: '…',       dot: '#475569', textColor: '#64748b' };
     case 'offline':   return { label: 'OFFLINE', dot: '#ef4444', textColor: '#ef4444' };
     case 'needs_pair':return { label: 'PAIR',    dot: '#f59e0b', textColor: '#f59e0b' };
+    case 'capability_missing': return { label: 'UPDATE', dot: '#f59e0b', textColor: '#f59e0b' };
+    case 'source_changed': return { label: 'REFRESH', dot: '#38bdf8', textColor: '#38bdf8' };
+    case 'restart_blocked': return { label: 'WAIT', dot: '#fb923c', textColor: '#fb923c' };
     case 'ready':     return { label: 'READY',   dot: accent,    textColor: accent };
   }
 }

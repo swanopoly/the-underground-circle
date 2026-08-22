@@ -25,6 +25,64 @@ export interface ComputerFileAdapterResult {
   data?: Record<string, unknown>;
 }
 
+export type DesktopBridgeReadOnlyFileActionMode = 'list' | 'read' | 'search' | 'stat';
+
+export interface DesktopBridgeReadOnlyFileSequencePlan {
+  schemaVersion: 1;
+  mode: 'all_actions_required';
+  actionCount: number;
+  actions: ReadonlyArray<Readonly<{
+    id: string;
+    ordinal: number;
+    text: string;
+    fileMode: DesktopBridgeReadOnlyFileActionMode;
+  }>>;
+}
+
+export type DesktopBridgeReadOnlyFileActionResultStatus =
+  | 'verified'
+  | 'blocked'
+  | 'incomplete'
+  | 'pending';
+
+export interface DesktopBridgeReadOnlyFileSequenceResult {
+  schemaVersion: 1;
+  status: 'completed' | 'partial' | 'blocked';
+  actionCount: number;
+  verifiedActionCount: number;
+  taskCompletionVerified: boolean;
+  actionResults: ReadonlyArray<Readonly<{
+    id: string;
+    ordinal: number;
+    fileMode: DesktopBridgeReadOnlyFileActionMode;
+    status: DesktopBridgeReadOnlyFileActionResultStatus;
+    message: string;
+    warnings: ReadonlyArray<string>;
+  }>>;
+  message: string;
+  warnings: ReadonlyArray<string>;
+}
+
+interface DesktopBridgeReadOnlyFileSequenceContractLike {
+  schemaVersion?: unknown;
+  mode?: unknown;
+  actionCount?: unknown;
+  capped?: unknown;
+  requiresDecompositionBeforeMutation?: unknown;
+  actions?: unknown;
+}
+
+export type DesktopBridgeReadOnlyFileStepExecutor = (
+  task: string,
+) => Promise<ComputerFileAdapterResult | null>;
+
+const DESKTOP_FILE_SEQUENCE_ACTION_LIMIT = 8;
+const DESKTOP_FILE_SEQUENCE_ACTION_TEXT_LIMIT = 800;
+const DESKTOP_FILE_SEQUENCE_VISIBLE_ACTION_RESULT_LIMIT = 6_000;
+const DESKTOP_FILE_SEQUENCE_VISIBLE_TOTAL_LIMIT = 18_000;
+const issuedDesktopBridgeReadOnlyFileSequencePlans = new WeakSet<object>();
+const issuedDesktopBridgeReadOnlyFileSequenceResults = new WeakSet<object>();
+
 function normalizeText(value: string | null | undefined): string {
   return String(value || '').trim().toLowerCase();
 }
@@ -354,6 +412,116 @@ export function planDesktopBridgeFileTask(task: string): {
   };
 }
 
+function classifyExplicitReadOnlyFileAction(
+  actionText: string,
+): { fileMode: DesktopBridgeReadOnlyFileActionMode } | null {
+  // This lane is intentionally closed-world. A missed classification keeps
+  // the complete request in the authenticated agent loop; it never silently
+  // drops a clause or turns model interpretation into file proof.
+  if (/\b(?:rename|move|copy|duplicate|delete|remove|trash|write|save|create|make|append|overwrite|replace|edit|change|upload|download|export|import)\b/i.test(actionText)) {
+    return null;
+  }
+  if (/\b(?:summari[sz]e|analy[sz]e|compare|explain|translate|rewrite|transcribe|interpret|classify|extract|count)\b/i.test(actionText)) {
+    return null;
+  }
+  if (/\b(?:it|them|this|that|those|these|same|former|latter|result|results|found|matching)\b/i.test(actionText)) {
+    return null;
+  }
+
+  const listIntent = /\b(?:list|browse)\b|\bshow\s+(?:me\s+)?(?:the\s+)?(?:files?|folders?|directory|folder contents?|contents?\s+of\s+(?:the\s+)?(?:folder|directory))\b/i.test(actionText);
+  const readIntent = /\b(?:read|preview|inspect)\b|\bshow\s+(?:me\s+)?(?:the\s+)?(?:contents?|text)\s+(?:of|in|from)\b/i.test(actionText);
+  const searchIntent = /\b(?:search(?:\s+for)?|find|locate|look\s+for)\b/i.test(actionText);
+  const statIntent = /\b(?:stat|metadata|size|modified|created|exists?|details?|information)\b/i.test(actionText);
+  const intents = [
+    listIntent ? 'list' as const : null,
+    readIntent ? 'read' as const : null,
+    searchIntent ? 'search' as const : null,
+    statIntent ? 'stat' as const : null,
+  ].filter((value): value is DesktopBridgeReadOnlyFileActionMode => value !== null);
+  if (intents.length !== 1) return null;
+
+  const plan = planDesktopBridgeFileTask(actionText);
+  const fileMode = intents[0];
+  if (plan.mode !== fileMode) return null;
+  if (fileMode === 'read' && (!plan.path || !looksLikeExplicitPath(plan.path))) return null;
+  if (fileMode === 'search' && !plan.query.trim()) return null;
+  if (fileMode === 'stat' && !plan.path && !plan.query.trim()) return null;
+  return { fileMode };
+}
+
+/**
+ * Closed-world gate for the legacy one-action shortcut. Semantic work such as
+ * summarizing or comparing files belongs to the authenticated agent loop even
+ * when it begins with a read verb.
+ */
+export function isExplicitDesktopBridgeReadOnlyFileTask(task: string): boolean {
+  const text = String(task || '').replace(/\s+/g, ' ').trim();
+  return Boolean(text && classifyExplicitReadOnlyFileAction(text));
+}
+
+/**
+ * Compile only an uncapped canonical A1…An ledger whose every clause is one
+ * independent deterministic desktop-bridge read. Cross-action pronouns and
+ * dependencies deliberately fail closed because they need a target-binding
+ * receipt, not text substitution.
+ */
+export function compileDesktopBridgeReadOnlyFileSequence(
+  contract: DesktopBridgeReadOnlyFileSequenceContractLike | null | undefined,
+): DesktopBridgeReadOnlyFileSequencePlan | null {
+  try {
+    if (
+      !contract
+      || contract.schemaVersion !== 1
+      || contract.mode !== 'all_actions_required'
+      || contract.capped !== false
+      || contract.requiresDecompositionBeforeMutation !== false
+      || !Array.isArray(contract.actions)
+      || contract.actions.length < 2
+      || contract.actions.length > DESKTOP_FILE_SEQUENCE_ACTION_LIMIT
+      || contract.actionCount !== contract.actions.length
+    ) return null;
+
+    const actions: Array<DesktopBridgeReadOnlyFileSequencePlan['actions'][number]> = [];
+    for (let index = 0; index < contract.actions.length; index += 1) {
+      const rawAction = contract.actions[index];
+      if (!rawAction || typeof rawAction !== 'object') return null;
+      const action = rawAction as Record<string, unknown>;
+      const expectedId = `A${index + 1}`;
+      const text = typeof action.text === 'string'
+        ? action.text.replace(/\s+/g, ' ').trim()
+        : '';
+      if (
+        action.id !== expectedId
+        || action.ordinal !== index + 1
+        || !text
+        || text.length > DESKTOP_FILE_SEQUENCE_ACTION_TEXT_LIMIT
+        || /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u202A-\u202E\u2066-\u2069]/u.test(text)
+        || !Array.isArray(action.dependsOnActionIds)
+        || action.dependsOnActionIds.length !== 0
+      ) return null;
+      const classified = classifyExplicitReadOnlyFileAction(text);
+      if (!classified) return null;
+      actions.push(Object.freeze({
+        id: expectedId,
+        ordinal: index + 1,
+        text,
+        fileMode: classified.fileMode,
+      }));
+    }
+
+    const plan = Object.freeze({
+      schemaVersion: 1 as const,
+      mode: 'all_actions_required' as const,
+      actionCount: actions.length,
+      actions: Object.freeze(actions),
+    });
+    issuedDesktopBridgeReadOnlyFileSequencePlans.add(plan);
+    return plan;
+  } catch {
+    return null;
+  }
+}
+
 function pickTool(tools: McpTool[], scorer: (tool: McpTool) => number): McpTool | null {
   const ranked = [...tools]
     .map((tool) => ({ tool, score: scorer(tool) }))
@@ -627,7 +795,7 @@ export async function executeDesktopBridgeFileTask(task: string): Promise<Comput
         ok: true,
         message: formatDesktopBridgeStat(result.data!),
         warnings: [],
-        data: { adapter: 'desktop_bridge', plan, source, result: result.data },
+        data: { adapter: 'desktop_bridge', plan, source, resolution: search.data, result: result.data },
       };
     }
 
@@ -874,6 +1042,245 @@ export async function executeDesktopBridgeFileTask(task: string): Promise<Comput
       data: { adapter: 'desktop_bridge', plan },
     };
   }
+}
+
+function boundedDesktopFileSequenceText(value: unknown, limit: number): string {
+  const text = String(value || '')
+    .replace(/\r\n?|[\u0085\u2028\u2029]/gu, '\n')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/gu, '')
+    .trim();
+  if (text.length <= limit) return text;
+  return `${text.slice(0, Math.max(0, limit - 26)).trimEnd()}\n…result display truncated`;
+}
+
+function desktopBridgeResultMatchesReadOnlyFileAction(
+  action: DesktopBridgeReadOnlyFileSequencePlan['actions'][number],
+  result: ComputerFileAdapterResult,
+): boolean {
+  const data = result.data;
+  if (!data || data.adapter !== 'desktop_bridge') return false;
+  const actualPlan = data.plan;
+  if (!actualPlan || typeof actualPlan !== 'object') return false;
+  const expectedPlan = planDesktopBridgeFileTask(action.text);
+  const actual = actualPlan as Record<string, unknown>;
+  const planMatches = actual.mode === action.fileMode
+    && actual.mode === expectedPlan.mode
+    && actual.rootPath === expectedPlan.rootPath
+    && actual.query === expectedPlan.query
+    && actual.path === expectedPlan.path;
+  if (!planMatches || !data.result || typeof data.result !== 'object') return false;
+  const typedResult = data.result as Record<string, unknown>;
+  if (action.fileMode === 'list') {
+    return typedResult.requestPath === expectedPlan.rootPath;
+  }
+  if (action.fileMode === 'read') {
+    return typedResult.requestPath === expectedPlan.path;
+  }
+  if (action.fileMode === 'search') {
+    return typedResult.requestRootPath === expectedPlan.rootPath
+      && typedResult.requestQuery === normalizeDesktopFileSearchQuery(expectedPlan.query);
+  }
+  if (expectedPlan.path) {
+    return typedResult.requestPath === expectedPlan.path;
+  }
+  const expectedQuery = normalizeDesktopFileSearchQuery(expectedPlan.query);
+  const source = data.source;
+  if (source && typeof source === 'object') {
+    const resolution = data.resolution;
+    return Boolean(
+      resolution
+      && typeof resolution === 'object'
+      && (resolution as Record<string, unknown>).requestRootPath === expectedPlan.rootPath
+      && (resolution as Record<string, unknown>).requestQuery === expectedQuery
+      && typeof (source as Record<string, unknown>).path === 'string'
+      && typedResult.requestPath === (source as Record<string, unknown>).path,
+    );
+  }
+  return typedResult.requestRootPath === expectedPlan.rootPath
+    && typedResult.requestQuery === expectedQuery;
+}
+
+function desktopBridgeReadOnlyFileResultWasTruncated(result: ComputerFileAdapterResult): boolean {
+  const raw = result.data?.result;
+  return Boolean(raw && typeof raw === 'object' && (raw as { truncated?: unknown }).truncated === true);
+}
+
+/**
+ * Verify one deterministic read-only result against the exact requested
+ * operation and bridge request echo. This is deliberately false for MCP
+ * results, semantic tasks, missing/stale bridge echoes, and truncated output.
+ */
+export function isDesktopBridgeReadOnlyFileTaskResultVerified(
+  task: string,
+  result: ComputerFileAdapterResult | null | undefined,
+): boolean {
+  const text = String(task || '').replace(/\s+/g, ' ').trim();
+  const classified = text ? classifyExplicitReadOnlyFileAction(text) : null;
+  if (!classified || !result?.ok) return false;
+  return desktopBridgeResultMatchesReadOnlyFileAction({
+    id: 'A1',
+    ordinal: 1,
+    text,
+    fileMode: classified.fileMode,
+  }, result) && !desktopBridgeReadOnlyFileResultWasTruncated(result);
+}
+
+function buildDesktopBridgeReadOnlyFileSequenceMessage(
+  status: DesktopBridgeReadOnlyFileSequenceResult['status'],
+  verifiedActionCount: number,
+  actionResults: DesktopBridgeReadOnlyFileSequenceResult['actionResults'],
+): string {
+  const heading = status === 'completed'
+    ? `Completed and independently verified all ${actionResults.length} requested file actions.`
+    : status === 'partial'
+      ? `Verified ${verifiedActionCount} of ${actionResults.length} requested file actions; the rest were not reported complete.`
+      : `The first requested file action could not be verified, so no later action was run.`;
+  const detail = actionResults.map((action) => {
+    const label = action.status === 'verified'
+      ? 'verified'
+      : action.status === 'pending'
+        ? 'pending — not run'
+        : action.status;
+    const evidenceBlock = (action.message || 'Waiting for the prior action to finish.')
+      .split('\n')
+      .map((line) => `    ${line}`)
+      .join('\n');
+    return `${action.id} · ${label}\n${evidenceBlock}`;
+  }).join('\n\n');
+  return boundedDesktopFileSequenceText(
+    `${heading}\n\n${detail}`,
+    DESKTOP_FILE_SEQUENCE_VISIBLE_TOTAL_LIMIT,
+  );
+}
+
+/**
+ * Run a compiler-issued read-only file sequence once, in ledger order. The
+ * first non-authoritative result stops the sequence; later actions stay
+ * pending and are never silently attempted or reported complete.
+ */
+export async function runDesktopBridgeReadOnlyFileSequencePlan(
+  plan: DesktopBridgeReadOnlyFileSequencePlan,
+  executeAction: DesktopBridgeReadOnlyFileStepExecutor = executeDesktopBridgeFileTask,
+): Promise<DesktopBridgeReadOnlyFileSequenceResult | null> {
+  if (
+    !issuedDesktopBridgeReadOnlyFileSequencePlans.has(plan as object)
+    || !Object.isFrozen(plan)
+    || !Object.isFrozen(plan.actions)
+    || typeof executeAction !== 'function'
+  ) return null;
+
+  const actionResults: Array<DesktopBridgeReadOnlyFileSequenceResult['actionResults'][number]> = [];
+  const warnings: string[] = [];
+  let stopped = false;
+
+  for (const action of plan.actions) {
+    if (stopped) {
+      actionResults.push(Object.freeze({
+        id: action.id,
+        ordinal: action.ordinal,
+        fileMode: action.fileMode,
+        status: 'pending' as const,
+        message: 'Not run because an earlier requested action was not verified.',
+        warnings: Object.freeze([] as string[]),
+      }));
+      continue;
+    }
+
+    let result: ComputerFileAdapterResult | null = null;
+    try {
+      result = await executeAction(action.text);
+    } catch (error: any) {
+      const warning = boundedDesktopFileSequenceText(
+        `Desktop bridge file action failed: ${error?.message || 'unknown error'}.`,
+        320,
+      );
+      warnings.push(warning);
+      actionResults.push(Object.freeze({
+        id: action.id,
+        ordinal: action.ordinal,
+        fileMode: action.fileMode,
+        status: 'blocked' as const,
+        message: 'The desktop bridge could not complete this requested file action.',
+        warnings: Object.freeze([warning]),
+      }));
+      stopped = true;
+      continue;
+    }
+
+    const stepWarnings = Object.freeze((result?.warnings || [])
+      .slice(0, 4)
+      .map((warning) => boundedDesktopFileSequenceText(warning, 320))
+      .filter(Boolean));
+    warnings.push(...stepWarnings);
+    const matchesAction = Boolean(result && desktopBridgeResultMatchesReadOnlyFileAction(action, result));
+    const truncated = Boolean(result && desktopBridgeReadOnlyFileResultWasTruncated(result));
+    const status: DesktopBridgeReadOnlyFileActionResultStatus = !result || !result.ok
+      ? 'blocked'
+      : !matchesAction || truncated
+        ? 'incomplete'
+        : 'verified';
+    const message = !result
+      ? 'The desktop bridge is unavailable, so this action was not run.'
+      : !matchesAction
+        ? 'The desktop bridge result was not bound to this exact requested action.'
+        : truncated
+          ? `${boundedDesktopFileSequenceText(result.message, DESKTOP_FILE_SEQUENCE_VISIBLE_ACTION_RESULT_LIMIT)}\n\nThe bridge truncated this result, so the action is not fully verified.`
+          : boundedDesktopFileSequenceText(result.message, DESKTOP_FILE_SEQUENCE_VISIBLE_ACTION_RESULT_LIMIT);
+    actionResults.push(Object.freeze({
+      id: action.id,
+      ordinal: action.ordinal,
+      fileMode: action.fileMode,
+      status,
+      message,
+      warnings: stepWarnings,
+    }));
+    if (status !== 'verified') stopped = true;
+  }
+
+  const frozenActionResults = Object.freeze(actionResults);
+  const verifiedActionCount = frozenActionResults.filter((action) => action.status === 'verified').length;
+  const status: DesktopBridgeReadOnlyFileSequenceResult['status'] = verifiedActionCount === plan.actionCount
+    ? 'completed'
+    : verifiedActionCount > 0
+      ? 'partial'
+      : 'blocked';
+  const uniqueWarnings = Object.freeze([...new Set(warnings)].slice(0, 12));
+  const sequenceResult = Object.freeze({
+    schemaVersion: 1 as const,
+    status,
+    actionCount: plan.actionCount,
+    verifiedActionCount,
+    taskCompletionVerified: status === 'completed',
+    actionResults: frozenActionResults,
+    message: buildDesktopBridgeReadOnlyFileSequenceMessage(status, verifiedActionCount, frozenActionResults),
+    warnings: uniqueWarnings,
+  });
+  issuedDesktopBridgeReadOnlyFileSequenceResults.add(sequenceResult);
+  return sequenceResult;
+}
+
+/** Exact in-process completion check; JSON copies and caller-shaped lookalikes are inert. */
+export function isDesktopBridgeReadOnlyFileSequenceCompletionVerified(
+  value: unknown,
+): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const result = value as DesktopBridgeReadOnlyFileSequenceResult;
+  return issuedDesktopBridgeReadOnlyFileSequenceResults.has(result as object)
+    && Object.isFrozen(result)
+    && Object.isFrozen(result.actionResults)
+    && result.schemaVersion === 1
+    && result.status === 'completed'
+    && result.taskCompletionVerified === true
+    && result.actionCount >= 2
+    && result.actionCount <= DESKTOP_FILE_SEQUENCE_ACTION_LIMIT
+    && result.verifiedActionCount === result.actionCount
+    && result.actionResults.length === result.actionCount
+    && result.actionResults.every((action, index) => (
+      Object.isFrozen(action)
+      && action.id === `A${index + 1}`
+      && action.ordinal === index + 1
+      && action.status === 'verified'
+    ));
 }
 
 export async function executeComputerFileTask(args: {

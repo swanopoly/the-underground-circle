@@ -103,7 +103,7 @@ export interface AgentMonitorHostProps {
   testID?: string;
 }
 
-const DEFAULT_ACCENT = '#22d3ee';
+const DEFAULT_ACCENT = '#6366f1';
 const DEFAULT_OFFSET = 16;
 const DEFAULT_Z_INDEX = 1150;
 
@@ -145,8 +145,8 @@ function getStatusVisual(status: AgentMonitorDisplayStatus, accentColor: string)
       return {
         label: 'Running',
         color: accentColor,
-        bg: alphaColor(accentColor, '1f', '#22d3ee1f'),
-        border: alphaColor(accentColor, '66', '#22d3ee66'),
+        bg: alphaColor(accentColor, '1f', '#6366f11f'),
+        border: alphaColor(accentColor, '66', '#6366f166'),
       };
     case 'waiting':
       return { label: 'Waiting', color: '#f59e0b', bg: '#f59e0b1f', border: '#f59e0b66' };

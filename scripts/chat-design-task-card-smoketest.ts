@@ -8,7 +8,8 @@ import { buildChatDesignTaskCardModel } from '../src/lib/chatDesignTaskCard';
 import { buildChatComputerRequestRoute } from '../src/lib/chatComputerRequestRouter';
 import { buildChatComputerRequestUserNotice } from '../src/lib/chatComputerRequestUx';
 
-const desktopTask = buildDesktopAttachmentComputerTask('change APR to 2.9% and export a proof from the InDesign banner', [{
+const desktopTaskRequest = 'change APR to 2.9% and export a proof from the InDesign banner';
+const legacyDesktopTaskProjection = buildDesktopAttachmentComputerTask(desktopTaskRequest, [{
   name: 'dealer-banner.indd',
   mimeType: 'application/octet-stream',
   sizeBytes: 4_200_000,
@@ -27,6 +28,14 @@ const desktopTask = buildDesktopAttachmentComputerTask('change APR to 2.9% and e
   sha256: 'b'.repeat(64),
   appName: 'Adobe Photoshop',
 }]);
+assert(!legacyDesktopTaskProjection.includes('/Users/chris'), 'legacy compatibility projection never exposes local paths');
+assert(!legacyDesktopTaskProjection.includes('dealer-banner.indd'), 'legacy compatibility projection never exposes filenames');
+assert(!legacyDesktopTaskProjection.includes(desktopTaskRequest), 'legacy compatibility projection never exposes the original edit request');
+
+// Design-card presentation consumes the original user task retained by the
+// trusted Chat/run envelope. The retired desktop-package string is deliberately
+// value-free and cannot reconstruct app, operation, filename, or proof data.
+const desktopTask = desktopTaskRequest;
 
 const readyHandoff = buildChatComputerHandoffContext({
   task: desktopTask,
@@ -50,7 +59,7 @@ assert(readyCard.reviewChecklist.some((item) => /Text inventory/i.test(item)), '
 assert(readyCard.reviewChecklist.some((item) => /fonts|links|overset/i.test(item)), 'InDesign card includes production blocker review item');
 assert(readyCard.phases.some((phase) => phase.id === 'inspect' && phase.state === 'done'));
 assert(readyCard.phases.some((phase) => phase.id === 'verify' && phase.state === 'pending'));
-assert.equal(readyCard.packageSummary, '2 files, 1 primary, 2 hashed');
+assert.equal(readyCard.packageSummary, undefined, 'value-free handoff does not reconstruct a desktop package summary');
 assert(!JSON.stringify(readyCard).includes('/Users/chris'), 'card model hides local package paths');
 assert(!JSON.stringify(readyCard).includes(DESKTOP_ATTACHMENT_MANIFEST_FILENAME), 'card model hides manifest path');
 
@@ -83,7 +92,8 @@ assert.match(blockedCard.nextAction, /InDesign needs Accessibility permission/i)
 assert.equal(blockedCard.blockerSummary, 'InDesign needs Accessibility permission');
 assert(blockedCard.phases.some((phase) => phase.state === 'blocked'));
 
-const photoshopTask = buildDesktopAttachmentComputerTask('remove the background with Photoshop generative fill, adjust color, and export a PNG proof', [{
+const photoshopTaskRequest = 'remove the background with Photoshop generative fill, adjust color, and export a PNG proof';
+const legacyPhotoshopTaskProjection = buildDesktopAttachmentComputerTask(photoshopTaskRequest, [{
   name: 'hero.psd',
   mimeType: 'application/octet-stream',
   sizeBytes: 9_200_000,
@@ -93,6 +103,9 @@ const photoshopTask = buildDesktopAttachmentComputerTask('remove the background 
   sha256: 'c'.repeat(64),
   appName: 'Adobe Photoshop',
 }]);
+assert(!legacyPhotoshopTaskProjection.includes('/Users/chris'), 'Photoshop compatibility projection hides its local path');
+assert(!legacyPhotoshopTaskProjection.includes('hero.psd'), 'Photoshop compatibility projection hides its filename');
+const photoshopTask = photoshopTaskRequest;
 const photoshopHandoff = buildChatComputerHandoffContext({
   task: photoshopTask,
   entrypoint: 'agent_runtime',
@@ -113,7 +126,7 @@ assert.equal(photoshopCard.creativeAiSummary, 'Localized cleanup or replacement'
 assert(photoshopCard.proofSignals.some((signal) => /raster proof|screenshot/i.test(signal)));
 assert(photoshopCard.reviewChecklist.some((item) => /Layer inventory/i.test(item)), 'Photoshop card includes layer inventory review item');
 assert(photoshopCard.reviewChecklist.some((item) => /Selection\/mask/i.test(item)), 'Photoshop card includes selection/mask review item');
-assert.equal(photoshopCard.packageSummary, '1 file, 1 primary, 1 hashed');
+assert.equal(photoshopCard.packageSummary, undefined, 'Photoshop card does not infer a package from the value-free compatibility descriptor');
 
 const photoshopSaveForWebHandoff = buildChatComputerHandoffContext({
   task: 'open the file Screenshot 2026-05-21 at 4.44.42\u202fPM thats on the desktop and open it in Photoshop and rename it lmao and save it as a png',

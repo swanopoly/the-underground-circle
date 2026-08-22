@@ -169,6 +169,8 @@ const SECONDARY_DB_STORE = 'kv';
 const SECONDARY_TOKEN_KEY = 'pair_token_v1';
 const SECONDARY_SECRET_NAMESPACE = 'desktop_bridge';
 const SECONDARY_SECRET_ID = 'pair_token';
+let desktopBridgeTokenGeneration = 0;
+const pendingSecondaryTokenWrites = new Set<Promise<void>>();
 
 function openSecondaryDb(): Promise<IDBDatabase | null> {
   return new Promise((resolve) => {
@@ -254,11 +256,42 @@ async function readSecondaryToken(): Promise<string | null> {
   }
 }
 
-export function clearDesktopBridgeToken(): void {
+function trackSecondaryTokenWrite(value: string, generation: number): void {
+  const pending = (async () => {
+    await writeSecondaryToken(value);
+    if (generation !== desktopBridgeTokenGeneration) {
+      await writeSecondaryToken(null);
+    }
+  })();
+  pendingSecondaryTokenWrites.add(pending);
+  void pending.then(
+    () => pendingSecondaryTokenWrites.delete(pending),
+    () => pendingSecondaryTokenWrites.delete(pending),
+  );
+}
+
+async function invalidateDesktopBridgeTokenStorage(): Promise<void> {
+  desktopBridgeTokenGeneration += 1;
   try {
     if (typeof localStorage !== 'undefined') localStorage.removeItem(TOKEN_KEY);
   } catch {}
-  void writeSecondaryToken(null);
+  if (pendingSecondaryTokenWrites.size > 0) {
+    await Promise.allSettled(Array.from(pendingSecondaryTokenWrites));
+  }
+  await writeSecondaryToken(null);
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.removeItem(TOKEN_KEY);
+  } catch {}
+}
+
+export function clearDesktopBridgeToken(): void {
+  void invalidateDesktopBridgeTokenStorage();
+}
+
+/** Awaitable logout variant so a secondary IndexedDB/keychain copy cannot
+ * survive after the signed-out UI is handed to another account. */
+export async function clearDesktopBridgeTokenForLogout(): Promise<void> {
+  await invalidateDesktopBridgeTokenStorage();
 }
 
 /**
@@ -288,6 +321,7 @@ export function getDesktopBridgeToken(): string | null {
  * failure the caller surfaces the original error to the user.
  */
 export async function ensureDesktopBridgePaired(): Promise<DesktopResult<{ token: string; autoPaired: boolean }>> {
+  const tokenGeneration = desktopBridgeTokenGeneration;
   const cached = readToken();
   if (cached && cached.length >= 32) {
     return { ok: true, data: { token: cached, autoPaired: false } };
@@ -295,18 +329,24 @@ export async function ensureDesktopBridgePaired(): Promise<DesktopResult<{ token
   // Read-through fallback (gap #9): localStorage was cleared but the
   // secondary copy survived — repopulate the primary and skip re-pairing.
   const recovered = await readSecondaryToken();
+  if (tokenGeneration !== desktopBridgeTokenGeneration) {
+    return { ok: false, error: 'bridge pairing was cleared during account exit', errorCode: 'not_paired' };
+  }
   if (recovered && recovered.length >= 32) {
     writeToken(recovered);
     return { ok: true, data: { token: recovered, autoPaired: false } };
   }
   const health = await getDesktopBridgeHealth();
+  if (tokenGeneration !== desktopBridgeTokenGeneration) {
+    return { ok: false, error: 'bridge pairing was cleared during account exit', errorCode: 'not_paired' };
+  }
   if (!health) {
     return { ok: false, error: 'bridge_offline', errorCode: 'bridge_offline' };
   }
   if (!health.supported) {
     return { ok: false, error: 'platform_unsupported', errorCode: 'platform_unsupported' };
   }
-  const paired = await pairDesktopBridge();
+  const paired = await pairDesktopBridgeAtGeneration(tokenGeneration);
   if (!paired.ok) return paired as DesktopResult<{ token: string; autoPaired: boolean }>;
   return { ok: true, data: { token: paired.data!.token, autoPaired: true } };
 }
@@ -318,7 +358,9 @@ export async function ensureDesktopBridgePaired(): Promise<DesktopResult<{ token
  * before the bridge returns the shared token, then caches it locally. Call once
  * per device.
  */
-export async function pairDesktopBridge(): Promise<DesktopResult<{ token: string }>> {
+async function pairDesktopBridgeAtGeneration(
+  tokenGeneration: number,
+): Promise<DesktopResult<{ token: string }>> {
   const base = getDesktopBridgeBaseUrl();
   if (!base) {
     return { ok: false, error: 'bridge unavailable in this environment', errorCode: 'bridge_offline' };
@@ -332,13 +374,20 @@ export async function pairDesktopBridge(): Promise<DesktopResult<{ token: string
         errorCode: paired.status === 401 || paired.status === 403 ? 'not_paired' : 'unknown',
       };
     }
+    if (tokenGeneration !== desktopBridgeTokenGeneration) {
+      return { ok: false, error: 'bridge pairing was cleared during account exit', errorCode: 'not_paired' };
+    }
     writeToken(paired.token);
     // Dual-write: secondary copy survives a localStorage clear (gap #9).
-    void writeSecondaryToken(paired.token);
+    trackSecondaryTokenWrite(paired.token, tokenGeneration);
     return { ok: true, data: { token: paired.token } };
   } catch (err: any) {
     return { ok: false, error: err?.message || 'bridge unreachable', errorCode: 'bridge_offline' };
   }
+}
+
+export async function pairDesktopBridge(): Promise<DesktopResult<{ token: string }>> {
+  return pairDesktopBridgeAtGeneration(desktopBridgeTokenGeneration);
 }
 
 // ─── Desktop actions ───────────────────────────────────────────────────────
@@ -1175,26 +1224,26 @@ export async function requestLocalFileSessionGrant(request: LocalFileSessionGran
   return { ok: true, data: grant };
 }
 
-export async function listFiles(rawPath: string): Promise<DesktopResult<{ path: string; entries: DesktopFileEntry[]; truncated: boolean }>> {
+export async function listFiles(rawPath: string): Promise<DesktopResult<{ requestPath: string | null; path: string; entries: DesktopFileEntry[]; truncated: boolean }>> {
   const v = validateDesktopPath(rawPath);
   if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
   const grantHeaders = await ensureLocalFileGrantHeaders([v.path], 'read', `List files in ${v.path}`);
-  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<{ path: string; entries: DesktopFileEntry[]; truncated: boolean }>(grantHeaders);
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<{ requestPath: string | null; path: string; entries: DesktopFileEntry[]; truncated: boolean }>(grantHeaders);
   const r = await callBridge('GET', `/desktop/file_list?path=${encodeURIComponent(v.path)}`, undefined, { headers: grantHeaders.data });
-  if (!r.ok) return r as DesktopResult<{ path: string; entries: DesktopFileEntry[]; truncated: boolean }>;
+  if (!r.ok) return r as DesktopResult<{ requestPath: string | null; path: string; entries: DesktopFileEntry[]; truncated: boolean }>;
   const d = r.data as any;
-  return { ok: true, data: { path: String(d?.path || v.path), entries: Array.isArray(d?.entries) ? d.entries : [], truncated: Boolean(d?.truncated) } };
+  return { ok: true, data: { requestPath: typeof d?.requestPath === 'string' ? d.requestPath : null, path: String(d?.path || v.path), entries: Array.isArray(d?.entries) ? d.entries : [], truncated: Boolean(d?.truncated) } };
 }
 
-export async function readFile(rawPath: string, maxBytes?: number): Promise<DesktopResult<{ path: string; content: string; modelContent: string; size: number; truncated: boolean }>> {
+export async function readFile(rawPath: string, maxBytes?: number): Promise<DesktopResult<{ requestPath: string | null; path: string; content: string; modelContent: string; size: number; truncated: boolean }>> {
   const v = validateDesktopPath(rawPath);
   if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
   const grantHeaders = await ensureLocalFileGrantHeaders([v.path], 'read', `Read local file ${v.path}`);
-  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<{ path: string; content: string; modelContent: string; size: number; truncated: boolean }>(grantHeaders);
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<{ requestPath: string | null; path: string; content: string; modelContent: string; size: number; truncated: boolean }>(grantHeaders);
   const params = new URLSearchParams({ path: v.path });
   if (typeof maxBytes === 'number') params.set('maxBytes', String(maxBytes));
   const r = await callBridge('GET', `/desktop/file_read?${params.toString()}`, undefined, { headers: grantHeaders.data });
-  if (!r.ok) return r as DesktopResult<{ path: string; content: string; modelContent: string; size: number; truncated: boolean }>;
+  if (!r.ok) return r as DesktopResult<{ requestPath: string | null; path: string; content: string; modelContent: string; size: number; truncated: boolean }>;
   const d = r.data as any;
   const content = String(d?.content || '');
   // QW2: file contents are UNTRUSTED local data. Raw `content` is preserved
@@ -1203,7 +1252,7 @@ export async function readFile(rawPath: string, maxBytes?: number): Promise<Desk
   // (invisible Tag-char smuggling stripped, auto-loading markdown defanged).
   return {
     ok: true,
-    data: { path: String(d?.path || v.path), content, modelContent: sanitizeUntrustedForModel(content), size: Number(d?.size || 0), truncated: Boolean(d?.truncated) },
+    data: { requestPath: typeof d?.requestPath === 'string' ? d.requestPath : null, path: String(d?.path || v.path), content, modelContent: sanitizeUntrustedForModel(content), size: Number(d?.size || 0), truncated: Boolean(d?.truncated) },
   };
 }
 
@@ -1251,13 +1300,13 @@ export type DesktopFileSearchOptions = {
   extensions?: string[];
 };
 
-export async function searchFiles(rootPath: string, query: string, options: DesktopFileSearchOptions = {}): Promise<DesktopResult<{ rootPath: string; query: string; matches: DesktopFileSearchMatch[]; visited: number; searchedContent?: number; truncated: boolean }>> {
+export async function searchFiles(rootPath: string, query: string, options: DesktopFileSearchOptions = {}): Promise<DesktopResult<{ requestRootPath: string | null; requestQuery: string | null; rootPath: string; query: string; matches: DesktopFileSearchMatch[]; visited: number; searchedContent?: number; truncated: boolean }>> {
   const v = validateDesktopPath(rootPath);
   if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
   const q = normalizeDesktopFileSearchQuery(query);
   if (!q || q.length > 120) return { ok: false, error: 'query is required and must be <= 120 chars', errorCode: 'invalid_input' };
   const grantHeaders = await ensureLocalFileGrantHeaders([v.path], 'read', `Search local files in ${v.path}`);
-  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<{ rootPath: string; query: string; matches: DesktopFileSearchMatch[]; visited: number; searchedContent?: number; truncated: boolean }>(grantHeaders);
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<{ requestRootPath: string | null; requestQuery: string | null; rootPath: string; query: string; matches: DesktopFileSearchMatch[]; visited: number; searchedContent?: number; truncated: boolean }>(grantHeaders);
   const params = new URLSearchParams({ rootPath: v.path, query: q });
   if (typeof options.maxResults === 'number') params.set('maxResults', String(options.maxResults));
   if (typeof options.maxFiles === 'number') params.set('maxFiles', String(options.maxFiles));
@@ -1265,11 +1314,13 @@ export async function searchFiles(rootPath: string, query: string, options: Desk
   if (typeof options.includeContent === 'boolean') params.set('includeContent', String(options.includeContent));
   if (Array.isArray(options.extensions) && options.extensions.length > 0) params.set('extensions', options.extensions.join(','));
   const r = await callBridge('GET', `/desktop/file_search?${params.toString()}`, undefined, { headers: grantHeaders.data });
-  if (!r.ok) return r as DesktopResult<{ rootPath: string; query: string; matches: DesktopFileSearchMatch[]; visited: number; searchedContent?: number; truncated: boolean }>;
+  if (!r.ok) return r as DesktopResult<{ requestRootPath: string | null; requestQuery: string | null; rootPath: string; query: string; matches: DesktopFileSearchMatch[]; visited: number; searchedContent?: number; truncated: boolean }>;
   const d = r.data as any;
   return {
     ok: true,
     data: {
+      requestRootPath: typeof d?.requestRootPath === 'string' ? d.requestRootPath : null,
+      requestQuery: typeof d?.requestQuery === 'string' ? d.requestQuery : null,
       rootPath: String(d?.rootPath || v.path),
       query: String(d?.query || q),
       matches: Array.isArray(d?.matches) ? d.matches : [],
@@ -1281,6 +1332,7 @@ export async function searchFiles(rootPath: string, query: string, options: Desk
 }
 
 export type DesktopFileStat = {
+  requestPath?: string | null;
   path: string;
   exists: boolean;
   kind: 'file' | 'directory' | 'symlink' | 'other' | null;
@@ -1303,6 +1355,7 @@ export async function statFile(rawPath: string): Promise<DesktopResult<DesktopFi
   return {
     ok: true,
     data: {
+      requestPath: typeof d?.requestPath === 'string' ? d.requestPath : null,
       path: String(d?.path || v.path),
       exists: Boolean(d?.exists),
       kind,
@@ -2116,6 +2169,526 @@ export async function stageAttachmentManifestForDesktop(args: {
       sha256: d?.sha256 ? String(d.sha256) : undefined,
     },
   };
+}
+
+// ─── Opaque, one-shot uploaded-attachment native open ─────────────────────
+//
+// This is deliberately separate from the legacy path-returning staging API.
+// The exported capability is value-free and frozen. Its random bearer exists
+// only in this module's WeakMap and a dedicated request header; object spread,
+// structured clone, JSON serialization, refresh, and forged lookalikes do not
+// carry authority.
+
+export type DesktopAttachmentOpenScope = Readonly<{
+  userId: string;
+  circleId: string;
+  threadId: string;
+  messageId: string;
+  attachmentId: string;
+}>;
+
+export type DesktopAttachmentOpenCapability = Readonly<{
+  schemaVersion: 1;
+  kind: 'desktop_attachment_open';
+  attachmentFingerprint: string;
+  scopeFingerprint: string;
+  requestedAppFingerprint: string;
+  resolvedAppFingerprint: string;
+  documentFingerprint: string;
+  sha256: string;
+  sizeBytes: number;
+  bridgeInstanceId: string;
+  expiresAt: string;
+}>;
+
+export type DesktopAttachmentOpenInspection = DesktopAttachmentOpenCapability & Readonly<{
+  available: true;
+}>;
+
+export type DesktopAttachmentOpenDispatchReceipt = DesktopAttachmentOpenCapability & Readonly<{
+  dispatched: true;
+  dispatchAcknowledged: true;
+  completionVerified: false;
+  dispatchedAt: string;
+}>;
+
+export type DesktopAttachmentOpenObservation = DesktopAttachmentOpenCapability & Readonly<{
+  observedAt: string;
+  appRunning: boolean;
+  frontmost: boolean;
+  documentOpen: boolean;
+  appProcessFingerprint: string;
+  windowFingerprint: string;
+  observationFingerprint: string;
+}>;
+
+type DesktopAttachmentOpenPrivateState = {
+  bearer: string;
+  scope: DesktopAttachmentOpenScope;
+  scopeCanonical: string;
+  status: 'active' | 'inspecting' | 'consuming' | 'dispatched' | 'observing' | 'spent';
+};
+
+const DESKTOP_ATTACHMENT_OPEN_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const DESKTOP_ATTACHMENT_OPEN_SHA256_RE = /^[0-9a-f]{64}$/;
+const DESKTOP_ATTACHMENT_OPEN_FINGERPRINT_RE = /^[0-9a-f]{64}$/;
+const DESKTOP_ATTACHMENT_OPEN_INSTANCE_RE = /^[0-9a-f]{32}$/;
+const DESKTOP_ATTACHMENT_OPEN_MIME_RE = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/;
+const DESKTOP_ATTACHMENT_OPEN_BEARER_HEADER = 'X-UC-Attachment-Open-Capability';
+const DESKTOP_ATTACHMENT_OPEN_MAX_BYTES = 100 * 1024 * 1024;
+const DESKTOP_ATTACHMENT_OPEN_SCOPE_KEYS = Object.freeze([
+  'userId',
+  'circleId',
+  'threadId',
+  'messageId',
+  'attachmentId',
+] as const);
+const desktopAttachmentOpenBrands = new WeakSet<object>();
+const desktopAttachmentOpenPrivateState = new WeakMap<object, DesktopAttachmentOpenPrivateState>();
+
+function normalizeDesktopAttachmentOpenScope(
+  raw: DesktopAttachmentOpenScope,
+): { scope: DesktopAttachmentOpenScope; canonical: string } | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const rawRecord = raw as unknown as Record<string, unknown>;
+  const keys = Object.keys(rawRecord).sort();
+  const expected = [...DESKTOP_ATTACHMENT_OPEN_SCOPE_KEYS].sort();
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) return null;
+  const mutable: Record<string, string> = {};
+  for (const key of DESKTOP_ATTACHMENT_OPEN_SCOPE_KEYS) {
+    const value = typeof rawRecord[key] === 'string'
+      ? String(rawRecord[key]).trim().toLowerCase()
+      : '';
+    if (!DESKTOP_ATTACHMENT_OPEN_UUID_RE.test(value)) return null;
+    mutable[key] = value;
+  }
+  const scope = Object.freeze({
+    userId: mutable.userId,
+    circleId: mutable.circleId,
+    threadId: mutable.threadId,
+    messageId: mutable.messageId,
+    attachmentId: mutable.attachmentId,
+  });
+  return {
+    scope,
+    canonical: DESKTOP_ATTACHMENT_OPEN_SCOPE_KEYS.map((key) => `${key}:${scope[key]}`).join('\n'),
+  };
+}
+
+function createDesktopAttachmentOpenBearer(): string | null {
+  try {
+    const cryptoApi = globalThis.crypto;
+    if (!cryptoApi?.getRandomValues) return null;
+    const bytes = new Uint8Array(32);
+    cryptoApi.getRandomValues(bytes);
+    return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+  } catch {
+    return null;
+  }
+}
+
+function isCanonicalDesktopAttachmentBase64(value: string, expectedBytes: number): boolean {
+  if (!value || value.length % 4 !== 0) return false;
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) return false;
+  const decodedBytes = Math.floor(value.length * 3 / 4)
+    - (value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0);
+  return decodedBytes === expectedBytes;
+}
+
+function normalizeDesktopAttachmentOpenProjection(
+  raw: unknown,
+  expected?: Readonly<{ sha256: string; sizeBytes: number }>,
+): DesktopAttachmentOpenCapability | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const data = raw as Record<string, unknown>;
+  const attachmentFingerprint = String(data.attachmentFingerprint || '').trim().toLowerCase();
+  const scopeFingerprint = String(data.scopeFingerprint || '').trim().toLowerCase();
+  const requestedAppFingerprint = String(data.requestedAppFingerprint || '').trim().toLowerCase();
+  const resolvedAppFingerprint = String(data.resolvedAppFingerprint || '').trim().toLowerCase();
+  const documentFingerprint = String(data.documentFingerprint || '').trim().toLowerCase();
+  const sha256 = String(data.sha256 || '').trim().toLowerCase();
+  const sizeBytes = Number(data.sizeBytes);
+  const bridgeInstanceId = String(data.bridgeInstanceId || '').trim().toLowerCase();
+  const expiresAt = String(data.expiresAt || '').trim();
+  const expiresAtMs = Date.parse(expiresAt);
+  if (
+    data.kind !== 'desktop_attachment_open'
+    || !DESKTOP_ATTACHMENT_OPEN_FINGERPRINT_RE.test(attachmentFingerprint)
+    || !DESKTOP_ATTACHMENT_OPEN_FINGERPRINT_RE.test(scopeFingerprint)
+    || !DESKTOP_ATTACHMENT_OPEN_FINGERPRINT_RE.test(requestedAppFingerprint)
+    || !DESKTOP_ATTACHMENT_OPEN_FINGERPRINT_RE.test(resolvedAppFingerprint)
+    || !DESKTOP_ATTACHMENT_OPEN_FINGERPRINT_RE.test(documentFingerprint)
+    || !DESKTOP_ATTACHMENT_OPEN_SHA256_RE.test(sha256)
+    || !Number.isInteger(sizeBytes)
+    || sizeBytes < 1
+    || sizeBytes > DESKTOP_ATTACHMENT_OPEN_MAX_BYTES
+    || !DESKTOP_ATTACHMENT_OPEN_INSTANCE_RE.test(bridgeInstanceId)
+    || !Number.isFinite(expiresAtMs)
+    || expiresAtMs <= Date.now()
+    || (expected && (sha256 !== expected.sha256 || sizeBytes !== expected.sizeBytes))
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    schemaVersion: 1,
+    kind: 'desktop_attachment_open',
+    attachmentFingerprint,
+    scopeFingerprint,
+    requestedAppFingerprint,
+    resolvedAppFingerprint,
+    documentFingerprint,
+    sha256,
+    sizeBytes,
+    bridgeInstanceId,
+    expiresAt: new Date(expiresAtMs).toISOString(),
+  });
+}
+
+function desktopAttachmentOpenProjectionMatches(
+  left: DesktopAttachmentOpenCapability,
+  right: DesktopAttachmentOpenCapability,
+): boolean {
+  return left.kind === right.kind
+    && left.attachmentFingerprint === right.attachmentFingerprint
+    && left.scopeFingerprint === right.scopeFingerprint
+    && left.requestedAppFingerprint === right.requestedAppFingerprint
+    && left.resolvedAppFingerprint === right.resolvedAppFingerprint
+    && left.documentFingerprint === right.documentFingerprint
+    && left.sha256 === right.sha256
+    && left.sizeBytes === right.sizeBytes
+    && left.bridgeInstanceId === right.bridgeInstanceId
+    && left.expiresAt === right.expiresAt;
+}
+
+function invalidDesktopAttachmentOpenCapability<T>(): DesktopResult<T> {
+  return {
+    ok: false,
+    error: 'An exact live attachment-open capability object is required.',
+    errorCode: 'invalid_input',
+  };
+}
+
+function desktopAttachmentOpenScopeMismatch<T>(): DesktopResult<T> {
+  return {
+    ok: false,
+    error: 'Attachment-open capability scope does not match.',
+    errorCode: 'permission_denied',
+  };
+}
+
+export function isDesktopAttachmentOpenCapability(
+  value: unknown,
+): value is DesktopAttachmentOpenCapability {
+  if (!value || typeof value !== 'object' || !desktopAttachmentOpenBrands.has(value as object)) {
+    return false;
+  }
+  const state = desktopAttachmentOpenPrivateState.get(value as object);
+  return !!state && state.status !== 'spent';
+}
+
+export async function stageDesktopAttachmentOpenCapability(args: Readonly<{
+  scope: DesktopAttachmentOpenScope;
+  filename: string;
+  mimeType: string;
+  base64: string;
+  sizeBytes: number;
+  sha256: string;
+  preferredAppName?: string | null;
+  ttlMs?: number;
+}>): Promise<DesktopResult<DesktopAttachmentOpenCapability>> {
+  const normalizedScope = normalizeDesktopAttachmentOpenScope(args?.scope);
+  const filename = typeof args?.filename === 'string' ? args.filename.trim() : '';
+  const mimeType = typeof args?.mimeType === 'string' ? args.mimeType.trim().toLowerCase() : '';
+  const base64 = typeof args?.base64 === 'string' ? args.base64 : '';
+  const sizeBytes = Number(args?.sizeBytes);
+  const sha256 = typeof args?.sha256 === 'string' ? args.sha256.trim().toLowerCase() : '';
+  const preferredAppName = typeof args?.preferredAppName === 'string'
+    ? args.preferredAppName.trim()
+    : '';
+  if (
+    !normalizedScope
+    || !filename
+    || filename.length > 160
+    || /[\\/\u0000-\u001f\u007f]/.test(filename)
+    || !DESKTOP_ATTACHMENT_OPEN_MIME_RE.test(mimeType)
+    || mimeType.length > 120
+    || !Number.isInteger(sizeBytes)
+    || sizeBytes < 1
+    || sizeBytes > DESKTOP_ATTACHMENT_OPEN_MAX_BYTES
+    || !DESKTOP_ATTACHMENT_OPEN_SHA256_RE.test(sha256)
+    || !isCanonicalDesktopAttachmentBase64(base64, sizeBytes)
+    || (preferredAppName && !isValidAppName(preferredAppName))
+  ) {
+    return { ok: false, error: 'Attachment-open binding is invalid.', errorCode: 'invalid_input' };
+  }
+  const bearer = createDesktopAttachmentOpenBearer();
+  if (!bearer) {
+    return {
+      ok: false,
+      error: 'Cryptographically secure attachment capability generation is unavailable.',
+      errorCode: 'permission_denied',
+    };
+  }
+  const r = await callBridge('POST', '/desktop/attachment_open/stage', {
+    scope: normalizedScope.scope,
+    filename,
+    mimeType,
+    base64,
+    sizeBytes,
+    sha256,
+    preferredAppName: preferredAppName || undefined,
+    ttlMs: typeof args.ttlMs === 'number' ? args.ttlMs : undefined,
+  }, {
+    headers: { [DESKTOP_ATTACHMENT_OPEN_BEARER_HEADER]: bearer },
+  });
+  if (!r.ok) return r as DesktopResult<DesktopAttachmentOpenCapability>;
+  const capability = normalizeDesktopAttachmentOpenProjection(r.data, { sha256, sizeBytes });
+  if (!capability) {
+    return {
+      ok: false,
+      error: 'Bridge returned an invalid attachment-open capability projection.',
+      errorCode: 'stale_bridge',
+    };
+  }
+  desktopAttachmentOpenBrands.add(capability);
+  desktopAttachmentOpenPrivateState.set(capability, {
+    bearer,
+    scope: normalizedScope.scope,
+    scopeCanonical: normalizedScope.canonical,
+    status: 'active',
+  });
+  return { ok: true, data: capability };
+}
+
+export async function inspectDesktopAttachmentOpenCapability(
+  capability: DesktopAttachmentOpenCapability,
+  scope: DesktopAttachmentOpenScope,
+): Promise<DesktopResult<DesktopAttachmentOpenInspection>> {
+  if (!isDesktopAttachmentOpenCapability(capability)) {
+    return invalidDesktopAttachmentOpenCapability<DesktopAttachmentOpenInspection>();
+  }
+  const state = desktopAttachmentOpenPrivateState.get(capability)!;
+  const normalizedScope = normalizeDesktopAttachmentOpenScope(scope);
+  if (!normalizedScope || normalizedScope.canonical !== state.scopeCanonical) {
+    return desktopAttachmentOpenScopeMismatch<DesktopAttachmentOpenInspection>();
+  }
+  if (state.status !== 'active') {
+    return invalidDesktopAttachmentOpenCapability<DesktopAttachmentOpenInspection>();
+  }
+  state.status = 'inspecting';
+  const r = await callBridge('POST', '/desktop/attachment_open/inspect', {
+    scope: state.scope,
+  }, {
+    headers: { [DESKTOP_ATTACHMENT_OPEN_BEARER_HEADER]: state.bearer },
+  });
+  if (!r.ok) {
+    state.status = /unavailable|expired|tampered/i.test(`${r.errorCode || ''} ${r.error || ''}`)
+      ? 'spent'
+      : 'active';
+    if (state.status === 'spent') state.bearer = '';
+    return r as DesktopResult<DesktopAttachmentOpenInspection>;
+  }
+  const projection = normalizeDesktopAttachmentOpenProjection(r.data, capability);
+  if (
+    !projection
+    || !desktopAttachmentOpenProjectionMatches(capability, projection)
+    || (r.data as Record<string, unknown>)?.available !== true
+  ) {
+    state.status = 'spent';
+    state.bearer = '';
+    return {
+      ok: false,
+      error: 'Bridge inspection did not match the exact attachment-open capability.',
+      errorCode: 'stale_bridge',
+    };
+  }
+  state.status = 'active';
+  return {
+    ok: true,
+    data: Object.freeze({ ...capability, available: true }),
+  };
+}
+
+export async function consumeDesktopAttachmentOpenCapability(
+  capability: DesktopAttachmentOpenCapability,
+  scope: DesktopAttachmentOpenScope,
+): Promise<DesktopResult<DesktopAttachmentOpenDispatchReceipt>> {
+  if (!isDesktopAttachmentOpenCapability(capability)) {
+    return invalidDesktopAttachmentOpenCapability<DesktopAttachmentOpenDispatchReceipt>();
+  }
+  const state = desktopAttachmentOpenPrivateState.get(capability)!;
+  const normalizedScope = normalizeDesktopAttachmentOpenScope(scope);
+  if (!normalizedScope || normalizedScope.canonical !== state.scopeCanonical) {
+    return desktopAttachmentOpenScopeMismatch<DesktopAttachmentOpenDispatchReceipt>();
+  }
+  if (state.status !== 'active') {
+    return invalidDesktopAttachmentOpenCapability<DesktopAttachmentOpenDispatchReceipt>();
+  }
+  // No-replay boundary: a transport error after the server accepted this call
+  // never makes the exact object dispatchable again. A successful dispatch
+  // retains only read/revoke authority so a fresh exact-document observation
+  // can complete or clean up the private staged bytes.
+  state.status = 'consuming';
+  const bearer = state.bearer;
+  const r = await callBridge('POST', '/desktop/attachment_open/consume', {
+    scope: state.scope,
+  }, {
+    headers: { [DESKTOP_ATTACHMENT_OPEN_BEARER_HEADER]: bearer },
+  });
+  if (!r.ok) {
+    state.status = 'spent';
+    state.bearer = '';
+    return r as DesktopResult<DesktopAttachmentOpenDispatchReceipt>;
+  }
+  const projection = normalizeDesktopAttachmentOpenProjection(r.data, capability);
+  const data = r.data as Record<string, unknown>;
+  const dispatchedAt = String(data?.dispatchedAt || '');
+  if (
+    !projection
+    || !desktopAttachmentOpenProjectionMatches(capability, projection)
+    || data?.dispatched !== true
+    || data?.dispatchAcknowledged !== true
+    || data?.completionVerified !== false
+    || !Number.isFinite(Date.parse(dispatchedAt))
+  ) {
+    state.status = 'spent';
+    state.bearer = '';
+    return {
+      ok: false,
+      error: 'Bridge dispatch receipt did not match the exact attachment-open capability.',
+      errorCode: 'stale_bridge',
+    };
+  }
+  state.status = 'dispatched';
+  return {
+    ok: true,
+    data: Object.freeze({
+      ...capability,
+      dispatched: true,
+      dispatchAcknowledged: true,
+      completionVerified: false,
+      dispatchedAt: new Date(Date.parse(dispatchedAt)).toISOString(),
+    }),
+  };
+}
+
+/**
+ * Read-only proof over the exact process-private app/document binding. The
+ * bridge sees the private resolved app plus the stage-pinned file identity;
+ * callers see only keyed fingerprints and booleans. It is valid before
+ * dispatch (baseline) and after dispatch (completion proof), but never confers
+ * replay authority.
+ */
+export async function observeDesktopAttachmentOpenCapability(
+  capability: DesktopAttachmentOpenCapability,
+  scope: DesktopAttachmentOpenScope,
+): Promise<DesktopResult<DesktopAttachmentOpenObservation>> {
+  if (!isDesktopAttachmentOpenCapability(capability)) {
+    return invalidDesktopAttachmentOpenCapability<DesktopAttachmentOpenObservation>();
+  }
+  const state = desktopAttachmentOpenPrivateState.get(capability)!;
+  const normalizedScope = normalizeDesktopAttachmentOpenScope(scope);
+  if (!normalizedScope || normalizedScope.canonical !== state.scopeCanonical) {
+    return desktopAttachmentOpenScopeMismatch<DesktopAttachmentOpenObservation>();
+  }
+  if (state.status !== 'active' && state.status !== 'dispatched') {
+    return invalidDesktopAttachmentOpenCapability<DesktopAttachmentOpenObservation>();
+  }
+  const priorStatus = state.status;
+  state.status = 'observing';
+  const r = await callBridge('POST', '/desktop/attachment_open/observe', {
+    scope: state.scope,
+  }, {
+    headers: { [DESKTOP_ATTACHMENT_OPEN_BEARER_HEADER]: state.bearer },
+  });
+  if (!r.ok) {
+    const spent = /unavailable|expired|tampered/i.test(`${r.errorCode || ''} ${r.error || ''}`);
+    state.status = spent ? 'spent' : priorStatus;
+    if (spent) state.bearer = '';
+    return r as DesktopResult<DesktopAttachmentOpenObservation>;
+  }
+  const projection = normalizeDesktopAttachmentOpenProjection(r.data, capability);
+  const data = r.data as Record<string, unknown>;
+  const observedAt = String(data?.observedAt || '');
+  const appProcessFingerprint = String(data?.appProcessFingerprint || '').trim().toLowerCase();
+  const windowFingerprint = String(data?.windowFingerprint || '').trim().toLowerCase();
+  const observationFingerprint = String(data?.observationFingerprint || '').trim().toLowerCase();
+  const appRunning = data?.appRunning === true;
+  const frontmost = data?.frontmost === true;
+  const documentOpen = data?.documentOpen === true;
+  if (
+    !projection
+    || !desktopAttachmentOpenProjectionMatches(capability, projection)
+    || !Number.isFinite(Date.parse(observedAt))
+    || !DESKTOP_ATTACHMENT_OPEN_FINGERPRINT_RE.test(appProcessFingerprint)
+    || !DESKTOP_ATTACHMENT_OPEN_FINGERPRINT_RE.test(windowFingerprint)
+    || !DESKTOP_ATTACHMENT_OPEN_FINGERPRINT_RE.test(observationFingerprint)
+    || (frontmost && !appRunning)
+    || (documentOpen && (!appRunning || !frontmost))
+  ) {
+    state.status = 'spent';
+    state.bearer = '';
+    return {
+      ok: false,
+      error: 'Bridge observation did not match the exact attachment-open capability.',
+      errorCode: 'stale_bridge',
+    };
+  }
+  const completed = priorStatus === 'dispatched' && documentOpen;
+  state.status = completed ? 'spent' : priorStatus;
+  if (completed) state.bearer = '';
+  return {
+    ok: true,
+    data: Object.freeze({
+      ...capability,
+      observedAt: new Date(Date.parse(observedAt)).toISOString(),
+      appRunning,
+      frontmost,
+      documentOpen,
+      appProcessFingerprint,
+      windowFingerprint,
+      observationFingerprint,
+    }),
+  };
+}
+
+export async function revokeDesktopAttachmentOpenCapability(
+  capability: DesktopAttachmentOpenCapability,
+  scope: DesktopAttachmentOpenScope,
+): Promise<DesktopResult<DesktopAttachmentOpenCapability & Readonly<{ revoked: true }>>> {
+  if (!isDesktopAttachmentOpenCapability(capability)) {
+    return invalidDesktopAttachmentOpenCapability<DesktopAttachmentOpenCapability & Readonly<{ revoked: true }>>();
+  }
+  const state = desktopAttachmentOpenPrivateState.get(capability)!;
+  const normalizedScope = normalizeDesktopAttachmentOpenScope(scope);
+  if (!normalizedScope || normalizedScope.canonical !== state.scopeCanonical) {
+    return desktopAttachmentOpenScopeMismatch<DesktopAttachmentOpenCapability & Readonly<{ revoked: true }>>();
+  }
+  if (state.status !== 'active' && state.status !== 'dispatched') {
+    return invalidDesktopAttachmentOpenCapability<DesktopAttachmentOpenCapability & Readonly<{ revoked: true }>>();
+  }
+  state.status = 'spent';
+  const bearer = state.bearer;
+  state.bearer = '';
+  const r = await callBridge('POST', '/desktop/attachment_open/revoke', {
+    scope: state.scope,
+  }, {
+    headers: { [DESKTOP_ATTACHMENT_OPEN_BEARER_HEADER]: bearer },
+  });
+  if (!r.ok) return r as DesktopResult<DesktopAttachmentOpenCapability & Readonly<{ revoked: true }>>;
+  const projection = normalizeDesktopAttachmentOpenProjection(r.data, capability);
+  if (
+    !projection
+    || !desktopAttachmentOpenProjectionMatches(capability, projection)
+    || (r.data as Record<string, unknown>)?.revoked !== true
+  ) {
+    return {
+      ok: false,
+      error: 'Bridge revoke receipt did not match the exact attachment-open capability.',
+      errorCode: 'stale_bridge',
+    };
+  }
+  return { ok: true, data: Object.freeze({ ...capability, revoked: true }) };
 }
 
 /** Phase 1d — mouse click at absolute screen coords. Uses cliclick when
@@ -4499,6 +5072,8 @@ export type PhotoshopDocumentStatus = {
   status: string;
   documentCount: number;
   activeDocumentName: string | null;
+  /** Positive Photoshop session document id when available. */
+  activeDocumentId: number | null;
   activeDocumentPath: string | null;
   activeDocumentModified: boolean;
   activeDocumentSaved: boolean;
@@ -4666,6 +5241,16 @@ export interface PhotoshopCreateDocumentResult {
   appName: string;
   appRunning: boolean;
   created: boolean;
+  /** Bridge-local correlation evidence only; not authorization or a signature. */
+  operationId: string;
+  observedAt: string;
+  startedAt: string;
+  completedAt: string;
+  documentCountBefore: number;
+  documentCountAfter: number;
+  activeDocumentNameBefore: string | null;
+  /** Photoshop session document id when exposed by the host DOM. */
+  createdDocumentId: number | null;
   documentName: string | null;
   widthPx: number;
   heightPx: number;
@@ -4673,6 +5258,148 @@ export interface PhotoshopCreateDocumentResult {
   mode: string | null;
   documentCount: number;
   error: string | null;
+}
+
+export interface PhotoshopCreateDocumentReceiptExpectation {
+  widthPx: number;
+  heightPx: number;
+  /** Exact only when sealed by a fresh native target guard. */
+  appName?: string;
+  /** Exact only when the caller requested an explicit document name. */
+  documentName?: string;
+}
+
+const PHOTOSHOP_CREATE_OPERATION_ID_RE = /^photoshop-create-[a-f0-9]{32}$/;
+const PHOTOSHOP_CREATE_ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+function parsePhotoshopCreateReceiptIso(value: unknown): { value: string; ms: number } | null {
+  if (typeof value !== 'string' || !PHOTOSHOP_CREATE_ISO_RE.test(value)) return null;
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms) || new Date(ms).toISOString() !== value) return null;
+  return { value, ms };
+}
+
+function isBoundedPhotoshopDocumentName(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= 260
+    && !/[\x00-\x1f\x7f]/.test(value);
+}
+
+/**
+ * Strictly parse bridge-generated correlation evidence for one create call.
+ * The receipt is intentionally unsigned and does not confer mutation authority.
+ */
+export function parsePhotoshopCreateDocumentBridgeResponse(
+  value: unknown,
+  expected: PhotoshopCreateDocumentReceiptExpectation,
+): DesktopResult<PhotoshopCreateDocumentResult> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {
+      ok: false,
+      error: 'Photoshop returned malformed create-document correlation evidence.',
+      errorCode: 'stale_bridge',
+    };
+  }
+  const d = value as Record<string, unknown>;
+  const operationId = typeof d.operationId === 'string' ? d.operationId : '';
+  const observedAt = parsePhotoshopCreateReceiptIso(d.observedAt);
+  const startedAt = parsePhotoshopCreateReceiptIso(d.startedAt);
+  const completedAt = parsePhotoshopCreateReceiptIso(d.completedAt);
+  const documentCountBefore = d.documentCountBefore;
+  const documentCountAfter = d.documentCountAfter;
+  const documentCount = d.documentCount;
+  const widthPx = d.widthPx;
+  const heightPx = d.heightPx;
+  const resolution = d.resolution;
+  const appName = typeof d.appName === 'string' ? d.appName : '';
+  const mode = typeof d.mode === 'string' ? d.mode : '';
+  const activeDocumentNameBefore = d.activeDocumentNameBefore;
+  const createdDocumentId = d.createdDocumentId;
+  const validBeforeName = activeDocumentNameBefore === null
+    || isBoundedPhotoshopDocumentName(activeDocumentNameBefore);
+  const validCreatedDocumentId = createdDocumentId === null
+    || (
+      typeof createdDocumentId === 'number'
+      && Number.isSafeInteger(createdDocumentId)
+      && createdDocumentId > 0
+    );
+  const malformed = d.ok !== true
+    || d.appRunning !== true
+    || d.created !== true
+    || d.error !== null
+    || !PHOTOSHOP_CREATE_OPERATION_ID_RE.test(operationId)
+    || !observedAt
+    || !startedAt
+    || !completedAt
+    || observedAt.ms > startedAt.ms
+    || startedAt.ms > completedAt.ms
+    || completedAt.ms - observedAt.ms > 120_000
+    || !appName
+    || appName.length > 160
+    || !/photoshop/i.test(appName)
+    || /[\x00-\x1f\x7f]/.test(appName)
+    || (expected.appName !== undefined && appName !== expected.appName)
+    || typeof documentCountBefore !== 'number'
+    || !Number.isSafeInteger(documentCountBefore)
+    || documentCountBefore < 0
+    || typeof documentCountAfter !== 'number'
+    || !Number.isSafeInteger(documentCountAfter)
+    || documentCountAfter !== documentCountBefore + 1
+    || typeof documentCount !== 'number'
+    || !Number.isSafeInteger(documentCount)
+    || documentCount !== documentCountAfter
+    || !Object.prototype.hasOwnProperty.call(d, 'activeDocumentNameBefore')
+    || !validBeforeName
+    || (documentCountBefore === 0 && activeDocumentNameBefore !== null)
+    || (documentCountBefore > 0 && !isBoundedPhotoshopDocumentName(activeDocumentNameBefore))
+    || !Object.prototype.hasOwnProperty.call(d, 'createdDocumentId')
+    || !validCreatedDocumentId
+    || !isBoundedPhotoshopDocumentName(d.documentName)
+    || (expected.documentName !== undefined && d.documentName !== expected.documentName)
+    || typeof widthPx !== 'number'
+    || !Number.isSafeInteger(widthPx)
+    || widthPx !== expected.widthPx
+    || typeof heightPx !== 'number'
+    || !Number.isSafeInteger(heightPx)
+    || heightPx !== expected.heightPx
+    || typeof resolution !== 'number'
+    || !Number.isFinite(resolution)
+    || resolution < 36
+    || resolution > 1200
+    || !mode
+    || mode.length > 40
+    || /[\x00-\x1f\x7f]/.test(mode);
+  if (malformed) {
+    return {
+      ok: false,
+      error: 'Photoshop returned malformed create-document correlation evidence.',
+      errorCode: 'stale_bridge',
+    };
+  }
+  return {
+    ok: true,
+    data: {
+      appName,
+      appRunning: true,
+      created: true,
+      operationId,
+      observedAt: observedAt.value,
+      startedAt: startedAt.value,
+      completedAt: completedAt.value,
+      documentCountBefore,
+      documentCountAfter,
+      activeDocumentNameBefore: activeDocumentNameBefore as string | null,
+      createdDocumentId: createdDocumentId as number | null,
+      documentName: d.documentName as string,
+      widthPx,
+      heightPx,
+      resolution,
+      mode,
+      documentCount,
+      error: null,
+    },
+  };
 }
 
 /** Create a new blank Photoshop document — the one Photoshop mutation with no
@@ -4686,7 +5413,19 @@ export async function photoshopCreateDocument(args: {
   name?: string;
   mode?: 'rgb' | 'grayscale' | 'cmyk';
   background?: 'white' | 'transparent' | 'background';
+  /** Optional for legacy callers; durable canaries require this exact guard. */
+  targetGuard?: DesktopNativeUiTargetGuard;
 }): Promise<DesktopResult<PhotoshopCreateDocumentResult>> {
+  const targetGuard = args.targetGuard === undefined
+    ? undefined
+    : normalizeDesktopNativeUiTargetGuard(args.targetGuard);
+  if (args.targetGuard !== undefined && !targetGuard) {
+    return {
+      ok: false,
+      error: 'Exact frontmost app/PID/CGWindow/bounds target guard is required.',
+      errorCode: 'uncertain_ui_target',
+    };
+  }
   const r = await callBridge('POST', '/desktop/photoshop_create_document', {
     appName: args.appName || 'Photoshop',
     widthPx: args.widthPx,
@@ -4695,26 +5434,368 @@ export async function photoshopCreateDocument(args: {
     name: args.name || undefined,
     mode: args.mode || undefined,
     background: args.background || undefined,
+    targetGuard,
   });
   if (!r.ok) return r as DesktopResult<PhotoshopCreateDocumentResult>;
-  const d = r.data as any;
-  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  return parsePhotoshopCreateDocumentBridgeResponse(r.data, {
+    widthPx: args.widthPx,
+    heightPx: args.heightPx,
+    ...(targetGuard ? { appName: targetGuard.appName } : {}),
+    ...(typeof args.name === 'string' && args.name.trim()
+      ? { documentName: args.name.trim() }
+      : {}),
+  });
+}
+
+export interface PhotoshopDocumentStatusReceiptExpectation {
+  appName?: string;
+  expectedDocumentName?: string | null;
+  sourceDocumentPath?: string | null;
+}
+
+const PHOTOSHOP_STATUS_ALLOWED_KEYS = new Set([
+  'ok',
+  'appName',
+  'appRunning',
+  'status',
+  'documentCount',
+  'activeDocumentName',
+  'activeDocumentId',
+  'activeDocumentPath',
+  'activeDocumentModified',
+  'activeDocumentSaved',
+  'widthPx',
+  'heightPx',
+  'resolution',
+  'mode',
+  'bitsPerChannel',
+  'layerCount',
+  'groupCount',
+  'textLayerCount',
+  'smartObjectCount',
+  'adjustmentLayerCount',
+  'lockedLayers',
+  'hiddenLayers',
+  'selectionActive',
+  'expectedDocumentName',
+  'sourceDocumentPath',
+  'documents',
+  'error',
+]);
+const PHOTOSHOP_STATUS_DOCUMENT_KEYS = new Set([
+  'name',
+  'path',
+  'modified',
+  'saved',
+  'widthPx',
+  'heightPx',
+]);
+const PHOTOSHOP_STATUS_VALUES = new Set([
+  'not_running',
+  'no_document',
+  'document_mismatch',
+  'ready',
+]);
+const PHOTOSHOP_STATUS_APP_IDENTITY_RE = /^(?:adobe )?photoshop(?: (?:cc(?: \d{4})?|\d{4}(?:\.\d+)?|beta|\(beta\)))?(?:\.app)?$/i;
+const PHOTOSHOP_STATUS_MAX_DOCUMENTS = 12;
+const PHOTOSHOP_STATUS_MAX_DOCUMENT_COUNT = 1_000_000;
+const PHOTOSHOP_STATUS_MAX_LAYER_COUNT = 1_000_000;
+const PHOTOSHOP_STATUS_MAX_DIMENSION_PX = 300_000;
+const PHOTOSHOP_STATUS_MAX_RESOLUTION = 1_000_000;
+
+function malformedPhotoshopDocumentStatus(): DesktopResult<PhotoshopDocumentStatus> {
   return {
-    ok: d?.ok === true && d?.created === true,
+    ok: false,
+    error: 'Photoshop returned malformed document-status evidence.',
+    errorCode: 'stale_bridge',
+  };
+}
+
+function readExactPhotoshopStatusRecord(
+  value: unknown,
+  allowedKeys: ReadonlySet<string>,
+): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return null;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const ownKeys = Reflect.ownKeys(descriptors);
+  if (
+    ownKeys.length !== allowedKeys.size
+    || ownKeys.some((key) => typeof key !== 'string' || !allowedKeys.has(key))
+  ) return null;
+  const result: Record<string, unknown> = Object.create(null);
+  for (const key of allowedKeys) {
+    const descriptor = descriptors[key];
+    if (
+      !descriptor
+      || !descriptor.enumerable
+      || !Object.prototype.hasOwnProperty.call(descriptor, 'value')
+      || descriptor.get
+      || descriptor.set
+    ) return null;
+    result[key] = descriptor.value;
+  }
+  return result;
+}
+
+function boundedPhotoshopStatusString(
+  value: unknown,
+  maxChars: number,
+): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && Array.from(value).length <= maxChars
+    && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+function nullableBoundedPhotoshopStatusString(
+  value: unknown,
+  maxChars: number,
+): value is string | null {
+  return value === null || boundedPhotoshopStatusString(value, maxChars);
+}
+
+function boundedPhotoshopStatusInteger(
+  value: unknown,
+  min: number,
+  max: number,
+): value is number {
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value >= min
+    && value <= max;
+}
+
+function boundedPhotoshopStatusNumber(
+  value: unknown,
+  minExclusive: number,
+  max: number,
+): value is number {
+  return typeof value === 'number'
+    && Number.isFinite(value)
+    && value > minExclusive
+    && value <= max;
+}
+
+function canonicalPhotoshopStatusAppIdentity(value: unknown): string | null {
+  if (!boundedPhotoshopStatusString(value, 160)) return null;
+  const normalized = value.trim().replace(/\s+/g, ' ');
+  if (normalized !== value || !PHOTOSHOP_STATUS_APP_IDENTITY_RE.test(normalized)) return null;
+  return normalized
+    .replace(/\.app$/i, '')
+    .replace(/^adobe /i, '')
+    .toLowerCase();
+}
+
+function photoshopStatusAppIdentityMatches(
+  actual: unknown,
+  expected: unknown,
+): actual is string {
+  const actualIdentity = canonicalPhotoshopStatusAppIdentity(actual);
+  const expectedIdentity = canonicalPhotoshopStatusAppIdentity(expected);
+  if (!actualIdentity || !expectedIdentity) return false;
+  // Generic "Photoshop" requests are resolved by the bridge to an exact
+  // installed/versioned process name. Versioned or beta requests remain exact.
+  return expectedIdentity === 'photoshop' || actualIdentity === expectedIdentity;
+}
+
+function parsePhotoshopStatusDocuments(
+  value: unknown,
+  documentCount: number,
+): PhotoshopDocumentSummary[] | null {
+  if (
+    !Array.isArray(value)
+    || value.length !== Math.min(documentCount, PHOTOSHOP_STATUS_MAX_DOCUMENTS)
+  ) return null;
+  const documents: PhotoshopDocumentSummary[] = [];
+  for (const candidate of value) {
+    const document = readExactPhotoshopStatusRecord(candidate, PHOTOSHOP_STATUS_DOCUMENT_KEYS);
+    if (
+      !document
+      || !boundedPhotoshopStatusString(document.name, 260)
+      || !nullableBoundedPhotoshopStatusString(document.path, 1024)
+      || typeof document.modified !== 'boolean'
+      || typeof document.saved !== 'boolean'
+      || document.modified && document.saved
+      || !boundedPhotoshopStatusNumber(document.widthPx, 0, PHOTOSHOP_STATUS_MAX_DIMENSION_PX)
+      || !boundedPhotoshopStatusNumber(document.heightPx, 0, PHOTOSHOP_STATUS_MAX_DIMENSION_PX)
+    ) return null;
+    documents.push({
+      name: document.name,
+      path: document.path,
+      modified: document.modified,
+      saved: document.saved,
+      widthPx: document.widthPx,
+      heightPx: document.heightPx,
+    });
+  }
+  return documents;
+}
+
+/**
+ * Parse one HTTP-success Photoshop document-status body as untrusted transport
+ * data. Valid absence and guarded mismatch observations remain successful, but
+ * missing, coerced, extra, or internally contradictory fields fail closed.
+ */
+export function parsePhotoshopDocumentStatusBridgeResponse(
+  value: unknown,
+  expected: PhotoshopDocumentStatusReceiptExpectation = {},
+): DesktopResult<PhotoshopDocumentStatus> {
+  const status = readExactPhotoshopStatusRecord(value, PHOTOSHOP_STATUS_ALLOWED_KEYS);
+  const expectedAppName = typeof expected.appName === 'string' && expected.appName.trim()
+    ? expected.appName.trim()
+    : 'Photoshop';
+  const expectedDocumentName = typeof expected.expectedDocumentName === 'string'
+    && expected.expectedDocumentName.length > 0
+    ? expected.expectedDocumentName
+    : null;
+  const expectedSourceDocumentPath = typeof expected.sourceDocumentPath === 'string'
+    && expected.sourceDocumentPath.length > 0
+    ? expected.sourceDocumentPath
+    : null;
+  if (
+    !status
+    || status.ok !== true
+    || !photoshopStatusAppIdentityMatches(status.appName, expectedAppName)
+    || typeof status.appRunning !== 'boolean'
+    || typeof status.status !== 'string'
+    || !PHOTOSHOP_STATUS_VALUES.has(status.status)
+    || !boundedPhotoshopStatusInteger(status.documentCount, 0, PHOTOSHOP_STATUS_MAX_DOCUMENT_COUNT)
+    || !nullableBoundedPhotoshopStatusString(status.activeDocumentName, 260)
+    || !(status.activeDocumentId === null
+      || boundedPhotoshopStatusInteger(status.activeDocumentId, 1, Number.MAX_SAFE_INTEGER))
+    || !nullableBoundedPhotoshopStatusString(status.activeDocumentPath, 1024)
+    || typeof status.activeDocumentModified !== 'boolean'
+    || typeof status.activeDocumentSaved !== 'boolean'
+    || status.activeDocumentModified && status.activeDocumentSaved
+    || typeof status.widthPx !== 'number'
+    || !Number.isFinite(status.widthPx)
+    || typeof status.heightPx !== 'number'
+    || !Number.isFinite(status.heightPx)
+    || typeof status.resolution !== 'number'
+    || !Number.isFinite(status.resolution)
+    || !nullableBoundedPhotoshopStatusString(status.mode, 80)
+    || !nullableBoundedPhotoshopStatusString(status.bitsPerChannel, 80)
+    || !boundedPhotoshopStatusInteger(status.layerCount, 0, PHOTOSHOP_STATUS_MAX_LAYER_COUNT)
+    || !boundedPhotoshopStatusInteger(status.groupCount, 0, PHOTOSHOP_STATUS_MAX_LAYER_COUNT)
+    || !boundedPhotoshopStatusInteger(status.textLayerCount, 0, PHOTOSHOP_STATUS_MAX_LAYER_COUNT)
+    || !boundedPhotoshopStatusInteger(status.smartObjectCount, 0, PHOTOSHOP_STATUS_MAX_LAYER_COUNT)
+    || !boundedPhotoshopStatusInteger(status.adjustmentLayerCount, 0, PHOTOSHOP_STATUS_MAX_LAYER_COUNT)
+    || !boundedPhotoshopStatusInteger(status.lockedLayers, 0, PHOTOSHOP_STATUS_MAX_LAYER_COUNT)
+    || !boundedPhotoshopStatusInteger(status.hiddenLayers, 0, PHOTOSHOP_STATUS_MAX_LAYER_COUNT)
+    || typeof status.selectionActive !== 'boolean'
+    || !nullableBoundedPhotoshopStatusString(status.expectedDocumentName, 260)
+    || !nullableBoundedPhotoshopStatusString(status.sourceDocumentPath, 1024)
+    || status.expectedDocumentName !== expectedDocumentName
+    || (expectedSourceDocumentPath === null
+      ? status.sourceDocumentPath !== null
+      : status.sourceDocumentPath === null)
+    || !(status.error === null || boundedPhotoshopStatusString(status.error, 500))
+  ) return malformedPhotoshopDocumentStatus();
+
+  const documentCount = status.documentCount;
+  const documents = parsePhotoshopStatusDocuments(status.documents, documentCount);
+  const zeroDocumentProof = documentCount === 0
+    && status.activeDocumentName === null
+    && status.activeDocumentId === null
+    && status.activeDocumentPath === null
+    && status.activeDocumentModified === false
+    && status.activeDocumentSaved === false
+    && status.widthPx === 0
+    && status.heightPx === 0
+    && status.resolution === 0
+    && status.mode === null
+    && status.bitsPerChannel === null
+    && status.layerCount === 0
+    && status.groupCount === 0
+    && status.textLayerCount === 0
+    && status.smartObjectCount === 0
+    && status.adjustmentLayerCount === 0
+    && status.lockedLayers === 0
+    && status.hiddenLayers === 0
+    && status.selectionActive === false
+    && status.error === null;
+  const activeIdentityProof = documentCount > 0
+    && boundedPhotoshopStatusString(status.activeDocumentName, 260)
+    && boundedPhotoshopStatusInteger(status.activeDocumentId, 1, Number.MAX_SAFE_INTEGER);
+  const zeroActiveDocumentDetails = status.activeDocumentPath === null
+    && status.activeDocumentModified === false
+    && status.activeDocumentSaved === false
+    && status.widthPx === 0
+    && status.heightPx === 0
+    && status.resolution === 0
+    && status.mode === null
+    && status.bitsPerChannel === null
+    && status.layerCount === 0
+    && status.groupCount === 0
+    && status.textLayerCount === 0
+    && status.smartObjectCount === 0
+    && status.adjustmentLayerCount === 0
+    && status.lockedLayers === 0
+    && status.hiddenLayers === 0
+    && status.selectionActive === false;
+  const totalLayerCount = typeof status.layerCount === 'number' ? status.layerCount : -1;
+  const layerCountsCoherent = [
+    status.groupCount,
+    status.textLayerCount,
+    status.smartObjectCount,
+    status.adjustmentLayerCount,
+    status.lockedLayers,
+    status.hiddenLayers,
+  ].every((count) => typeof count === 'number' && count <= totalLayerCount);
+  const readyProof = activeIdentityProof
+    && boundedPhotoshopStatusNumber(status.widthPx, 0, PHOTOSHOP_STATUS_MAX_DIMENSION_PX)
+    && boundedPhotoshopStatusNumber(status.heightPx, 0, PHOTOSHOP_STATUS_MAX_DIMENSION_PX)
+    && boundedPhotoshopStatusNumber(status.resolution, 0, PHOTOSHOP_STATUS_MAX_RESOLUTION)
+    && boundedPhotoshopStatusString(status.mode, 80)
+    && boundedPhotoshopStatusString(status.bitsPerChannel, 80)
+    && layerCountsCoherent
+    && status.error === null;
+  const mismatchProof = activeIdentityProof
+    && zeroActiveDocumentDetails
+    && (status.expectedDocumentName !== null || status.sourceDocumentPath !== null)
+    && status.error === 'Expected Photoshop document is not active.';
+  const stateCoherent = status.status === 'not_running'
+    ? status.appRunning === false && zeroDocumentProof
+    : status.status === 'no_document'
+      ? status.appRunning === true && zeroDocumentProof
+      : status.status === 'document_mismatch'
+        ? status.appRunning === true && mismatchProof
+        : status.appRunning === true && readyProof;
+  if (!documents || !stateCoherent) return malformedPhotoshopDocumentStatus();
+
+  return {
+    ok: true,
     data: {
-      appName: d?.appName ? String(d.appName) : (args.appName || 'Photoshop'),
-      appRunning: d?.appRunning !== false,
-      created: d?.created === true,
-      documentName: d?.documentName ? String(d.documentName) : null,
-      widthPx: toNumber(d?.widthPx),
-      heightPx: toNumber(d?.heightPx),
-      resolution: toNumber(d?.resolution),
-      mode: d?.mode ? String(d.mode) : null,
-      documentCount: toNumber(d?.documentCount),
-      error: d?.error ? String(d.error) : null,
+      appName: status.appName,
+      appRunning: status.appRunning,
+      status: status.status,
+      documentCount,
+      activeDocumentName: status.activeDocumentName,
+      activeDocumentId: status.activeDocumentId,
+      activeDocumentPath: status.activeDocumentPath,
+      activeDocumentModified: status.activeDocumentModified,
+      activeDocumentSaved: status.activeDocumentSaved,
+      widthPx: status.widthPx,
+      heightPx: status.heightPx,
+      resolution: status.resolution,
+      mode: status.mode,
+      bitsPerChannel: status.bitsPerChannel,
+      layerCount: status.layerCount,
+      groupCount: status.groupCount,
+      textLayerCount: status.textLayerCount,
+      smartObjectCount: status.smartObjectCount,
+      adjustmentLayerCount: status.adjustmentLayerCount,
+      lockedLayers: status.lockedLayers,
+      hiddenLayers: status.hiddenLayers,
+      selectionActive: status.selectionActive,
+      expectedDocumentName: status.expectedDocumentName,
+      sourceDocumentPath: status.sourceDocumentPath,
+      documents,
+      error: status.error,
     },
-    ...(d?.ok === true && d?.created === true ? {} : { error: d?.error ? String(d.error) : 'Photoshop did not confirm document creation.' }),
-  } as DesktopResult<PhotoshopCreateDocumentResult>;
+  };
 }
 
 export async function photoshopDocumentStatus(args: {
@@ -4731,48 +5812,11 @@ export async function photoshopDocumentStatus(args: {
     sourceDocumentPath: sourceDocumentPath || undefined,
   });
   if (!r.ok) return r as DesktopResult<PhotoshopDocumentStatus>;
-  const d = r.data as any;
-  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
-  const documents = Array.isArray(d?.documents)
-    ? d.documents.slice(0, 12).map((doc: any) => ({
-        name: doc?.name ? String(doc.name) : '',
-        path: doc?.path ? String(doc.path) : null,
-        modified: doc?.modified === true,
-        saved: doc?.saved === true,
-        widthPx: toNumber(doc?.widthPx),
-        heightPx: toNumber(doc?.heightPx),
-      })).filter((doc: PhotoshopDocumentSummary) => !!doc.name)
-    : [];
-  return {
-    ok: true,
-    data: {
-      appName: d?.appName ? String(d.appName) : appName,
-      appRunning: d?.appRunning === true,
-      status: d?.status ? String(d.status) : 'unknown',
-      documentCount: toNumber(d?.documentCount),
-      activeDocumentName: d?.activeDocumentName ? String(d.activeDocumentName) : null,
-      activeDocumentPath: d?.activeDocumentPath ? String(d.activeDocumentPath) : null,
-      activeDocumentModified: d?.activeDocumentModified === true,
-      activeDocumentSaved: d?.activeDocumentSaved === true,
-      widthPx: toNumber(d?.widthPx),
-      heightPx: toNumber(d?.heightPx),
-      resolution: toNumber(d?.resolution),
-      mode: d?.mode ? String(d.mode) : null,
-      bitsPerChannel: d?.bitsPerChannel ? String(d.bitsPerChannel) : null,
-      layerCount: toNumber(d?.layerCount),
-      groupCount: toNumber(d?.groupCount),
-      textLayerCount: toNumber(d?.textLayerCount),
-      smartObjectCount: toNumber(d?.smartObjectCount),
-      adjustmentLayerCount: toNumber(d?.adjustmentLayerCount),
-      lockedLayers: toNumber(d?.lockedLayers),
-      hiddenLayers: toNumber(d?.hiddenLayers),
-      selectionActive: d?.selectionActive === true,
-      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (expectedDocumentName || null),
-      sourceDocumentPath: d?.sourceDocumentPath ? String(d.sourceDocumentPath) : (sourceDocumentPath || null),
-      documents,
-      error: d?.error ? String(d.error) : null,
-    },
-  };
+  return parsePhotoshopDocumentStatusBridgeResponse(r.data, {
+    appName,
+    expectedDocumentName: expectedDocumentName || null,
+    sourceDocumentPath: sourceDocumentPath || null,
+  });
 }
 
 export async function photoshopLayerInventory(args: {
@@ -5976,6 +7020,19 @@ const EXPLICIT_BRIDGE_BODY_CODES = new Set<DesktopBridgeError>([
   // output_not_created above are shared with cad_compile.
   'design_export_failed' as DesktopBridgeError,
   'design_export_timeout' as DesktopBridgeError,
+  // Opaque, one-shot uploaded-attachment native-open capability lane.
+  'attachment_open_invalid_input' as DesktopBridgeError,
+  'attachment_open_invalid_capability' as DesktopBridgeError,
+  'attachment_open_capability_collision' as DesktopBridgeError,
+  'attachment_open_capacity_reached' as DesktopBridgeError,
+  'attachment_open_capability_unavailable' as DesktopBridgeError,
+  'attachment_open_capability_expired' as DesktopBridgeError,
+  'attachment_open_scope_mismatch' as DesktopBridgeError,
+  'attachment_open_file_tampered' as DesktopBridgeError,
+  'attachment_open_stage_failed' as DesktopBridgeError,
+  'attachment_open_app_unavailable' as DesktopBridgeError,
+  'attachment_open_observation_unavailable' as DesktopBridgeError,
+  'attachment_open_dispatch_failed' as DesktopBridgeError,
 ]);
 
 function normalizeExplicitBridgeBodyCode(value: unknown): DesktopBridgeError | null {

@@ -514,6 +514,24 @@ AS $$
       OR p_payload->>'threadId'
         ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
     )
+    AND (
+      NOT (p_payload ? 'autoApproveCategory')
+      OR p_payload->'autoApproveCategory' = 'null'::jsonb
+      OR (
+        jsonb_typeof(p_payload->'autoApproveCategory') = 'string'
+        AND p_payload->>'autoApproveCategory' IN (
+          'memory_read',
+          'memory_write',
+          'skill_run',
+          'skill_write',
+          'automation_create',
+          'automation_run',
+          'browser_click',
+          'external_publish',
+          'desktop_action'
+        )
+      )
+    )
     AND NOT EXISTS (
       SELECT 1
       FROM jsonb_object_keys(p_payload) AS payload_keys(payload_key)
@@ -527,6 +545,7 @@ AS $$
         'userId',
         'roomId',
         'threadId',
+        'autoApproveCategory',
         'redacted'
       ])
     )

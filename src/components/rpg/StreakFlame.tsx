@@ -13,11 +13,36 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  View, Text, StyleSheet, Animated, Easing, Platform,
+  View, Text, StyleSheet, Animated, Easing, Platform, AccessibilityInfo,
 } from 'react-native';
 
 const MONO = Platform.OS === 'web' ? 'monospace' : undefined;
 const EMBER_COUNT = 5;
+
+function useReducedMotionPreference(): boolean {
+  // Decorative loops stay off until the platform preference is known.
+  const [reduceMotion, setReduceMotion] = useState(true);
+
+  useEffect(() => {
+    let mounted = true;
+    void AccessibilityInfo.isReduceMotionEnabled()
+      .then(enabled => {
+        if (mounted) setReduceMotion(enabled);
+      })
+      .catch(() => {
+        // Motion is decorative; if the preference cannot be read, fail to the
+        // fully visible static state. A later change event can still update it.
+        if (mounted) setReduceMotion(true);
+      });
+    const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', setReduceMotion);
+    return () => {
+      mounted = false;
+      subscription.remove();
+    };
+  }, []);
+
+  return reduceMotion;
+}
 
 interface Props {
   streakDays: number;
@@ -52,6 +77,7 @@ const TIER_COLORS: Record<FlameTier, { outer: string; inner: string; core: strin
 export default function StreakFlame({ streakDays, accentColor }: Props) {
   const tier = getFlameTier(streakDays);
   const colors = TIER_COLORS[tier];
+  const reduceMotion = useReducedMotionPreference();
 
   // Size: 32 for small/medium, 40 for large/epic, 48 for legendary
   const size = tier === 'legendary' ? 48 : tier === 'large' || tier === 'epic' ? 40 : 32;
@@ -74,56 +100,86 @@ export default function StreakFlame({ streakDays, accentColor }: Props) {
   );
 
   useEffect(() => {
+    const animatedValues = [pulseScale, flicker, coreGlow, ringRotate, floatY];
+    for (const value of animatedValues) value.stopAnimation();
+    for (const ember of embers) {
+      ember.x.stopAnimation();
+      ember.y.stopAnimation();
+      ember.opacity.stopAnimation();
+      ember.scale.stopAnimation();
+    }
+
+    // Static values preserve tier, flame colors, core, ring, and day count
+    // without residual transforms from an animation that was just stopped.
+    pulseScale.setValue(1);
+    flicker.setValue(0.5);
+    coreGlow.setValue(0.8);
+    ringRotate.setValue(0);
+    floatY.setValue(0);
+    for (const ember of embers) {
+      ember.x.setValue(0);
+      ember.y.setValue(0);
+      ember.opacity.setValue(0);
+      ember.scale.setValue(0.5);
+    }
+    if (reduceMotion) return;
+
+    const runningAnimations: Animated.CompositeAnimation[] = [];
+    const startLoop = (animation: Animated.CompositeAnimation) => {
+      runningAnimations.push(animation);
+      animation.start();
+    };
+
     // Base floating motion for all tiers
-    Animated.loop(
+    startLoop(Animated.loop(
       Animated.sequence([
         Animated.timing(floatY, { toValue: -2, duration: 800, easing: Easing.inOut(Easing.sin), useNativeDriver: false }),
         Animated.timing(floatY, { toValue: 1, duration: 800, easing: Easing.inOut(Easing.sin), useNativeDriver: false }),
       ])
-    ).start();
+    ));
 
     // Flicker for all tiers
-    Animated.loop(
+    startLoop(Animated.loop(
       Animated.sequence([
         Animated.timing(flicker, { toValue: 1, duration: 150 + Math.random() * 200, useNativeDriver: false }),
         Animated.timing(flicker, { toValue: 0, duration: 150 + Math.random() * 200, useNativeDriver: false }),
       ])
-    ).start();
+    ));
 
     // Pulse for medium+
     if (tier !== 'small') {
       const pulseDuration = tier === 'legendary' ? 600 : tier === 'epic' ? 700 : 800;
       const pulseMax = tier === 'legendary' ? 1.15 : tier === 'epic' ? 1.1 : 1.06;
-      Animated.loop(
+      startLoop(Animated.loop(
         Animated.sequence([
           Animated.timing(pulseScale, { toValue: pulseMax, duration: pulseDuration, easing: Easing.inOut(Easing.sin), useNativeDriver: false }),
           Animated.timing(pulseScale, { toValue: 1, duration: pulseDuration, easing: Easing.inOut(Easing.sin), useNativeDriver: false }),
         ])
-      ).start();
+      ));
     }
 
     // Core glow for epic+
     if (tier === 'epic' || tier === 'legendary') {
-      Animated.loop(
+      startLoop(Animated.loop(
         Animated.sequence([
           Animated.timing(coreGlow, { toValue: 1, duration: 400, useNativeDriver: false }),
           Animated.timing(coreGlow, { toValue: 0.5, duration: 400, useNativeDriver: false }),
         ])
-      ).start();
+      ));
     }
 
     // Ring rotation for legendary
     if (tier === 'legendary') {
-      Animated.loop(
+      startLoop(Animated.loop(
         Animated.timing(ringRotate, { toValue: 1, duration: 4000, easing: Easing.linear, useNativeDriver: false })
-      ).start();
+      ));
     }
 
     // Embers for large+
     if (tier === 'large' || tier === 'epic' || tier === 'legendary') {
       embers.forEach((ember, i) => {
         const startDelay = i * 300;
-        Animated.loop(
+        startLoop(Animated.loop(
           Animated.sequence([
             Animated.delay(startDelay),
             // Reset
@@ -157,10 +213,14 @@ export default function StreakFlame({ streakDays, accentColor }: Props) {
               ]),
             ]),
           ])
-        ).start();
+        ));
       });
     }
-  }, [tier]);
+
+    return () => {
+      for (const animation of runningAnimations) animation.stop();
+    };
+  }, [coreGlow, embers, flicker, floatY, pulseScale, reduceMotion, ringRotate, size, tier]);
 
   const flameSize = size * 0.6;
   const innerSize = flameSize * 0.6;
@@ -172,7 +232,11 @@ export default function StreakFlame({ streakDays, accentColor }: Props) {
   });
 
   return (
-    <View style={[styles.container, { width: size, height: size }]}>
+    <View
+      accessible
+      accessibilityLabel={`${streakDays} day streak, ${tier} flame`}
+      style={[styles.container, { width: size, height: size }]}
+    >
       {/* Legendary ring */}
       {tier === 'legendary' && (
         <Animated.View

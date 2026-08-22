@@ -3,6 +3,7 @@ import {
   isUuidLike,
   type AgentRuntimeSubjectMetadata,
 } from './agentRuntimeSubject';
+import { decodeEntityHandle, encodeEntityHandle } from './entityHandleCore';
 
 export type ChatAgentTargetStatus =
   | 'active'
@@ -57,6 +58,172 @@ export interface ChatAgentTarget<TAgent extends ChatAgentLike = ChatAgentLike> {
 }
 
 export const DEFAULT_CHAT_AGENT_TARGET_ID = 'chat-agent::openswan';
+const DEFAULT_CHAT_AGENT_RUNTIME_ID = 'default::blackswan';
+export const CHAT_AGENT_FOCUS_DRAFT_MAX = 3_500;
+
+export type ChatAgentFocusResolution = Readonly<{
+  officeAgentId: string;
+  targetId: string;
+  requestId: number;
+}>;
+
+const OFFICE_BRIDGE_PROVIDER_BY_PREFIX: Readonly<Record<string, string>> = Object.freeze({
+  cc: 'claude-code',
+  codex: 'codex',
+  cursor: 'cursor',
+  gemini: 'gemini',
+});
+
+/**
+ * Normalize a visible, user-reviewable Office-to-Chat draft. These handoffs
+ * may contain a multi-line task or generated artifact, so they intentionally
+ * use a larger bound than one-line quick-action composer seeds. The value is
+ * still stripped of non-whitespace controls and clamped before it crosses the
+ * surface boundary; Chat never submits it automatically.
+ */
+export function normalizeChatAgentFocusDraft(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, '')
+    .trim();
+  if (!normalized) return null;
+  return normalized.slice(0, CHAT_AGENT_FOCUS_DRAFT_MAX);
+}
+
+/**
+ * Translate an exact Office roster id into the selector id actually owned by
+ * Chat. Office and Chat historically used different structural namespaces for
+ * the same local bridge session (`cc::<session>` vs
+ * `bridge::claude-code::<session>`), while a disconnected synthetic provider
+ * main corresponds to Chat's setup preset rather than a live agent. Keep those
+ * translations structural and exact; display names are never identity.
+ *
+ * Entity-handle encode/decode supplies the same bounded, secret-free id
+ * validation used at the cross-surface navigation boundary. An Office-only
+ * provider placeholder with no Chat setup target fails closed so callers can
+ * disable the handoff instead of selecting a fabricated unavailable agent.
+ */
+export function chatAgentTargetIdFromOfficeAgentId(officeAgentId: unknown): string | null {
+  if (typeof officeAgentId !== 'string') return null;
+  const encoded = encodeEntityHandle({
+    surface: 'chat',
+    kind: 'agent',
+    id: officeAgentId,
+  });
+  const decoded = decodeEntityHandle(encoded);
+  if (!decoded || decoded.surface !== 'chat' || decoded.kind !== 'agent') return null;
+  if (decoded.id === DEFAULT_CHAT_AGENT_RUNTIME_ID) return DEFAULT_CHAT_AGENT_TARGET_ID;
+
+  const providerMain = /^provider-main::([A-Za-z0-9._-]+)$/.exec(decoded.id);
+  if (providerMain) {
+    const provider = normalizeChatAgentProvider(providerMain[1]);
+    if (provider === 'openswan') return DEFAULT_CHAT_AGENT_TARGET_ID;
+    return PRESET_BY_PROVIDER.has(provider) ? `preset::${provider}` : null;
+  }
+
+  const bridgeSession = /^(cc|codex|cursor|gemini)::(.+)$/.exec(decoded.id);
+  if (bridgeSession) {
+    const provider = OFFICE_BRIDGE_PROVIDER_BY_PREFIX[bridgeSession[1]];
+    return provider ? `agent::bridge::${provider}::${bridgeSession[2]}` : null;
+  }
+
+  return `agent::${decoded.id}`;
+}
+
+/**
+ * Admit a Chat focus request only once and in strictly increasing order.
+ * Navigation owns the request sequence; Chat owns selection. Keeping this
+ * gate pure makes duplicate, stale, malformed, and replayed requests inert.
+ */
+export function resolveChatAgentFocusRequest(
+  officeAgentId: unknown,
+  requestId: unknown,
+  lastAcceptedRequestId: unknown,
+): ChatAgentFocusResolution | null {
+  if (!Number.isSafeInteger(requestId) || (requestId as number) <= 0) return null;
+  const prior = Number.isSafeInteger(lastAcceptedRequestId) && (lastAcceptedRequestId as number) >= 0
+    ? lastAcceptedRequestId as number
+    : 0;
+  if ((requestId as number) <= prior) return null;
+  const targetId = chatAgentTargetIdFromOfficeAgentId(officeAgentId);
+  if (!targetId) return null;
+  const encoded = encodeEntityHandle({ surface: 'chat', kind: 'agent', id: officeAgentId });
+  const decoded = decodeEntityHandle(encoded);
+  if (!decoded) return null;
+  return Object.freeze({
+    officeAgentId: decoded.id,
+    targetId,
+    requestId: requestId as number,
+  });
+}
+
+export type ParsedChatAgentAssignment = Readonly<{
+  selectorKind: 'id' | 'name';
+  selector: string;
+  task: string;
+}>;
+
+export type ChatAgentAssignmentResolution<TAgent extends ChatAgentLike = ChatAgentLike> =
+  | Readonly<{ ok: true; agent: TAgent }>
+  | Readonly<{ ok: false; reason: 'invalid' | 'not_found' | 'ambiguous' }>;
+
+export function buildChatAgentAssignmentCommand(agentId: string): string {
+  const exactId = String(agentId || '').trim();
+  return exactId ? `/assign --id ${encodeURIComponent(exactId)} ` : '/assign ';
+}
+
+export function parseChatAgentAssignmentCommand(input: string): ParsedChatAgentAssignment | null {
+  const raw = String(input || '').trim().replace(/^\/assign\s+/i, '');
+  if (!raw) return null;
+
+  const idMatch = raw.match(/^--id\s+(\S+)\s+([\s\S]+)$/i);
+  if (idMatch) {
+    try {
+      const selector = decodeURIComponent(idMatch[1]).trim();
+      const task = idMatch[2].trim();
+      if (!selector || selector.length > 240 || !task) return null;
+      return Object.freeze({ selectorKind: 'id' as const, selector, task });
+    } catch {
+      return null;
+    }
+  }
+
+  const quoted = raw.match(/^@?(?:["“]([^"”]+)["”]|'([^']+)')\s+([\s\S]+)$/);
+  if (quoted) {
+    const selector = String(quoted[1] || quoted[2] || '').trim();
+    const task = quoted[3].trim();
+    if (!selector || selector.length > 120 || !task) return null;
+    return Object.freeze({ selectorKind: 'name' as const, selector, task });
+  }
+
+  const legacy = raw.match(/^@?([^\s]+)\s+([\s\S]+)$/);
+  if (!legacy) return null;
+  return Object.freeze({
+    selectorKind: 'name' as const,
+    selector: legacy[1].trim(),
+    task: legacy[2].trim(),
+  });
+}
+
+export function resolveChatAgentAssignmentTarget<TAgent extends ChatAgentLike>(
+  agents: readonly TAgent[],
+  parsed: ParsedChatAgentAssignment | null,
+  preferredAgentId?: string | null,
+): ChatAgentAssignmentResolution<TAgent> {
+  if (!parsed || !Array.isArray(agents)) return Object.freeze({ ok: false, reason: 'invalid' });
+  const exactId = String(preferredAgentId || (parsed.selectorKind === 'id' ? parsed.selector : '')).trim();
+  if (exactId) {
+    const matches = agents.filter((agent) => agent.id === exactId);
+    if (matches.length === 1) return Object.freeze({ ok: true, agent: matches[0] });
+    return Object.freeze({ ok: false, reason: matches.length > 1 ? 'ambiguous' : 'not_found' });
+  }
+  const normalizedName = parsed.selector.trim().toLowerCase();
+  if (!normalizedName) return Object.freeze({ ok: false, reason: 'invalid' });
+  const matches = agents.filter((agent) => String(agent.name || '').trim().toLowerCase() === normalizedName);
+  if (matches.length === 1) return Object.freeze({ ok: true, agent: matches[0] });
+  return Object.freeze({ ok: false, reason: matches.length > 1 ? 'ambiguous' : 'not_found' });
+}
 
 export const CHAT_AGENT_PROVIDER_PRESETS: ChatAgentProviderPreset[] = [
   {
@@ -257,7 +424,7 @@ export function buildChatAgentTargets<TAgent extends ChatAgentLike>(
     const provider = normalizeChatAgentProvider(agent.provider);
     const preset = getChatAgentProviderPreset(provider);
     connectedProviders.add(provider);
-    const isDefault = provider === 'openswan' && (agent.id.includes('default') || agent.name.toLowerCase() === 'openswan');
+    const isDefault = provider === 'openswan' && agent.id === DEFAULT_CHAT_AGENT_RUNTIME_ID;
     const label = provider === 'cursor' && /^cursor$/i.test(agent.name || '')
       ? preset.label
       : agent.name || preset.label;
@@ -329,7 +496,11 @@ export function resolveChatAgentTarget<TAgent extends ChatAgentLike>(
   targets: ChatAgentTarget<TAgent>[],
   selectedId: string | null | undefined,
 ): ChatAgentTarget<TAgent> {
+  const exactSelectedId = String(selectedId || '').trim();
   if (!targets.length) {
+    if (exactSelectedId) {
+      return buildUnavailableChatAgentTarget<TAgent>(exactSelectedId);
+    }
     const preset = getChatAgentProviderPreset('openswan');
     return {
       id: DEFAULT_CHAT_AGENT_TARGET_ID,
@@ -346,9 +517,29 @@ export function resolveChatAgentTarget<TAgent extends ChatAgentLike>(
       ...buildTargetSubjectFields<TAgent>(null, 'openswan', true),
     };
   }
-  return targets.find((target) => target.id === selectedId)
-    || targets.find((target) => target.id === DEFAULT_CHAT_AGENT_TARGET_ID)
+  if (exactSelectedId) {
+    return targets.find((target) => target.id === exactSelectedId)
+      || buildUnavailableChatAgentTarget<TAgent>(exactSelectedId);
+  }
+  return targets.find((target) => target.id === DEFAULT_CHAT_AGENT_TARGET_ID)
     || targets[0];
+}
+
+function buildUnavailableChatAgentTarget<TAgent extends ChatAgentLike>(selectedId: string): ChatAgentTarget<TAgent> {
+  return {
+    id: selectedId,
+    provider: 'unavailable',
+    label: 'Selected agent unavailable',
+    icon: '!',
+    color: '#f97316',
+    description: 'The exact previously selected agent is no longer available.',
+    status: 'offline',
+    connected: false,
+    source: 'preset',
+    setupHint: 'Refresh the agent list and explicitly choose another target. Nothing will be dispatched while this selection is unavailable.',
+    priority: Number.MAX_SAFE_INTEGER,
+    isDefault: false,
+  };
 }
 
 export function buildChatAgentSetupMessage(target: ChatAgentTarget): string {

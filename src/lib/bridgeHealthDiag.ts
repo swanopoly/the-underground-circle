@@ -14,7 +14,8 @@
  *     classifies the response shape via `parseBridgeHealth`, and
  *     returns `BridgeProbeResult[]`.
  *   - `parseBridgeHealth(name, raw)` is pure — given a JSON body it
- *     extracts session count, auth state, and any actionable hint.
+ *     extracts session count, any explicitly reported auth state, and an
+ *     actionable hint.
  *     Smoke-testable without real network.
  *   - `summarizeBridgeProbes(results)` formats a one-screen
  *     human-readable report (used by `scripts/check-bridges.ts`).
@@ -107,8 +108,10 @@ export interface BridgeProbeResult {
 /**
  * Parse a `/health` response body into a probe result. Tolerant of the
  * fact that each bridge author chose slightly different field names —
- * Claude bridge uses `sessions: number`, Gemini uses
- * `{ sessions, auth, email }`, others may add their own.
+ * Every current bridge uses `sessions: number`. Gemini deliberately keeps
+ * account state on its authenticated `/auth` route, so a healthy `/health`
+ * payload normally has neither `auth` nor `email`. Older bridge versions may
+ * still include those optional fields.
  */
 export function parseBridgeHealth(
   entry: BridgeCatalogEntry,
@@ -137,13 +140,30 @@ export function parseBridgeHealth(
   }
 
   const body = raw as Record<string, unknown>;
-  const sessionCount = typeof body.sessions === 'number' ? body.sessions : undefined;
+  const hasSessionCount = Object.prototype.hasOwnProperty.call(body, 'sessions');
+  if (
+    hasSessionCount
+    && (
+      typeof body.sessions !== 'number'
+      || !Number.isSafeInteger(body.sessions)
+      || body.sessions < 0
+    )
+  ) {
+    return {
+      status: 'offline',
+      detail: 'health endpoint returned an invalid session count',
+      hint: `Restart with: ${entry.restartCommand}`,
+      raw,
+    };
+  }
+  const sessionCount = hasSessionCount ? body.sessions as number : undefined;
   const auth = typeof body.auth === 'string' ? body.auth : undefined;
   const email = typeof body.email === 'string' ? body.email : undefined;
 
-  // Gemini reports `auth: 'none'` when the user hasn't logged in. The
-  // bridge IS running but it can't expose anything until auth.
-  const authMissing = auth === 'none' || (entry.name === 'gemini-cli' && !email);
+  // Only explicit auth evidence may downgrade bridge health. The current
+  // Gemini `/health` contract intentionally omits account/email information;
+  // absence therefore means "not reported", never "not authenticated".
+  const authMissing = auth === 'none';
   if (authMissing) {
     return {
       status: 'degraded',

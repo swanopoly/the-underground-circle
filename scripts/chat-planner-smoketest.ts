@@ -185,8 +185,8 @@ if (officeAgentPlan.intent.kind === 'conversational_action' && officeAgentPlan.i
   const officeAgentIntent = officeAgentPlan.intent.intent;
   if (officeAgentIntent.agentName === 'Scout') pass('conversational:office agent task extracts agent name');
   else fail(`conversational:office agent task extracts agent name\n    expected Scout, got ${officeAgentIntent.agentName}`);
-  if (officeAgentIntent.modelName === 'claude-opus-4-8') pass('conversational:office agent task extracts requested model');
-  else fail(`conversational:office agent task extracts requested model\n    expected claude-opus-4-8, got ${officeAgentIntent.modelName}`);
+  if (officeAgentIntent.modelName === 'claude-opus-5') pass('conversational:office agent task extracts the current requested model');
+  else fail(`conversational:office agent task extracts the current requested model\n    expected claude-opus-5, got ${officeAgentIntent.modelName}`);
   if (officeAgentIntent.taskTarget === 'latest_user_task') pass('conversational:office agent task targets latest user task');
   else fail(`conversational:office agent task targets latest user task\n    expected latest_user_task, got ${officeAgentIntent.taskTarget}`);
 } else {

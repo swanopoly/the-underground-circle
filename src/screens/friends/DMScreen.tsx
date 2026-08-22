@@ -61,11 +61,7 @@ export default function DMScreen({ navigation, route }: any) {
 
     const { data, error } = await supabase
       .from('direct_messages')
-      .select(`
-        *,
-        sender:profiles!direct_messages_sender_id_fkey(id, display_name, username),
-        receiver:profiles!direct_messages_receiver_id_fkey(id, display_name, username)
-      `)
+      .select('*')
       .or(`and(sender_id.eq.${currentUserId},receiver_id.eq.${friendId}),and(sender_id.eq.${friendId},receiver_id.eq.${currentUserId})`)
       .order('created_at', { ascending: true });
 
@@ -107,11 +103,7 @@ export default function DMScreen({ navigation, route }: any) {
           message_type: 'text',
           is_read: false,
         })
-        .select(`
-          *,
-          sender:profiles!direct_messages_sender_id_fkey(id, display_name, username),
-          receiver:profiles!direct_messages_receiver_id_fkey(id, display_name, username)
-        `)
+        .select('*')
         .single();
 
       if (error) throw error;

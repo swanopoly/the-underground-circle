@@ -7,6 +7,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import type { MemoryEntry } from '../lib/agentRunSystem';
@@ -26,6 +27,11 @@ import {
   createSecondBrainNoteFromMemory,
   getSecondBrainUnavailableMessage,
   getSecondBrainReviewState,
+  isCircleShareableSecondBrainMemory,
+  isCircleShareableSecondBrainNote,
+  isPersonalSecondBrainMemory,
+  loadSecondBrainAgentBriefInputs,
+  loadSecondBrainMemoriesForScope,
   promoteSecondBrainNoteToMemory,
   reviewSecondBrainNote,
   searchSecondBrain,
@@ -101,6 +107,30 @@ interface OtherCircle { id: string; name: string; }
 
 type ReviewQueueItem = { note: SecondBrainNote; state: SecondBrainReviewState };
 
+type KnowledgeReadKind =
+  | 'main'
+  | 'other-circles'
+  | 'other-graph'
+  | 'db-stats'
+  | 'search'
+  | 'mutation'
+  | 'site-map'
+  | 'knowledge-intake';
+
+const SITE_MAP_PREVIEW_LABELS = [
+  'Chat',
+  'Office',
+  'Feed',
+  'Rooms',
+  'Marketplace',
+  'Backpack',
+  'Computer Use',
+  'OpenSwan',
+  'BlackSwan',
+  'Memory Bank',
+  'Provider Routing',
+] as const;
+
 const DB_STAT_FAILURE_COOLDOWN_MS = 60_000;
 const dbStatUnavailableUntil = new Map<string, number>();
 
@@ -109,9 +139,11 @@ function shouldCacheDbStatError(error: any): boolean {
   const status = Number(error?.status || error?.statusCode || 0);
   const code = String(error?.code || '');
   const message = `${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`.toLowerCase();
-  return status === 404
+  return status === 400
+    || status === 404
     || status >= 500
     || code === '42P01'
+    || code === '22P02'
     || code === 'PGRST204'
     || code === 'PGRST205'
     || code.startsWith('XX')
@@ -136,7 +168,7 @@ interface SystemSimNode extends DigitalBrainSystemNode {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const NODE_COLORS = [
-  '#22d3ee', '#22c55e', '#a855f7', '#f59e0b',
+  '#6366f1', '#22c55e', '#a855f7', '#f59e0b',
   '#38bdf8', '#f43f5e', '#84cc16', '#fb923c',
 ] as const;
 
@@ -322,7 +354,7 @@ function drawFrame(s: CanvasState): void {
 
   // Nebula glow
   const grd = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W, H) * 0.65);
-  grd.addColorStop(0, 'rgba(34,211,238,0.055)');
+  grd.addColorStop(0, 'rgba(99,102,241,0.055)');
   grd.addColorStop(0.45, 'rgba(168,85,247,0.025)');
   grd.addColorStop(1, 'rgba(0,0,0,0)');
   ctx.fillStyle = grd;
@@ -525,7 +557,7 @@ function drawFrame(s: CanvasState): void {
   ctx.globalAlpha = 0.68;
   ctx.fillStyle = 'rgba(2,9,20,0.9)';
   ctx.fillRect(MM_X, MM_Y, MM_W, MM_H);
-  ctx.strokeStyle = 'rgba(34,211,238,0.18)';
+  ctx.strokeStyle = 'rgba(99,102,241,0.18)';
   ctx.lineWidth = 1;
   ctx.strokeRect(MM_X, MM_Y, MM_W, MM_H);
   ctx.globalAlpha = 0.38;
@@ -868,6 +900,7 @@ function DigitalBrainSystemFlowCanvas({
     canvas.style.height = `${height}px`;
     canvas.style.display = 'block';
     canvas.style.cursor = 'grab';
+    canvas.style.touchAction = 'pan-y';
     container.innerHTML = '';
     container.appendChild(canvas);
     const ctx = canvas.getContext('2d');
@@ -885,6 +918,8 @@ function DigitalBrainSystemFlowCanvas({
     let rotX = -0.34;
     let rotY = 0.58;
     let zoom = 1;
+    let baseZoom = 1;
+    let hasUserZoomed = false;
     let isDragging = false;
     let moved = false;
     let lastX = 0;
@@ -951,6 +986,8 @@ function DigitalBrainSystemFlowCanvas({
     const resize = () => {
       const rect = container.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
+      baseZoom = Math.max(0.52, Math.min(1, rect.width / 760));
+      if (!hasUserZoomed) zoom = baseZoom;
       canvas.width = Math.max(1, Math.floor(rect.width * dpr));
       canvas.height = Math.max(1, Math.floor(height * dpr));
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -992,19 +1029,25 @@ function DigitalBrainSystemFlowCanvas({
       const W = canvas.clientWidth || 1;
       const H = height;
       ctx.clearRect(0, 0, W, H);
-      const bg = ctx.createLinearGradient(0, 0, W, H);
-      bg.addColorStop(0, '#020711');
-      bg.addColorStop(0.5, '#061322');
-      bg.addColorStop(1, '#020711');
-      ctx.fillStyle = bg;
+      ctx.fillStyle = '#080b12';
+      ctx.fillRect(0, 0, W, H);
+
+      const ambient = ctx.createRadialGradient(W * 0.5, H * 0.42, 0, W * 0.5, H * 0.42, Math.max(W, H) * 0.7);
+      ambient.addColorStop(0, 'rgba(99,102,241,0.055)');
+      ambient.addColorStop(0.52, 'rgba(30,41,59,0.025)');
+      ambient.addColorStop(1, 'rgba(8,11,18,0)');
+      ctx.fillStyle = ambient;
       ctx.fillRect(0, 0, W, H);
 
       ctx.save();
-      ctx.globalAlpha = 0.16;
-      ctx.strokeStyle = accentColor;
-      ctx.lineWidth = 1;
-      for (let x = 0; x < W; x += 48) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
-      for (let y = 0; y < H; y += 48) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+      ctx.fillStyle = 'rgba(148,163,184,0.10)';
+      for (let x = 20; x < W; x += 32) {
+        for (let y = 20; y < H; y += 32) {
+          ctx.beginPath();
+          ctx.arc(x, y, 0.7, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
       ctx.restore();
 
       for (const cluster of map.clusters) {
@@ -1014,20 +1057,20 @@ function DigitalBrainSystemFlowCanvas({
         const count = byCluster.get(cluster.id)?.length || 0;
         const radius = Math.max(42, Math.min(130, 36 + Math.sqrt(count) * 16)) * p.scale;
         ctx.save();
-        ctx.globalAlpha = 0.10 + Math.max(0.04, p.scale * 0.08);
+        ctx.globalAlpha = 0.035 + Math.max(0.018, p.scale * 0.025);
         ctx.fillStyle = cluster.color;
         ctx.beginPath();
-        ctx.ellipse(p.sx, p.sy, radius * 1.35, radius * 0.72, rotY * 0.3, 0, Math.PI * 2);
+        ctx.ellipse(p.sx, p.sy, radius * 1.24, radius * 0.68, rotY * 0.22, 0, Math.PI * 2);
         ctx.fill();
-        ctx.globalAlpha = 0.34;
+        ctx.globalAlpha = 0.16;
         ctx.strokeStyle = cluster.color;
-        ctx.setLineDash([5, 8]);
+        ctx.lineWidth = 1;
         ctx.stroke();
         ctx.restore();
-        ctx.fillStyle = '#cbd5e1';
-        ctx.font = '800 9px monospace';
+        ctx.fillStyle = '#8792a6';
+        ctx.font = '600 10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText(cluster.label.toUpperCase(), p.sx, p.sy - radius - 8);
+        ctx.fillText(cluster.label, p.sx, p.sy - radius - 9);
       }
 
       const nodes = layoutRef.current;
@@ -1046,23 +1089,22 @@ function DigitalBrainSystemFlowCanvas({
         if (!a || !b || a.sx == null || b.sx == null || a.sy == null || b.sy == null) continue;
         const color = flowColor(edge.kind);
         const activeSelectedId = selectedRef.current;
-        const selected = activeSelectedId && (edge.from === activeSelectedId || edge.to === activeSelectedId);
+        const selected = Boolean(activeSelectedId && (edge.from === activeSelectedId || edge.to === activeSelectedId));
         const avgScale = ((a.scale || 1) + (b.scale || 1)) / 2;
         const mx = ((a.sx || 0) + (b.sx || 0)) / 2;
-        const my = ((a.sy || 0) + (b.sy || 0)) / 2 - (32 * avgScale) * Math.sin(i);
+        const my = ((a.sy || 0) + (b.sy || 0)) / 2 - (18 * avgScale) * Math.sin(i);
         ctx.save();
-        ctx.globalAlpha = selected ? 0.72 : 0.20 + edge.strength * 0.18;
-        ctx.strokeStyle = color;
-        ctx.lineWidth = selected ? 2.4 : Math.max(0.7, edge.strength * 1.8 * avgScale);
+        ctx.globalAlpha = selected ? 0.78 : 0.08 + edge.strength * 0.08;
+        ctx.strokeStyle = selected ? color : '#94a3b8';
+        ctx.lineWidth = selected ? 1.8 : Math.max(0.55, edge.strength * 1.05 * avgScale);
         ctx.beginPath();
         ctx.moveTo(a.sx || 0, a.sy || 0);
         ctx.quadraticCurveTo(mx, my, b.sx || 0, b.sy || 0);
         ctx.stroke();
         ctx.restore();
 
-        const particles = selected ? 3 : 1;
-        for (let p = 0; p < particles; p++) {
-          const phase = (time * (0.00008 + edge.strength * 0.00006) + i * 0.031 + p / particles) % 1;
+        if (selected) {
+          const phase = (time * (0.000075 + edge.strength * 0.00004) + i * 0.031) % 1;
           const x1 = (a.sx || 0) + (mx - (a.sx || 0)) * phase;
           const y1 = (a.sy || 0) + (my - (a.sy || 0)) * phase;
           const x2 = mx + ((b.sx || 0) - mx) * phase;
@@ -1070,12 +1112,12 @@ function DigitalBrainSystemFlowCanvas({
           const px = x1 + (x2 - x1) * phase;
           const py = y1 + (y2 - y1) * phase;
           ctx.save();
-          ctx.globalAlpha = selected ? 0.95 : 0.68;
+          ctx.globalAlpha = 0.92;
           ctx.fillStyle = color;
           ctx.shadowColor = color;
-          ctx.shadowBlur = selected ? 18 : 10;
+          ctx.shadowBlur = 10;
           ctx.beginPath();
-          ctx.arc(px, py, selected ? 3.5 : 2.3, 0, Math.PI * 2);
+          ctx.arc(px, py, 2.4, 0, Math.PI * 2);
           ctx.fill();
           ctx.restore();
         }
@@ -1318,64 +1360,48 @@ function DigitalBrainSystemFlowCanvas({
       for (const node of sortedNodes) {
         if (node.sx == null || node.sy == null) continue;
         const color = nodeColor(node);
+        const [cr, cg, cb] = hexToRgb(color);
         const activeSelectedId = selectedRef.current;
         const selected = node.id === activeSelectedId;
         const hovered = node.id === hoverId;
         const scale = node.scale || 1;
-        const r = (selected ? node.radius + 5 : hovered ? node.radius + 3 : node.radius) * scale;
+        const baseRadius = node.type === 'memory' ? node.radius * 0.62 : node.radius * 0.74;
+        const r = Math.max(3.2, (baseRadius + (selected ? 3 : hovered ? 1.5 : 0)) * scale);
         ctx.save();
-        ctx.globalAlpha = node.type === 'memory' && !selected ? 0.62 + Math.min(0.26, scale * 0.18) : 1;
+        ctx.globalAlpha = node.type === 'memory' && !selected ? 0.72 : 1;
+
+        if (selected || hovered) {
+          ctx.strokeStyle = `rgba(${cr},${cg},${cb},${selected ? 0.34 : 0.18})`;
+          ctx.lineWidth = selected ? 5 : 3;
+          ctx.beginPath();
+          ctx.arc(node.sx, node.sy, r + (selected ? 8 : 5), 0, Math.PI * 2);
+          ctx.stroke();
+        }
+
+        ctx.fillStyle = `rgba(${cr},${cg},${cb},${selected ? 0.30 : hovered ? 0.23 : 0.13})`;
+        ctx.strokeStyle = selected ? '#f8fafc' : hovered ? color : `rgba(${cr},${cg},${cb},0.70)`;
+        ctx.lineWidth = selected ? 1.8 : 1;
         ctx.shadowColor = color;
-        ctx.shadowBlur = selected ? 38 : hovered ? 26 : node.type === 'memory' ? 9 : 16;
-        // base fill
-        ctx.fillStyle = color;
+        ctx.shadowBlur = selected ? 13 : hovered ? 7 : 0;
         traceNodeShape(node.type, node.sx, node.sy, r);
         ctx.fill();
-        ctx.shadowBlur = 0;
-        // sphere highlight overlay — white radial at top-left
-        const hl = ctx.createRadialGradient(
-          node.sx - r * 0.32, node.sy - r * 0.34, r * 0.04,
-          node.sx - r * 0.22, node.sy - r * 0.22, r * 0.92,
-        );
-        hl.addColorStop(0, 'rgba(255,255,255,0.58)');
-        hl.addColorStop(0.42, 'rgba(255,255,255,0.12)');
-        hl.addColorStop(1, 'rgba(0,0,0,0)');
-        ctx.fillStyle = hl;
-        traceNodeShape(node.type, node.sx, node.sy, r);
-        ctx.fill();
-        // dark rim at bottom-right
-        const rim = ctx.createRadialGradient(
-          node.sx + r * 0.26, node.sy + r * 0.28, r * 0.05,
-          node.sx, node.sy, r * 1.08,
-        );
-        rim.addColorStop(0, 'rgba(0,0,0,0)');
-        rim.addColorStop(0.55, 'rgba(0,0,0,0)');
-        rim.addColorStop(1, 'rgba(0,0,0,0.52)');
-        ctx.fillStyle = rim;
-        traceNodeShape(node.type, node.sx, node.sy, r);
-        ctx.fill();
-        // inner icon details on top of shading
-        if (r >= 6) drawNodeIcon(node.type, node.sx, node.sy, r, selected);
-        // outline
-        ctx.strokeStyle = selected ? '#ffffff' : hovered ? color : '#020711';
-        ctx.lineWidth = selected ? 2.2 : hovered ? 1.4 : 0.9;
-        traceNodeShape(node.type, node.sx, node.sy, r);
         ctx.stroke();
-        // label
-        if (selected || hovered || node.type !== 'memory' || map.stats.memories <= 18) {
-          ctx.fillStyle = selected ? '#ffffff' : '#dbeafe';
-          ctx.font = `${selected ? '900' : '800'} ${selected ? 12 : 10}px monospace`;
+
+        if ((selected || hovered) && r >= 6) {
+          ctx.shadowBlur = 0;
+          drawNodeIcon(node.type, node.sx, node.sy, r, selected);
+        }
+
+        const showLabel = selected || hovered || (W >= 700 && node.type !== 'memory' && node.weight >= 0.99);
+        if (showLabel) {
+          ctx.shadowBlur = 0;
+          ctx.fillStyle = selected ? '#f8fafc' : '#b6c0cf';
+          ctx.font = `${selected ? '600' : '500'} ${selected ? 12 : 10}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
           ctx.textAlign = 'center';
-          ctx.fillText(node.label.slice(0, selected ? 34 : 22), node.sx, node.sy + r + 15);
+          ctx.fillText(node.label.slice(0, selected ? 34 : 24), node.sx, node.sy + r + 15);
         }
         ctx.restore();
       }
-
-      ctx.save();
-      ctx.fillStyle = '#94a3b8';
-      ctx.font = '10px monospace';
-      ctx.fillText('3D SYSTEM FLOW · drag to orbit · scroll to zoom · click nodes', 12, H - 14);
-      ctx.restore();
 
       requestId = requestAnimationFrame(draw);
     };
@@ -1395,22 +1421,26 @@ function DigitalBrainSystemFlowCanvas({
       return best;
     };
 
-    const getXY = (e: MouseEvent) => {
+    const getXY = (e: MouseEvent | PointerEvent) => {
       const rect = canvas.getBoundingClientRect();
       return { x: e.clientX - rect.left, y: e.clientY - rect.top };
     };
 
-    const handleMouseDown = (e: MouseEvent) => {
+    const handlePointerDown = (e: PointerEvent) => {
       const p = getXY(e);
-      isDragging = true;
+      isDragging = e.pointerType === 'mouse';
       moved = false;
       lastX = p.x;
       lastY = p.y;
-      canvas.style.cursor = 'grabbing';
+      if (isDragging) canvas.style.cursor = 'grabbing';
     };
 
-    const handleMouseMove = (e: MouseEvent) => {
+    const handlePointerMove = (e: PointerEvent) => {
       const p = getXY(e);
+      if (e.pointerType !== 'mouse') {
+        if (Math.abs(p.x - lastX) + Math.abs(p.y - lastY) > 6) moved = true;
+        return;
+      }
       if (isDragging) {
         const dx = p.x - lastX;
         const dy = p.y - lastY;
@@ -1427,7 +1457,7 @@ function DigitalBrainSystemFlowCanvas({
       }
     };
 
-    const handleMouseUp = (e: MouseEvent) => {
+    const handlePointerUp = (e: PointerEvent) => {
       const p = getXY(e);
       if (!moved) {
         const hit = hitTest(p.x, p.y);
@@ -1437,16 +1467,24 @@ function DigitalBrainSystemFlowCanvas({
       canvas.style.cursor = hoverId ? 'pointer' : 'grab';
     };
 
+    const handlePointerCancel = () => {
+      isDragging = false;
+      moved = true;
+      canvas.style.cursor = 'grab';
+    };
+
     const handleWheel = (e: WheelEvent) => {
       e.preventDefault();
+      hasUserZoomed = true;
       zoom *= e.deltaY > 0 ? 0.92 : 1.08;
-      zoom = Math.max(0.45, Math.min(2.8, zoom));
+      zoom = Math.max(0.36, Math.min(2.8, zoom));
     };
 
     const handleDoubleClick = () => {
       rotX = -0.34;
       rotY = 0.58;
-      zoom = 1;
+      hasUserZoomed = false;
+      zoom = baseZoom;
     };
 
     const handleMouseLeave = () => {
@@ -1458,19 +1496,21 @@ function DigitalBrainSystemFlowCanvas({
     resize();
     requestId = requestAnimationFrame(draw);
     window.addEventListener('resize', resize);
-    canvas.addEventListener('mousedown', handleMouseDown);
-    canvas.addEventListener('mousemove', handleMouseMove);
-    canvas.addEventListener('mouseup', handleMouseUp);
-    canvas.addEventListener('mouseleave', handleMouseLeave);
+    canvas.addEventListener('pointerdown', handlePointerDown);
+    canvas.addEventListener('pointermove', handlePointerMove);
+    canvas.addEventListener('pointerup', handlePointerUp);
+    canvas.addEventListener('pointercancel', handlePointerCancel);
+    canvas.addEventListener('pointerleave', handleMouseLeave);
     canvas.addEventListener('wheel', handleWheel, { passive: false });
     canvas.addEventListener('dblclick', handleDoubleClick);
     return () => {
       cancelAnimationFrame(requestId);
       window.removeEventListener('resize', resize);
-      canvas.removeEventListener('mousedown', handleMouseDown);
-      canvas.removeEventListener('mousemove', handleMouseMove);
-      canvas.removeEventListener('mouseup', handleMouseUp);
-      canvas.removeEventListener('mouseleave', handleMouseLeave);
+      canvas.removeEventListener('pointerdown', handlePointerDown);
+      canvas.removeEventListener('pointermove', handlePointerMove);
+      canvas.removeEventListener('pointerup', handlePointerUp);
+      canvas.removeEventListener('pointercancel', handlePointerCancel);
+      canvas.removeEventListener('pointerleave', handleMouseLeave);
       canvas.removeEventListener('wheel', handleWheel);
       canvas.removeEventListener('dblclick', handleDoubleClick);
       canvas.remove();
@@ -1488,7 +1528,7 @@ function DigitalBrainSystemFlowCanvas({
 // ─── Main component ────────────────────────────────────────────────────────────
 
 export default function SecondBrainDashboard({
-  circleId, userId, accentColor = '#22d3ee', onOpenCompartment,
+  circleId, userId, accentColor = '#6366f1', onOpenCompartment,
 }: Props) {
   const [brainMode, setBrainMode] = useState<'mine' | 'circle'>('mine');
   const [mapping, setMapping] = useState(false);
@@ -1498,8 +1538,11 @@ export default function SecondBrainDashboard({
   const [graph, setGraph] = useState<SecondBrainGraph | null>(null);
   const [filter, setFilter] = useState<BrainFilter>('active');
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+  const [loadIsStale, setLoadIsStale] = useState(false);
   const [status, setStatus] = useState('');
   const [saving, setSaving] = useState(false);
+  const [searching, setSearching] = useState(false);
   const [title, setTitle] = useState('');
   const [url, setUrl] = useState('');
   const [content, setContent] = useState('');
@@ -1512,67 +1555,221 @@ export default function SecondBrainDashboard({
   const [otherCircleId, setOtherCircleId] = useState<string | null>(null);
   const [otherGraph, setOtherGraph] = useState<SecondBrainGraph | null>(null);
   const [otherLoading, setOtherLoading] = useState(false);
+  const [otherCirclesError, setOtherCirclesError] = useState('');
+  const [otherGraphError, setOtherGraphError] = useState('');
   const [uploadStatus, setUploadStatus] = useState('');
   const [dbStats, setDbStats] = useState<Record<string, DigitalBrainDbStat>>({});
+  const [dbStatsError, setDbStatsError] = useState('');
   const [systemNodeId, setSystemNodeId] = useState<string | null>(null);
   const [knowledgeSeeding, setKnowledgeSeeding] = useState(false);
-  const memorySyncRef = useRef('');
-  const autoMapFiredRef = useRef(false);
+  const [showSystemDetails, setShowSystemDetails] = useState(false);
+  const [dismissedSiteMapDraftScope, setDismissedSiteMapDraftScope] = useState('');
+  const readGenerationRef = useRef<Record<KnowledgeReadKind, number>>({
+    main: 0,
+    'other-circles': 0,
+    'other-graph': 0,
+    'db-stats': 0,
+    search: 0,
+    mutation: 0,
+    'site-map': 0,
+    'knowledge-intake': 0,
+  });
+  const snapshotScopeRef = useRef({ graph: '', memories: '' });
+  const { width } = useWindowDimensions();
+  const compactLayout = width < 720;
+  const scopeKey = `${circleId}:${userId || 'anonymous'}:${brainMode}`;
+  const currentScopeRef = useRef(scopeKey);
+  currentScopeRef.current = scopeKey;
+
+  const beginRead = useCallback((kind: KnowledgeReadKind) => {
+    readGenerationRef.current[kind] += 1;
+    return readGenerationRef.current[kind];
+  }, []);
+
+  const isCurrentRead = useCallback((kind: KnowledgeReadKind, generation: number) => (
+    readGenerationRef.current[kind] === generation
+  ), []);
+
+  const isCurrentScopeOperation = useCallback((
+    kind: KnowledgeReadKind,
+    generation: number,
+    targetScope: string,
+  ) => (
+    readGenerationRef.current[kind] === generation
+    && currentScopeRef.current === targetScope
+  ), []);
 
   const load = useCallback(async () => {
+    const generation = beginRead('main');
+    const targetScope = scopeKey;
+    const hadGraphSnapshot = snapshotScopeRef.current.graph === targetScope;
+    const hadMemorySnapshot = snapshotScopeRef.current.memories === targetScope;
     setLoading(true);
+    setLoadError('');
+    setLoadIsStale(false);
+    if (brainMode === 'mine' && !userId) {
+      if (isCurrentScopeOperation('main', generation, targetScope)) {
+        setGraph(null);
+        setNotes([]);
+        setMemories([]);
+        setLoadError('Sign in to load personal Knowledge. No circle data was substituted.');
+        setLoading(false);
+      }
+      return;
+    }
     const graphOpts = brainMode === 'mine' ? { userId, mode: 'mine' as const } : { mode: 'circle' as const };
-    const [graphResult, memoryResult] = await Promise.all([
-      buildSecondBrainGraph(circleId, graphOpts),
-      import('../lib/agentMemory')
-        .then(mod => mod.getUserMemories(circleId, userId))
-        .catch(() => ({ circle: [], user: [], session: [], agent: [], total: 0 })),
-    ]);
-    setGraph(graphResult.graph);
-    setNotes(graphResult.graph.notes);
-    const loaded = [
-      ...(memoryResult.circle || []),
-      ...(memoryResult.user || []),
-      ...(memoryResult.session || []),
-      ...((memoryResult as any).agent || []),
-    ];
-    setMemories(loaded);
-    setStatus(graphResult.missing
-      ? 'Second brain migration is not deployed yet. Run the SQL migration and refresh.'
-      : graphResult.unavailable
-        ? 'Second brain storage is temporarily unavailable. Check the Supabase table/RLS health and refresh.'
-      : graphResult.error || '');
-    setLoading(false);
-  }, [circleId, userId, brainMode]);
+    try {
+      const [graphResult, memoryResult] = await Promise.all([
+        buildSecondBrainGraph(circleId, graphOpts),
+        loadSecondBrainMemoriesForScope({ circleId, userId, mode: brainMode, limit: 200 }),
+      ]);
+      if (!isCurrentScopeOperation('main', generation, targetScope)) return;
 
-  useEffect(() => { load(); }, [load]);
+      const graphFailed = Boolean(graphResult.missing || graphResult.unavailable || graphResult.error);
+      if (!graphFailed) {
+        setGraph(graphResult.graph);
+        setNotes(graphResult.graph.notes);
+        snapshotScopeRef.current.graph = targetScope;
+      } else if (!hadGraphSnapshot) {
+        setGraph(null);
+        setNotes([]);
+      }
+      if (!memoryResult.error) {
+        setMemories(memoryResult.memories);
+        snapshotScopeRef.current.memories = targetScope;
+      } else if (!hadMemorySnapshot) {
+        setMemories([]);
+      }
+
+      const retainedParts = [
+        graphFailed && hadGraphSnapshot ? 'notes' : '',
+        memoryResult.error && hadMemorySnapshot ? 'agent memory' : '',
+      ].filter(Boolean);
+      if (retainedParts.length) {
+        setLoadIsStale(true);
+        setLoadError(`Refresh failed for ${retainedParts.join(' and ')}. Previously loaded data is still shown and may be stale.`);
+      } else if (graphResult.missing) {
+        setLoadError('Knowledge storage is not set up for this workspace yet. Unavailable sections were cleared.');
+      } else if (graphResult.unavailable || graphResult.error) {
+        setLoadError('Knowledge notes could not be loaded. The unavailable section was cleared; check the connection and retry.');
+      } else if (memoryResult.error) {
+        setLoadError('Knowledge notes are current, but agent memory could not be loaded. The unavailable memory section was cleared; retry.');
+      }
+    } catch {
+      if (isCurrentScopeOperation('main', generation, targetScope)) {
+        if (hadGraphSnapshot || hadMemorySnapshot) {
+          setLoadIsStale(true);
+          setLoadError('Refresh failed. Previously loaded Knowledge is still shown and may be stale.');
+        } else {
+          setGraph(null);
+          setNotes([]);
+          setMemories([]);
+          setLoadError('Knowledge could not load. Unavailable sections were cleared; check the connection and retry.');
+        }
+      }
+    } finally {
+      if (isCurrentScopeOperation('main', generation, targetScope)) setLoading(false);
+    }
+  }, [beginRead, brainMode, circleId, isCurrentScopeOperation, scopeKey, userId]);
+
+  useEffect(() => {
+    setGraph(null);
+    setNotes([]);
+    setMemories([]);
+    setSelectedNoteId(null);
+    setSearchResults(null);
+    setSearching(false);
+    setMapping(false);
+    setMapStatus('');
+    setDbStats({});
+    setDbStatsError('');
+    setLoadError('');
+    setLoadIsStale(false);
+    setStatus('');
+    setSaving(false);
+    setUploadStatus('');
+    setKnowledgeSeeding(false);
+    void load();
+    return () => {
+      readGenerationRef.current.main += 1;
+      readGenerationRef.current.search += 1;
+      readGenerationRef.current.mutation += 1;
+      readGenerationRef.current['site-map'] += 1;
+      readGenerationRef.current['knowledge-intake'] += 1;
+    };
+  }, [load, scopeKey]);
 
   const loadOtherCircles = useCallback(async () => {
-    if (!userId) return;
-    const { data } = await supabase
-      .from('circle_members')
-      .select('circle_id, circles(id, name)')
-      .eq('user_id', userId)
-      .neq('circle_id', circleId);
-    setOtherCircles((data || []).map((m: any) => ({
-      id: m.circle_id,
-      name: m.circles?.name || m.circle_id.slice(0, 10),
-    })));
-  }, [userId, circleId]);
+    if (!userId) {
+      setOtherCircles([]);
+      setOtherCirclesError('Sign in to view other circle knowledge.');
+      return;
+    }
+    const generation = beginRead('other-circles');
+    setOtherCirclesError('');
+    try {
+      const { data, error } = await supabase
+        .from('circle_members')
+        .select('circle_id, circles(id, name)')
+        .eq('user_id', userId)
+        .neq('circle_id', circleId);
+      if (!isCurrentRead('other-circles', generation)) return;
+      if (error) {
+        setOtherCirclesError('Other circles could not be loaded. Check the connection and retry.');
+        return;
+      }
+      setOtherCircles((data || []).map((m: any) => ({
+        id: m.circle_id,
+        name: m.circles?.name || m.circle_id.slice(0, 10),
+      })));
+    } catch {
+      if (isCurrentRead('other-circles', generation)) {
+        setOtherCirclesError('Other circles could not be loaded. Check the connection and retry.');
+      }
+    }
+  }, [beginRead, circleId, isCurrentRead, userId]);
+
+  useEffect(() => {
+    readGenerationRef.current['other-circles'] += 1;
+    readGenerationRef.current['other-graph'] += 1;
+    setOtherCircles([]);
+    setOtherCirclesError('');
+    setOtherCircleId(null);
+    setOtherGraph(null);
+    setOtherGraphError('');
+    setOtherLoading(false);
+  }, [circleId, userId]);
 
   useEffect(() => {
     if (viewMode === 'other' && !otherCircles.length) loadOtherCircles();
   }, [viewMode, otherCircles.length, loadOtherCircles]);
 
   const loadOtherCircleGraph = async (id: string) => {
+    const generation = beginRead('other-graph');
     setOtherCircleId(id);
+    setOtherGraph(null);
+    setOtherGraphError('');
     setOtherLoading(true);
-    const result = await buildSecondBrainGraph(id, { mode: 'circle' });
-    setOtherGraph(result.graph);
-    setOtherLoading(false);
+    try {
+      const result = await buildSecondBrainGraph(id, { mode: 'circle' });
+      if (!isCurrentRead('other-graph', generation)) return;
+      if (result.missing || result.unavailable || result.error) {
+        setOtherGraphError('That circle\'s knowledge graph could not be loaded. Check access and retry.');
+      } else {
+        setOtherGraph(result.graph);
+      }
+    } catch {
+      if (isCurrentRead('other-graph', generation)) {
+        setOtherGraphError('That circle\'s knowledge graph could not be loaded. Check access and retry.');
+      }
+    } finally {
+      if (isCurrentRead('other-graph', generation)) setOtherLoading(false);
+    }
   };
 
   const loadDbStats = useCallback(async () => {
+    const generation = beginRead('db-stats');
+    setDbStatsError('');
     const entries = await Promise.all(DIGITAL_BRAIN_DB_TABLES.map(async (cfg) => {
       if (cfg.probe === 'skip') {
         return [cfg.table, {
@@ -1586,6 +1783,12 @@ export default function SecondBrainDashboard({
       }
       if ((cfg.filter === 'user' || cfg.filter === 'owner') && !userId) {
         return [cfg.table, { table: cfg.table, label: cfg.label, count: null, ok: false, error: 'No user session' }] as const;
+      }
+      // Same guard for circle/id-scoped probes: an empty circleId serialized
+      // to `circle_id=eq.` — a PostgREST 400 (invalid uuid) on EVERY mount,
+      // twice (the userId hydration re-keys the callback). Skip until known.
+      if ((cfg.filter === 'circle' || cfg.filter === 'id') && !circleId) {
+        return [cfg.table, { table: cfg.table, label: cfg.label, count: null, ok: false, error: 'No circle in scope' }] as const;
       }
       const unavailableUntil = dbStatUnavailableUntil.get(cfg.table) || 0;
       if (unavailableUntil > Date.now()) {
@@ -1631,32 +1834,35 @@ export default function SecondBrainDashboard({
         }] as const;
       }
     }));
+    if (!isCurrentRead('db-stats', generation)) return;
     setDbStats(Object.fromEntries(entries));
-  }, [circleId, userId]);
+    const failedCount = entries.filter(([, stat]) => !stat.ok && !('skipped' in stat && stat.skipped)).length;
+    if (failedCount > 0) {
+      setDbStatsError(`${failedCount} data ${failedCount === 1 ? 'source' : 'sources'} could not be verified. Counts marked unavailable are not zero.`);
+    }
+  }, [beginRead, circleId, isCurrentRead, userId]);
 
   useEffect(() => {
     if (viewMode === 'system') void loadDbStats();
+    return () => {
+      readGenerationRef.current['db-stats'] += 1;
+    };
   }, [viewMode, loadDbStats]);
-
-  useEffect(() => {
-    if (loading || autoMapFiredRef.current || brainMode !== 'mine' || !userId || Platform.OS !== 'web') return;
-    if (status || getSecondBrainUnavailableMessage()) return;
-    const siteMapCount = notes.filter(n => (n.metadata as any)?.siteMapKey).length;
-    if (siteMapCount < 5) {
-      autoMapFiredRef.current = true;
-      autoMapSiteToSecondBrain(circleId, userId, () => {}).then(result => {
-        if (!result.error && result.created > 0) load();
-      });
-    }
-  }, [loading, brainMode, userId, notes, circleId, load, status]);
 
   const processBrainFiles = useCallback(async (files: File[]) => {
     if (Platform.OS !== 'web') return;
     if (!userId) { setStatus('Sign in to upload files.'); return; }
     if (!files.length) return;
+    const targetScope = scopeKey;
+    if (currentScopeRef.current !== targetScope) return;
+    const generation = beginRead('mutation');
+    const targetCircleId = circleId;
+    const targetUserId = userId;
+    const targetMode = brainMode;
 
     setUploadStatus(`Processing ${files.length} file(s)...`);
     for (const file of files) {
+      if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
       const ext = (file.name.split('.').pop() || '').toLowerCase();
       let noteTitle = file.name.replace(/\.[^.]+$/, '');
       let noteContent = '';
@@ -1670,12 +1876,13 @@ export default function SecondBrainDashboard({
         } else {
           noteContent = `File: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
         }
+        if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
         const result = await createSecondBrainNote({
-          circleId, userId, title: noteTitle,
+          circleId: targetCircleId, userId: targetUserId, title: noteTitle,
           content: noteContent.slice(0, 8000),
           noteKind: 'note',
           status: 'inbox',
-          visibility: brainMode === 'circle' ? 'circle_shared' : 'private',
+          visibility: targetMode === 'circle' ? 'circle_shared' : 'private',
           metadata: {
             source: 'file_upload',
             filename: file.name,
@@ -1684,6 +1891,7 @@ export default function SecondBrainDashboard({
             reviewIntervalDays: 1,
           },
         });
+        if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
         if (result.note) {
           setSelectedNoteId(result.note.id);
           setUploadStatus(`Saved: ${noteTitle}`);
@@ -1691,12 +1899,18 @@ export default function SecondBrainDashboard({
           setUploadStatus(result.error || 'Failed to save');
         }
       } catch (err: any) {
-        setUploadStatus(`Error with ${file.name}`);
+        if (isCurrentScopeOperation('mutation', generation, targetScope)) {
+          setUploadStatus(`Error with ${file.name}`);
+        }
       }
     }
+    if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
     await load();
-    setTimeout(() => setUploadStatus(''), 2500);
-  }, [brainMode, userId, circleId, load]);
+    if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
+    setTimeout(() => {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) setUploadStatus('');
+    }, 2500);
+  }, [beginRead, brainMode, circleId, isCurrentScopeOperation, load, scopeKey, userId]);
 
   const handleFileUpload = useCallback(async () => {
     if (Platform.OS !== 'web') return;
@@ -1737,9 +1951,21 @@ export default function SecondBrainDashboard({
     .filter(item => item.state.urgency === 'due' || item.state.urgency === 'soon')
     .sort((a, b) => b.state.priorityScore - a.state.priorityScore)
     .slice(0, 14), [notes]);
+  const agentBriefNotes = useMemo(
+    () => brainMode === 'circle' ? notes.filter(isCircleShareableSecondBrainNote) : notes,
+    [brainMode, notes],
+  );
+  const agentBriefMemories = useMemo(
+    () => brainMode === 'circle'
+      ? memories.filter(isCircleShareableSecondBrainMemory)
+      : userId
+        ? memories.filter(memory => isPersonalSecondBrainMemory(memory, userId))
+        : [],
+    [brainMode, memories, userId],
+  );
   const agentBrief = useMemo(
-    () => buildSecondBrainAgentBrief(notes, memories),
-    [notes, memories],
+    () => buildSecondBrainAgentBrief(agentBriefNotes, agentBriefMemories),
+    [agentBriefMemories, agentBriefNotes],
   );
   const systemMap = useMemo<DigitalBrainSystemMap>(
     () => buildDigitalBrainSystemMap({ notes, memories, dbStats }),
@@ -1802,155 +2028,266 @@ export default function SecondBrainDashboard({
     return graphLinks.filter(l => l.from === selectedNote.id || l.to === selectedNote.id).slice(0, 8);
   }, [graphLinks, selectedNote]);
 
-  const inboxCount = notes.filter(n => n.status === 'inbox').length;
-  const evergreenCount = notes.filter(n => n.status === 'evergreen').length;
-  const webCount = notes.filter(n => n.note_kind === 'web_clip').length;
   const linkedMemoryCount = notes.filter(n => Boolean(n.source_memory_id)).length;
-  const privateCount = notes.filter(n => n.visibility === 'private').length;
   const reviewDueCount = reviewQueue.length;
   const allGraphLinkCount = graph?.links.length || graphLinks.length;
+  const siteMapCount = notes.filter(note => Boolean((note.metadata as any)?.siteMapKey)).length;
+  const siteMapDraftReady = Platform.OS === 'web'
+    && !loading
+    && brainMode === 'mine'
+    && Boolean(userId)
+    && siteMapCount < 5
+    && dismissedSiteMapDraftScope !== scopeKey
+    && !getSecondBrainUnavailableMessage();
 
   const handleCapture = async (kind: 'note' | 'web_clip') => {
     if (!userId) { setStatus('Sign in before saving to the circle digital brain.'); return; }
     const body = content.trim(), sourceUrl = url.trim();
     if (!body && !sourceUrl) { setStatus('Add note content or a URL first.'); return; }
+    const generation = beginRead('mutation');
+    const targetScope = scopeKey;
+    const targetCircleId = circleId;
+    const targetUserId = userId;
+    const targetMode = brainMode;
     setSaving(true);
-    const result = await createSecondBrainNote({
-      circleId, userId, title,
-      url: sourceUrl || undefined,
-      content: body || sourceUrl,
-      noteKind: kind,
-      status: kind === 'web_clip' ? 'inbox' : 'processed',
-      visibility: brainMode === 'circle' ? 'circle_shared' : 'private',
-      metadata: { surface: 'backpack', captureMode: kind },
-    });
-    setSaving(false);
-    if (result.note) {
-      setTitle(''); setUrl(''); setContent('');
-      setSelectedNoteId(result.note.id);
-      setStatus('Saved to the .web digital brain.');
-      await load();
-    } else {
-      setStatus(result.missing
-        ? 'Second brain database migration is not deployed yet.'
-        : result.error || 'Could not save note.');
+    try {
+      const result = await createSecondBrainNote({
+        circleId: targetCircleId, userId: targetUserId, title,
+        url: sourceUrl || undefined,
+        content: body || sourceUrl,
+        noteKind: kind,
+        status: kind === 'web_clip' ? 'inbox' : 'processed',
+        visibility: targetMode === 'circle' ? 'circle_shared' : 'private',
+        metadata: { surface: 'backpack', captureMode: kind },
+      });
+      if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
+      if (result.note) {
+        setTitle(''); setUrl(''); setContent('');
+        setSelectedNoteId(result.note.id);
+        setStatus('Saved to the .web digital brain.');
+        await load();
+      } else {
+        setStatus(result.missing
+          ? 'Second brain database migration is not deployed yet.'
+          : result.error || 'Could not save note.');
+      }
+    } catch {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) {
+        setStatus('Knowledge could not save the note. Check the connection and retry.');
+      }
+    } finally {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) setSaving(false);
     }
   };
 
   const handleSearch = async () => {
-    if (!searchQuery.trim()) { setSearchResults(null); return; }
-    setSaving(true);
-    const result = await searchSecondBrain(circleId, searchQuery, { includeMemories: true, limit: 14 });
-    setSearchResults(result.results);
-    setSaving(false);
-    if (result.error) setStatus(result.error);
+    const query = searchQuery.trim();
+    if (!query) {
+      beginRead('search');
+      setSearchResults(null);
+      setSearching(false);
+      return;
+    }
+    const generation = beginRead('search');
+    const targetScope = scopeKey;
+    const targetCircleId = circleId;
+    const targetMode = brainMode;
+    const targetUserId = userId;
+    setSearching(true);
+    try {
+      if (targetMode === 'mine' && !targetUserId) {
+        setSearchResults(null);
+        setStatus('Sign in to search personal Knowledge.');
+        return;
+      }
+      const result = await searchSecondBrain(targetCircleId, query, targetMode === 'circle'
+        ? { mode: 'circle', includeMemories: true, limit: 14 }
+        : { mode: 'mine', userId: targetUserId!, includeMemories: true, limit: 14 });
+      if (!isCurrentScopeOperation('search', generation, targetScope)) return;
+      if (result.error) {
+        setSearchResults(null);
+        setStatus('Knowledge search could not finish. Check the connection and retry.');
+      } else {
+        setSearchResults(result.results);
+      }
+    } catch {
+      if (isCurrentScopeOperation('search', generation, targetScope)) {
+        setSearchResults(null);
+        setStatus('Knowledge search could not finish. Check the connection and retry.');
+      }
+    } finally {
+      if (isCurrentScopeOperation('search', generation, targetScope)) setSearching(false);
+    }
   };
 
   const handlePromoteNote = async (note: SecondBrainNote, scope: 'circle' | 'user') => {
     if (!userId) { setStatus('Sign in before promoting notes into memory.'); return; }
+    if (scope === 'circle' && !isCircleShareableSecondBrainNote(note)) {
+      setStatus('Share this note with the circle first. Promoting it is a separate action.');
+      return;
+    }
+    const generation = beginRead('mutation');
+    const targetScope = scopeKey;
+    const targetUserId = userId;
     setSaving(true);
-    const result = await promoteSecondBrainNoteToMemory(note, { userId, scope });
-    setSaving(false);
-    if (result.memory) {
-      setStatus(`Promoted "${note.title}" into ${scope} agent memory.`);
-      await load();
-    } else {
-      setStatus(result.error || 'Could not promote note.');
+    try {
+      const result = await promoteSecondBrainNoteToMemory(note, { userId: targetUserId, scope });
+      if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
+      if (result.memory) {
+        setStatus(`Promoted "${note.title}" into ${scope} agent memory.`);
+        await load();
+      } else {
+        setStatus(result.error || 'Could not promote note.');
+      }
+    } catch {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) {
+        setStatus('Knowledge could not promote the note. Check the connection and retry.');
+      }
+    } finally {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) setSaving(false);
     }
   };
 
   const handleMark = async (note: SecondBrainNote, nextStatus: SecondBrainNote['status']) => {
+    const generation = beginRead('mutation');
+    const targetScope = scopeKey;
     setSaving(true);
-    const result = await updateSecondBrainNote(note.id, { status: nextStatus });
-    setSaving(false);
-    if (result.note) {
-      setStatus(`Marked "${note.title}" as ${nextStatus}.`);
-      await load();
-    } else {
-      setStatus(result.error || 'Could not update note.');
+    try {
+      const result = await updateSecondBrainNote(note.id, { status: nextStatus });
+      if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
+      if (result.note) {
+        setStatus(`Marked "${note.title}" as ${nextStatus}.`);
+        await load();
+      } else {
+        setStatus(result.error || 'Could not update note.');
+      }
+    } catch {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) {
+        setStatus('Knowledge could not update the note. Check the connection and retry.');
+      }
+    } finally {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) setSaving(false);
     }
   };
 
   const handleImportMemory = async (mem: MemoryEntry) => {
     if (!userId) { setStatus('Sign in before importing agent memory.'); return; }
+    const generation = beginRead('mutation');
+    const targetScope = scopeKey;
+    const targetCircleId = circleId;
+    const targetUserId = userId;
+    const targetMode = brainMode;
     setSaving(true);
-    const result = await createSecondBrainNoteFromMemory(
-      mem,
-      userId,
-      circleId,
-      brainMode === 'circle' ? undefined : 'private',
-    );
-    setSaving(false);
-    if (result.note) {
-      setSelectedNoteId(result.note.id);
-      setStatus('Agent memory linked into the .web digital brain.');
-      await load();
-    } else {
-      setStatus(result.missing
-        ? 'Second brain database migration is not deployed yet.'
-        : result.error || 'Could not import memory.');
+    try {
+      const result = await createSecondBrainNoteFromMemory(
+        mem,
+        targetUserId,
+        targetCircleId,
+        targetMode === 'circle' ? undefined : 'private',
+      );
+      if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
+      if (result.note) {
+        setSelectedNoteId(result.note.id);
+        setStatus('Agent memory linked into the .web digital brain.');
+        await load();
+      } else {
+        setStatus(result.missing
+          ? 'Second brain database migration is not deployed yet.'
+          : result.error || 'Could not import memory.');
+      }
+    } catch {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) {
+        setStatus('Knowledge could not link that memory. Check the connection and retry.');
+      }
+    } finally {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) setSaving(false);
     }
   };
 
-  const handleSyncAllMemories = useCallback(async (silent = false) => {
+  const handleSyncAllMemories = useCallback(async () => {
     if (!userId) {
-      if (!silent) setStatus('Sign in before syncing memories.');
+      setStatus('Sign in before syncing memories.');
       return;
     }
     const toSync = memories.filter(mem => !linkedMemoryIds.has(mem.id));
     if (!toSync.length) {
-      if (!silent) setStatus('All loaded memories are already present in your Digital Brain.');
+      setStatus('All loaded memories are already present in your Digital Brain.');
       return;
     }
+    const generation = beginRead('mutation');
+    const targetScope = scopeKey;
+    const targetCircleId = circleId;
+    const targetUserId = userId;
     setSaving(true);
-    if (!silent) setStatus(`Syncing ${toSync.length} memories into your Digital Brain...`);
+    setStatus(`Syncing ${toSync.length} memories into your Digital Brain...`);
     let synced = 0;
     let skipped = 0;
-    for (const mem of toSync) {
-      const result = await createSecondBrainNoteFromMemory(mem, userId, circleId, 'private');
-      if (result.note) synced++;
-      else skipped++;
+    try {
+      for (const mem of toSync) {
+        if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
+        const result = await createSecondBrainNoteFromMemory(mem, targetUserId, targetCircleId, 'private');
+        if (result.note) synced++;
+        else skipped++;
+      }
+      if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
+      setStatus(skipped
+        ? `Synced ${synced} memories into your Digital Brain. ${skipped} could not be attached to this circle.`
+        : `Synced ${synced} memories into your Digital Brain.`);
+      await load();
+    } catch {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) {
+        setStatus('Knowledge memory sync did not finish. Check the connection and retry.');
+      }
+    } finally {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) setSaving(false);
     }
-    setSaving(false);
-    setStatus(skipped
-      ? `Synced ${synced} memories into your Digital Brain. ${skipped} could not be attached to this circle.`
-      : `Synced ${synced} memories into your Digital Brain.`);
-    await load();
-  }, [circleId, linkedMemoryIds, load, memories, userId]);
-
-  useEffect(() => {
-    if (viewMode !== 'system' || !userId || missingMemories.length === 0) return;
-    const key = `${circleId}:${userId}:${missingMemories.map(mem => mem.id).sort().join('|')}`;
-    if (memorySyncRef.current === key) return;
-    memorySyncRef.current = key;
-    void handleSyncAllMemories(true);
-  }, [circleId, handleSyncAllMemories, missingMemories, userId, viewMode]);
+  }, [beginRead, circleId, isCurrentScopeOperation, linkedMemoryIds, load, memories, scopeKey, userId]);
 
   const handleShare = async (note: SecondBrainNote, visibility: SecondBrainVisibility) => {
+    const generation = beginRead('mutation');
+    const targetScope = scopeKey;
     setSaving(true);
-    const result = await shareSecondBrainNote(note.id, visibility);
-    setSaving(false);
-    if (result.note) {
-      setStatus(visibility === 'private'
-        ? `"${note.title}" is now private.`
-        : `"${note.title}" shared with the circle.`);
-      await load();
-    } else {
-      setStatus(result.error || 'Could not update visibility.');
+    try {
+      const result = await shareSecondBrainNote(note.id, visibility);
+      if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
+      if (result.note) {
+        setStatus(visibility === 'private'
+          ? `"${note.title}" is now private.`
+          : `"${note.title}" shared with the circle. Promote it separately if agents should retain it.`);
+        await load();
+      } else {
+        setStatus(result.error || 'Could not update visibility.');
+      }
+    } catch {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) {
+        setStatus('Knowledge could not update visibility. Check the connection and retry.');
+      }
+    } finally {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) setSaving(false);
     }
   };
 
   const handleReviewAction = async (note: SecondBrainNote, action: 'reviewed' | 'snoozed' | 'evergreen') => {
+    const generation = beginRead('mutation');
+    const targetScope = scopeKey;
     setSaving(true);
-    const result = await reviewSecondBrainNote(note, action);
-    setSaving(false);
-    if (result.note) {
-      setStatus(action === 'snoozed'
-        ? `Snoozed "${note.title}" for review.`
-        : `Reviewed "${note.title}" and scheduled the next resurfacing.`);
-      await load();
-    } else {
-      setStatus(result.error || 'Could not update review schedule.');
+    try {
+      const result = await reviewSecondBrainNote(note, action);
+      if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
+      if (result.note) {
+        setStatus(action === 'snoozed'
+          ? `Snoozed "${note.title}" for review.`
+          : `Reviewed "${note.title}" and scheduled the next resurfacing.`);
+        await load();
+      } else {
+        setStatus(result.error || 'Could not update review schedule.');
+      }
+    } catch {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) {
+        setStatus('Knowledge could not update the review schedule. Check the connection and retry.');
+      }
+    } finally {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) setSaving(false);
     }
   };
 
@@ -1969,80 +2306,157 @@ export default function SecondBrainDashboard({
 
   const handleSaveAgentBrief = async () => {
     if (!userId) { setStatus('Sign in before saving the agent brief.'); return; }
+    const generation = beginRead('mutation');
+    const targetScope = scopeKey;
+    const targetCircleId = circleId;
+    const targetUserId = userId;
+    const targetMode = brainMode;
     setSaving(true);
-    const result = await createSecondBrainNote({
-      circleId,
-      userId,
-      title: `.web Digital Brain brief - ${new Date().toLocaleDateString()}`,
-      content: agentBrief,
-      noteKind: 'agent_summary',
-      status: 'processed',
-      visibility: brainMode === 'circle' ? 'circle_shared' : 'private',
-      tags: ['agent-brief', 'digital-brain', 'openswan'],
-      importance: 0.82,
-      metadata: {
-        source: 'digital_brain_agent_brief',
-        generatedAt: new Date().toISOString(),
-        reviewDueAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-        reviewIntervalDays: 7,
-      },
-    });
-    setSaving(false);
-    if (result.note) {
-      setSelectedNoteId(result.note.id);
-      setStatus('Saved an agent-ready brief back into the Digital Brain.');
-      await load();
-    } else {
-      setStatus(result.error || 'Could not save the agent brief.');
+    setStatus('Revalidating the brief inputs before saving…');
+    try {
+      const inputs = await loadSecondBrainAgentBriefInputs({
+        circleId: targetCircleId,
+        userId: targetUserId,
+        mode: targetMode,
+      });
+      if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
+      if (inputs.error) {
+        setStatus('The agent brief was not saved because its source visibility could not be revalidated. Retry after refreshing Knowledge.');
+        return;
+      }
+      if (targetMode === 'circle' && (
+        inputs.notes.some(note => !isCircleShareableSecondBrainNote(note))
+        || inputs.memories.some(memory => !isCircleShareableSecondBrainMemory(memory))
+      )) {
+        setStatus('The circle brief was not saved because a source is not circle-shared.');
+        return;
+      }
+      const revalidatedBrief = buildSecondBrainAgentBrief(inputs.notes, inputs.memories);
+      const result = await createSecondBrainNote({
+        circleId: targetCircleId,
+        userId: targetUserId,
+        title: `.web Digital Brain brief - ${new Date().toLocaleDateString()}`,
+        content: revalidatedBrief,
+        noteKind: 'agent_summary',
+        status: 'processed',
+        visibility: targetMode === 'circle' ? 'circle_shared' : 'private',
+        tags: ['agent-brief', 'digital-brain', 'openswan'],
+        importance: 0.82,
+        metadata: {
+          source: 'digital_brain_agent_brief',
+          sourceMode: targetMode,
+          sourceNoteIds: inputs.notes.map(note => note.id),
+          sourceMemoryIds: inputs.memories.map(memory => memory.id),
+          visibilityRevalidatedAt: new Date().toISOString(),
+          generatedAt: new Date().toISOString(),
+          reviewDueAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          reviewIntervalDays: 7,
+        },
+      });
+      if (!isCurrentScopeOperation('mutation', generation, targetScope)) return;
+      if (result.note) {
+        setSelectedNoteId(result.note.id);
+        setStatus(targetMode === 'circle'
+          ? 'Saved a circle brief from revalidated circle-shared sources.'
+          : 'Saved a private agent brief from revalidated personal sources.');
+        await load();
+      } else {
+        setStatus(result.error || 'Could not save the agent brief.');
+      }
+    } catch {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) {
+        setStatus('The agent brief was not saved because source revalidation failed.');
+      }
+    } finally {
+      if (isCurrentScopeOperation('mutation', generation, targetScope)) setSaving(false);
     }
   };
 
   const handleMapSite = async () => {
     if (!userId) { setStatus('Sign in before mapping the site.'); return; }
     if (mapping) return;
+    const generation = beginRead('site-map');
+    const targetScope = scopeKey;
+    const targetCircleId = circleId;
+    const targetUserId = userId;
     const unavailable = getSecondBrainUnavailableMessage();
     if (unavailable) {
       setMapStatus(`Map paused: ${unavailable}`);
-      setTimeout(() => setMapStatus(''), 4000);
+      setTimeout(() => {
+        if (isCurrentScopeOperation('site-map', generation, targetScope)) setMapStatus('');
+      }, 4000);
       return;
     }
     setMapping(true);
-    setMapStatus('Starting site map…');
-    const result = await autoMapSiteToSecondBrain(
-      circleId,
-      userId,
-      (msg, _pct) => setMapStatus(msg),
-    );
-    setMapping(false);
-    if (result.error) {
-      setMapStatus(`Map error: ${result.error}`);
-    } else {
-      setMapStatus(`Mapped: +${result.created} new, ${result.updated} refreshed, ${result.linked} links`);
-      await load();
+    setMapStatus('Saving the reviewed site map…');
+    try {
+      const result = await autoMapSiteToSecondBrain(
+        targetCircleId,
+        targetUserId,
+        (msg, _pct) => {
+          if (isCurrentScopeOperation('site-map', generation, targetScope)) setMapStatus(msg);
+        },
+      );
+      if (!isCurrentScopeOperation('site-map', generation, targetScope)) return;
+      if (result.error) {
+        setMapStatus('Site map could not be saved. No completion was recorded; check Knowledge storage and retry.');
+      } else {
+        setDismissedSiteMapDraftScope(targetScope);
+        setMapStatus(`Site map saved: ${result.created} new, ${result.updated} refreshed, ${result.linked} links.`);
+        await load();
+      }
+    } catch {
+      if (isCurrentScopeOperation('site-map', generation, targetScope)) {
+        setMapStatus('Site map could not be saved. No completion was recorded; check the connection and retry.');
+      }
+    } finally {
+      if (isCurrentScopeOperation('site-map', generation, targetScope)) {
+        setMapping(false);
+        setTimeout(() => {
+          if (isCurrentScopeOperation('site-map', generation, targetScope)) setMapStatus('');
+        }, 5000);
+      }
     }
-    setTimeout(() => setMapStatus(''), 4000);
   };
 
   const handleSeedKnowledge = async () => {
     if (!userId) { setStatus('Sign in before running Digital Brain knowledge intake.'); return; }
     if (knowledgeSeeding) return;
+    const generation = beginRead('knowledge-intake');
+    const targetScope = scopeKey;
+    const targetCircleId = circleId;
+    const targetUserId = userId;
+    const targetMode = brainMode;
     setKnowledgeSeeding(true);
     setMapStatus('Running Wiki + .web knowledge intake...');
-    const result = await runSecondBrainKnowledgeProfile({
-      profileKeys: SECOND_BRAIN_KNOWLEDGE_PROFILE_OPTIONS.map(profile => profile.key),
-      circleId,
-      userId,
-      visibility: brainMode === 'circle' ? 'circle_shared' : 'private',
-    });
-    setKnowledgeSeeding(false);
-    if (!result.ok) {
-      setMapStatus(`Knowledge intake failed: ${result.error || 'unknown error'}`);
-      setTimeout(() => setMapStatus(''), 5000);
-      return;
+    try {
+      const result = await runSecondBrainKnowledgeProfile({
+        profileKeys: SECOND_BRAIN_KNOWLEDGE_PROFILE_OPTIONS.map(profile => profile.key),
+        circleId: targetCircleId,
+        userId: targetUserId,
+        visibility: targetMode === 'circle' ? 'circle_shared' : 'private',
+      });
+      if (!isCurrentScopeOperation('knowledge-intake', generation, targetScope)) return;
+      if (!result.ok) {
+        setMapStatus(`Knowledge intake failed: ${result.error || 'unknown error'}`);
+        setTimeout(() => {
+          if (isCurrentScopeOperation('knowledge-intake', generation, targetScope)) setMapStatus('');
+        }, 5000);
+        return;
+      }
+      setMapStatus('Knowledge intake complete. Wiki and Digital Brain were refreshed.');
+      await load();
+      if (!isCurrentScopeOperation('knowledge-intake', generation, targetScope)) return;
+      setTimeout(() => {
+        if (isCurrentScopeOperation('knowledge-intake', generation, targetScope)) setMapStatus('');
+      }, 4500);
+    } catch {
+      if (isCurrentScopeOperation('knowledge-intake', generation, targetScope)) {
+        setMapStatus('Knowledge intake did not finish. Check the connection and retry.');
+      }
+    } finally {
+      if (isCurrentScopeOperation('knowledge-intake', generation, targetScope)) setKnowledgeSeeding(false);
     }
-    setMapStatus('Knowledge intake complete. Wiki and Digital Brain were refreshed.');
-    await load();
-    setTimeout(() => setMapStatus(''), 4500);
   };
 
   const resultNotes = (searchResults || []).filter(i => i.kind === 'note');
@@ -2059,16 +2473,14 @@ export default function SecondBrainDashboard({
 
       {/* ── Header ─────────────────────────────────────────────────────── */}
       <View style={styles.header}>
-        <View style={styles.headerLeft}>
-          <View style={[styles.dotWebMark, { borderColor: accentColor }]}>
-            <Text style={[styles.dotWebText, { color: accentColor }]}>.web</Text>
-          </View>
-          <View>
-            <Text style={styles.heroEyebrow}>
-              {brainMode === 'mine' ? 'MY DIGITAL BRAIN' : 'CIRCLE SHARED BRAIN'}
-            </Text>
-            <Text style={styles.heroTitle}>Digital Brain Graph</Text>
-          </View>
+        <View style={styles.brainHeaderCopy}>
+          <Text style={styles.heroEyebrow}>DIGITAL BRAIN</Text>
+          <Text style={styles.heroTitle}>
+            {brainMode === 'mine' ? 'Your knowledge system' : 'Circle knowledge'}
+          </Text>
+          <Text style={styles.heroSubtitle}>
+            Map how context, memory, data, and agents move through your workspace.
+          </Text>
           <View style={styles.brainModeToggle}>
             <Pressable
               onPress={() => setBrainMode('mine')}
@@ -2078,7 +2490,7 @@ export default function SecondBrainDashboard({
               ]}
             >
               <Text style={[styles.modeBtnText, brainMode === 'mine' ? { color: accentColor } : null]}>
-                MY BRAIN
+                Personal
               </Text>
             </Pressable>
             <Pressable
@@ -2089,7 +2501,7 @@ export default function SecondBrainDashboard({
               ]}
             >
               <Text style={[styles.modeBtnText, brainMode === 'circle' ? { color: '#a855f7' } : null]}>
-                CIRCLE
+                Circle
               </Text>
             </Pressable>
           </View>
@@ -2097,67 +2509,49 @@ export default function SecondBrainDashboard({
         <View style={styles.heroActions}>
           <Pressable
             onPress={load}
-            style={({ hovered, pressed }: any) => [styles.ghostBtn, hovered && webLift, pressed && webPressed]}
+            disabled={loading}
+            accessibilityRole="button"
+            accessibilityLabel="Refresh knowledge"
+            accessibilityState={{ busy: loading, disabled: loading }}
+            style={({ hovered, pressed }: any) => [
+              styles.ghostBtn,
+              loading && styles.actionDisabled,
+              hovered && !loading && webLift,
+              pressed && !loading && webPressed,
+            ]}
           >
-            <Text style={styles.ghostBtnText}>REFRESH</Text>
+            <Text style={styles.ghostBtnText}>{loading ? 'Refreshing…' : 'Refresh'}</Text>
           </Pressable>
-          {brainMode === 'mine' && (
-            <Pressable
-              onPress={handleMapSite}
-              disabled={mapping}
-              style={({ hovered, pressed }: any) => [
-                styles.ghostBtn,
-                { borderColor: '#22d3ee55', backgroundColor: mapping ? '#22d3ee08' : undefined },
-                hovered && !mapping && webLift,
-                pressed && webPressed,
-              ]}
-            >
-              <Text style={[styles.ghostBtnText, { color: '#22d3ee' }]}>
-                {mapping ? 'MAPPING…' : 'MAP SITE'}
-              </Text>
-            </Pressable>
-          )}
-          {onOpenCompartment && (
-            <Pressable
-              onPress={() => onOpenCompartment('projects')}
-              style={({ hovered, pressed }: any) => [styles.ghostBtn, hovered && webLift, pressed && webPressed]}
-            >
-              <Text style={styles.ghostBtnText}>PROJECTS</Text>
-            </Pressable>
-          )}
           {Platform.OS === 'web' && (
             <Pressable
               onPress={handleFileUpload}
               style={({ hovered, pressed }: any) => [styles.ghostBtn, hovered && webLift, pressed && webPressed]}
             >
-              <Text style={styles.ghostBtnText}>+ UPLOAD</Text>
+              <Text style={styles.ghostBtnText}>Add file</Text>
             </Pressable>
           )}
         </View>
       </View>
 
       {/* ── Stat strip ─────────────────────────────────────────────────── */}
-      <View style={styles.statStrip}>
-        <BrainStat label="Nodes" value={String(notes.length)} color={accentColor} />
-        <BrainStat label="Private" value={String(privateCount)} color="#f59e0b" />
-        <BrainStat label="Clusters" value={String(graph?.clusters.length || 0)} color="#22c55e" />
-        <BrainStat label="Edges" value={String(allGraphLinkCount)} color="#a855f7" />
-        <BrainStat label="Review" value={String(reviewDueCount)} color="#f59e0b" />
-        <BrainStat label=".web" value={String(webCount)} color="#38bdf8" />
-        <BrainStat label="Memory" value={String(linkedMemoryCount)} color="#a855f7" />
-        <BrainStat label="Inbox" value={String(inboxCount)} color="#f59e0b" />
-        <BrainStat label="Evergreen" value={String(evergreenCount)} color="#22c55e" />
-      </View>
+      {viewMode !== 'system' ? (
+        <View style={styles.statStrip}>
+          <BrainStat label="Nodes" value={String(notes.length)} color={accentColor} />
+          <BrainStat label="Connections" value={String(allGraphLinkCount)} color="#a855f7" />
+          <BrainStat label="Memory links" value={String(linkedMemoryCount)} color="#22c55e" />
+          <BrainStat label="Review" value={String(reviewDueCount)} color="#f59e0b" />
+        </View>
+      ) : null}
 
       {/* ── Tab bar ────────────────────────────────────────────────────── */}
       <View style={styles.tabBar}>
         {([
-          { key: 'system', label: 'SYSTEM FLOW' },
-          { key: 'graph', label: 'GRAPH' },
-          { key: 'nodes', label: 'BASES' },
-          { key: 'review', label: 'REVIEW' },
-          ...(Platform.OS === 'web' ? [{ key: 'upload', label: 'UPLOAD' }] : []),
-          { key: 'other', label: 'OTHER BRAINS' },
+          { key: 'system', label: 'Flow map' },
+          { key: 'graph', label: 'Knowledge' },
+          { key: 'nodes', label: 'Bases' },
+          { key: 'review', label: 'Review' },
+          ...(Platform.OS === 'web' ? [{ key: 'upload', label: 'Add' }] : []),
+          { key: 'other', label: 'Circles' },
         ] as { key: ViewMode; label: string }[]).map(tab => (
           <Pressable
             key={tab.key}
@@ -2180,9 +2574,40 @@ export default function SecondBrainDashboard({
       </View>
 
       {/* ── Status ─────────────────────────────────────────────────────── */}
+      {loadError ? (
+        <View
+          style={[styles.statusBar, styles.errorBar]}
+          accessibilityRole="alert"
+          accessibilityLiveRegion="polite"
+        >
+          <View style={styles.statusCopy}>
+            <Text style={styles.errorTitle}>{loadIsStale ? 'Showing stale Knowledge' : 'Knowledge is incomplete'}</Text>
+            <Text style={styles.statusText}>{loadError}</Text>
+          </View>
+          <Pressable
+            onPress={load}
+            disabled={loading}
+            accessibilityRole="button"
+            accessibilityLabel="Retry loading knowledge"
+            accessibilityState={{ busy: loading, disabled: loading }}
+            style={({ hovered, pressed }: any) => [
+              styles.retryBtn,
+              loading && styles.actionDisabled,
+              hovered && !loading && styles.mapActionBtnHover,
+              pressed && !loading && webPressed,
+            ]}
+          >
+            <Text style={styles.retryBtnText}>{loading ? 'Retrying…' : 'Retry'}</Text>
+          </Pressable>
+        </View>
+      ) : null}
       {(mapStatus || status || uploadStatus) ? (
-        <View style={[styles.statusBar, mapStatus ? { borderColor: '#22d3ee33', backgroundColor: '#22d3ee0a' } : null]}>
-          <Text style={[styles.statusText, mapStatus ? { color: '#22d3ee' } : null]}>
+        <View
+          style={[styles.statusBar, mapStatus ? { borderColor: '#6366f133', backgroundColor: '#6366f10a' } : null]}
+          accessible
+          accessibilityLiveRegion="polite"
+        >
+          <Text style={[styles.statusText, mapStatus ? { color: '#6366f1' } : null]}>
             {mapStatus || uploadStatus || status}
           </Text>
         </View>
@@ -2192,74 +2617,133 @@ export default function SecondBrainDashboard({
       {viewMode === 'system' && (
         <View style={styles.systemFlowPanel}>
           <View style={styles.panelHeader}>
-            <View>
-              <Text style={styles.panelLabel}>MY PRIVATE SYSTEM FLOW MAP</Text>
+            <View style={styles.panelHeaderCopy}>
+              <Text style={styles.panelLabel}>System flow</Text>
               <Text style={styles.panelHint}>
-                3D map of site surfaces, database tables, memories, credentials, model routing, agent runs, and information movement.
+                A live view of how surfaces, models, memory, data, and agents connect.
               </Text>
             </View>
-            <View style={styles.heroActions}>
+            <View style={styles.mapActions}>
               <Pressable
                 onPress={handleMapSite}
                 disabled={mapping}
-                style={({ hovered, pressed }: any) => [styles.ghostBtn, hovered && !mapping && webLift, pressed && webPressed]}
+                accessibilityRole="button"
+                accessibilityLabel="Save site map to Knowledge"
+                accessibilityHint="Creates or refreshes private Knowledge notes and links"
+                accessibilityState={{ busy: mapping, disabled: mapping }}
+                style={({ hovered, pressed }: any) => [
+                  styles.mapActionBtn,
+                  mapping && styles.actionDisabled,
+                  hovered && !mapping && styles.mapActionBtnHover,
+                  pressed && !mapping && webPressed,
+                ]}
               >
-                <Text style={[styles.ghostBtnText, { color: '#22d3ee' }]}>{mapping ? 'MAPPING' : 'MAP SITE'}</Text>
+                <Text style={[styles.mapActionText, { color: '#8b8df8' }]}>{mapping ? 'Saving…' : 'Save map'}</Text>
               </Pressable>
               <Pressable
-                onPress={() => handleSyncAllMemories(false)}
+                onPress={handleSyncAllMemories}
                 disabled={saving || !missingMemories.length}
-                style={({ hovered, pressed }: any) => [styles.ghostBtn, hovered && !saving && webLift, pressed && webPressed]}
+                style={({ hovered, pressed }: any) => [styles.mapActionBtn, hovered && !saving && styles.mapActionBtnHover, pressed && webPressed]}
               >
-                <Text style={[styles.ghostBtnText, { color: missingMemories.length ? '#a855f7' : PIXEL_COLORS.text3 }]}>
-                  {missingMemories.length ? `SYNC ${missingMemories.length} MEMORIES` : 'MEMORIES SYNCED'}
+                <Text style={[styles.mapActionText, { color: missingMemories.length ? '#bd8cff' : '#687388' }]}>
+                  {missingMemories.length ? `Sync ${missingMemories.length}` : 'Synced'}
                 </Text>
-              </Pressable>
-              <Pressable
-                onPress={loadDbStats}
-                style={({ hovered, pressed }: any) => [styles.ghostBtn, hovered && webLift, pressed && webPressed]}
-              >
-                <Text style={styles.ghostBtnText}>DB COUNTS</Text>
               </Pressable>
               <Pressable
                 onPress={handleSeedKnowledge}
                 disabled={knowledgeSeeding}
-                style={({ hovered, pressed }: any) => [styles.ghostBtn, hovered && !knowledgeSeeding && webLift, pressed && webPressed]}
+                style={({ hovered, pressed }: any) => [styles.mapActionBtn, hovered && !knowledgeSeeding && styles.mapActionBtnHover, pressed && webPressed]}
               >
-                <Text style={[styles.ghostBtnText, { color: '#22c55e' }]}>
-                  {knowledgeSeeding ? 'LEARNING...' : 'LEARN'}
+                <Text style={[styles.mapActionText, { color: '#61d48b' }]}>
+                  {knowledgeSeeding ? 'Learning…' : 'Learn'}
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  const next = !showSystemDetails;
+                  setShowSystemDetails(next);
+                  if (next) loadDbStats();
+                }}
+                style={({ hovered, pressed }: any) => [
+                  styles.mapActionBtn,
+                  showSystemDetails && styles.mapActionBtnActive,
+                  hovered && styles.mapActionBtnHover,
+                  pressed && webPressed,
+                ]}
+              >
+                <Text style={[styles.mapActionText, showSystemDetails && { color: '#f1f4f8' }]}>
+                  {showSystemDetails ? 'Hide details' : 'Details'}
                 </Text>
               </Pressable>
             </View>
           </View>
 
-          <View style={styles.knowledgeIntakeRail}>
-            {SECOND_BRAIN_KNOWLEDGE_PROFILE_OPTIONS.map(profile => (
-              <View key={profile.key} style={[styles.knowledgeProfileCard, { borderColor: `${profile.color}44`, backgroundColor: `${profile.color}10` }]}>
-                <Text style={[styles.cardTitle, { color: profile.color }]}>{profile.label}</Text>
-                <Text style={styles.cardMeta}>{profile.cadence.toUpperCase()} INTAKE</Text>
-                <Text style={styles.cardBody}>{profile.description}</Text>
+          {siteMapDraftReady ? (
+            <View style={styles.siteMapDraft} accessibilityRole="summary">
+              <View style={styles.siteMapDraftCopy}>
+                <Text style={styles.siteMapDraftTitle}>SITE MAP DRAFT · NOT SAVED</Text>
+                <Text style={styles.panelHint}>
+                  {SITE_MAP_PREVIEW_LABELS.join(' · ')} plus eligible live missions, rooms, and agents are ready to map. Nothing has been written. Saving will create or refresh private Knowledge notes and their links.
+                </Text>
               </View>
-            ))}
-          </View>
+              <View style={styles.heroActions}>
+                <Pressable
+                  onPress={handleMapSite}
+                  disabled={mapping}
+                  accessibilityRole="button"
+                  accessibilityLabel="Save site map to Knowledge"
+                  accessibilityHint="Creates or refreshes private Knowledge notes and links"
+                  accessibilityState={{ busy: mapping, disabled: mapping }}
+                  style={({ hovered, pressed }: any) => [
+                    styles.mapActionBtn,
+                    styles.siteMapSaveBtn,
+                    mapping && styles.actionDisabled,
+                    hovered && !mapping && styles.mapActionBtnHover,
+                    pressed && !mapping && webPressed,
+                  ]}
+                >
+                  <Text style={[styles.mapActionText, { color: '#c7d2fe' }]}>{mapping ? 'Saving…' : 'Save map'}</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => setDismissedSiteMapDraftScope(scopeKey)}
+                  disabled={mapping}
+                  accessibilityRole="button"
+                  accessibilityLabel="Dismiss site map draft"
+                  style={({ hovered, pressed }: any) => [
+                    styles.mapActionBtn,
+                    mapping && styles.actionDisabled,
+                    hovered && !mapping && styles.mapActionBtnHover,
+                    pressed && !mapping && webPressed,
+                  ]}
+                >
+                  <Text style={styles.mapActionText}>Not now</Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
 
           <View style={styles.systemStatStrip}>
-            <BrainStat label="Surfaces" value={String(systemMap.stats.appSurfaces)} color="#22d3ee" />
-            <BrainStat label="DB tables" value={String(systemMap.stats.databaseTables)} color="#64748b" />
+            <BrainStat label="Surfaces" value={String(systemMap.stats.appSurfaces)} color="#6366f1" />
+            <BrainStat label="Data" value={String(systemMap.stats.databaseTables)} color="#94a3b8" />
             <BrainStat label="Memories" value={String(systemMap.stats.memories)} color="#a855f7" />
-            <BrainStat label="Synced" value={String(systemMap.stats.syncedMemories)} color="#22c55e" />
-            <BrainStat label="Flows" value={String(systemMap.edges.length)} color="#f59e0b" />
-            <BrainStat label="Clusters" value={String(systemMap.clusters.length)} color="#38bdf8" />
+            <BrainStat label="Connections" value={String(systemMap.edges.length)} color="#f59e0b" />
           </View>
 
           <View style={styles.systemCanvasShell}>
+            <View style={styles.mapCanvasTopbar}>
+              <View style={styles.liveMapLabel}>
+                <View style={styles.liveMapDot} />
+                <Text style={styles.liveMapText}>Live system</Text>
+              </View>
+              <Text style={styles.mapCanvasHelp}>{compactLayout ? 'Tap nodes to inspect' : 'Drag to orbit  ·  Scroll to zoom  ·  Select a node'}</Text>
+            </View>
             {Platform.OS === 'web' ? (
               <DigitalBrainSystemFlowCanvas
                 map={systemMap}
                 selectedNodeId={selectedSystemNode?.id || null}
                 accentColor={accentColor}
                 onSelectNode={setSystemNodeId}
-                height={640}
+                height={compactLayout ? 430 : 560}
               />
             ) : (
               <View style={[styles.graphArea, { minHeight: 260, alignItems: 'center', justifyContent: 'center' }]}>
@@ -2269,8 +2753,8 @@ export default function SecondBrainDashboard({
           </View>
 
           <View style={styles.systemDetailGrid}>
-            <View style={styles.systemDetailCard}>
-              <Text style={styles.columnTitle}>SELECTED NODE</Text>
+            <View style={[styles.systemDetailCard, styles.systemSelectionCard]}>
+              <Text style={styles.columnTitle}>Selected node</Text>
               {selectedSystemNode ? (
                 <>
                   <View style={styles.nodeDetailHeader}>
@@ -2299,8 +2783,9 @@ export default function SecondBrainDashboard({
               )}
             </View>
 
+            {showSystemDetails ? <>
             <View style={styles.systemDetailCard}>
-              <Text style={styles.columnTitle}>CLUSTERS</Text>
+              <Text style={styles.columnTitle}>Clusters</Text>
               <ScrollView style={styles.systemList} nestedScrollEnabled>
                 {systemMap.clusters.map(cluster => (
                   <Pressable
@@ -2320,7 +2805,20 @@ export default function SecondBrainDashboard({
             </View>
 
             <View style={styles.systemDetailCard}>
-              <Text style={styles.columnTitle}>DATABASE COVERAGE</Text>
+              <Text style={styles.columnTitle}>Database coverage</Text>
+              {dbStatsError ? (
+                <View style={styles.inlineError} accessibilityRole="alert">
+                  <Text style={styles.inlineErrorText}>{dbStatsError}</Text>
+                  <Pressable
+                    onPress={loadDbStats}
+                    accessibilityRole="button"
+                    accessibilityLabel="Retry database coverage"
+                    style={({ hovered, pressed }: any) => [styles.inlineRetryBtn, hovered && styles.mapActionBtnHover, pressed && webPressed]}
+                  >
+                    <Text style={styles.retryBtnText}>Retry</Text>
+                  </Pressable>
+                </View>
+              ) : null}
               <ScrollView style={styles.systemList} nestedScrollEnabled>
                 {DIGITAL_BRAIN_DB_TABLES.map(cfg => {
                   const stat = dbStats[cfg.table];
@@ -2329,7 +2827,7 @@ export default function SecondBrainDashboard({
                       <View style={styles.dbRowHeader}>
                         <Text style={styles.cardTitle}>{cfg.label}</Text>
                         <Text style={[styles.cardMeta, { color: stat?.skipped ? '#94a3b8' : stat?.ok ? '#22c55e' : '#f59e0b' }]}>
-                          {stat?.skipped ? 'skipped' : stat?.ok ? `${stat.count ?? 0}` : 'pending'}
+                          {stat?.skipped ? 'skipped' : stat?.ok ? `${stat.count ?? 0}` : stat ? 'unavailable' : 'loading'}
                         </Text>
                       </View>
                       <Text style={styles.sourceUrl}>{cfg.table}</Text>
@@ -2341,7 +2839,7 @@ export default function SecondBrainDashboard({
             </View>
 
             <View style={styles.systemDetailCard}>
-              <Text style={styles.columnTitle}>MEMORY COVERAGE</Text>
+              <Text style={styles.columnTitle}>Memory coverage</Text>
               <Text style={styles.panelHint}>
                 {systemMap.stats.syncedMemories}/{systemMap.stats.memories} loaded memories are linked as Digital Brain notes.
               </Text>
@@ -2366,10 +2864,11 @@ export default function SecondBrainDashboard({
                 {!memories.length ? <Text style={styles.emptyText}>No memories loaded yet.</Text> : null}
               </ScrollView>
             </View>
+            </> : null}
           </View>
 
           {/* ── Agent memories breakdown ──────────────────────────────── */}
-          {memoriesByAgent.length > 0 && (
+          {showSystemDetails && memoriesByAgent.length > 0 && (
             <View style={styles.agentMemoriesPanel}>
               <Text style={styles.columnTitle}>AGENT MEMORIES</Text>
               <Text style={styles.panelHint}>
@@ -2606,7 +3105,12 @@ export default function SecondBrainDashboard({
               <View style={styles.searchRow}>
                 <TextInput
                   value={searchQuery}
-                  onChangeText={setSearchQuery}
+                  onChangeText={(value) => {
+                    beginRead('search');
+                    setSearching(false);
+                    setSearchQuery(value);
+                    setSearchResults(null);
+                  }}
                   onSubmitEditing={handleSearch}
                   placeholder="Ask the brain anything…"
                   placeholderTextColor={PIXEL_COLORS.text3}
@@ -2614,12 +3118,18 @@ export default function SecondBrainDashboard({
                 />
                 <Pressable
                   onPress={handleSearch}
+                  disabled={searching}
+                  accessibilityRole="button"
+                  accessibilityLabel="Search knowledge"
+                  accessibilityState={{ busy: searching, disabled: searching }}
                   style={({ hovered, pressed }: any) => [
                     styles.primaryBtn, { borderColor: accentColor, backgroundColor: accentColor },
-                    hovered && webLift, pressed && webPressed,
+                    searching && styles.actionDisabled,
+                    hovered && !searching && webLift,
+                    pressed && !searching && webPressed,
                   ]}
                 >
-                  <Text style={styles.primaryBtnText}>{saving ? '…' : 'SEARCH'}</Text>
+                  <Text style={styles.primaryBtnText}>{searching ? '…' : 'SEARCH'}</Text>
                 </Pressable>
                 {searchResults && (
                   <Pressable
@@ -2760,7 +3270,11 @@ export default function SecondBrainDashboard({
               <View style={styles.panelHeader}>
                 <View>
                   <Text style={styles.panelLabel}>AGENT BRIEF</Text>
-                  <Text style={styles.panelHint}>Compressed context for chat, OpenSwan, terminal agents, and browser tasks.</Text>
+                  <Text style={styles.panelHint}>
+                    {brainMode === 'circle'
+                      ? 'Compressed only from circle-shared notes and memories; visibility is checked again before save.'
+                      : 'Compressed personal context for chat, OpenSwan, terminal agents, and browser tasks.'}
+                  </Text>
                 </View>
                 <View style={styles.heroActions}>
                   <Pressable onPress={handleCopyAgentBrief} style={({ hovered, pressed }: any) => [styles.ghostBtn, hovered && webLift, pressed && webPressed]}>
@@ -2780,7 +3294,7 @@ export default function SecondBrainDashboard({
               <Text style={styles.panelLabel}>LONG-TERM DIGITAL BRAIN PLAN</Text>
               <Text style={styles.panelHint}>Build toward a private, circle-aware second brain that actively feeds every agent workflow.</Text>
               <View style={styles.planMiniGrid}>
-                <PlanStep label="Now" body="Graph, bases, capture, search, memory import, and review queue for the Backpack dashboard." color="#22d3ee" />
+                <PlanStep label="Now" body="Graph, bases, capture, search, memory import, and review queue for the Backpack dashboard." color="#6366f1" />
                 <PlanStep label="Next" body="Pipe agent briefs into chat model selection, OpenSwan task planning, and terminal session launches." color="#22c55e" />
                 <PlanStep label="Scale" body="Add per-project knowledge packs, permissions, provenance, conflict detection, and local model indexing." color="#a855f7" />
                 <PlanStep label="Enterprise" body="Support customer-owned models, local-only vaults, compliance exports, and business-specific automations." color="#f59e0b" />
@@ -2851,7 +3365,20 @@ export default function SecondBrainDashboard({
             View the knowledge graph of any circle you are a member of.
           </Text>
 
-          {!otherCircles.length ? (
+          {otherCirclesError ? (
+            <View style={[styles.emptyCard, styles.errorCard]} accessibilityRole="alert">
+              <Text style={styles.emptyTitle}>CIRCLES UNAVAILABLE</Text>
+              <Text style={styles.emptyText}>{otherCirclesError}</Text>
+              <Pressable
+                onPress={loadOtherCircles}
+                accessibilityRole="button"
+                accessibilityLabel="Retry loading other circles"
+                style={({ hovered, pressed }: any) => [styles.retryBtn, hovered && styles.mapActionBtnHover, pressed && webPressed]}
+              >
+                <Text style={styles.retryBtnText}>Retry</Text>
+              </Pressable>
+            </View>
+          ) : !otherCircles.length ? (
             <View style={styles.emptyCard}>
               <Text style={styles.emptyTitle}>NO OTHER CIRCLES</Text>
               <Text style={styles.emptyText}>Join additional circles to see their brain graphs here.</Text>
@@ -2884,11 +3411,28 @@ export default function SecondBrainDashboard({
                   {otherCircles.find(c => c.id === otherCircleId)?.name || otherCircleId} — Brain Graph
                 </Text>
                 <Text style={styles.graphCanvasMeta}>
-                  {otherGraph ? `${otherGraph.notes.length} nodes · ${otherGraph.clusters.length} clusters` : 'Loading…'}
+                  {otherGraphError
+                    ? 'Unavailable'
+                    : otherGraph
+                      ? `${otherGraph.notes.length} nodes · ${otherGraph.clusters.length} clusters`
+                      : 'Loading…'}
                 </Text>
               </View>
               {otherLoading ? (
                 <ActivityIndicator color={accentColor} style={{ padding: 40 }} />
+              ) : otherGraphError ? (
+                <View style={[styles.graphArea, styles.graphEmptyState, { minHeight: 180 }]} accessibilityRole="alert">
+                  <Text style={styles.emptyTitle}>GRAPH UNAVAILABLE</Text>
+                  <Text style={styles.emptyText}>{otherGraphError}</Text>
+                  <Pressable
+                    onPress={() => loadOtherCircleGraph(otherCircleId)}
+                    accessibilityRole="button"
+                    accessibilityLabel="Retry loading circle knowledge graph"
+                    style={({ hovered, pressed }: any) => [styles.retryBtn, hovered && styles.mapActionBtnHover, pressed && webPressed]}
+                  >
+                    <Text style={styles.retryBtnText}>Retry</Text>
+                  </Pressable>
+                </View>
               ) : otherGraph && Platform.OS === 'web' ? (
                 <BrainGraph3DCanvas
                   notes={otherGraph.notes.filter(n => n.status !== 'archived').slice(0, 24)}
@@ -2992,8 +3536,8 @@ function NoteCard({
             <Text style={[styles.miniBtnText, { color: '#f59e0b' }]}>MAKE PRIVATE</Text>
           </Pressable>
         )}
-        <Pressable onPress={() => onPromote(note, 'circle')} style={styles.miniBtn}>
-          <Text style={styles.miniBtnText}>MEMORY</Text>
+        <Pressable onPress={() => onPromote(note, isPrivate ? 'user' : 'circle')} style={styles.miniBtn}>
+          <Text style={styles.miniBtnText}>{isPrivate ? 'PRIVATE MEMORY' : 'CIRCLE MEMORY'}</Text>
         </Pressable>
         <Pressable onPress={() => onMark(note, 'archived')} style={styles.miniBtnDanger}>
           <Text style={styles.miniBtnDangerText}>ARCHIVE</Text>
@@ -3022,8 +3566,8 @@ const webPressed = Platform.OS === 'web' ? ({ transform: [{ scale: 0.99 }] } as 
 const styles = StyleSheet.create({
   shell: {
     marginHorizontal: GRID.lg,
-    marginBottom: GRID.xl,
-    gap: GRID.md,
+    marginBottom: 28,
+    gap: 12,
   },
 
   // Header
@@ -3033,30 +3577,25 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     flexWrap: 'wrap',
     gap: GRID.md,
-    paddingVertical: GRID.sm,
+    paddingVertical: 4,
   },
-  headerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: GRID.sm,
-  },
+  brainHeaderCopy: { flex: 1, minWidth: 260, gap: 3 },
   heroEyebrow: {
-    color: PIXEL_COLORS.text3,
-    fontSize: 9,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-    letterSpacing: 2.5,
+    color: '#748096',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 1.4,
     textTransform: 'uppercase',
   },
   heroTitle: {
-    color: PIXEL_COLORS.text0,
-    fontSize: 20,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-    marginTop: 2,
+    color: '#f1f4f8',
+    fontSize: 22,
+    lineHeight: 28,
+    fontWeight: '700',
+    letterSpacing: -0.45,
+    marginTop: 1,
   },
+  heroSubtitle: { color: '#818da1', fontSize: 12, lineHeight: 18, maxWidth: 580 },
   dotWebMark: {
     borderWidth: 2,
     borderRadius: 2,
@@ -3073,68 +3612,67 @@ const styles = StyleSheet.create({
   heroActions: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: GRID.sm,
+    gap: 7,
   },
 
   // Stat strip
   statStrip: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: GRID.sm,
+    gap: 7,
   },
   brainStat: {
-    flexGrow: 1,
-    minWidth: 80,
+    flex: 1,
+    minWidth: 105,
     borderWidth: 1,
-    borderRadius: 3,
-    backgroundColor: '#0a0f1c',
-    paddingHorizontal: GRID.md,
-    paddingVertical: GRID.sm,
+    borderRadius: 10,
+    backgroundColor: '#0b0f16',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     gap: 2,
   },
   brainStatValue: {
-    fontSize: 22,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-    lineHeight: 26,
+    fontSize: 18,
+    fontWeight: '700',
+    lineHeight: 22,
   },
   brainStatLabel: {
-    color: PIXEL_COLORS.text3,
-    fontSize: 8,
-    fontWeight: '700',
-    fontFamily: 'monospace',
-    letterSpacing: 1.2,
-    textTransform: 'uppercase',
+    color: '#737f93',
+    fontSize: 9,
+    fontWeight: '600',
   },
 
   // Tab bar
   tabBar: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 6,
+    gap: 3,
+    alignSelf: 'flex-start',
+    padding: 3,
+    borderWidth: 1,
+    borderColor: '#1b2230',
+    borderRadius: 12,
+    backgroundColor: '#0b0f16',
   },
   tabBtn: {
     borderWidth: 1,
-    borderColor: PIXEL_COLORS.border1,
-    borderRadius: 3,
-    backgroundColor: PIXEL_COLORS.bg2,
-    paddingHorizontal: GRID.md,
-    paddingVertical: 9,
+    borderColor: 'transparent',
+    borderRadius: 9,
+    backgroundColor: 'transparent',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     ...(Platform.OS === 'web' ? { transition: 'all 0.15s ease', cursor: 'pointer' } as any : {}),
   },
   tabBtnText: {
-    color: PIXEL_COLORS.text2,
-    fontSize: 9,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-    letterSpacing: 1.2,
-    textTransform: 'uppercase',
+    color: '#8994a7',
+    fontSize: 10,
+    fontWeight: '600',
   },
 
   // Graph stage
   graphStage: {
     borderWidth: 1,
-    borderColor: '#22d3ee28',
+    borderColor: '#6366f128',
     borderRadius: 4,
     backgroundColor: '#040b14',
     overflow: 'hidden',
@@ -3142,7 +3680,7 @@ const styles = StyleSheet.create({
     ...Platform.select({
       web: {
         backgroundImage: [
-          'radial-gradient(circle at 20% 20%, rgba(34,211,238,0.16), transparent 30%)',
+          'radial-gradient(circle at 20% 20%, rgba(99,102,241,0.16), transparent 30%)',
           'radial-gradient(circle at 75% 18%, rgba(168,85,247,0.14), transparent 28%)',
           'radial-gradient(circle at 50% 82%, rgba(34,197,94,0.1), transparent 28%)',
         ].join(', '),
@@ -3266,62 +3804,92 @@ const styles = StyleSheet.create({
   // System flow
   systemFlowPanel: {
     borderWidth: 1,
-    borderColor: '#22d3ee28',
-    borderRadius: 4,
-    backgroundColor: '#030711',
-    padding: GRID.md,
-    gap: GRID.md,
-    ...Platform.select({
-      web: {
-        backgroundImage: [
-          'radial-gradient(circle at 22% 18%, rgba(34,211,238,0.16), transparent 28%)',
-          'radial-gradient(circle at 78% 18%, rgba(245,158,11,0.14), transparent 28%)',
-          'radial-gradient(circle at 50% 88%, rgba(168,85,247,0.14), transparent 30%)',
-        ].join(', '),
-      } as any,
-      default: {},
-    }),
+    borderColor: '#1b2230',
+    borderRadius: 16,
+    backgroundColor: '#0b0f16',
+    padding: 12,
+    gap: 12,
   },
+  panelHeaderCopy: { flex: 1, minWidth: 240, gap: 4 },
+  mapActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  mapActionBtn: {
+    minHeight: 34,
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#242c3a',
+    borderRadius: 9,
+    backgroundColor: '#10151e',
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
+  },
+  mapActionBtnHover: { backgroundColor: '#171d28', borderColor: '#343e50' },
+  mapActionBtnActive: { backgroundColor: '#1a2030', borderColor: '#3d475a' },
+  mapActionText: { color: '#98a3b5', fontSize: 10, fontWeight: '600' },
+  actionDisabled: {
+    opacity: 0.5,
+    ...(Platform.OS === 'web' ? { cursor: 'default' } as any : {}),
+  },
+  siteMapDraft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 12,
+    borderWidth: 1,
+    borderColor: '#6366f144',
+    borderRadius: 12,
+    backgroundColor: '#6366f10d',
+    padding: 12,
+  },
+  siteMapDraftCopy: { flex: 1, minWidth: 250, gap: 4 },
+  siteMapDraftTitle: { color: '#c7d2fe', fontSize: 10, fontWeight: '800', letterSpacing: 0.7 },
+  siteMapSaveBtn: { borderColor: '#6366f166', backgroundColor: '#6366f118' },
   systemStatStrip: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: GRID.sm,
-  },
-  knowledgeIntakeRail: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: GRID.md,
-  },
-  knowledgeProfileCard: {
-    flex: 1,
-    minWidth: 220,
-    borderWidth: 1,
-    borderRadius: 3,
-    padding: GRID.md,
-    gap: 4,
+    gap: 7,
   },
   systemCanvasShell: {
     borderWidth: 1,
-    borderColor: '#ffffff12',
-    borderRadius: 4,
-    backgroundColor: '#020711',
+    borderColor: '#202837',
+    borderRadius: 14,
+    backgroundColor: '#080b12',
     overflow: 'hidden',
   },
+  mapCanvasTopbar: {
+    minHeight: 42,
+    paddingHorizontal: 13,
+    paddingVertical: 9,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#171d28',
+    backgroundColor: '#0c1017',
+  },
+  liveMapLabel: { flexDirection: 'row', alignItems: 'center', gap: 7 },
+  liveMapDot: { width: 6, height: 6, borderRadius: 999, backgroundColor: '#22c55e' },
+  liveMapText: { color: '#b8c1ce', fontSize: 10, fontWeight: '600' },
+  mapCanvasHelp: { color: '#687388', fontSize: 9 },
   systemDetailGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: GRID.md,
+    gap: 10,
   },
   systemDetailCard: {
     flex: 1,
     minWidth: 280,
     borderWidth: 1,
-    borderColor: PIXEL_COLORS.border0,
-    borderRadius: 3,
-    backgroundColor: '#07101d',
-    padding: GRID.md,
-    gap: GRID.sm,
+    borderColor: '#1d2533',
+    borderRadius: 12,
+    backgroundColor: '#0d121a',
+    padding: 13,
+    gap: 8,
   },
+  systemSelectionCard: { flexBasis: '100%', minHeight: 88 },
   systemList: {
     maxHeight: 340,
   },
@@ -3330,9 +3898,9 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
     gap: GRID.sm,
     borderWidth: 1,
-    borderColor: PIXEL_COLORS.border0,
-    borderRadius: 3,
-    backgroundColor: PIXEL_COLORS.bg2,
+    borderColor: '#202837',
+    borderRadius: 9,
+    backgroundColor: '#10151e',
     padding: GRID.sm,
     marginBottom: GRID.sm,
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
@@ -3345,12 +3913,33 @@ const styles = StyleSheet.create({
   },
   dbRow: {
     borderWidth: 1,
-    borderColor: PIXEL_COLORS.border0,
-    borderRadius: 3,
-    backgroundColor: PIXEL_COLORS.bg2,
+    borderColor: '#202837',
+    borderRadius: 9,
+    backgroundColor: '#10151e',
     padding: GRID.sm,
     marginBottom: GRID.sm,
     gap: 4,
+  },
+  inlineError: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    borderWidth: 1,
+    borderColor: '#f59e0b33',
+    borderRadius: 8,
+    backgroundColor: '#f59e0b0d',
+    padding: 8,
+  },
+  inlineErrorText: { flex: 1, color: '#d4a650', fontSize: 9, lineHeight: 14 },
+  inlineRetryBtn: {
+    minHeight: 32,
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#f59e0b44',
+    borderRadius: 7,
+    paddingHorizontal: 9,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   dbRowHeader: {
     flexDirection: 'row',
@@ -3362,9 +3951,9 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
     gap: GRID.sm,
     borderWidth: 1,
-    borderColor: PIXEL_COLORS.border0,
-    borderRadius: 3,
-    backgroundColor: PIXEL_COLORS.bg2,
+    borderColor: '#202837',
+    borderRadius: 9,
+    backgroundColor: '#10151e',
     padding: GRID.sm,
     marginBottom: GRID.sm,
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
@@ -3504,8 +4093,8 @@ const styles = StyleSheet.create({
   panelHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    gap: GRID.sm,
+    alignItems: 'center',
+    gap: GRID.md,
     flexWrap: 'wrap',
   },
   filterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 5 },
@@ -3531,23 +4120,22 @@ const styles = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
   },
   noteTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: GRID.sm, flexWrap: 'wrap' },
-  kindBadge: { borderWidth: 1, borderRadius: 2, paddingHorizontal: 6, paddingVertical: 3, backgroundColor: '#00000030' },
-  kindBadgeText: { fontSize: 7, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.6, textTransform: 'uppercase' },
-  cardTitle: { color: PIXEL_COLORS.text0, fontSize: 13, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.3 },
-  cardMeta: { color: PIXEL_COLORS.text3, fontSize: 10, fontFamily: 'monospace' },
-  cardBody: { color: PIXEL_COLORS.text1, fontSize: 11, fontFamily: 'monospace', lineHeight: 17 },
-  sourceUrl: { color: '#38bdf8', fontSize: 10, fontFamily: 'monospace' },
+  kindBadge: { borderWidth: 1, borderRadius: 999, paddingHorizontal: 7, paddingVertical: 3, backgroundColor: '#00000030' },
+  kindBadgeText: { fontSize: 8, fontWeight: '700', letterSpacing: 0.4, textTransform: 'uppercase' },
+  cardTitle: { color: '#e7ebf1', fontSize: 12, fontWeight: '600', letterSpacing: 0.1 },
+  cardMeta: { color: '#748096', fontSize: 9 },
+  cardBody: { color: '#aab4c3', fontSize: 11, lineHeight: 17 },
+  sourceUrl: { color: '#7aa2f7', fontSize: 10 },
   tagRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 4 },
   tag: {
     color: '#94a3b8',
     backgroundColor: '#ffffff09',
     borderWidth: 1,
     borderColor: '#ffffff14',
-    borderRadius: 2,
+    borderRadius: 999,
     paddingHorizontal: 5,
     paddingVertical: 2,
     fontSize: 9,
-    fontFamily: 'monospace',
   },
   actionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 5 },
   miniBtn: {
@@ -3626,7 +4214,7 @@ const styles = StyleSheet.create({
   },
   agentBriefPanel: {
     borderWidth: 1,
-    borderColor: '#22d3ee30',
+    borderColor: '#6366f130',
     borderRadius: 3,
     backgroundColor: '#06101b',
     padding: GRID.md,
@@ -3687,30 +4275,54 @@ const styles = StyleSheet.create({
   primaryBtnText: { color: '#040c14', fontSize: 10, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1 },
   ghostBtn: {
     borderWidth: 1,
-    borderColor: PIXEL_COLORS.border1,
-    borderRadius: 3,
-    backgroundColor: PIXEL_COLORS.bg2,
-    paddingHorizontal: GRID.md,
-    paddingVertical: 10,
+    borderColor: '#242c3a',
+    borderRadius: 9,
+    backgroundColor: '#10151e',
+    paddingHorizontal: 12,
+    paddingVertical: 9,
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
   },
-  ghostBtnText: { color: PIXEL_COLORS.text1, fontSize: 10, fontWeight: '800', fontFamily: 'monospace', letterSpacing: 0.8 },
+  ghostBtnText: { color: '#b8c1ce', fontSize: 10, fontWeight: '600' },
 
   // Status
   statusBar: {
     borderWidth: 1,
     borderColor: '#f59e0b33',
     backgroundColor: '#f59e0b0d',
-    borderRadius: 3,
-    padding: GRID.md,
+    borderRadius: 10,
+    padding: 11,
   },
-  statusText: { color: PIXEL_COLORS.text1, fontSize: 11, fontFamily: 'monospace' },
+  statusText: { color: '#b8c1ce', fontSize: 11 },
+  errorBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 10,
+    borderColor: '#ef444455',
+    backgroundColor: '#ef44440d',
+  },
+  statusCopy: { flex: 1, minWidth: 240, gap: 3 },
+  errorTitle: { color: '#fca5a5', fontSize: 10, fontWeight: '800' },
+  retryBtn: {
+    minHeight: 36,
+    alignSelf: 'flex-start',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#ef444455',
+    borderRadius: 8,
+    backgroundColor: '#161116',
+    paddingHorizontal: 12,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  retryBtnText: { color: '#f1f4f8', fontSize: 10, fontWeight: '700' },
 
   // Common
-  panelLabel: { color: PIXEL_COLORS.text2, fontSize: 9, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 2.5, textTransform: 'uppercase' },
-  panelHint: { color: PIXEL_COLORS.text3, fontSize: 10, fontFamily: 'monospace', marginTop: 1 },
-  columnTitle: { color: PIXEL_COLORS.text2, fontSize: 9, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1.8, textTransform: 'uppercase' },
+  panelLabel: { color: '#e7ebf1', fontSize: 15, fontWeight: '600', letterSpacing: -0.2 },
+  panelHint: { color: '#7d899d', fontSize: 11, lineHeight: 17 },
+  columnTitle: { color: '#aab4c3', fontSize: 10, fontWeight: '700', letterSpacing: 0.35 },
   emptyCard: { borderWidth: 1, borderColor: PIXEL_COLORS.border0, borderRadius: 3, backgroundColor: PIXEL_COLORS.bg2, padding: GRID.lg, gap: GRID.sm },
+  errorCard: { borderColor: '#ef444444', backgroundColor: '#ef44440a' },
   emptyTitle: { color: PIXEL_COLORS.text1, fontSize: 11, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 1.2, textTransform: 'uppercase' },
   emptyText: { color: PIXEL_COLORS.text3, fontSize: 11, fontFamily: 'monospace', lineHeight: 16 },
 
@@ -3719,24 +4331,21 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 5,
     alignItems: 'center',
-    marginLeft: GRID.sm,
+    marginTop: 8,
   },
   modeBtn: {
     borderWidth: 1,
-    borderColor: PIXEL_COLORS.border1,
-    borderRadius: 3,
-    backgroundColor: PIXEL_COLORS.bg2,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
+    borderColor: '#252d3a',
+    borderRadius: 999,
+    backgroundColor: '#0f141d',
+    paddingHorizontal: 11,
+    paddingVertical: 6,
     ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
   },
   modeBtnText: {
-    color: PIXEL_COLORS.text2,
-    fontSize: 8,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
+    color: '#8792a5',
+    fontSize: 9,
+    fontWeight: '600',
   },
 
   // Visibility badge

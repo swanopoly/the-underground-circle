@@ -31,13 +31,36 @@ export interface HfCommandResult {
     inputPreview?: string;
     outputPreview?: string;
   }[];
+  /** Exact, server-reported lineage for a generated image. */
+  imageGeneration?: {
+    provider: string;
+    model: string;
+    sourceMessageId: string;
+  };
+}
+
+export interface HfCommandContext {
+  circleId: string;
+  userId: string;
+  userName?: string;
+  /** Backwards-compatible text-model selection for non-image HF commands. */
+  model?: string;
+  /** Exact Chat catalog selection; a failed call cannot reroute to another API. */
+  modelDispatchSealed?: boolean;
+  /** User-facing model selection; the image service resolves the real generator. */
+  requestedModel?: string;
+  provider?: string;
+  threadId?: string;
+  sourceMessageId?: string;
+  accessToken?: string;
+  signal?: AbortSignal;
 }
 
 // ─── Main Dispatcher ────────────────────────────────────────────────────────
 
 export async function executeHfCommand(
   input: string,
-  context: { circleId: string; userId: string; userName?: string; model?: string },
+  context: HfCommandContext,
 ): Promise<HfCommandResult> {
   const trimmed = input.trim();
   const lower = trimmed.toLowerCase();
@@ -48,7 +71,9 @@ export async function executeHfCommand(
   if (lower.startsWith('/classify ')) return handleClassify(trimmed.slice(10).trim(), context);
   if (lower.startsWith('/zero-shot ')) return handleZeroShot(trimmed.slice(11).trim(), context);
   if (lower.startsWith('/qa ')) return handleQA(trimmed.slice(4).trim(), context);
-  if (lower.startsWith('/imagine ')) return handleImagine(trimmed.slice(9).trim(), context);
+  if (lower === '/imagine' || lower.startsWith('/imagine ')) {
+    return handleImagine(trimmed.slice(8).trim(), context);
+  }
   if (lower.startsWith('/vision ')) return handleVision(trimmed.slice(8).trim(), context);
   if (lower.startsWith('/openmodel ')) return handleOpenModel(trimmed.slice(11).trim(), context);
   if (lower.startsWith('/build-page ')) return handleBuildPage(trimmed.slice(12).trim(), context);
@@ -61,12 +86,19 @@ export async function executeHfCommand(
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function buildSwanBotContext(ctx: { circleId: string; userId: string; userName?: string; model?: string }): SwanBotContext {
+function buildSwanBotContext(ctx: {
+  circleId: string;
+  userId: string;
+  userName?: string;
+  model?: string;
+  modelDispatchSealed?: boolean;
+}): SwanBotContext {
   return {
     userId: ctx.userId,
     circleId: ctx.circleId,
     userName: ctx.userName,
     model: ctx.model,
+    modelDispatchSealed: ctx.modelDispatchSealed,
   };
 }
 
@@ -271,46 +303,73 @@ async function handleQA(
 
 async function handleImagine(
   prompt: string,
-  ctx: { circleId: string; userId: string; userName?: string; model?: string },
+  ctx: HfCommandContext,
 ): Promise<HfCommandResult> {
   if (!prompt) {
     return { success: false, message: 'Usage: `/imagine <prompt>`' };
   }
 
-  // Real image generation — call hf-proxy. Claude (SwanBot) cannot generate
-  // images, so the previous SwanBot path returned text descriptions only.
-  // Default model: black-forest-labs/FLUX.1-schnell (set in hf-proxy).
-  // Note: text-to-image returns { image: dataUrl, ... }, while other binary
-  // tasks return { data: dataUrl, ... }. Tolerate both.
-  const result = await callHfProxy<{ image?: string; data?: string }>({
-    task: 'text-to-image',
-    inputs: prompt,
+  // Image generation is durable, server-authoritative work. Never start a
+  // provider request unless Chat has supplied the exact persisted source row
+  // and thread scope. This also keeps the legacy browser HF/data-URL path out
+  // of the canonical generated-image flow.
+  if (!ctx.threadId || !ctx.sourceMessageId) {
+    return {
+      success: false,
+      message: '**Image generation needs a saved Chat message**\n\nYour request was not sent to an image provider. Retry after the conversation finishes saving.',
+    };
+  }
+
+  const { generateChatImage } = await import('./generatedChatImages');
+  const result = await generateChatImage({
+    prompt,
     circleId: ctx.circleId,
+    threadId: ctx.threadId,
+    sourceMessageId: ctx.sourceMessageId,
+    requestedModel: ctx.requestedModel,
+    provider: ctx.provider,
+    accessToken: ctx.accessToken,
+    signal: ctx.signal,
   });
 
   if (!result.ok) {
     return {
       success: false,
-      message: `**Image generation failed**\n\n${result.error}\n\n_${hfErrorGuidance(result.code)}_`,
+      message: `**Image generation failed**\n\n${result.message}`,
     };
   }
 
-  const imageDataUrl = result.result?.image || result.result?.data;
-  if (!imageDataUrl) {
-    return { success: false, message: 'Image generation returned no data.' };
-  }
+  const artifact = result.artifact;
 
   return {
     success: true,
-    message: `**Generated image:** _${prompt}_`,
+    message: result.message || `**Generated image:** _${prompt}_`,
     artifacts: [{
-      kind: 'image',
-      title: prompt.slice(0, 80),
-      url: imageDataUrl,
-      content: prompt,
-      metadata: { model: result.model, source: 'huggingface' },
+      kind: artifact.kind,
+      title: artifact.title || prompt.slice(0, 80),
+      ...(typeof artifact.url === 'string' ? { url: artifact.url } : {}),
+      ...(typeof artifact.content === 'string' ? { content: artifact.content } : { content: prompt }),
+      metadata: {
+        ...(artifact.metadata || {}),
+        sourceMessageId: ctx.sourceMessageId,
+        provider: result.provider,
+        model: result.model,
+      },
     }],
-    toolActions: buildToolAction('hf_imagine', 'Generate Image', prompt, `Image (${result.model})`),
+    toolActions: [{
+      kind: 'image_generation',
+      toolName: 'generate_chat_image',
+      title: 'Generate Image',
+      status: 'completed',
+      model: result.model,
+      inputPreview: prompt.slice(0, 100),
+      outputPreview: `${result.provider} · ${result.model}`.slice(0, 100),
+    }],
+    imageGeneration: {
+      provider: result.provider,
+      model: result.model,
+      sourceMessageId: ctx.sourceMessageId,
+    },
   };
 }
 

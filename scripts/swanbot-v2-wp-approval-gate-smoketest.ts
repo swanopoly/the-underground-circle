@@ -72,12 +72,11 @@ function assertSwanBotContinuationContext(): void {
     'continuation passes persisted run and loop iteration into client tools',
   );
   assert(
-    // Assert `context` IS forwarded, tolerating extra trailing arguments and a
-    // multi-line call. The 3-arg-exactly form broke when a
-    // `directMutationReceipt?.markDispatched` callback was added as a 4th
-    // argument — the approval context is still forwarded, which is the property
-    // this guards.
-    /dispatchOneClientTool\(\s*bridge,\s*call,\s*context\s*[,)]/s.test(swanbotSource),
+    // The dispatcher now receives a copied context so the per-batch call
+    // ordinal can be sealed into the runtime receipt. Pin the spread itself:
+    // it preserves the approval resume binding, user constraints, iteration,
+    // and approval callback while allowing receipt-only fields to be added.
+    /dispatchOneClientTool\(\s*bridge,\s*call,\s*context\s*\?\s*\{\s*\.\.\.context,\s*sourceCallOrdinal:\s*sourceCallOrdinalByToolUseId\.get\(call\.id\)\s*\|\|\s*undefined,\s*\}\s*:\s*undefined,/s.test(swanbotSource),
     'client tool loop forwards approval context into dispatcher',
   );
   assert(

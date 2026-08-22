@@ -9,7 +9,7 @@
  *   - DCA (dollar-cost averaging) execution
  *   - Price alerts & watchlist monitoring
  *
- * Requires: HELIUS_API_KEY in user_api_keys or env
+ * Requires: a user-owned Helius API key connected through Integrations.
  */
 
 import { Platform } from 'react-native';
@@ -892,7 +892,7 @@ export class TradingBot {
 
 // ─── Supabase Integration ────────────────────────────────────────────────────
 
-/** Get Helius API key for a user (from user_api_keys or env) */
+/** Get a user-owned Helius API key from the authenticated BYOK store. */
 export async function getHeliusApiKey(userId?: string): Promise<string | null> {
   const readRpcKey = async (resolvedUserId: string, label: string | null): Promise<string | null> => {
     if (heliusReadRpcUnavailable) return null;
@@ -919,13 +919,9 @@ export async function getHeliusApiKey(userId?: string): Promise<string | null> {
     return null;
   };
 
-  // 1. Try env variable
-  const envKey = typeof process !== 'undefined'
-    ? (process.env?.HELIUS_API_KEY || process.env?.EXPO_PUBLIC_HELIUS_API_KEY)
-    : null;
-  if (envKey) return envKey;
-
-  // 2. Resolve the current user if caller did not provide one
+  // Resolve the current user if caller did not provide one. There is
+  // deliberately no browser environment fallback: public build variables are
+  // part of the downloadable bundle and must never carry provider secrets.
   let resolvedUserId = userId;
   if (!resolvedUserId) {
     try {
@@ -2787,7 +2783,6 @@ function mapFeaturedTrade(d: any): FeaturedTrade {
     createdAt: d.created_at,
   };
 }
-
 
 
 

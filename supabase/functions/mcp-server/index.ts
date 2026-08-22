@@ -18,10 +18,25 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
+    const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
+    const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+    const anonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
+    const authorization = req.headers.get('Authorization') || req.headers.get('authorization') || '';
     const supabase = createClient(
-      Deno.env.get('SUPABASE_URL') ?? '',
-      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '' // Service role for internal data access
+      supabaseUrl,
+      serviceRoleKey, // Service role is limited to invite + membership resolution.
     );
+
+    // Authenticate before touching the invite code. Otherwise the difference
+    // between "invalid code" and "authentication required" is an oracle for
+    // a bearer-like Circle join credential.
+    const authUser = await getAuthenticatedUser(req);
+    if (!authUser) {
+      return new Response(
+        JSON.stringify({ error: 'Authentication required: send the user access token in Authorization' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+      );
+    }
 
     const inviteCode = req.headers.get('x-circle-invite-code');
     if (!inviteCode) {
@@ -46,11 +61,10 @@ Deno.serve(async (req: Request) => {
     // alone granted full read of tasks + the last 50 chat messages plus an
     // unauthenticated write that forged a task attributed to the circle creator.)
     // MCP clients must send the user's Supabase access token in Authorization.
-    const authUser = await getAuthenticatedUser(req);
-    if (!authUser) {
+    if (!supabaseUrl || !anonKey || !authorization) {
       return new Response(
-        JSON.stringify({ error: 'Authentication required: send the user access token in Authorization' }),
-        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+        JSON.stringify({ error: 'Authenticated Circle data access is unavailable' }),
+        { status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       );
     }
     const { data: membership } = await supabase
@@ -65,6 +79,15 @@ Deno.serve(async (req: Request) => {
         { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       );
     }
+
+    // All tenant data reads and writes below must execute as the verified user.
+    // A service-role query would bypass message/thread RLS and could export a
+    // private/shared Chat thread to any other member holding the Circle invite
+    // code. Keep service role authority above at the authentication boundary.
+    const callerSupabase = createClient(supabaseUrl, anonKey, {
+      global: { headers: { Authorization: authorization } },
+      auth: { persistSession: false },
+    });
 
     const { method, params, id: jsonRpcId } = await req.json();
 
@@ -108,7 +131,7 @@ Deno.serve(async (req: Request) => {
       case 'resources/read':
         const uri = params.uri;
         if (uri.endsWith('/tasks')) {
-          const { data: tasks } = await supabase
+          const { data: tasks } = await callerSupabase
             .from('tasks')
             .select('title, status, assigned_to(display_name), due_date')
             .eq('circle_id', circle.id)
@@ -123,12 +146,30 @@ Deno.serve(async (req: Request) => {
             }]
           };
         } else if (uri.endsWith('/messages')) {
-          const { data: messages } = await supabase
+          // This Circle-wide MCP resource intentionally excludes private and
+          // shared threads, even when the caller belongs to one. Exporting a
+          // mixed resource could replay that private text into a public Circle
+          // workflow. A future thread-specific URI must prove exact membership.
+          const { data: circleThreads, error: threadError } = await callerSupabase
+            .from('circle_chat_threads')
+            .select('id')
+            .eq('circle_id', circle.id)
+            .eq('visibility', 'circle')
+            .limit(50);
+          if (threadError) throw new Error('Circle Chat visibility could not be verified');
+          const visibleThreadIds = (circleThreads || [])
+            .map((thread: { id?: unknown }) => typeof thread.id === 'string' ? thread.id : null)
+            .filter((id: string | null): id is string => Boolean(id));
+          const messagesQuery = callerSupabase
             .from('messages')
             .select('content, is_bot, profiles(display_name), created_at')
             .eq('circle_id', circle.id)
             .order('created_at', { ascending: false })
             .limit(50);
+          const { data: messages, error: messagesError } = visibleThreadIds.length > 0
+            ? await messagesQuery.in('thread_id', visibleThreadIds)
+            : { data: [], error: null };
+          if (messagesError) throw new Error('Circle messages could not be read');
           
           result = {
             contents: [{
@@ -165,7 +206,7 @@ Deno.serve(async (req: Request) => {
           // Attribute the task to the authenticated member (verified above), not
           // the circle creator — the previous behavior forged tasks under the
           // creator's identity for any caller holding an invite code.
-          const { data: newTask, error: taskErr } = await supabase
+          const { data: newTask, error: taskErr } = await callerSupabase
             .from('tasks')
             .insert({
               circle_id: circle.id,

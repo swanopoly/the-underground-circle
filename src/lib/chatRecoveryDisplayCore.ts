@@ -42,6 +42,267 @@ export function sanitizeVisibleComputerTaskMessage(message: string, status: stri
   return 'I could not finish that app or file action. Technical details were saved for recovery.';
 }
 
+export type ChatMinimalRecoveryStatus =
+  | 'manual_verification'
+  | 'needs_user'
+  | 'review_required'
+  | 'action_available'
+  | 'stopped';
+
+export type ChatMinimalRecoveryPrimaryKind =
+  | 'manual_verification'
+  | 'recovery_option'
+  | 'details';
+
+export interface ChatMinimalRecoveryPresentationInput {
+  /**
+   * Raw failure/recovery copy is retained only in `details`. It is never used
+   * to build the compact customer-facing status, reason, or action label.
+   */
+  failureMessage?: string | null;
+  recoveryMessage?: string | null;
+  recoveryOptions?: readonly ChatFailureRecoveryOption[] | null;
+  detailMetadata?: unknown;
+  /**
+   * Presentation-only signal from the existing exact, current-task manual
+   * verification resolver. This helper does not mint or broaden authority.
+   * Supplying the already-bound action makes the read-only check the single
+   * primary action and moves every recovery option under Details.
+   */
+  authorizedManualVerificationAction?: object | null;
+}
+
+export interface ChatMinimalRecoveryPrimaryAction {
+  kind: ChatMinimalRecoveryPrimaryKind;
+  /** Closed-vocabulary customer-facing label. */
+  label: string;
+  /** Exactly one action is primary in the compact presentation. */
+  recommended: true;
+  /** Original option and position used for the existing execution callback. */
+  option: ChatFailureRecoveryOption | null;
+  optionIndex: number | null;
+  /** Existing manual-verification action, preserved without displaying it. */
+  manualVerificationAction: object | null;
+  requiresApproval: boolean;
+  userActionRequired: boolean;
+}
+
+export interface ChatMinimalRecoveryPresentation {
+  status: ChatMinimalRecoveryStatus;
+  /** Closed-vocabulary customer-facing copy; safe for the collapsed surface. */
+  statusLine: string;
+  /** Closed-vocabulary customer-facing copy; safe for the collapsed surface. */
+  reason: string;
+  primaryAction: ChatMinimalRecoveryPrimaryAction;
+  /** Original options other than the selected primary, in their exact order. */
+  secondaryOptions: readonly ChatFailureRecoveryOption[];
+  detailsLabel: 'Details';
+  /**
+   * Lossless support/archive payload. Consumers must keep this behind Details
+   * and must not treat raw strings or option labels as customer-safe copy.
+   */
+  details: {
+    failureMessage: string | null;
+    recoveryMessage: string | null;
+    recoveryOptions: readonly ChatFailureRecoveryOption[];
+    metadata: unknown;
+    manualVerificationAction: object | null;
+  };
+}
+
+function readRecoveryOptionField(
+  option: ChatFailureRecoveryOption,
+  field: 'id' | 'actor' | 'source' | 'recommended',
+): unknown {
+  try {
+    return option?.[field];
+  } catch {
+    return undefined;
+  }
+}
+
+function getMinimalRecoveryPolicy(option: ChatFailureRecoveryOption) {
+  const id = readRecoveryOptionField(option, 'id');
+  const actor = readRecoveryOptionField(option, 'actor');
+  const source = readRecoveryOptionField(option, 'source');
+  return buildChatFailureRecoveryExecutionPlan({
+    id: typeof id === 'string' ? id : '',
+    actor: typeof actor === 'string' ? actor as ChatFailureRecoveryOption['actor'] : 'none',
+    source: typeof source === 'string' ? source as ChatFailureRecoveryOption['source'] : 'recovery_policy',
+  }).policy;
+}
+
+function getMinimalRecoveryCopy(
+  option: ChatFailureRecoveryOption | null,
+): Pick<ChatMinimalRecoveryPresentation, 'status' | 'statusLine' | 'reason'> & {
+  actionLabel: string;
+  requiresApproval: boolean;
+  userActionRequired: boolean;
+} {
+  if (!option) {
+    return {
+      status: 'stopped',
+      statusLine: "I couldn't finish that step.",
+      reason: 'Nothing else ran. You can review what happened.',
+      actionLabel: 'Show details',
+      requiresApproval: false,
+      userActionRequired: false,
+    };
+  }
+
+  const policy = getMinimalRecoveryPolicy(option);
+  if (policy.action === 'request_user_unblock') {
+    return {
+      status: 'needs_user',
+      statusLine: 'I need one quick step from you.',
+      reason: 'Finish the required sign-in, permission, or confirmation, then continue.',
+      actionLabel: 'Show the step',
+      requiresApproval: policy.requiresApproval,
+      userActionRequired: true,
+    };
+  }
+  if (policy.action === 'retry_with_fresh_evidence') {
+    return {
+      status: policy.requiresApproval ? 'review_required' : 'action_available',
+      statusLine: "I couldn't confirm the next step.",
+      reason: 'I can check the current state, then retry that step once.',
+      actionLabel: policy.requiresApproval ? 'Review retry' : 'Check and retry',
+      requiresApproval: policy.requiresApproval,
+      userActionRequired: policy.userActionRequired,
+    };
+  }
+  if (policy.action === 'repair_with_connected_agent') {
+    return {
+      status: policy.requiresApproval ? 'review_required' : 'action_available',
+      statusLine: "I couldn't finish that step.",
+      reason: 'I can prepare a repair and verify it before continuing.',
+      actionLabel: policy.requiresApproval ? 'Review repair' : 'Repair and continue',
+      requiresApproval: policy.requiresApproval,
+      userActionRequired: policy.userActionRequired,
+    };
+  }
+  if (policy.action === 'switch_route_or_model') {
+    return {
+      status: policy.requiresApproval ? 'review_required' : 'action_available',
+      statusLine: "I couldn't finish that step.",
+      reason: 'I can check another supported path before trying again.',
+      actionLabel: policy.requiresApproval ? 'Review another path' : 'Try another path',
+      requiresApproval: policy.requiresApproval,
+      userActionRequired: policy.userActionRequired,
+    };
+  }
+  if (policy.action === 'repair_or_restart_bridge') {
+    return policy.userActionRequired
+      ? {
+          status: 'needs_user',
+          statusLine: 'I need one quick step from you.',
+          reason: 'Reconnect app control, then continue.',
+          actionLabel: 'Show the step',
+          requiresApproval: policy.requiresApproval,
+          userActionRequired: true,
+        }
+      : {
+          status: policy.requiresApproval ? 'review_required' : 'action_available',
+          statusLine: "I couldn't finish that step.",
+          reason: 'I can repair the app connection and check it before continuing.',
+          actionLabel: policy.requiresApproval ? 'Review connection fix' : 'Repair connection',
+          requiresApproval: policy.requiresApproval,
+          userActionRequired: false,
+        };
+  }
+  if (policy.action === 'stop_and_report') {
+    return {
+      status: 'stopped',
+      statusLine: "I couldn't safely continue.",
+      reason: 'Nothing else ran. You can review what happened.',
+      actionLabel: 'Show details',
+      requiresApproval: false,
+      userActionRequired: false,
+    };
+  }
+  return {
+    status: policy.requiresApproval ? 'review_required' : 'action_available',
+    statusLine: "I couldn't finish that step.",
+    reason: 'Review what happened before trying another action.',
+    actionLabel: policy.requiresApproval ? 'Review next step' : 'Continue',
+    requiresApproval: policy.requiresApproval,
+    userActionRequired: policy.userActionRequired,
+  };
+}
+
+/**
+ * Builds the one-glance failure-recovery surface without changing execution,
+ * approval, replay, or verification policy. Selection is deterministic:
+ * an already-authorized read-only manual verification action, otherwise the
+ * first recommended option, otherwise the first option, otherwise Details.
+ * Multiple recommendation flags are normalized only for presentation; the
+ * original options and metadata remain lossless under `details`.
+ */
+export function buildChatMinimalRecoveryPresentation(
+  input?: ChatMinimalRecoveryPresentationInput | null,
+): ChatMinimalRecoveryPresentation {
+  const recoveryOptions = Array.isArray(input?.recoveryOptions)
+    ? [...input.recoveryOptions]
+    : [];
+  const manualVerificationAction = input?.authorizedManualVerificationAction
+    && typeof input.authorizedManualVerificationAction === 'object'
+    ? input.authorizedManualVerificationAction
+    : null;
+  const details = {
+    failureMessage: typeof input?.failureMessage === 'string' ? input.failureMessage : null,
+    recoveryMessage: typeof input?.recoveryMessage === 'string' ? input.recoveryMessage : null,
+    recoveryOptions,
+    metadata: input?.detailMetadata ?? null,
+    manualVerificationAction,
+  };
+
+  if (manualVerificationAction) {
+    return {
+      status: 'manual_verification',
+      statusLine: "I couldn't confirm the result.",
+      reason: 'I can check the current state without repeating the action.',
+      primaryAction: {
+        kind: 'manual_verification',
+        label: 'Check current state',
+        recommended: true,
+        option: null,
+        optionIndex: null,
+        manualVerificationAction,
+        requiresApproval: false,
+        userActionRequired: false,
+      },
+      secondaryOptions: recoveryOptions,
+      detailsLabel: 'Details',
+      details,
+    };
+  }
+
+  const recommendedIndex = recoveryOptions.findIndex((option) => (
+    readRecoveryOptionField(option, 'recommended') === true
+  ));
+  const primaryIndex = recommendedIndex >= 0 ? recommendedIndex : recoveryOptions.length > 0 ? 0 : -1;
+  const primaryOption = primaryIndex >= 0 ? recoveryOptions[primaryIndex] : null;
+  const copy = getMinimalRecoveryCopy(primaryOption);
+  return {
+    status: copy.status,
+    statusLine: copy.statusLine,
+    reason: copy.reason,
+    primaryAction: {
+      kind: primaryOption ? 'recovery_option' : 'details',
+      label: copy.actionLabel,
+      recommended: true,
+      option: primaryOption,
+      optionIndex: primaryIndex >= 0 ? primaryIndex : null,
+      manualVerificationAction: null,
+      requiresApproval: copy.requiresApproval,
+      userActionRequired: copy.userActionRequired,
+    },
+    secondaryOptions: recoveryOptions.filter((_, index) => index !== primaryIndex),
+    detailsLabel: 'Details',
+    details,
+  };
+}
+
 export function getRecoveryOptionActorLabel(actor: ChatFailureRecoveryOption['actor']): string {
   switch (actor) {
     case 'openswan':
@@ -98,11 +359,11 @@ export function formatRecoveryEvidenceLabel(value: string): string {
     .trim();
 }
 
-// P22: display-only route/surface label for computer/desktop/app-task
-// messages. The plan preview's `routeLabel` is hardcoded 'browser' for the
-// forced computer-task path (and the preview smoke locks that value), so we
-// derive a surface-accurate label from the handoff metadata for DISPLAY only —
-// executor selection still keys off the unchanged routeId.
+// Historical computer-task messages may still carry the former lowercase
+// `browser` route label. The handoff surface remains a useful display fallback
+// for those rows and for route chips that do not have a persisted plan preview.
+// New plan cards use the canonical `computerRequestRoute.kind` label from the
+// preview instead (see `resolveChatAutomationPlanDisplayRouteLabel`).
 export function formatHandoffSurfaceRouteLabel(
   handoff?: ChatComputerHandoffMetadata | null,
 ): string | null {
@@ -118,6 +379,29 @@ export function formatHandoffSurfaceRouteLabel(
     default:
       return null;
   }
+}
+
+/**
+ * Select the plan card's display-only route label without letting the coarser
+ * legacy handoff surface erase a canonical planner label. In particular, a
+ * `computer` handoff cannot distinguish a true hybrid task from capability
+ * buildout, while the persisted plan preview can.
+ *
+ * The override is retained only to repair historical previews whose route was
+ * persisted as the old lowercase `browser`/`direct` placeholder. Execution
+ * continues to use the typed plan and never reads this display value.
+ */
+export function resolveChatAutomationPlanDisplayRouteLabel(
+  previewRouteLabel: string | null | undefined,
+  legacyHandoffOverride?: string | null,
+): string {
+  const previewLabel = String(previewRouteLabel || '').trim();
+  const fallbackLabel = String(legacyHandoffOverride || '').trim();
+
+  if (previewLabel && previewLabel !== 'browser' && previewLabel !== 'direct') {
+    return previewLabel;
+  }
+  return fallbackLabel || previewLabel || 'Direct';
 }
 
 // P22: the one always-visible compact summary line for a computer/desktop/

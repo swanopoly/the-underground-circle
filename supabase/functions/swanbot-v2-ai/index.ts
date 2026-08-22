@@ -77,6 +77,16 @@ import {
 // numbers. See docs/AGENTS_ROADMAP.md §6 Rule #3.
 import { callClaude, addUsage, EMPTY_USAGE, logClaudeUsage, computeCostUsd, type UsageBreakdown } from "../_claude/anthropic.ts";
 import { wrapUntrusted } from "../_shared/untrusted.ts";
+import {
+  exactAgentSpiritContextErrorResponse,
+  resolveExactAgentSpiritContext,
+  type ExactAgentSpiritContext,
+} from "../_shared/agent-spirit-context.ts";
+import {
+  parseSwanBotExactAgentTarget,
+  prependAssignedAgentSpiritPrompt,
+  type SwanBotExactAgentTarget,
+} from "../../../src/lib/agentSpiritPromptCore.ts";
 import { attachToolInputExamples } from "../../../src/lib/toolInputExamples.ts";
 // Secret-hygiene gate for the agent-callable `save_memory` tool. Pure,
 // dependency-free module shared verbatim with the client writers
@@ -193,6 +203,9 @@ type ToolContext = {
   supabase: SupabaseEdgeClient;
   circleId: string;
   userId: string;
+  /** Exact Chat thread selected when this turn started. Server-side message
+   *  writes may target only this pre-authorized thread. */
+  threadId?: string | null;
   /** The current agent_runs.id — set whenever runLoop is running under a
    *  persisted run (every non-throwaway call has one). M3d approvals
    *  attach to this when the model omits runId. */
@@ -205,6 +218,100 @@ type ToolContext = {
   agentDbId?: string | null;
   agentLegacyIds?: string[];
 };
+
+// THREAD_AUTHORIZATION_CORE_START
+type SwanBotChatThreadAuthorizationDecision =
+  | { ok: true; threadId: string | null }
+  | {
+      ok: false;
+      status: 403 | 503;
+      code: "thread_forbidden" | "thread_authorization_unavailable";
+      message: string;
+    };
+
+/**
+ * Authorize the exact Chat thread immediately before it becomes service-role
+ * tool authority. Continuations call this again after opening their sealed
+ * snapshot: a membership that was valid when the run paused may have been
+ * revoked before a dispatch claim or result submission arrives.
+ */
+async function authorizeSwanBotChatThread(input: {
+  supabase: SupabaseEdgeClient;
+  circleId: string;
+  userId: string;
+  threadId?: unknown;
+}): Promise<SwanBotChatThreadAuthorizationDecision> {
+  if (input.threadId === null || input.threadId === undefined) {
+    return { ok: true, threadId: null };
+  }
+
+  const threadId = typeof input.threadId === "string"
+    ? input.threadId.trim().toLowerCase()
+    : "";
+  const validThreadId =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(threadId);
+  if (!validThreadId) {
+    return {
+      ok: false,
+      status: 403,
+      code: "thread_forbidden",
+      message: "The active Chat thread identity is invalid. No new tool work was authorized.",
+    };
+  }
+
+  const { data: thread, error: threadError } = await input.supabase
+    .from("circle_chat_threads")
+    .select("id, circle_id, created_by, visibility")
+    .eq("id", threadId)
+    .eq("circle_id", input.circleId)
+    .maybeSingle();
+  if (threadError) {
+    return {
+      ok: false,
+      status: 503,
+      code: "thread_authorization_unavailable",
+      message: "Could not verify the active Chat thread. No new tool work was authorized.",
+    };
+  }
+  if (!thread) {
+    return {
+      ok: false,
+      status: 403,
+      code: "thread_forbidden",
+      message: "The active Chat thread does not belong to this circle. No new tool work was authorized.",
+    };
+  }
+
+  if (thread.visibility === "circle" || thread.created_by === input.userId) {
+    return { ok: true, threadId };
+  }
+
+  const { data: threadMembership, error: threadMembershipError } = await input.supabase
+    .from("circle_chat_thread_members")
+    .select("user_id")
+    .eq("thread_id", threadId)
+    .eq("user_id", input.userId)
+    .maybeSingle();
+  if (threadMembershipError) {
+    return {
+      ok: false,
+      status: 503,
+      code: "thread_authorization_unavailable",
+      message: "Could not verify the active Chat thread. No new tool work was authorized.",
+    };
+  }
+  if (!threadMembership) {
+    return {
+      ok: false,
+      status: 403,
+      code: "thread_forbidden",
+      message: "Not authorized for this Chat thread. No new tool work was authorized.",
+    };
+  }
+
+  return { ok: true, threadId };
+}
+// THREAD_AUTHORIZATION_CORE_END
 
 type Mode =
   | "talk" | "build" | "plan" | "execute"
@@ -1396,18 +1503,24 @@ const TOOLS: ToolDef[] = [
       required: ["content"],
       additionalProperties: false,
     },
-    handler: async (input, { supabase, circleId, userId }) => {
+    handler: async (input, { supabase, circleId, userId, threadId }) => {
       const args = (input || {}) as { content?: string; threadId?: string; replyToId?: string };
       const content = String(args.content || "").trim().slice(0, 4000);
       if (!content) return { ok: false, error: "content required" };
+      if (!threadId) {
+        return { ok: false, error: "active Chat thread identity required" };
+      }
+      if (args.threadId && args.threadId !== threadId) {
+        return { ok: false, error: "messages.create cannot write outside the active Chat thread" };
+      }
       const payload: Record<string, unknown> = {
         circle_id: circleId,
         user_id: userId,
         content,
         reactions: {},
         is_bot: false,
+        thread_id: threadId,
       };
-      if (args.threadId) payload.thread_id = args.threadId;
       if (args.replyToId) payload.reply_to = args.replyToId;
       const { data, error } = await supabase
         .from("messages")
@@ -1707,7 +1820,7 @@ const TOOLS: ToolDef[] = [
     {
       name: "credentials.get",
       description:
-        "Fetches credentials from 1Password via the user's local bridge (`/secrets` → `op item get`). Returns requested fields as a key→value map. Treat as highly sensitive — NEVER echo to chat or include in a tool_use payload for another tool without narrowing to the specific field. Requires `op` CLI + OP_SERVICE_ACCOUNT_TOKEN set on the bridge host.",
+        "Unavailable to model-side tools: raw credential values are never returned to the model. Use browser.fill_credential_field only through its target-bound guarded runtime, or ask the user to enter the credential manually.",
       input_schema: {
         type: "object" as const,
         properties: {
@@ -2345,7 +2458,7 @@ const TOOLS: ToolDef[] = [
     {
       name: "browser.fill_field",
       description:
-        "Drafts non-secret text into one exact textbox or searchbox selected by accessible name OR an exact CSS selector, then verifies it through the sealed client runtime. This action never submits. Use browser.select_option for dropdowns and browser.fill_credential_field for saved credentials. Login, OTP, MFA, CAPTCHA, bot-check, payment, recovery, and secret-like fields fail closed.",
+        "Drafts non-secret text into one exact textbox or searchbox selected by accessible name OR an exact CSS selector, then verifies it through the sealed client runtime. This action never submits. Use browser.select_option for dropdowns. Saved credential injection is currently withheld, so ask the user to enter login secrets manually. Login, OTP, MFA, CAPTCHA, bot-check, payment, recovery, and secret-like fields fail closed.",
       input_schema: {
         type: "object" as const,
         properties: {
@@ -2400,11 +2513,12 @@ const TOOLS: ToolDef[] = [
     {
       name: "browser.fill_credential_field",
       description:
-        "Safely fills a browser field with a login credential from 1Password without returning the raw secret to the model. Use for username/email/password fields during user-approved login flows, and pass siteUrl or expectedOrigin whenever known so the local browser can verify it is on the approved origin before fetching the secret. Never use for OTP, MFA, CAPTCHA, bot checks, or 'not a robot' controls — pause for the human instead.",
+        "Safely fills a browser field from exactly one saved-login source — credentialId for a granted circle-vault entry or item for 1Password — without returning the raw secret to the model. Use for username/email/password fields during user-approved login flows, and pass siteUrl or expectedOrigin whenever known so the local browser can verify it is on the approved origin before fetching the secret. Never use for OTP, MFA, CAPTCHA, bot checks, or 'not a robot' controls — pause for the human instead.",
       input_schema: {
         type: "object" as const,
         properties: {
-          item: { type: "string", description: "1Password item name (for example, 'WordPress Admin')." },
+          credentialId: { type: "string", minLength: 1, description: "Circle vault credential id from vault.resolve_for_task or vault.find." },
+          item: { type: "string", minLength: 1, description: "1Password item name (for example, 'WordPress Admin')." },
           vault: { type: "string", description: "Optional 1Password vault name." },
           siteUrl: { type: "string", description: "Expected site URL for origin binding before the saved credential is fetched and filled." },
           expectedOrigin: { type: "string", description: "Expected browser origin or hostname, e.g. https://example.com or example.com. Overrides siteUrl when provided." },
@@ -2414,9 +2528,16 @@ const TOOLS: ToolDef[] = [
           selector: { type: "string", description: "Optional CSS selector when ARIA label is unavailable." },
           submit: { type: "boolean", description: "Press Enter after filling." },
           exact: { type: "boolean" },
-          timeoutMs: { type: "integer" },
+          nth: { type: "integer", minimum: 0, description: "Zero-based disambiguator when multiple fields match." },
+          timeoutMs: { type: "integer", minimum: 500, maximum: 30000 },
+          taskContext: { type: "string", description: "Original user task or login context for guarded browser popup decisions." },
         },
-        required: ["item", "credentialField"],
+        required: ["credentialField"],
+        oneOf: [
+          { required: ["credentialId"], not: { required: ["item"] } },
+          { required: ["item"], not: { required: ["credentialId"] } },
+        ],
+        additionalProperties: false,
       },
     },
     {
@@ -2427,6 +2548,161 @@ const TOOLS: ToolDef[] = [
         type: "object" as const,
         properties: { combo: { type: "string" } },
         required: ["combo"],
+      },
+    },
+    {
+      name: "browser.wait_for",
+      description:
+        "Waits on the exact browser document from one fresh browser.dom_snapshot. Copy its opaque process/context/page/url identity into expected* fields, then use a named lifecycle condition, an exact ARIA role plus accessible name for element visibility, or an explicit short delay. Raw selectors, missing identity, tab drift, navigation, and unknown fields are refused. The result never returns the element name, raw URL, title, or page status.",
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          condition: {
+            type: "string",
+            enum: ["page_loaded", "dom_ready", "network_idle", "element_visible", "element_hidden", "delay"],
+            description: "Exact condition to await. Prefer a page or element condition over delay.",
+          },
+          role: {
+            type: "string",
+            minLength: 1,
+            maxLength: 100,
+            description: "Exact ARIA role; required only for element_visible or element_hidden.",
+          },
+          name: {
+            type: "string",
+            minLength: 1,
+            maxLength: 500,
+            description: "Exact accessible name; required only for element_visible or element_hidden.",
+          },
+          exact: {
+            type: "boolean",
+            enum: [true],
+            description: "Element waits always use exact accessible-name matching.",
+          },
+          timeoutMs: {
+            type: "integer",
+            minimum: 0,
+            maximum: 60000,
+            description: "Bounded wait budget. Delay requires this field and is capped at 30 seconds; all other waits default to 15 seconds.",
+          },
+          expectedBrowserProcessId: {
+            type: "string",
+            minLength: 20,
+            maxLength: 180,
+            pattern: "^[A-Za-z0-9_-]+$",
+            description: "Opaque browser process id from the fresh DOM snapshot.",
+          },
+          expectedBrowserContextId: {
+            type: "string",
+            minLength: 20,
+            maxLength: 180,
+            pattern: "^[A-Za-z0-9_-]+$",
+            description: "Opaque browser context id from the same DOM snapshot.",
+          },
+          expectedPageId: {
+            type: "string",
+            minLength: 20,
+            maxLength: 180,
+            pattern: "^[A-Za-z0-9_-]+$",
+            description: "Opaque page/document id from the same DOM snapshot.",
+          },
+          expectedUrl: {
+            type: "string",
+            minLength: 79,
+            maxLength: 79,
+            pattern: "^uc_browser_url_[a-f0-9]{64}$",
+            description: "Opaque exact-URL HMAC identity from the same DOM snapshot; never pass a raw URL.",
+          },
+        },
+        required: [
+          "condition",
+          "expectedBrowserProcessId",
+          "expectedBrowserContextId",
+          "expectedPageId",
+          "expectedUrl",
+        ],
+        oneOf: [
+          {
+            properties: {
+              condition: { enum: ["page_loaded", "dom_ready", "network_idle"] },
+              timeoutMs: { type: "integer", minimum: 100, maximum: 60000 },
+            },
+            not: { anyOf: [{ required: ["role"] }, { required: ["name"] }, { required: ["exact"] }] },
+          },
+          {
+            properties: {
+              condition: { enum: ["element_visible", "element_hidden"] },
+              exact: { type: "boolean", enum: [true] },
+              timeoutMs: { type: "integer", minimum: 100, maximum: 60000 },
+            },
+            required: ["role", "name"],
+          },
+          {
+            properties: {
+              condition: { enum: ["delay"] },
+              timeoutMs: { type: "integer", minimum: 0, maximum: 30000 },
+            },
+            required: ["timeoutMs"],
+            not: { anyOf: [{ required: ["role"] }, { required: ["name"] }, { required: ["exact"] }] },
+          },
+        ],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "browser.scroll",
+      description:
+        "Moves the exact browser document from one fresh browser.dom_snapshot by one bounded semantic direction and coarse amount. Copy its opaque process/context/page/url identity into expected* fields. Missing identity, tab drift, or navigation fails closed. This reversible local action never accepts coordinates, clicks, types, navigates, or returns raw URL, title, or page-status data.",
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          direction: {
+            type: "string",
+            enum: ["up", "down", "left", "right"],
+            description: "Direction of the one-step viewport movement.",
+          },
+          amount: {
+            type: "string",
+            enum: ["small", "medium", "large"],
+            description: "Coarse bounded distance. Defaults to medium.",
+          },
+          expectedBrowserProcessId: {
+            type: "string",
+            minLength: 20,
+            maxLength: 180,
+            pattern: "^[A-Za-z0-9_-]+$",
+            description: "Opaque browser process id from the fresh DOM snapshot.",
+          },
+          expectedBrowserContextId: {
+            type: "string",
+            minLength: 20,
+            maxLength: 180,
+            pattern: "^[A-Za-z0-9_-]+$",
+            description: "Opaque browser context id from the same DOM snapshot.",
+          },
+          expectedPageId: {
+            type: "string",
+            minLength: 20,
+            maxLength: 180,
+            pattern: "^[A-Za-z0-9_-]+$",
+            description: "Opaque page/document id from the same DOM snapshot.",
+          },
+          expectedUrl: {
+            type: "string",
+            minLength: 79,
+            maxLength: 79,
+            pattern: "^uc_browser_url_[a-f0-9]{64}$",
+            description: "Opaque exact-URL HMAC identity from the same DOM snapshot; never pass a raw URL.",
+          },
+        },
+        required: [
+          "direction",
+          "expectedBrowserProcessId",
+          "expectedBrowserContextId",
+          "expectedPageId",
+          "expectedUrl",
+        ],
+        additionalProperties: false,
       },
     },
     {
@@ -2593,10 +2869,10 @@ const TOOL_GROUPS: Record<string, string[]> = {
   rooms: ["rooms.list", "rooms.create", "rooms.send_message", "workspace.create_room", "workspace.apply_artifacts", "workspace.open_preview", "approvals.request"],
   workspace: ["workspace.create_room", "workspace.apply_artifacts", "workspace.open_preview", "verification.typecheck", "verification.tests", "verification.lint", "approvals.request"],
   approvals: ["approvals.list", "approvals.request"],
-  browser: ["browser.open_url", "browser.dom_snapshot", "browser.wp_admin_source_intelligence", "browser.verification_state", "browser.locator_actionability", "browser.set_toggle", "browser.select_option", "browser.click_role", "browser.fill_field", "browser.fill_credential_field", "browser.press_key", "browser.screenshot", "approvals.request"],
+  browser: ["browser.open_url", "browser.dom_snapshot", "browser.wp_admin_source_intelligence", "browser.verification_state", "browser.locator_actionability", "browser.set_toggle", "browser.select_option", "browser.click_role", "browser.fill_field", "browser.press_key", "browser.wait_for", "browser.scroll", "browser.screenshot", "approvals.request"],
   desktop: ["fetch_url", "desktop.launch_app", "desktop.focus_app", "desktop.type_text", "desktop.paste_text", "desktop.run_applescript", "desktop.press_keys", "desktop.menu_click", "desktop.list_running_apps", "desktop.wait_for_app", "desktop.screenshot", "desktop.open_url", "desktop.open_path", "desktop.file_search", "desktop.file_stat", "desktop.convert_image", "desktop.click_at", "desktop.mouse_move", "desktop.mouse_click", "desktop.mouse_down", "desktop.mouse_up", "desktop.mouse_drag", "desktop.mouse_scroll", "desktop.screen_size", "desktop.read_a11y_tree", "desktop.click_element", "desktop.set_element_value", "approvals.request"],
-  wordpress: ["wp.discover_types", "wp.list_posts", "browser.wp_admin_source_intelligence", "wp.upload_media", "wp.create_slide", "wp.update_post", "wp.trash_post", "browser.open_url", "browser.dom_snapshot", "browser.verification_state", "browser.locator_actionability", "browser.set_toggle", "browser.select_option", "browser.click_role", "browser.fill_field", "browser.fill_credential_field", "approvals.request"],
-  credentials: ["credentials.get", "browser.fill_credential_field", "browser.verification_state", "approvals.request"],
+  wordpress: ["wp.discover_types", "wp.list_posts", "browser.wp_admin_source_intelligence", "wp.upload_media", "wp.create_slide", "wp.update_post", "wp.trash_post", "browser.open_url", "browser.dom_snapshot", "browser.verification_state", "browser.locator_actionability", "browser.set_toggle", "browser.select_option", "browser.click_role", "browser.fill_field", "browser.wait_for", "browser.scroll", "approvals.request"],
+  credentials: ["browser.verification_state", "approvals.request"],
   rewards: ["rewards.summary", "rewards.leaderboard", "getMemberStatus", "check_ins.list", "tasks.list"],
   verification: ["verification.typecheck", "verification.tests", "verification.lint"],
   coding: ["codebase.search", "desktop.edit_file", "local.run_shell", "git.run", "todo.write", "coordination.file_status", "desktop.file_read", "desktop.file_search", "verification.typecheck", "verification.tests", "verification.lint", "approvals.request"],
@@ -2605,6 +2881,12 @@ const TOOL_GROUPS: Record<string, string[]> = {
 function addToolNames(target: Set<string>, names: readonly string[]) {
   for (const name of names) if (TOOL_BY_NAME.has(name)) target.add(name);
 }
+
+const MODEL_DISABLED_TOOL_NAMES = new Set([
+  "approvals.resolve",
+  "credentials.get",
+  "browser.fill_credential_field",
+]);
 
 function selectToolsForTurn(userMessage: string, mode: Mode): ToolDef[] {
   const text = String(userMessage || "").toLowerCase();
@@ -2630,16 +2912,20 @@ function selectToolsForTurn(userMessage: string, mode: Mode): ToolDef[] {
 
   const tools = [...selected]
     .map((name) => TOOL_BY_NAME.get(name))
-    .filter((tool): tool is ToolDef => !!tool);
-  return tools.length > 0 ? tools : TOOLS;
+    .filter((tool): tool is ToolDef => !!tool && !MODEL_DISABLED_TOOL_NAMES.has(tool.name));
+  return tools.length > 0
+    ? tools
+    : TOOLS.filter((tool) => !MODEL_DISABLED_TOOL_NAMES.has(tool.name));
 }
 
 function resolveToolsByName(names?: string[]): ToolDef[] {
   if (!names || names.length === 0) return TOOLS;
   const out = names
     .map((name) => TOOL_BY_NAME.get(name))
-    .filter((tool): tool is ToolDef => !!tool);
-  return out.length > 0 ? out : TOOLS;
+    .filter((tool): tool is ToolDef => !!tool && !MODEL_DISABLED_TOOL_NAMES.has(tool.name));
+  return out.length > 0
+    ? out
+    : TOOLS.filter((tool) => !MODEL_DISABLED_TOOL_NAMES.has(tool.name));
 }
 
 // ─── Connectivity gate (client-supplied snapshot) ───────────────────────────
@@ -2651,13 +2937,11 @@ function resolveToolsByName(names?: string[]): ToolDef[] {
 // round on a doomed call. No snapshot → gate nothing (old clients identical).
 //
 // extraRules re-key v2's local-bridge-backed families to their TRUE
-// prerequisites (they are clientOnly here — wp.* and credentials.get execute
-// over the local desktop bridge, browser.fill_credential_field over the
-// browser bridge). extraRules win specificity ties over the core's defaults.
+// prerequisites (wp.* executes over the local desktop bridge). Disabled
+// credential tools are withheld from model selection above and therefore do
+// not get reachability hints that could encourage a doomed retry loop.
 const V2_CONNECTIVITY_EXTRA_RULES: ToolPrereqRule[] = [
   { match: "wp.", capability: "desktopBridge", hint: "Start the local desktop bridge to use wp.* tools." },
-  { match: "credentials.get", capability: "desktopBridge", hint: "Start the local desktop bridge before fetching a credential." },
-  { match: "browser.fill_credential_field", capability: "browser", hint: "Start the local browser bridge before filling saved credentials." },
 ];
 
 /** Keep LITERAL booleans only from the caller-supplied snapshot (plus bounded
@@ -2716,12 +3000,12 @@ async function buildFrozenBlock(
     // because screenshots are the most familiar pattern. Making the
     // order explicit cuts token spend + misclicks.
     "1. For ON-SCREEN app automation, observe with **desktop.read_a11y_tree** first (or the client runtime's **desktop.window_state / desktop.observe_app** when available). Every generic native UI mutation requires the exact resolved frontmost `appName` from that fresh observation; never infer an app name from task text. Use **desktop.click_element** only for its narrow approval-gated low-consequence presentation/help/settings press canary, supplying the exact app/PID/path/role/label from the tree. For one named non-secret text field, prefer **desktop.set_element_value** and supply exact app/PID/path/role/label/current value from the same full observation; its one-shot runtime verifies the requested value by hash and length on the same field. Use **desktop.menu_click** before coordinates when the action exists in the app menu. Use **desktop.paste_text** for long/multiline text only when the semantic setter cannot cover the field and the exact focus target is freshly verified, and **desktop.mouse_down + desktop.mouse_up** only for held interactions such as dragging handles, painting, selecting, or scrubbing.",
-    "2. For WEB automation, prefer **browser.dom_snapshot + browser.locator_actionability + browser.set_toggle / browser.select_option / browser.click_role / browser.fill_field** (ARIA-backed selectors, same benefits). Use browser.locator_actionability with fresh browser identity for advisory target certainty; it is read-only and returns only bounded structural checks, but it does not authorize or bind a later mutation. Re-observe after DOM changes and use every mutation path's own approval/proof gate. Use browser.set_toggle for an exact non-consequential checkbox/switch/radio state and browser.select_option for an exact bounded preference on a native single-value HTML select; neither tool submits or navigates. For WordPress/wp-admin or Dealer Inspire work, use **wp.discover_types / wp.list_posts / wp.update_post** for supported REST operations and call **browser.wp_admin_source_intelligence** before wp-admin UI decisions so only bounded redacted admin facts reach the model.",
+    "2. For WEB automation, prefer **browser.dom_snapshot + browser.locator_actionability + browser.set_toggle / browser.select_option / browser.click_role / browser.fill_field** (ARIA-backed selectors, same benefits). Use **browser.wait_for** after actions that trigger dynamic loading and **browser.scroll** only as one coarse reversible viewport step; copy all four opaque process/context/page/url identity fields from one fresh browser.dom_snapshot into either call. Both fail closed on tab or navigation drift, neither is a page mutation, and both stay sequential barriers so later observations see their result. Use browser.locator_actionability with fresh browser identity for advisory target certainty; it is read-only and returns only bounded structural checks, but it does not authorize or bind a later mutation. Re-observe after DOM changes and use every mutation path's own approval/proof gate. Use browser.set_toggle for an exact non-consequential checkbox/switch/radio state and browser.select_option for an exact bounded preference on a native single-value HTML select; neither tool submits or navigates. For WordPress/wp-admin or Dealer Inspire work, use **wp.discover_types / wp.list_posts / wp.update_post** for supported REST operations and call **browser.wp_admin_source_intelligence** before wp-admin UI decisions so only bounded redacted admin facts reach the model.",
     "3. Fall back to **desktop.screenshot + desktop.click_at** (vision) only for a reversible low-risk target when the a11y tree omits it after two reads, the app is a canvas/image editor (Photoshop, Figma, games), or an exact path became stale. Never use coordinates to bypass a semantic safety/approval rejection, protected control, or uncertain consequential action. Say out loud that you're switching to vision so the user can audit the fallback.",
     "4. Before any click_at/mouse_move/mouse_click/mouse_down/mouse_up/mouse_drag/mouse_scroll call, always obtain a fresh exact app observation and call desktop.screenshot or desktop.screen_size first. Pass that exact `appName` with the bounded coordinates; never guess either the app or coordinates.",
     "5. Before browser clicks/fills on login, signup, checkout, admin, or suspicious pages, call browser.verification_state. If CAPTCHA, bot verification, MFA, or 'not a robot' is detected, DO NOT click or solve it; tell the user to complete it manually and wait for confirmation.",
     "6. For risky writes (publish, external_send, file_write, browser_action), call approvals.request FIRST with a `payload` containing `{ tool, app, label, url }` so the HITL banner renders a human-readable action line instead of raw args.",
-    "7. For login forms, prefer browser.fill_credential_field over credentials.get so raw passwords are never returned to the model. Pass siteUrl or expectedOrigin whenever known so the browser can verify the approved origin before filling. Never print secrets.",
+    "7. Saved credential tools are currently withheld from model use. For login forms, never request or print a secret; ask the user to enter credentials manually, and always hand OTP, MFA, CAPTCHA, and bot checks to the human.",
     "8. Use only the tools listed below. If a capability is missing from this turn's focused tool list, explain the needed capability rather than inventing a tool call.",
     "9. Deterministic-first orchestration: when the user gives explicit desktop/browser steps, execute the concrete tool sequence instead of replacing it with free-form model advice. Use model reasoning only at decision points: ambiguous visual target, selector missing after observation, creative artifact generation, summarization of observed state, or recovery after two failed deterministic attempts.",
     "10. Creative/model handoff: if the task needs a generated image, design asset, prompt rewrite, or visual concept, produce a concrete artifact or route to the available image/model tool when present. If this turn's focused tools do not include image generation, say what tool/key is needed and provide a ready-to-run prompt rather than claiming the runtime cannot help.",
@@ -2903,6 +3187,8 @@ type RunContinuation = {
   targetAgentDbId?: string | null;
   targetAgentLegacyIds?: string[];
   agentSubject?: Record<string, unknown>;
+  /** Exact visible Chat thread inherited by every resumed server tool call. */
+  threadId?: string;
   systemBlocks: Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }>;
   toolNames?: string[];
   pendingToolUseIds: string[];
@@ -3353,7 +3639,11 @@ function isUuidLike(value: unknown): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ""));
 }
 
-function normalizeTargetAgentMetadata(input: Record<string, unknown>, targetAgentName: string): Record<string, unknown> {
+function normalizeTargetAgentMetadata(
+  input: Record<string, unknown>,
+  targetAgentName: string,
+  exactTarget?: SwanBotExactAgentTarget,
+): Record<string, unknown> {
   const subject = input.agentSubject && typeof input.agentSubject === "object"
     ? input.agentSubject as Record<string, unknown>
     : input.agentSubjectMetadata && typeof input.agentSubjectMetadata === "object"
@@ -3362,11 +3652,13 @@ function normalizeTargetAgentMetadata(input: Record<string, unknown>, targetAgen
   const subjectKey = cleanSubjectString(input.targetAgentSubjectKey)
     || cleanSubjectString(input.agentSubjectKey)
     || cleanSubjectString(subject.agentSubjectKey);
-  const dbId = cleanSubjectString(input.targetAgentDbId)
+  const dbId = exactTarget?.dbId
+    || cleanSubjectString(input.targetAgentDbId)
     || cleanSubjectString(input.agentDbId)
     || cleanSubjectString(subject.agentDbId)
     || (isUuidLike(input.targetAgentId) ? cleanSubjectString(input.targetAgentId) : undefined);
-  const sessionKey = cleanSubjectString(input.agentSessionKey)
+  const sessionKey = exactTarget?.sessionKey
+    || cleanSubjectString(input.agentSessionKey)
     || cleanSubjectString(subject.agentSessionKey);
   const legacyIds = cleanSubjectStringArray([
     ...cleanSubjectStringArray(input.targetAgentLegacyIds),
@@ -3386,6 +3678,20 @@ function normalizeTargetAgentMetadata(input: Record<string, unknown>, targetAgen
   if (legacyIds.length > 0) out.targetAgentLegacyIds = legacyIds;
   if (subjectKey || dbId || sessionKey || legacyIds.length > 0) out.agentSubject = agentSubject;
   return out;
+}
+
+function withCanonicalTargetAgentName(
+  metadata: Record<string, unknown>,
+  targetAgentName: string,
+): Record<string, unknown> {
+  const subject = metadata.agentSubject && typeof metadata.agentSubject === "object"
+    ? metadata.agentSubject as Record<string, unknown>
+    : null;
+  return {
+    ...metadata,
+    targetAgent: targetAgentName,
+    ...(subject ? { agentSubject: { ...subject, agentDisplayName: targetAgentName } } : {}),
+  };
 }
 
 type SwanBotV2FinalStopReason = "end_turn" | "max_tokens" | "client_pending" | "error";
@@ -4567,11 +4873,18 @@ async function runLoop(args: {
   targetAgentDbId?: string | null;
   targetAgentLegacyIds?: string[];
   agentSubject?: Record<string, unknown>;
+  /** Exact assigned Spirit behavior resolved before the run is created. The
+   *  raw private profile projection is provider-visible only and is never
+   *  written to run metadata or a model-visible receipt. */
+  agentSpiritPrompt?: string | null;
   /** P1: optional untrusted client memory payload (see v2MemoryInjectionCore). */
   memoryPayload?: unknown;
   supabase: SupabaseEdgeClient;
   circleId: string;
   userId: string;
+  /** Validated visible Chat thread for this fresh turn. Resumes restore the
+   *  value from the authenticated continuation snapshot. */
+  threadId?: string | null;
   runId: string | null;
   /** Optional resume — when present, skips user-message setup and
    *  picks up from the persisted `messages` / `iter`. */
@@ -4607,10 +4920,12 @@ async function runLoop(args: {
     targetAgentDbId,
     targetAgentLegacyIds,
     agentSubject,
+    agentSpiritPrompt,
     memoryPayload,
     supabase,
     circleId,
     userId,
+    threadId,
     runId,
     resumeFrom,
     resumeToolResults,
@@ -4727,13 +5042,23 @@ async function runLoop(args: {
     ? resumeFrom.systemBlocks
     : [
         { type: "text" as const, text: `${await buildFrozenBlock(supabase, circleId, targetAgentName, activeTools)}\n\n[${mode.toUpperCase()} RESPONSE CONTRACT]\n${MODE_CONTRACT[mode]}`, cache_control: { type: "ephemeral" as const } },
-        { type: "text" as const, text: `Now: ${new Date().toISOString()}\nUser id: ${userId}${connectivityNote ? `\nConnectivity: ${connectivityNote}` : ""}${memoryBlockText ? `\n\n${memoryBlockText}` : ""}` },
+        {
+          type: "text" as const,
+          // Assigned custom Spirit text is private, per-agent context. Keep it
+          // out of the shared frozen/cacheable block and seal it only inside
+          // the authenticated continuation snapshot.
+          text: prependAssignedAgentSpiritPrompt(
+            `Now: ${new Date().toISOString()}\nUser id: ${userId}${connectivityNote ? `\nConnectivity: ${connectivityNote}` : ""}${memoryBlockText ? `\n\n${memoryBlockText}` : ""}`,
+            agentSpiritPrompt,
+          ),
+        },
       ];
 
   const ctx: ToolContext = {
     supabase,
     circleId,
     userId,
+    threadId: resumeFrom?.threadId ?? threadId ?? null,
     runId,
     // Agent identity travels with the run (fresh turns and resumes both carry
     // it — see the `continuation` restore) so `save_memory` can write the
@@ -4966,6 +5291,7 @@ async function runLoop(args: {
         targetAgentDbId,
         targetAgentLegacyIds,
         agentSubject,
+        ...(ctx.threadId ? { threadId: ctx.threadId } : {}),
         systemBlocks,
         toolNames: activeTools.map((tool) => tool.name),
         pendingToolUseIds: clientUses.map((u) => u.id),
@@ -5020,10 +5346,12 @@ async function runLoop(args: {
 
 const MODEL_MAP: Record<string, string> = {
   "claude-haiku":  "claude-haiku-4-5-20251001",
-  "claude-sonnet": "claude-sonnet-4-6",
+  "claude-sonnet": "claude-sonnet-5",
   "claude-fable":  "claude-fable-5",
   "claude-fable-5": "claude-fable-5",
-  "claude-opus":   "claude-opus-4-8",
+  "claude-opus-5": "claude-opus-5",
+  "claude-sonnet-5": "claude-sonnet-5",
+  "claude-opus":   "claude-opus-5",
   "claude-opus-4-8": "claude-opus-4-8",
   "claude-opus-4-7": "claude-opus-4-7",
   "claude-opus-4-6": "claude-opus-4-6",
@@ -5061,6 +5389,12 @@ Deno.serve(async (req: Request) => {
   const userId: string | undefined = body.userId;
   if (!circleId || !userId) {
     return errResponse(400, "missing_fields", "circleId, userId required");
+  }
+  const requestedThreadId = !isContinuation && typeof body.threadId === "string"
+    ? body.threadId.trim().toLowerCase()
+    : null;
+  if (!isContinuation && body.threadId !== undefined && !isUuidLike(requestedThreadId)) {
+    return errResponse(400, "invalid_thread_identity", "threadId must be a valid Chat thread id");
   }
   if (isContinuation && !isDispatchClaim && !isResultSubmission) {
     return errResponse(
@@ -5121,6 +5455,51 @@ Deno.serve(async (req: Request) => {
     return errResponse(403, "forbidden", "Not authorized for this circle.");
   }
 
+  // A fresh Chat turn may carry the same immutable Office identity in several
+  // compatibility projections. Reconcile them before any run/provider work,
+  // then resolve the published row by exact id (or the caller's exact local
+  // session). Display names are labels only and never select runtime context.
+  let freshExactTarget: SwanBotExactAgentTarget | null = null;
+  let freshExactAgentContext: ExactAgentSpiritContext | null = null;
+  if (!isContinuation) {
+    const parsedExactTarget = parseSwanBotExactAgentTarget(body);
+    if (!parsedExactTarget.ok) {
+      return errResponse(
+        400,
+        parsedExactTarget.error,
+        "The target agent identity is malformed or conflicts across request fields. No model work was started.",
+      );
+    }
+    freshExactTarget = parsedExactTarget.target;
+    const resolvedAgentContext = await resolveExactAgentSpiritContext(supabase, {
+      circleId,
+      userId,
+      target: parsedExactTarget.target,
+    });
+    if (!resolvedAgentContext.ok) {
+      const failure = exactAgentSpiritContextErrorResponse(resolvedAgentContext.code);
+      return errResponse(failure.status, failure.code, failure.message);
+    }
+    freshExactAgentContext = resolvedAgentContext.context;
+  }
+
+  // Bind service-role server tools to the exact visible Chat thread supplied
+  // by the authenticated client. The same authorization is repeated against
+  // a continuation's sealed thread after the snapshot is opened below.
+  const freshThreadAuthorization = await authorizeSwanBotChatThread({
+    supabase,
+    circleId,
+    userId,
+    threadId: requestedThreadId,
+  });
+  if (!freshThreadAuthorization.ok) {
+    return errResponse(
+      freshThreadAuthorization.status,
+      freshThreadAuthorization.code,
+      freshThreadAuthorization.message,
+    );
+  }
+
   // A pre-dispatch claim is an authenticated safety operation, not a model
   // call. Do not make local side-effect ownership depend on API-key health.
   let apiKey = "";
@@ -5142,6 +5521,7 @@ Deno.serve(async (req: Request) => {
   let model: string;
   let targetAgentName: string;
   let targetAgentMetadata: Record<string, unknown> = {};
+  let agentSpiritPrompt: string | null = null;
   let runId: string | null = null;
   let resumeFrom: RunContinuation | undefined;
   let resumeToolResults: SwanBotResumeToolResult[] | undefined;
@@ -5205,6 +5585,24 @@ Deno.serve(async (req: Request) => {
           : "The paused checkpoint changed while it was being authenticated. No local action was authorized or replayed.",
       );
     }
+    // A sealed thread id is identity, not evergreen authorization. Membership
+    // may be revoked while local work is paused, so re-check it before parsing
+    // or honoring a dispatch claim, consuming submitted results, or resuming
+    // any model/tool work under the service role.
+    const continuationThreadAuthorization = await authorizeSwanBotChatThread({
+      supabase,
+      circleId,
+      userId,
+      threadId: cont.threadId,
+    });
+    if (!continuationThreadAuthorization.ok) {
+      return errResponse(
+        continuationThreadAuthorization.status,
+        continuationThreadAuthorization.code,
+        continuationThreadAuthorization.message,
+      );
+    }
+    cont.threadId = continuationThreadAuthorization.threadId ?? undefined;
     const parsedDispatchClaim = parseSwanBotContinuationDispatchClaim(body);
     if (!parsedDispatchClaim.ok) {
       return errResponse(
@@ -5523,8 +5921,21 @@ Deno.serve(async (req: Request) => {
       return errResponse(400, "model_unsupported_on_v2", "This model is not supported on the v2 typed loop; route via swanbot-ai/llm-proxy.");
     }
     model = resolvedModel;
-    targetAgentName = body.targetAgentName || "BlackSwan";
-    targetAgentMetadata = normalizeTargetAgentMetadata(body, targetAgentName);
+    targetAgentName = freshExactAgentContext?.canonicalAgentName
+      || body.targetAgentName
+      || "BlackSwan";
+    targetAgentMetadata = normalizeTargetAgentMetadata(
+      body,
+      targetAgentName,
+      freshExactTarget || undefined,
+    );
+    if (freshExactAgentContext?.canonicalAgentName) {
+      targetAgentMetadata = withCanonicalTargetAgentName(
+        targetAgentMetadata,
+        freshExactAgentContext.canonicalAgentName,
+      );
+    }
+    agentSpiritPrompt = freshExactAgentContext?.spiritPrompt || null;
     // Optional client connectivity snapshot for the fresh-start tool gate
     // (literal booleans only; anything else is dropped so absent never gates).
     connectivity = sanitizeConnectivitySnapshot(body.connectivity);
@@ -5683,8 +6094,9 @@ Deno.serve(async (req: Request) => {
       targetAgentDbId: targetAgentMetadata.targetAgentDbId as string | null | undefined,
       targetAgentLegacyIds: targetAgentMetadata.targetAgentLegacyIds as string[] | undefined,
       agentSubject: targetAgentMetadata.agentSubject as Record<string, unknown> | undefined,
+      agentSpiritPrompt,
       memoryPayload,
-      supabase, circleId, userId, runId,
+      supabase, circleId, userId, threadId: requestedThreadId, runId,
       resumeFrom,
       resumeToolResults,
       clientContinuationProtocolVersion,

@@ -1,6 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { View, Text, StyleSheet, Pressable, Animated, ScrollView, Platform } from 'react-native';
-import { AgentApproval, resolveApproval } from '../services/hitlService';
+import {
+  AgentApproval,
+  resolveApproval,
+  resolveApprovalExact,
+  type AgentApprovalsExactAuthority,
+} from '../services/hitlService';
 import { safeGetUserId } from '../lib/authSession';
 import {
   applyApprovedAction,
@@ -51,6 +56,10 @@ interface Props {
     approval: AgentApproval,
     status: 'approved' | 'rejected',
   ) => void | Promise<void>;
+  /** Exact immutable Office authority. When present, mutable-session approval
+   * and remember/apply compatibility paths are disabled. */
+  exactAuthority?: AgentApprovalsExactAuthority | null;
+  isExactAuthorityCurrent?: (authority: AgentApprovalsExactAuthority) => boolean;
 }
 
 function actionColor(type: string): string {
@@ -153,7 +162,15 @@ function isRuntimeOwnedApproval(ap: AgentApproval | undefined): boolean {
   return isRuntimeOwnedAgentApprovalActionType(ap?.action_type);
 }
 
-export default function HitlApprovalBanner({ approvals, circleId, onEditAndResend, onEdit, onResolved }: Props) {
+export default function HitlApprovalBanner({
+  approvals,
+  circleId,
+  onEditAndResend,
+  onEdit,
+  onResolved,
+  exactAuthority,
+  isExactAuthorityCurrent,
+}: Props) {
   const [expanded, setExpanded] = useState(false);
   const [rememberPerApproval, setRememberPerApproval] = useState<Record<string, boolean>>({});
   const [editBusy, setEditBusy] = useState<Record<string, boolean>>({});
@@ -184,10 +201,27 @@ export default function HitlApprovalBanner({ approvals, circleId, onEditAndResen
 
   const handleResolve = async (approvalId: string, status: 'approved' | 'rejected') => {
     try {
-      const userId = await safeGetUserId();
-      if (!userId) return;
-      const approval = approvals.find((item) => item.id === approvalId);
-      await resolveApproval(approvalId, status, userId);
+      const capturedAuthority = exactAuthority ? { ...exactAuthority } : null;
+      const authorityIsCurrent = () => Boolean(
+        capturedAuthority
+        && isExactAuthorityCurrent?.(capturedAuthority),
+      );
+      let approval = approvals.find((item) => item.id === approvalId);
+      let userId = capturedAuthority?.userId || '';
+      if (capturedAuthority) {
+        const resolved = await resolveApprovalExact(
+          approvalId,
+          status,
+          capturedAuthority,
+          authorityIsCurrent,
+        );
+        if (!resolved.ok || !authorityIsCurrent()) return;
+        approval = resolved.approval;
+      } else {
+        userId = await safeGetUserId() || '';
+        if (!userId) return;
+        await resolveApproval(approvalId, status, userId);
+      }
 
       // Close the HITL loop: resolveApproval only flips status to "approved";
       // the proposed side-effect (skill/memory write) runs here via the worker.
@@ -195,7 +229,7 @@ export default function HitlApprovalBanner({ approvals, circleId, onEditAndResen
       // one dispatch after resolution. Sending those rows through the generic
       // worker would perform an unnecessary applied_at lookup (and on a legacy
       // schema, fail before the runtime gets a chance to consume authority).
-      if (status === 'approved' && !isRuntimeOwnedApproval(approval)) {
+      if (!capturedAuthority && status === 'approved' && !isRuntimeOwnedApproval(approval)) {
         const applied = await applyApprovedAction(approvalId);
         if (!applied.ok) {
           console.error(
@@ -208,7 +242,7 @@ export default function HitlApprovalBanner({ approvals, circleId, onEditAndResen
       // and this was an approve, persist the category as auto-approved
       // for future plans. Reject + remember is not offered (Cline pattern:
       // never auto-deny by default; users can toggle via settings).
-      if (status === 'approved' && rememberPerApproval[approvalId]) {
+      if (!capturedAuthority && status === 'approved' && rememberPerApproval[approvalId]) {
         const ap = approvals.find((x) => x.id === approvalId);
         const cat = ap ? deriveCategory(ap) : null;
         // Floor suppression (approvalCardModelCore) — defense-in-depth mirror
@@ -223,6 +257,7 @@ export default function HitlApprovalBanner({ approvals, circleId, onEditAndResen
         delete next[approvalId];
         return next;
       });
+      if (capturedAuthority && !authorityIsCurrent()) return;
       if (approval) await onResolved?.(approval, status);
     } catch (e) {
       console.error(e);
@@ -236,14 +271,24 @@ export default function HitlApprovalBanner({ approvals, circleId, onEditAndResen
   const handleEditAndResend = async (ap: AgentApproval, commandText: string) => {
     if (!onEditAndResend || editBusy[ap.id]) return;
     setEditBusy((prev) => ({ ...prev, [ap.id]: true }));
+    let exactRejectConfirmed = !exactAuthority;
     try {
-      const userId = await safeGetUserId();
-      if (!userId) throw new Error('no authenticated user to reject the approval');
-      await resolveApproval(ap.id, 'rejected', userId);
+      if (exactAuthority) {
+        const capturedAuthority = { ...exactAuthority };
+        const authorityIsCurrent = () => Boolean(isExactAuthorityCurrent?.(capturedAuthority));
+        const result = await resolveApprovalExact(ap.id, 'rejected', capturedAuthority, authorityIsCurrent);
+        if (!result.ok || !authorityIsCurrent()) throw new Error(result.ok ? 'Office authority retired' : result.error);
+        exactRejectConfirmed = true;
+      } else {
+        const userId = await safeGetUserId();
+        if (!userId) throw new Error('no authenticated user to reject the approval');
+        await resolveApproval(ap.id, 'rejected', userId);
+      }
     } catch (e) {
-      // The user's intent is to edit — a stale/failed reject must not block
-      // them (the pending row expires on its own timeout).
-      console.warn('[HitlApprovalBanner] edit-and-resend: reject failed, continuing to edit', e);
+      // Compatibility mounts retain the historical edit behavior. Exact
+      // Office mounts fail closed: a retired account must never turn a stale
+      // approval into a newly dispatched command under the replacement user.
+      console.warn('[HitlApprovalBanner] edit-and-resend: reject failed', e);
     } finally {
       setEditBusy((prev) => {
         const next = { ...prev };
@@ -251,6 +296,7 @@ export default function HitlApprovalBanner({ approvals, circleId, onEditAndResen
         return next;
       });
     }
+    if (!exactRejectConfirmed) return;
     onEditAndResend(ap, commandText);
   };
 
@@ -362,16 +408,16 @@ export default function HitlApprovalBanner({ approvals, circleId, onEditAndResen
                 </>
               ) : (
                 <>
-                  <Text style={styles.description}>{ap.description}</Text>
-                  {ap.payload && Object.keys(ap.payload).length > 0 && (
-                    <Text style={styles.payload}>
-                      {JSON.stringify(ap.payload, null, 2).slice(0, 180)}
-                    </Text>
-                  )}
+                  <Text style={styles.description}>
+                    {ap.description || 'Review this action before OpenSwan continues.'}
+                  </Text>
+                  {ap.payload && Object.keys(ap.payload).length > 0 ? (
+                    <Text style={styles.payload}>Technical details are saved with this approval.</Text>
+                  ) : null}
                 </>
               )}
 
-              {(() => {
+              {!exactAuthority && (() => {
                 const cat = deriveCategory(ap);
                 if (!cat) return null;
                 // Floor suppression (approvalCardModelCore): pay/delete/login/

@@ -18,6 +18,7 @@ import BackpackCamera from './BackpackCamera';
 import { getAllCompartmentStats } from './compartmentActivity';
 import { SCENE_BG, SOLAR } from './backpackMaterials';
 import type { BackpackData } from '../../hooks/useBackpackData';
+import type { BackpackCompartmentKey } from '../../lib/backpackCompartments';
 
 // ─── PASTE YOUR SPLINE SCENE URL HERE ────────────────────────────────────────
 const SPLINE_SCENE_URL = 'https://prod.spline.design/Ah5Z7wGOiFbQfiJv/scene.splinecode';
@@ -25,7 +26,7 @@ const SPLINE_SCENE_URL = 'https://prod.spline.design/Ah5Z7wGOiFbQfiJv/scene.spli
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Map of Spline object names → compartment keys */
-const SPLINE_OBJECT_MAP: Record<string, string> = {
+const SPLINE_OBJECT_MAP: Readonly<Record<string, BackpackCompartmentKey | ''>> = {
   'compartment-terminal': 'terminal',
   'compartment-trading': 'trading',
   'compartment-cost': 'cost',
@@ -44,7 +45,7 @@ const SPLINE_OBJECT_MAP: Record<string, string> = {
 
 interface Props {
   data: BackpackData;
-  onOpenCompartment: (key: string) => void;
+  onOpenCompartment: (key: BackpackCompartmentKey) => void;
 }
 
 // ─── Background Effects (R3F) ────────────────────────────────────────────────

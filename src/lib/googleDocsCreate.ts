@@ -9,12 +9,10 @@
  * `createGoogleDocFromMarkdown` (LOCKSTEP — keep the two in step).
  *
  * Credential reality (be honest with users when this fails):
- *   - `startGoogleWorkspaceOAuth` (googleCreds.ts) stores a refresh token +
- *     a ~1h cached `access_token` in `user_google_credentials`. RLS lets a
- *     signed-in user read their OWN row. When the cached token is expired,
- *     the resolver calls the `google-oauth` edge fn `?action=token` route
- *     (P14), which refreshes with the stored refresh_token server-side —
- *     the refresh_token never reaches the client. Refresh refused by Google
+ *   - `startGoogleWorkspaceOAuth` (googleCreds.ts) stores provider tokens in a
+ *     server-only table. The resolver calls authenticated google-oauth status
+ *     and token actions; browser roles cannot select the credential row and
+ *     the refresh token never reaches the client. Refresh refused by Google
  *     (revoked consent) → reconnect Google Drive in Marketplace.
  *   - Drive writes need the `https://www.googleapis.com/auth/drive` scope,
  *     which the Workspace connect flow requests when the `drive` service is
@@ -202,48 +200,25 @@ export function markdownToDocHtml(markdown: string): string {
 // ─── Token resolution (real pattern; deps-overridable) ──────────────────────
 
 /**
- * Default token resolver — the client-usable path that exists TODAY:
- * read the caller's own `user_google_credentials` row (RLS: user-only),
- * verify the Drive scope was granted and the cached access token has not
- * expired. Returns null (→ not_connected) in every other case. Lazy imports
- * keep this module smoke-testable under tsx (no top-level supabase/RN deps).
+ * Default token resolver. Connection metadata and the short-lived token come
+ * from authenticated google-oauth actions; the provider credential table is
+ * server-only. Returns null (→ not_connected) in every other case.
  */
-async function resolveGoogleDriveAccessToken(explicitUserId?: string): Promise<string | null> {
+async function resolveGoogleDriveAccessToken(_explicitUserId?: string): Promise<string | null> {
   try {
-    const [{ supabase }, { safeGetUserId }] = await Promise.all([
-      import('./supabase'),
-      import('./authSession'),
-    ]);
-    const userId = explicitUserId || (await safeGetUserId());
-    if (!userId) return null;
-
-    const { data, error } = await supabase
-      .from('user_google_credentials')
-      .select('access_token, expires_at, scopes')
-      .eq('user_id', userId)
-      .maybeSingle();
-    if (error || !data || typeof data.access_token !== 'string' || !data.access_token) return null;
+    const { fetchGoogleWorkspaceAccessToken, getGoogleAuthStatusAuthoritative } = await import('./googleCreds');
+    const status = await getGoogleAuthStatusAuthoritative();
+    if (!status?.connected) return null;
 
     // Refuse tokens whose grant never included a Drive write scope — the
     // upload would 403; treating it as "Drive not connected" is the honest
     // user-facing state (Marketplace re-connect with Drive selected fixes it).
-    const scopes: string[] = Array.isArray(data.scopes) ? data.scopes : [];
+    const scopes: string[] = Array.isArray(status.scopes) ? status.scopes : [];
     if (scopes.length > 0 && !scopes.includes(GOOGLE_DRIVE_SCOPE) && !scopes.includes(GOOGLE_DRIVE_FILE_SCOPE)) {
       return null;
     }
 
-    // Cached token expired (or about to)? Ask the edge fn's ?action=token
-    // route to refresh it with the stored refresh_token (P14). Null when the
-    // refresh fails → not_connected keeps the honest reconnect message.
-    if (data.expires_at) {
-      const expiresAtMs = new Date(data.expires_at).getTime();
-      if (Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now() + 30_000) {
-        const { fetchGoogleWorkspaceAccessToken } = await import('./googleCreds');
-        return await fetchGoogleWorkspaceAccessToken();
-      }
-    }
-
-    return data.access_token;
+    return await fetchGoogleWorkspaceAccessToken();
   } catch {
     return null;
   }

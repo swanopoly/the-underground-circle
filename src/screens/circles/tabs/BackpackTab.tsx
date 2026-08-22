@@ -9,7 +9,7 @@
  * and Giza's dark depth aesthetic.
  */
 
-import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
+import React, { useEffect, useRef, useState, Suspense, lazy } from 'react';
 import CompartmentErrorBoundary from '../../../components/CompartmentErrorBoundary';
 import {
   View,
@@ -17,41 +17,39 @@ import {
   StyleSheet,
   Pressable,
   ScrollView,
-  Animated,
   Platform,
-  useWindowDimensions,
 } from 'react-native';
 import { useBackpackData } from '../../../hooks/useBackpackData';
-import StatCube from '../../../components/StatCube';
+import { useExactCircleAuthority } from '../../../hooks/useAuth';
+import { GRID } from '../../../lib/pixelDesign';
 import {
-  PIXEL_COLORS, PIXEL_ICONS, GRID, PX,
-  pixelCard, pixelInset, pixelHeader, pixelLabel, pixelBody, pixelMuted,
-  iconBoxStyle,
-} from '../../../lib/pixelDesign';
+  BACKPACK_COMPARTMENTS,
+  isBackpackCompartmentKey,
+  type BackpackCompartmentKey,
+} from '../../../lib/backpackCompartments';
 import { LoadingScreen } from '../../../components/LoadingWave';
-// Lightweight panels that are cheap to ship on the initial bundle.
-import CostDashboard from '../../../components/CostDashboard';
-import AgentPerformanceMetrics from '../../../components/AgentPerformanceMetrics';
-import FarmHealthDashboard from '../../../components/FarmHealthDashboard';
-import OfficeAnalyticsPanel from '../../../components/OfficeAnalyticsPanel';
-import OfficeTerminal from '../../../components/OfficeTerminal';
-import SessionTagsDashboard from '../../../components/SessionTagsDashboard';
-import SharedMemoryPanel from '../../../components/SharedMemoryPanel';
-import ProjectRoomsPanel from '../../../components/ProjectRoomsPanel';
-import PromptManagerPanel from './office/PromptManagerPanel';
-import TraceViewer from '../../../components/TraceViewer';
-import DevicePanel from '../../../components/DevicePanel';
-import SecondBrainDashboard from '../../../components/SecondBrainDashboard';
+import InteractiveBackpack2D from '../../../components/backpack2d/InteractiveBackpack2D';
+import { getAllCompartmentStats } from '../../../components/backpack3d/compartmentActivity';
 
-// Heavy / niche compartments — deferred. These panels (TradingBotPanel ~3.5K
-// lines with Solana deps, ModelLabPanel, LLMBenchmarkPanel, PixelOfficeCanvas)
-// are only rendered when the user taps their Backpack compartment. Code-split
-// them so they don't weigh down the initial bundle for users who never open
-// the Backpack — or who only use cost / terminal / traces.
+// Every compartment is deferred. The overview only needs the shared registry,
+// activity snapshot, and semantic 2.5D launcher; loading all 14 panel trees up
+// front would make the primary Backpack interaction pay for unopened tools.
+const CostDashboard = lazy(() => import('../../../components/CostDashboard'));
+const AgentPerformanceMetrics = lazy(() => import('../../../components/AgentPerformanceMetrics'));
+const FarmHealthDashboard = lazy(() => import('../../../components/FarmHealthDashboard'));
+const OfficeAnalyticsPanel = lazy(() => import('../../../components/OfficeAnalyticsPanel'));
+const OfficeTerminal = lazy(() => import('../../../components/OfficeTerminal'));
+const SessionTagsDashboard = lazy(() => import('../../../components/SessionTagsDashboard'));
+const SharedMemoryPanel = lazy(() => import('../../../components/SharedMemoryPanel'));
+const ProjectRoomsPanel = lazy(() => import('../../../components/ProjectRoomsPanel'));
+const PromptManagerPanel = lazy(() => import('./office/PromptManagerPanel'));
+const TraceViewer = lazy(() => import('../../../components/TraceViewer'));
+const DevicePanel = lazy(() => import('../../../components/DevicePanel'));
 const TradingBotPanel = lazy(() => import('../../../components/TradingBotPanel'));
 const ModelLabPanel = lazy(() => import('../../../components/ModelLabPanel'));
 const LLMBenchmarkPanel = lazy(() => import('../../../components/LLMBenchmarkPanel'));
 const PixelOfficeCanvas = lazy(() => import('../../../components/PixelOfficeCanvas'));
+const SecondBrainDashboard = lazy(() => import('../../../components/SecondBrainDashboard'));
 
 function CompartmentSuspenseFallback() {
   return (
@@ -61,59 +59,95 @@ function CompartmentSuspenseFallback() {
   );
 }
 
-type Compartment = 'none' | 'cost' | 'terminal' | 'farm' | 'performance' | 'projects' | 'analytics' | 'canvas' | 'prompts' | 'traces' | 'llm-bench' | 'model-lab' | 'trading' | 'devices';
+function BackpackLoadFailure({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <View style={styles.loadFailure} accessibilityRole="alert">
+      <View style={styles.loadFailureMark}>
+        <Text style={styles.loadFailureMarkText}>!</Text>
+      </View>
+      <Text style={styles.loadFailureTitle}>Backpack unavailable</Text>
+      <Text style={styles.loadFailureText}>{message}</Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Retry loading Backpack"
+        onPress={onRetry}
+        style={({ hovered, pressed, focused }: any) => [
+          styles.loadFailureButton,
+          hovered && Platform.OS === 'web' ? styles.loadFailureButtonHover : null,
+          focused ? styles.loadFailureButtonFocused : null,
+          pressed ? styles.loadFailureButtonPressed : null,
+        ]}
+      >
+        <Text style={styles.loadFailureButtonText}>Try again</Text>
+      </Pressable>
+    </View>
+  );
+}
 
-// Pixel-art icon blocks instead of emoji
-const COMPARTMENTS: {
-  key: Compartment;
-  label: string;
-  iconLabel: string;   // Text rendered inside pixel block
-  color: string;
-  description: string;
-}[] = [
-  { key: 'cost',        label: 'Cost Tracker',   iconLabel: '$',  color: '#f59e0b', description: 'Spending analytics & budget alerts' },
-  { key: 'terminal',    label: 'Command Center',  iconLabel: '>_', color: '#22c55e', description: 'Terminal & agent commands' },
-  { key: 'traces',      label: 'Traces',          iconLabel: '?',  color: '#3b82f6', description: 'Request traces & replay' },
-  { key: 'farm',        label: 'Agent Farm',       iconLabel: '+',  color: '#22c55e', description: 'Health monitoring & status' },
-  { key: 'performance', label: 'Performance',      iconLabel: '#',  color: '#fbbf24', description: 'Top performers & metrics' },
-  { key: 'projects',    label: 'Projects',         iconLabel: '[]', color: '#6366f1', description: 'Tags, memory & project rooms' },
-  { key: 'analytics',   label: 'Analytics',        iconLabel: '//', color: '#a855f7', description: 'Deep office analytics' },
-  { key: 'canvas',      label: 'Canvas',           iconLabel: '::',  color: '#22d3ee', description: 'Pixel agent visualization' },
-  { key: 'prompts',     label: 'Prompts',          iconLabel: 'P',  color: '#f43f5e', description: 'Prompt library & management' },
-  { key: 'llm-bench',   label: 'LLM Bench',        iconLabel: '|=|', color: '#3b82f6', description: 'BlackSwan vs industry models' },
-  { key: 'model-lab',   label: 'Model Lab',        iconLabel: '🧬',  color: '#8b5cf6', description: 'Train, optimize & deploy custom LLMs' },
-  { key: 'trading',     label: 'Trading Bot',      iconLabel: '◎',   color: '#22d3ee', description: 'Solana trading, DCA, alerts & P&L' },
-  { key: 'devices',     label: 'Devices',          iconLabel: '🖨',   color: '#a855f7', description: 'Printers, 3D printers, serial & USB' },
-];
+type FocusablePressable = { focus?: () => void };
+type ReturnFocusOrigin = { kind: 'pocket'; key: BackpackCompartmentKey };
 
 interface Props {
   circleId: string;
   accentColor?: string;
+  onOpenOffice: () => void;
 }
 
-export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props) {
+export default function BackpackTab({ circleId, accentColor = '#6366f1', onOpenOffice }: Props) {
   const data = useBackpackData(circleId);
-  const [activeCompartment, setActiveCompartment] = useState<Compartment>('none');
-  const { width } = useWindowDimensions();
-  const isDesktop = width > 768;
+  const { exactAuthority, isExactAuthorityCurrent } = useExactCircleAuthority(circleId);
+  const [activeCompartment, setActiveCompartment] = useState<BackpackCompartmentKey | null>(null);
+  const returnFocusOrigin = useRef<ReturnFocusOrigin | null>(null);
+  const backButtonRef = useRef<FocusablePressable | null>(null);
 
-  // Terminal shared state — must match OfficeTerminal's expected defaults
-  const [terminalInput, setTerminalInput] = useState('');
-  const [terminalTargetId, setTerminalTargetId] = useState<string | null>(null);
-  const [terminalTargetName, setTerminalTargetName] = useState('@all');
-  const [terminalModel, setTerminalModel] = useState<string | null>(null);
-  const [terminalTargetIds, setTerminalTargetIds] = useState<string[] | null>(null);
+  const openCompartment = (
+    key: BackpackCompartmentKey,
+    origin: ReturnFocusOrigin = { kind: 'pocket', key },
+  ) => {
+    if (data.loading) return;
+    returnFocusOrigin.current = origin;
+    setActiveCompartment(key);
+  };
 
-  const handleBack = () => setActiveCompartment('none');
+  const handleBack = () => setActiveCompartment(null);
+
+  const handleNestedCompartmentOpen = (key: string) => {
+    if (isBackpackCompartmentKey(key)) openCompartment(key);
+  };
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const frame = requestAnimationFrame(() => {
+      if (activeCompartment) {
+        backButtonRef.current?.focus?.();
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [activeCompartment]);
 
   // ─── Expanded compartment view ─────────────────────────────────
-  if (activeCompartment !== 'none') {
-    const meta = COMPARTMENTS.find(c => c.key === activeCompartment)!;
+  if (activeCompartment) {
+    const meta = BACKPACK_COMPARTMENTS.find(c => c.key === activeCompartment);
+    if (!meta) return null;
     return (
-      <View style={styles.container}>
-        <Pressable onPress={handleBack} style={styles.backRow}>
-          <Text style={[styles.backArrow, { color: meta.color }]}>{'<-'}</Text>
-          <Text style={styles.backText}>BACKPACK</Text>
+      <View style={styles.container} testID={`backpack-panel-${activeCompartment}`}>
+        <Pressable
+          ref={(node) => {
+            backButtonRef.current = node as unknown as FocusablePressable | null;
+          }}
+          accessibilityRole="button"
+          accessibilityLabel="Back to Backpack"
+          accessibilityHint="Return to the interactive Backpack overview"
+          onPress={handleBack}
+          style={({ hovered, pressed, focused }: any) => [
+            styles.backRow,
+            hovered && Platform.OS === 'web' ? styles.backRowHover : null,
+            focused ? styles.backRowFocused : null,
+            pressed ? styles.backRowPressed : null,
+          ]}
+        >
+          <Text style={[styles.backArrow, { color: meta.color }]}>←</Text>
+          <Text style={styles.backText}>Backpack</Text>
           <View style={[styles.compartmentBadge, { backgroundColor: meta.color + '20', borderColor: meta.color + '30' }]}>
             <View style={[styles.badgePixelIcon, { backgroundColor: meta.color + '20', borderColor: meta.color + '40' }]}>
               <Text style={[styles.badgePixelChar, { color: meta.color }]}>{meta.iconLabel}</Text>
@@ -124,34 +158,69 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
 
         <View style={styles.compartmentContent}>
           <CompartmentErrorBoundary name={meta.label} color={meta.color} onBack={handleBack}>
+          <Suspense fallback={<CompartmentSuspenseFallback />}>
+          {activeCompartment === 'knowledge' && (
+            <ScrollView
+              style={styles.knowledgeScroll}
+              contentContainerStyle={styles.knowledgeScrollContent}
+              nestedScrollEnabled
+            >
+              <SecondBrainDashboard
+                circleId={circleId}
+                userId={data.currentUserId}
+                accentColor={accentColor}
+                onOpenCompartment={handleNestedCompartmentOpen}
+              />
+            </ScrollView>
+          )}
           {activeCompartment === 'cost' && (
             <CostDashboard
               sessions={data.enrichedSessions}
               agents={data.enrichedAgents}
               sessionTags={data.sessionTags}
               accentColor={accentColor}
+              costAuthority="estimated"
             />
           )}
           {activeCompartment === 'terminal' && (
-            <OfficeTerminal
-              circleId={circleId}
-              userId={data.currentUserId}
-              userDisplayName={data.currentUserName}
-              agents={data.mergedCircleAgents}
-              myAgentIds={data.mergedCircleAgents.filter(a => a.isOwn).map(a => a.id)}
-              sharedInput={terminalInput}
-              onSharedInputChange={setTerminalInput}
-              sharedTargetId={terminalTargetId}
-              sharedTargetName={terminalTargetName}
-              onSharedSelectTarget={(id: string | null, name: string) => {
-                setTerminalTargetId(id);
-                setTerminalTargetName(name);
-              }}
-              sharedModel={terminalModel}
-              onSharedModelChange={setTerminalModel}
-              sharedTargetIds={terminalTargetIds}
-              onSharedSelectTargets={(ids, _names) => setTerminalTargetIds(ids)}
-            />
+            <View style={styles.terminalCompartment}>
+              <View style={styles.terminalOwnerNotice} accessibilityRole="summary">
+                <View style={styles.terminalOwnerCopy}>
+                  <Text style={styles.terminalOwnerTitle}>Dispatch from the Office</Text>
+                  <Text style={styles.terminalOwnerText}>
+                    Recorded command history is available here in read-only mode. Commands, automations,
+                    local shell, training, and agent creation stay in the Office's live exact-authority surface.
+                  </Text>
+                </View>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Open the Office Command Center"
+                  accessibilityHint="Switch to the canonical live terminal and command dispatcher"
+                  testID="backpack-open-office-terminal"
+                  onPress={onOpenOffice}
+                  style={({ hovered, pressed, focused }: any) => [
+                    styles.openOfficeButton,
+                    hovered && Platform.OS === 'web' ? styles.openOfficeButtonHover : null,
+                    focused ? styles.openOfficeButtonFocused : null,
+                    pressed ? styles.openOfficeButtonPressed : null,
+                  ]}
+                >
+                  <Text style={styles.openOfficeButtonText}>Open Office</Text>
+                  <Text style={styles.openOfficeButtonArrow}>→</Text>
+                </Pressable>
+              </View>
+              <View style={styles.terminalReadSurface}>
+                <OfficeTerminal
+                  circleId={circleId}
+                  userId={data.currentUserId}
+                  userDisplayName={data.currentUserName}
+                  agents={data.mergedCircleAgents}
+                  myAgentIds={data.mergedCircleAgents.filter(a => a.isOwn).map(a => a.id)}
+                  readOnly
+                  readOnlyReason="Backpack shows recorded history only. Open the Office to run commands or tools."
+                />
+              </View>
+            </View>
           )}
           {activeCompartment === 'traces' && (
             <TraceViewer
@@ -188,15 +257,15 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
               circleId={circleId}
               userId={data.currentUserId}
               agents={data.mergedCircleAgents}
+              exactAgentUsageAuthority={exactAuthority}
+              isExactAgentUsageAuthorityCurrent={isExactAuthorityCurrent}
             />
           )}
           {activeCompartment === 'canvas' && (
-            <Suspense fallback={<CompartmentSuspenseFallback />}>
-              <PixelOfficeCanvas
-                agents={data.mergedCircleAgents}
-                currentUserId={data.currentUserId}
-              />
-            </Suspense>
+            <PixelOfficeCanvas
+              agents={data.mergedCircleAgents}
+              currentUserId={data.currentUserId}
+            />
           )}
           {activeCompartment === 'prompts' && (
             <PromptManagerPanel
@@ -206,31 +275,26 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
             />
           )}
           {activeCompartment === 'llm-bench' && (
-            <Suspense fallback={<CompartmentSuspenseFallback />}>
-              <LLMBenchmarkPanel
-                accentColor={accentColor}
-              />
-            </Suspense>
+            <LLMBenchmarkPanel
+              accentColor={accentColor}
+            />
           )}
           {activeCompartment === 'model-lab' && (
-            <Suspense fallback={<CompartmentSuspenseFallback />}>
-              <ModelLabPanel circleId={circleId} />
-            </Suspense>
+            <ModelLabPanel circleId={circleId} />
           )}
           {activeCompartment === 'trading' && (
-            <Suspense fallback={<CompartmentSuspenseFallback />}>
-              <TradingBotPanel
-                circleId={circleId}
-                userId={data.currentUserId}
-                accentColor={accentColor}
-              />
-            </Suspense>
+            <TradingBotPanel
+              circleId={circleId}
+              userId={data.currentUserId}
+              accentColor={accentColor}
+            />
           )}
           {activeCompartment === 'devices' && (
             <DevicePanel
               circleId={circleId}
             />
           )}
+          </Suspense>
           </CompartmentErrorBoundary>
         </View>
       </View>
@@ -238,284 +302,195 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
   }
 
   // ─── Overview — The open backpack ──────────────────────────────
-  if (data.loading) {
-    return <LoadingScreen />;
+  if (data.error && !data.lastRefreshed) {
+    return (
+      <BackpackLoadFailure
+        message={data.error}
+        onRetry={() => { void data.refresh(); }}
+      />
+    );
   }
-
-  // Compute quick stats
-  const activeAgents = data.enrichedAgents.filter(a => a.status === 'active').length;
-  const healthyAgents = data.enrichedAgents.filter(a => a.status !== 'error').length;
-  const healthPct = data.enrichedAgents.length > 0
-    ? Math.round((healthyAgents / data.enrichedAgents.length) * 100)
-    : 100;
-  // Format tokens
-  const fmtTokens = (n: number) => n >= 1_000_000 ? `${(n/1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n/1000).toFixed(1)}K` : String(n);
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.scrollContent}>
-      {/* ─── Header — pixel-styled ─── */}
+      {/* ─── Backpack overview ─── */}
       <View style={styles.header}>
-        <View style={styles.headerLeft}>
-          <View style={styles.headerPixelIcon}>
-            <Text style={styles.headerPixelChar}>.</Text>
-          </View>
-          <View>
-            <Text style={styles.headerTitle}>BACKPACK</Text>
-            <Text style={styles.headerSubtitle}>
-              {data.lastRefreshed ? `.web Digital Brain updated ${new Date(data.lastRefreshed).toLocaleTimeString()}` : '.web Digital Brain for this circle'}
-            </Text>
-          </View>
-        </View>
-        <Pressable onPress={data.refresh} style={styles.refreshBtn}>
-          <Text style={styles.refreshText}>↻</Text>
-        </Pressable>
-      </View>
-
-      <SecondBrainDashboard
-        circleId={circleId}
-        userId={data.currentUserId}
-        accentColor={accentColor}
-        onOpenCompartment={(key) => setActiveCompartment(key as Compartment)}
-      />
-
-      {/* ─── Journey Dashboard — Pixel Stat Blocks ─── */}
-      <View style={styles.statsSection}>
-        <Text style={styles.sectionLabel}>JOURNEY DASHBOARD</Text>
-        <View style={[styles.statsGrid, isDesktop && styles.statsGridDesktop]}>
-          <StatCube
-            icon="$"
-            label="Spend"
-            value={`$${data.periodCosts.today.toFixed(2)}`}
-            subtitle={`$${data.periodCosts.week.toFixed(2)} this week`}
-            color="#f59e0b"
-            onPress={() => setActiveCompartment('cost')}
-            delay={0}
-          />
-          <StatCube
-            icon="A"
-            label="Agents"
-            value={String(data.agentCount)}
-            subtitle={`${activeAgents} active`}
-            color="#6366f1"
-            onPress={() => setActiveCompartment('farm')}
-            delay={100}
-          />
-          <StatCube
-            icon="T"
-            label="Tokens"
-            value={fmtTokens(data.totalTokensToday)}
-            subtitle={`${data.totalMessagesToday} msgs today`}
-            color="#3b82f6"
-            onPress={() => setActiveCompartment('traces')}
-            delay={200}
-          />
-          <StatCube
-            icon="+"
-            label="Health"
-            value={`${healthPct}%`}
-            subtitle={`${healthyAgents}/${data.enrichedAgents.length || 1}`}
-            color={healthPct >= 90 ? '#22c55e' : healthPct >= 70 ? '#f59e0b' : '#ef4444'}
-            onPress={() => setActiveCompartment('farm')}
-            delay={300}
-          />
+        <View style={styles.headerCopy}>
+          <Text style={styles.headerEyebrow}>PRIVATE WORKSPACE</Text>
+          <Text style={styles.headerTitle} accessibilityRole="header">Backpack</Text>
+          <Text style={styles.headerSubtitle}>
+            {data.loading
+              ? 'Opening your tools while the verified circle snapshot loads…'
+              : data.lastRefreshed
+              ? `Your circle snapshot, updated ${new Date(data.lastRefreshed).toLocaleTimeString()}`
+              : 'Your digital brain, activity, and tools in one place.'}
+          </Text>
         </View>
       </View>
 
-      {/* ─── Budget Alert (if any) ─── */}
+      {data.loading ? (
+        <View style={styles.loadingNotice} accessibilityRole="progressbar" accessibilityLabel="Loading verified Backpack data">
+          <View style={styles.loadingNoticeDot} />
+          <Text style={styles.loadingNoticeText}>Loading your verified activity snapshot. The Backpack is ready to explore as soon as it settles.</Text>
+        </View>
+      ) : null}
+
+      {data.error && data.lastRefreshed ? (
+        <View style={styles.staleBanner} accessibilityRole="alert">
+          <View style={styles.staleDot} />
+          <Text style={styles.staleText}>{data.error}</Text>
+          <Text style={styles.staleMeta}>Showing the snapshot from {new Date(data.lastRefreshed).toLocaleTimeString()}.</Text>
+        </View>
+      ) : null}
+
       {data.budgetAlerts.length > 0 && (
-        <View style={[styles.alertBanner, {
-          borderColor: data.budgetAlerts[0].level === 'critical' ? '#ef4444' :
-                        data.budgetAlerts[0].level === 'danger' ? '#f59e0b' : '#ffffff15',
-          backgroundColor: data.budgetAlerts[0].level === 'critical' ? '#ef444415' :
-                            data.budgetAlerts[0].level === 'danger' ? '#f59e0b15' : '#ffffff08',
-        }]}>
+        <View
+          accessibilityRole="alert"
+          style={[styles.alertBanner, {
+            borderColor: data.budgetAlerts[0].level === 'critical' ? '#ef4444' :
+                          data.budgetAlerts[0].level === 'danger' ? '#f59e0b' : '#ffffff15',
+            backgroundColor: data.budgetAlerts[0].level === 'critical' ? '#ef444415' :
+                              data.budgetAlerts[0].level === 'danger' ? '#f59e0b15' : '#ffffff08',
+          }]}
+        >
           <Text style={styles.alertIcon}>!</Text>
           <Text style={styles.alertText}>{data.budgetAlerts[0].message}</Text>
         </View>
       )}
 
-      {/* ─── Recent Activity Feed ─── */}
-      {data.recentActivity.length > 0 && (
-        <View style={styles.activitySection}>
-          <Text style={styles.sectionLabel}>RECENT ACTIVITY</Text>
-          {data.recentActivity.slice(0, 5).map((act, i) => (
-            <View key={i} style={styles.activityRow}>
-              <View style={[styles.activityDot, { backgroundColor: act.color }]} />
-              <Text style={styles.activityText} numberOfLines={1}>{act.text}</Text>
-              <Text style={styles.activityTime}>{act.time}</Text>
+      <InteractiveBackpack2D
+        onOpenCompartment={(key) => openCompartment(key, { kind: 'pocket', key })}
+        restoreFocusKey={returnFocusOrigin.current?.kind === 'pocket' ? returnFocusOrigin.current.key : null}
+        stats={data.loading
+          ? Object.fromEntries(BACKPACK_COMPARTMENTS.map(item => [item.key, { miniStat: 'Loading data…', hasActivity: false }]))
+          : getAllCompartmentStats(data)}
+        disabled={data.loading}
+      />
+
+      <View style={styles.secondaryGrid}>
+        {data.recentActivity.length > 0 && (
+          <View style={styles.activitySection}>
+            <View style={styles.sectionHeaderRow}>
+              <Text style={styles.sectionLabel}>Recent activity</Text>
+              <Text style={styles.sectionMeta}>Latest {Math.min(3, data.recentActivity.length)}</Text>
             </View>
-          ))}
-        </View>
-      )}
-
-      {/* ─── Bottom Backpack Tabs ─── */}
-      <View style={styles.bottomTabs}>
-        <View>
-          <Text style={styles.sectionLabel}>BACKPACK TOOLS</Text>
-          <Text style={styles.sectionHint}>Digital Brain stays primary. Open the older compartments from here.</Text>
-        </View>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.bottomTabsRow}>
-          {COMPARTMENTS.map((comp) => (
-            <Pressable
-              key={comp.key}
-              onPress={() => setActiveCompartment(comp.key)}
-              style={({ hovered, pressed }: any) => [
-                styles.bottomTab,
-                { borderColor: comp.color + '38' },
-                hovered && Platform.OS === 'web' ? { backgroundColor: comp.color + '12', transform: [{ translateY: -1 }] } as any : null,
-                pressed && Platform.OS === 'web' ? { transform: [{ scale: 0.98 }] } as any : null,
-              ]}
-            >
-              <Text style={[styles.bottomTabIcon, { color: comp.color }]}>{comp.iconLabel}</Text>
-              <Text style={styles.bottomTabLabel}>{comp.label}</Text>
-            </Pressable>
-          ))}
-        </ScrollView>
-      </View>
-
-      {/* ─── Pack Status Footer ─── */}
-      <View style={styles.packStatus}>
-        <View style={styles.packDivider} />
-        <Text style={styles.packStatusText}>
-          [{COMPARTMENTS.length}] compartments packed :: {data.sessionCount} sessions tracked
-        </Text>
+            {data.recentActivity.slice(0, 3).map((act, i) => (
+              <View key={i} style={styles.activityRow}>
+                <View style={[styles.activityDot, { backgroundColor: act.color }]} />
+                <Text style={styles.activityText} numberOfLines={1}>{act.text}</Text>
+                <Text style={styles.activityTime}>{act.time}</Text>
+              </View>
+            ))}
+          </View>
+        )}
       </View>
     </ScrollView>
-  );
-}
-
-// ─── Compartment Card ─────────────────────────────────────────────
-
-function CompartmentCard({
-  iconLabel, label, description, color, miniStat, hasActivity, delay, onPress, isDesktop,
-}: {
-  iconLabel: string;
-  label: string;
-  description: string;
-  color: string;
-  miniStat: string;
-  hasActivity?: boolean;
-  delay: number;
-  onPress: () => void;
-  isDesktop: boolean;
-}) {
-  const fadeAnim = useRef(new Animated.Value(0)).current;
-  const slideAnim = useRef(new Animated.Value(12)).current;
-
-  useEffect(() => {
-    Animated.parallel([
-      Animated.timing(fadeAnim, { toValue: 1, duration: 400, delay, useNativeDriver: true }),
-      Animated.timing(slideAnim, { toValue: 0, duration: 400, delay, useNativeDriver: true }),
-    ]).start();
-  }, []);
-
-  return (
-    <Animated.View style={[
-      styles.compCardWrap,
-      isDesktop && styles.compCardWrapDesktop,
-      { opacity: fadeAnim, transform: [{ translateY: slideAnim }] },
-    ]}>
-      <Pressable onPress={onPress} style={[styles.compCard, { borderColor: color + '25' }]}>
-        {/* Left accent stripe — pixel-thick */}
-        <View style={[styles.compStripe, { backgroundColor: color }]} />
-
-        <View style={styles.compBody}>
-          <View style={styles.compTop}>
-            {/* Pixel icon block instead of emoji */}
-            <View style={[styles.compIconWrap, { backgroundColor: color + '12', borderColor: color + '30' }]}>
-              <Text style={[styles.compIconChar, { color }]}>{iconLabel}</Text>
-              {/* Activity pulse */}
-              {hasActivity && (
-                <View style={[styles.activityPulse, { backgroundColor: color }]} />
-              )}
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.compLabel, { color }]}>{label}</Text>
-              <Text style={styles.compDesc}>{description}</Text>
-            </View>
-            <Text style={styles.compArrow}>{'->'}</Text>
-          </View>
-
-          {/* Mini stat bar */}
-          <View style={[styles.compStatBar, { backgroundColor: color + '08', borderTopColor: color + '15' }]}>
-            <Text style={[styles.compStatText, { color: color + 'cc' }]}>{miniStat}</Text>
-          </View>
-        </View>
-      </Pressable>
-    </Animated.View>
   );
 }
 
 // ─── Styles ───────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: PIXEL_COLORS.bg0 },
-  scrollContent: { paddingBottom: 40 },
-  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 12 },
-  loadingText: { color: PIXEL_COLORS.text2, fontSize: 12, fontFamily: 'monospace' },
-
-  // Header — pixel-art styled
+  container: { flex: 1, backgroundColor: '#07090d' },
+  scrollContent: { paddingBottom: 48 },
+  loadFailure: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    padding: 28,
+    backgroundColor: '#07090d',
+  },
+  loadFailureMark: {
+    width: 42,
+    height: 42,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#f59e0b55',
+    borderRadius: 14,
+    backgroundColor: '#f59e0b14',
+  },
+  loadFailureMarkText: { color: '#fbbf24', fontSize: 20, fontWeight: '800' },
+  loadFailureTitle: { color: '#f2f4f8', fontSize: 18, fontWeight: '700' },
+  loadFailureText: { maxWidth: 440, color: '#8f9aae', fontSize: 13, lineHeight: 19, textAlign: 'center' },
+  loadFailureButton: {
+    minHeight: 44,
+    minWidth: 112,
+    marginTop: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+    borderWidth: 1,
+    borderColor: '#3a4763',
+    borderRadius: 10,
+    backgroundColor: '#141a29',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  loadFailureButtonHover: { backgroundColor: '#1a2133', borderColor: '#4c5a7c' },
+  loadFailureButtonFocused: {
+    ...Platform.select({ web: { outlineStyle: 'none', boxShadow: '0 0 0 3px rgba(99,102,241,0.5)' } as any, default: {} }),
+  },
+  loadFailureButtonPressed: { opacity: 0.78 },
+  loadFailureButtonText: { color: '#eef2f7', fontSize: 12, fontWeight: '700' },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
+    alignItems: 'flex-end',
+    flexWrap: 'wrap',
+    gap: GRID.md,
     paddingHorizontal: GRID.lg,
-    paddingTop: GRID.lg,
-    paddingBottom: GRID.md,
+    paddingTop: 30,
+    paddingBottom: 18,
   },
-  headerLeft: { flexDirection: 'row', alignItems: 'center', gap: GRID.md },
-  headerPixelIcon: {
-    width: 32,
-    height: 32,
-    backgroundColor: PIXEL_COLORS.indigo + '18',
-    borderWidth: 2,
-    borderColor: PIXEL_COLORS.indigo + '40',
-    borderRadius: 2,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  headerPixelChar: {
-    color: PIXEL_COLORS.indigo,
-    fontSize: 14,
-    fontWeight: '900',
-    fontFamily: 'monospace',
+  headerCopy: { flex: 1, minWidth: 240 },
+  headerEyebrow: {
+    color: '#7c87b8',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 2,
+    marginBottom: 7,
   },
   headerTitle: {
-    color: PIXEL_COLORS.text0,
-    fontSize: 16,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-    letterSpacing: 3,
-    textTransform: 'uppercase',
+    color: '#f4f6fb',
+    fontSize: 32,
+    lineHeight: 37,
+    fontWeight: '800',
+    letterSpacing: -1,
   },
-  headerSubtitle: { color: PIXEL_COLORS.text3, fontSize: 10, fontFamily: 'monospace', marginTop: 2 },
-  refreshBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 2,
-    backgroundColor: PIXEL_COLORS.bg2,
-    borderWidth: 2,
-    borderColor: PIXEL_COLORS.border1,
-    justifyContent: 'center',
+  headerSubtitle: { color: '#8b96b0', fontSize: 13, lineHeight: 19, marginTop: 5 },
+  loadingNotice: {
+    minHeight: 44,
+    marginHorizontal: GRID.lg,
+    marginBottom: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    flexDirection: 'row',
     alignItems: 'center',
+    gap: 9,
+    borderWidth: 1,
+    borderColor: '#30395a',
+    borderRadius: 12,
+    backgroundColor: '#111625',
   },
-  refreshText: { color: PIXEL_COLORS.text2, fontSize: 16, fontFamily: 'monospace' },
+  loadingNoticeDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: '#818cf8',
+  },
+  loadingNoticeText: { flex: 1, color: '#a8b1c7', fontSize: 11, lineHeight: 16 },
 
-  // Stats
-  statsSection: { paddingHorizontal: GRID.lg, marginBottom: GRID.xl },
   sectionLabel: {
-    color: PIXEL_COLORS.text2,
-    fontSize: 10,
+    color: '#e8ecf5',
+    fontSize: 13,
     fontWeight: '700',
-    fontFamily: 'monospace',
-    letterSpacing: 2,
-    marginBottom: GRID.sm,
-    textTransform: 'uppercase',
+    letterSpacing: -0.1,
   },
-  statsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: GRID.sm },
-  statsGridDesktop: { flexWrap: 'nowrap' },
+  sectionHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: GRID.sm },
+  sectionMeta: { color: '#5f6a88', fontSize: 10, fontWeight: '600', letterSpacing: 0.4 },
 
-  // Alert — pixel border
+  // Budget alert
   alertBanner: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -523,8 +498,8 @@ const styles = StyleSheet.create({
     marginHorizontal: GRID.lg,
     marginBottom: GRID.lg,
     padding: GRID.md,
-    borderWidth: 2,
-    borderRadius: 2,
+    borderWidth: 1,
+    borderRadius: 13,
   },
   alertIcon: {
     color: '#f59e0b',
@@ -534,191 +509,138 @@ const styles = StyleSheet.create({
     width: 20,
     textAlign: 'center',
   },
-  alertText: { flex: 1, color: PIXEL_COLORS.text1, fontSize: 12, fontFamily: 'monospace' },
-
-  // Compartments
-  compartmentsSection: { paddingHorizontal: GRID.lg },
-  compartmentHeader: {
+  alertText: { flex: 1, color: '#dce2eb', fontSize: 12, lineHeight: 18 },
+  staleBanner: {
+    maxWidth: 900,
+    width: 'auto',
+    alignSelf: 'center',
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: GRID.sm,
-  },
-  sectionHint: { color: PIXEL_COLORS.text3, fontSize: 10, fontFamily: 'monospace', marginTop: -4 },
-  viewToggle: {
-    paddingVertical: 4,
-    paddingHorizontal: GRID.sm,
-    borderRadius: 2,
-    borderWidth: 2,
-    borderColor: PIXEL_COLORS.border1,
-    backgroundColor: PIXEL_COLORS.bg2,
-  },
-  viewToggleActive: {
-    borderColor: '#6366f1',
-    backgroundColor: '#6366f115',
-  },
-  viewToggleText: {
-    fontSize: 10,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-    color: PIXEL_COLORS.text2,
-    letterSpacing: 1,
-  },
-  viewToggleTextActive: {
-    color: '#6366f1',
-  },
-  scene3dLoading: {
-    height: 500,
-    justifyContent: 'center',
     alignItems: 'center',
-    gap: 12,
-    backgroundColor: '#0a0a0a',
-    borderRadius: 4,
-  },
-  compartmentGrid: { gap: GRID.sm },
-  compartmentGridDesktop: {
-    flexDirection: 'row',
     flexWrap: 'wrap',
+    gap: 8,
+    marginHorizontal: GRID.lg,
+    marginBottom: GRID.lg,
+    paddingHorizontal: 13,
+    paddingVertical: 11,
+    borderWidth: 1,
+    borderColor: '#f59e0b42',
+    borderRadius: 12,
+    backgroundColor: '#f59e0b0f',
   },
-
-  // Compartment Card — pixel-art style
-  compCardWrap: {},
-  compCardWrapDesktop: { flexBasis: '48.5%' },
-  compCard: {
-    backgroundColor: PIXEL_COLORS.bg2,
-    borderWidth: 2,
-    borderRadius: 2,
-    flexDirection: 'row',
-    overflow: 'hidden',
-    height: 104,
-    ...Platform.select({
-      web: { boxShadow: `${PX}px ${PX}px 0px ${PIXEL_COLORS.bg0}` } as any,
-      default: {
-        shadowColor: PIXEL_COLORS.bg0,
-        shadowOffset: { width: PX, height: PX },
-        shadowOpacity: 1,
-        shadowRadius: 0,
-        elevation: 4,
-      },
-    }),
-  },
-  compStripe: { width: 4 },
-  compBody: { flex: 1, justifyContent: 'space-between' },
-  compTop: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: GRID.md,
-    gap: GRID.md,
-  },
-  compIconWrap: {
-    width: 36,
-    height: 36,
-    borderRadius: 2,
-    borderWidth: 2,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  compIconChar: {
-    fontSize: 12,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-  },
-  compLabel: { fontSize: 12, fontWeight: '700', fontFamily: 'monospace', letterSpacing: 1 },
-  compDesc: { color: PIXEL_COLORS.text2, fontSize: 10, fontFamily: 'monospace', marginTop: 2 },
-  compArrow: { color: PIXEL_COLORS.text3, fontSize: 12, fontFamily: 'monospace', fontWeight: '700' },
-  compStatBar: {
-    paddingVertical: 5,
-    paddingHorizontal: GRID.md,
-    borderTopWidth: 2,
-    marginLeft: 4,
-  },
-  compStatText: { fontSize: 10, fontFamily: 'monospace', fontWeight: '600' },
-
-  // Back navigation
+  staleDot: { width: 7, height: 7, borderRadius: 999, backgroundColor: '#f59e0b' },
+  staleText: { flexShrink: 1, color: '#e8d6ae', fontSize: 11, lineHeight: 16 },
+  staleMeta: { color: '#927f5a', fontSize: 10, lineHeight: 15 },
   backRow: {
+    minHeight: 54,
     flexDirection: 'row',
     alignItems: 'center',
     gap: GRID.sm,
     paddingHorizontal: GRID.lg,
-    paddingVertical: GRID.md,
-    borderBottomWidth: 2,
-    borderBottomColor: PIXEL_COLORS.border0,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1f2737',
+    backgroundColor: '#0a0e15',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'background-color 0.15s ease' } as any : {}),
   },
-  backArrow: { fontSize: 14, fontWeight: '900', fontFamily: 'monospace' },
-  backText: { color: PIXEL_COLORS.text2, fontSize: 12, fontFamily: 'monospace', letterSpacing: 1 },
+  backRowHover: { backgroundColor: '#101623' },
+  backRowFocused: {
+    borderBottomColor: '#818cf8',
+    ...Platform.select({ web: { outlineStyle: 'none', boxShadow: 'inset 0 0 0 2px rgba(99,102,241,0.55)' } as any, default: {} }),
+  },
+  backRowPressed: { opacity: 0.78 },
+  backArrow: { fontSize: 18, lineHeight: 22, fontWeight: '600' },
+  backText: { color: '#a9b3c9', fontSize: 12, fontWeight: '700', letterSpacing: 0.2 },
   compartmentBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: PX,
-    paddingHorizontal: GRID.sm,
-    paddingVertical: PX,
-    borderRadius: 2,
+    gap: 6,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 999,
     borderWidth: 1,
-    marginLeft: PX,
+    marginLeft: 4,
   },
   badgePixelIcon: {
-    width: 20,
-    height: 20,
-    borderRadius: 2,
+    width: 22,
+    height: 22,
+    borderRadius: 7,
     borderWidth: 1,
     justifyContent: 'center',
     alignItems: 'center',
   },
   badgePixelChar: {
     fontSize: 9,
-    fontWeight: '900',
-    fontFamily: 'monospace',
+    fontWeight: '800',
   },
-  compartmentBadgeText: { fontSize: 11, fontWeight: '700', fontFamily: 'monospace' },
-  compartmentContent: { flex: 1 },
-
-  // Quick Actions
-  quickActions: { paddingHorizontal: GRID.lg, marginBottom: GRID.lg },
-  quickActionsRow: { flexDirection: 'row', gap: GRID.sm },
-  quickActionBtn: {
-    paddingVertical: GRID.md,
-    paddingHorizontal: GRID.lg,
-    borderRadius: 2,
-    borderWidth: 2,
-    backgroundColor: PIXEL_COLORS.bg2,
+  compartmentBadgeText: { fontSize: 11, fontWeight: '700', letterSpacing: 0.1 },
+  compartmentContent: { flex: 1, minHeight: 0 },
+  terminalCompartment: { flex: 1, minHeight: 0 },
+  terminalOwnerNotice: {
+    flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    minWidth: 70,
-  },
-  quickActionIcon: {
-    fontSize: 14,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-  },
-  quickActionLabel: {
-    fontSize: 9,
-    fontWeight: '700',
-    fontFamily: 'monospace',
-    color: PIXEL_COLORS.text2,
-    letterSpacing: 0.5,
-  },
-
-  // Activity pulse dot
-  activityPulse: {
-    position: 'absolute',
-    top: -2,
-    right: -2,
-    width: 7,
-    height: 7,
-    borderRadius: 4,
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 12,
+    margin: 12,
+    marginBottom: 0,
+    padding: 13,
     borderWidth: 1,
-    borderColor: PIXEL_COLORS.bg0,
+    borderColor: '#34d39933',
+    borderRadius: 13,
+    backgroundColor: '#0d1a15',
   },
-
-  // Recent Activity
-  activitySection: { paddingHorizontal: GRID.lg, marginTop: GRID.lg },
+  terminalOwnerCopy: { flex: 1, minWidth: 220 },
+  terminalOwnerTitle: { color: '#dcebe4', fontSize: 12, fontWeight: '700', marginBottom: 3 },
+  terminalOwnerText: { color: '#84978d', fontSize: 10, lineHeight: 15 },
+  openOfficeButton: {
+    minHeight: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+    paddingHorizontal: 15,
+    borderWidth: 1,
+    borderColor: '#34d3994d',
+    borderRadius: 11,
+    backgroundColor: '#0f231b',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  openOfficeButtonHover: { backgroundColor: '#153024', borderColor: '#34d39980' },
+  openOfficeButtonFocused: {
+    ...Platform.select({ web: { outlineStyle: 'none', boxShadow: '0 0 0 3px rgba(52,211,153,0.3)' } as any, default: {} }),
+  },
+  openOfficeButtonPressed: { opacity: 0.78 },
+  openOfficeButtonText: { color: '#b9ebd5', fontSize: 11, fontWeight: '700', letterSpacing: 0.2 },
+  openOfficeButtonArrow: { color: '#34d399', fontSize: 15, fontWeight: '700' },
+  terminalReadSurface: { flex: 1, minHeight: 0 },
+  knowledgeScroll: { flex: 1 },
+  knowledgeScrollContent: { paddingBottom: 32 },
+  secondaryGrid: {
+    marginHorizontal: GRID.lg,
+    gap: GRID.md,
+  },
+  activitySection: {
+    width: '100%',
+    maxWidth: 900,
+    alignSelf: 'center',
+    padding: GRID.md,
+    borderWidth: 1,
+    borderColor: '#212a3d',
+    borderRadius: 16,
+    backgroundColor: '#0b0f18',
+    gap: 4,
+    ...Platform.select({
+      web: { boxShadow: 'inset 0 1px 0 rgba(164,178,222,0.06)' } as any,
+      default: {},
+    }),
+  },
   activityRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: GRID.sm,
-    paddingVertical: 6,
+    paddingVertical: 9,
     borderBottomWidth: 1,
-    borderBottomColor: PIXEL_COLORS.border0,
+    borderBottomColor: '#161d2c',
   },
   activityDot: {
     width: 6,
@@ -728,66 +650,11 @@ const styles = StyleSheet.create({
   activityText: {
     flex: 1,
     fontSize: 11,
-    fontFamily: 'monospace',
-    color: PIXEL_COLORS.text1,
+    color: '#b6c0d4',
   },
   activityTime: {
     fontSize: 10,
-    fontFamily: 'monospace',
-    color: PIXEL_COLORS.text3,
+    color: '#66718e',
+    fontVariant: ['tabular-nums'],
   },
-
-  // Bottom tabs — secondary Backpack tools live below the Digital Brain.
-  bottomTabs: {
-    marginHorizontal: GRID.lg,
-    marginTop: GRID.xl,
-    padding: GRID.md,
-    gap: GRID.sm,
-    borderWidth: 2,
-    borderColor: PIXEL_COLORS.border0,
-    borderRadius: 2,
-    backgroundColor: PIXEL_COLORS.bg1,
-  },
-  bottomTabsRow: {
-    flexDirection: 'row',
-    gap: GRID.sm,
-    paddingRight: GRID.md,
-  },
-  bottomTab: {
-    minWidth: 112,
-    minHeight: 66,
-    borderWidth: 2,
-    borderRadius: 2,
-    backgroundColor: PIXEL_COLORS.bg2,
-    paddingVertical: GRID.sm,
-    paddingHorizontal: GRID.md,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 4,
-    ...(Platform.OS === 'web' ? { transition: 'all 0.16s ease', cursor: 'pointer' } as any : {}),
-  },
-  bottomTabIcon: {
-    fontSize: 14,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-  },
-  bottomTabLabel: {
-    color: PIXEL_COLORS.text2,
-    fontSize: 9,
-    fontWeight: '800',
-    fontFamily: 'monospace',
-    letterSpacing: 0.4,
-    textAlign: 'center',
-  },
-
-  // Pack Status Footer
-  packStatus: { paddingHorizontal: GRID.lg, paddingVertical: GRID.xl, alignItems: 'center' },
-  packDivider: {
-    width: 48,
-    height: 2,
-    backgroundColor: PIXEL_COLORS.border0,
-    borderRadius: 0,
-    marginBottom: GRID.md,
-  },
-  packStatusText: { color: PIXEL_COLORS.text3, fontSize: 10, fontFamily: 'monospace' },
 });

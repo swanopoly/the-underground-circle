@@ -21,10 +21,11 @@ interface Props {
   agents: CircleOfficeAgent[];
   filteredGoalId: string | null;
   onFilter: (goalId: string | null) => void;
-  onCreateGoal: (fields: Partial<Goal>) => void;
-  onUpdateGoal: (goalId: string, fields: Partial<Goal>) => void;
+  // Returns false when the write was refused, so the modal can stay open.
+  onCreateGoal: (fields: Partial<Goal>) => void | boolean | Promise<void | boolean>;
+  onUpdateGoal: (goalId: string, fields: Partial<Goal>) => void | boolean | Promise<void | boolean>;
   onDeleteGoal: (goalId: string) => void;
-  onCreateTask?: (fields: CreateTaskFields) => Promise<void>;
+  onCreateTask?: (fields: CreateTaskFields) => Promise<void | boolean>;
   onEditGoal?: (goal: GoalWithCount) => void;
   // Plans integration
   plans?: CirclePlan[];
@@ -212,7 +213,12 @@ export default function GoalsPanel({
       {showAdd && (
         <AddGoalModal
           onClose={() => setShowAdd(false)}
-          onCreate={(fields) => { onCreateGoal(fields); setShowAdd(false); }}
+          onCreate={async (fields) => {
+            // Was fire-and-forget: not awaited, result ignored, modal closed
+            // unconditionally. A denied insert looked exactly like success.
+            if ((await onCreateGoal(fields)) === false) return;
+            setShowAdd(false);
+          }}
         />
       )}
 
@@ -222,7 +228,10 @@ export default function GoalsPanel({
           goal={editGoal}
           agents={agents}
           onClose={() => setEditGoal(null)}
-          onUpdate={(fields) => { onUpdateGoal(editGoal.id, fields); setEditGoal(null); }}
+          onUpdate={async (fields) => {
+            if ((await onUpdateGoal(editGoal.id, fields)) === false) return;
+            setEditGoal(null);
+          }}
           onCreateTask={onCreateTask}
         />
       )}
@@ -284,7 +293,7 @@ function EditGoalModal({
   agents: CircleOfficeAgent[];
   onClose: () => void;
   onUpdate: (f: Partial<Goal>) => void;
-  onCreateTask?: (fields: CreateTaskFields) => Promise<void>;
+  onCreateTask?: (fields: CreateTaskFields) => Promise<void | boolean>;
 }) {
   const [name, setName] = useState(goal.name);
   const [description, setDescription] = useState(goal.description || '');

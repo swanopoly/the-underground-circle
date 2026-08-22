@@ -50,7 +50,7 @@ export const PIXEL_COLORS = {
   green:   '#22c55e',
   amber:   '#f59e0b',
   red:     '#ef4444',
-  cyan:    '#22d3ee',
+  cyan:    '#6366f1',
   pink:    '#ec4899',
   purple:  '#a855f7',
   orange:  '#f97316',
@@ -81,7 +81,7 @@ export const PIXEL_ICONS: Record<string, PixelIcon> = {
   canvas:      { label: '[]', color: '#ec4899', bgColor: '#161616' },
   prompts:     { label: 'P',  color: '#f97316', bgColor: '#161616' },
   // Room types
-  code:        { label: '{}', color: '#22d3ee', bgColor: '#161616' },
+  code:        { label: '{}', color: '#6366f1', bgColor: '#161616' },
   docs:        { label: 'D',  color: '#3b82f6', bgColor: '#161616' },
   chat:        { label: '..',  color: '#22c55e', bgColor: '#161616' },
   config:      { label: '*',  color: '#f59e0b', bgColor: '#161616' },

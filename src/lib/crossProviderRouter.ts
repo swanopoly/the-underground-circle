@@ -86,7 +86,7 @@ export const MODEL_ALIASES: Record<string, ProviderModelAliases> = {
   'mistral-large': {
     huggingface: 'mistralai/Mistral-Large-2411',
     openrouter: 'mistralai/mistral-large-2411',
-    mistral_ai: 'mistral-large-latest',
+    mistral_ai: 'mistral-large-2512',
   },
   // ── Mistral Small (free tier on OR + Mistral 7B free on HF) ──────
   'mistral-small-free': {
@@ -97,23 +97,31 @@ export const MODEL_ALIASES: Record<string, ProviderModelAliases> = {
   'qwen-3-235b': {
     huggingface: 'Qwen/Qwen3-235B-A22B',
     openrouter: 'qwen/qwen3-235b-a22b',
-    together_ai: 'Qwen/Qwen3-235B-A22B-fp8-tput',
+    together_ai: 'Qwen/Qwen3-235B-A22B-Instruct-2507-tput',
   },
   // ── DeepSeek R1 ─ HF + OR ─────────────────────────────────────────
   'deepseek-r1': {
     huggingface: 'deepseek-ai/DeepSeek-R1',
     openrouter: 'deepseek/deepseek-r1',
-    fireworks_ai: 'accounts/fireworks/models/deepseek-r1',
+    fireworks_ai: 'accounts/fireworks/models/deepseek-r1-0528',
   },
   // ── Claude Sonnet 4.6 ─ Anthropic native + OR passthrough ─────────
   'claude-sonnet-4-6': {
     anthropic: 'claude-sonnet-4-6',
     openrouter: 'anthropic/claude-sonnet-4-6',
   },
+  'claude-sonnet-5': {
+    anthropic: 'claude-sonnet-5',
+    openrouter: 'anthropic/claude-sonnet-5',
+  },
   // ── Claude Fable / Opus current tier ─ Anthropic native + OR ──────
   'claude-fable-5': {
     anthropic: 'claude-fable-5',
     openrouter: 'anthropic/claude-fable-5',
+  },
+  'claude-opus-5': {
+    anthropic: 'claude-opus-5',
+    openrouter: 'anthropic/claude-opus-5',
   },
   'claude-opus-4-8': {
     anthropic: 'claude-opus-4-8',
@@ -133,7 +141,19 @@ export const MODEL_ALIASES: Record<string, ProviderModelAliases> = {
     anthropic: 'claude-haiku-4-5-20251001',
     openrouter: 'anthropic/claude-haiku-4-5',
   },
-  // ── GPT-4o ─ OpenAI native + OR passthrough ───────────────────────
+  // ── OpenAI GPT ─ native + OR passthrough ──────────────────────────
+  'gpt-5.6-sol': {
+    openai: 'gpt-5.6-sol',
+    openrouter: 'openai/gpt-5.6-sol',
+  },
+  'gpt-5.6-terra': {
+    openai: 'gpt-5.6-terra',
+    openrouter: 'openai/gpt-5.6-terra',
+  },
+  'gpt-5.6-luna': {
+    openai: 'gpt-5.6-luna',
+    openrouter: 'openai/gpt-5.6-luna',
+  },
   'gpt-5.5-pro': {
     openai: 'gpt-5.5-pro',
     openrouter: 'openai/gpt-5.5-pro',
@@ -166,11 +186,27 @@ export const MODEL_ALIASES: Record<string, ProviderModelAliases> = {
     openai: 'gpt-4.1-mini',
     openrouter: 'openai/gpt-4.1-mini',
   },
+  'o3-pro': {
+    openai: 'o3-pro',
+    openrouter: 'openai/o3-pro',
+  },
+  'o3': {
+    openai: 'o3',
+    openrouter: 'openai/o3',
+  },
   'gpt-4.1-nano': {
     openai: 'gpt-4.1-nano',
     openrouter: 'openai/gpt-4.1-nano',
   },
-  // ── Gemini 2.5 Pro ─ OR-only today (no native Google in llm-proxy) ─
+  // ── Gemini ─ native Google AI + OR passthrough ────────────────────
+  'gemini-3.6-flash': {
+    openrouter: 'google/gemini-3.6-flash',
+    google_ai: 'gemini-3.6-flash',
+  },
+  'gemini-3.5-flash-lite': {
+    openrouter: 'google/gemini-3.5-flash-lite',
+    google_ai: 'gemini-3.5-flash-lite',
+  },
   'gemini-3.5-flash': {
     openrouter: 'google/gemini-3.5-flash',
     google_ai: 'gemini-3.5-flash',
@@ -199,11 +235,34 @@ export const MODEL_ALIASES: Record<string, ProviderModelAliases> = {
   'deepseek-reasoner': {
     deepseek: 'deepseek-reasoner',
     openrouter: 'deepseek/deepseek-r1',
-    fireworks_ai: 'accounts/fireworks/models/deepseek-r1',
+    fireworks_ai: 'accounts/fireworks/models/deepseek-r1-0528',
   },
   'command-r-plus': {
     cohere: 'command-r-plus',
     openrouter: 'cohere/command-r-plus',
+  },
+  'deepseek-v4-pro': {
+    deepseek: 'deepseek-v4-pro',
+    openrouter: 'deepseek/deepseek-v4-pro',
+    together_ai: 'deepseek-ai/DeepSeek-V4-Pro',
+  },
+  'deepseek-v4-flash': {
+    deepseek: 'deepseek-v4-flash',
+    openrouter: 'deepseek/deepseek-v4-flash',
+  },
+  'command-a-plus-05-2026': {
+    cohere: 'command-a-plus-05-2026',
+    openrouter: 'cohere/command-a-plus-05-2026',
+  },
+  'glm-5.1': {
+    zai: 'glm-5.1',
+    openrouter: 'z-ai/glm-5.1',
+    together_ai: 'zai-org/GLM-5.1',
+  },
+  'minimax-m2.7': {
+    minimax: 'MiniMax-M2.7',
+    openrouter: 'minimax/minimax-m2.7',
+    together_ai: 'MiniMaxAI/MiniMax-M2.7',
   },
   'sonar-deep-research': {
     perplexity: 'sonar-deep-research',
@@ -242,11 +301,16 @@ export function findAliasKey(modelId: string): string | null {
   // Soft mapping — the chat composer sometimes uses friendlier ids.
   const norm = id.toLowerCase();
   if (norm === 'claude-fable-5' || norm === 'claude-fable') return 'claude-fable-5';
+  if (norm === 'claude-opus-5')              return 'claude-opus-5';
+  if (norm === 'claude-sonnet-5')            return 'claude-sonnet-5';
   if (norm === 'claude-opus-4-8')           return 'claude-opus-4-8';
   if (norm === 'claude-opus-4-7')           return 'claude-opus-4-7';
   if (norm === 'claude-opus-4-6')           return 'claude-opus-4-6';
   if (norm === 'claude-sonnet-4-6')         return 'claude-sonnet-4-6';
   if (norm.startsWith('claude-haiku'))      return 'claude-haiku-4-5';
+  if (norm === 'gpt-5.6' || norm === 'gpt-5.6-sol') return 'gpt-5.6-sol';
+  if (norm === 'gpt-5.6-terra')             return 'gpt-5.6-terra';
+  if (norm === 'gpt-5.6-luna')              return 'gpt-5.6-luna';
   if (norm === 'gpt-5.5-pro')               return 'gpt-5.5-pro';
   if (norm === 'gpt-5.5')                   return 'gpt-5.5';
   if (norm === 'gpt-5.4')                   return 'gpt-5.4';
@@ -254,19 +318,34 @@ export function findAliasKey(modelId: string): string | null {
   if (norm === 'gpt-5.4-nano')              return 'gpt-5.4-nano';
   if (norm === 'gpt-4.1')                   return 'gpt-4.1';
   if (norm === 'gpt-4.1-mini')              return 'gpt-4.1-mini';
+  if (norm === 'o3-pro')                    return 'o3-pro';
+  if (norm === 'o3')                        return 'o3';
   if (norm === 'gpt-4.1-nano')              return 'gpt-4.1-nano';
   if (norm.startsWith('gpt-4o'))            return 'gpt-4o';
+  if (norm === 'gemini-3.6-flash') return 'gemini-3.6-flash';
+  if (norm === 'gemini-3.5-flash-lite') return 'gemini-3.5-flash-lite';
   if (norm === 'gemini-3.5-flash') return 'gemini-3.5-flash';
   if (norm === 'gemini-3.1-pro' || norm === 'gemini-3.1-pro-preview') return 'gemini-3.1-pro-preview';
   if (norm === 'gemini-3.1-flash-lite') return 'gemini-3.1-flash-lite';
   if (norm === 'gemini-2.5-flash-lite') return 'gemini-2.5-flash-lite';
-  if (norm.includes('gemini') && norm.includes('flash-lite')) return norm.includes('3.1') ? 'gemini-3.1-flash-lite' : 'gemini-2.5-flash-lite';
-  if (norm.includes('gemini') && norm.includes('flash')) return norm.includes('3.5') ? 'gemini-3.5-flash' : 'gemini-2.5-flash';
+  if (norm.includes('gemini') && norm.includes('flash-lite')) {
+    if (norm.includes('3.5')) return 'gemini-3.5-flash-lite';
+    return norm.includes('3.1') ? 'gemini-3.1-flash-lite' : 'gemini-2.5-flash-lite';
+  }
+  if (norm.includes('gemini') && norm.includes('flash')) {
+    if (norm.includes('3.6')) return 'gemini-3.6-flash';
+    return norm.includes('3.5') ? 'gemini-3.5-flash' : 'gemini-2.5-flash';
+  }
   if (norm.includes('gemini') && norm.includes('pro'))   return 'gemini-2.5-pro';
   if (norm === 'sonar-deep-research')       return 'sonar-deep-research';
   if (norm === 'sonar-reasoning-pro')       return 'sonar-reasoning-pro';
   if (norm === 'sonar-pro')                 return 'sonar-pro';
   if (norm === 'sonar')                     return 'sonar';
+  if (norm === 'deepseek-v4-pro')           return 'deepseek-v4-pro';
+  if (norm === 'deepseek-v4-flash')         return 'deepseek-v4-flash';
+  if (norm === 'command-a-plus-05-2026' || norm === 'command-a-plus') return 'command-a-plus-05-2026';
+  if (norm === 'glm-5.1' || norm === 'glm-5-1') return 'glm-5.1';
+  if (norm === 'minimax-m2.7')              return 'minimax-m2.7';
   if (norm.includes('llama-3.3') && norm.includes('70b')) return 'llama-3.3-70b';
   if (norm.includes('llama-3.1') && norm.includes('8b'))  return 'llama-3.1-8b';
   if (norm.includes('mistral-large'))        return 'mistral-large';
@@ -377,6 +456,85 @@ function providerFromModelPrefix(modelId: string): LLMProvider | null {
     'ollama',
     'github-models',
   ].includes(head)) return head as LLMProvider;
+  return null;
+}
+
+export interface PlainChatModelRoute {
+  provider: LLMProvider;
+  model: string;
+}
+
+// Only providers with a fixed, code-owned destination in llm-proxy belong in
+// the browser's hosted text-only lane. Ollama and OpenAI-compatible endpoints
+// are intentionally local-bridge concerns (the hosted edge rejects arbitrary
+// destinations), while Replicate is not a chat provider there at all.
+const HOSTED_PLAIN_CHAT_PROVIDERS: ReadonlySet<LLMProvider> = new Set([
+  'anthropic',
+  'openai',
+  'openrouter',
+  'groq',
+  'github-models',
+  'huggingface',
+  'zai',
+  'minimax',
+  'google_ai',
+  'mistral_ai',
+  'cohere',
+  'perplexity',
+  'together_ai',
+  'fireworks_ai',
+  'deepseek',
+]);
+
+/**
+ * Resolve one user-selected text model to exactly one no-tools provider route.
+ * Unlike resolveProviderRoutes this never builds a fallback chain: a pinned
+ * model stays pinned, and an unknown/local-only id fails visibly to its caller.
+ */
+export function resolvePlainChatModelRoute(
+  modelId: string | null | undefined,
+): PlainChatModelRoute | null {
+  const normalized = String(modelId || '').trim();
+  if (!normalized || normalized === 'auto') {
+    return { provider: 'anthropic', model: 'claude-sonnet-4-6' };
+  }
+
+  if (/^claude-/i.test(normalized)) return { provider: 'anthropic', model: normalized };
+  if (/^cswan801\/blackswan/i.test(normalized)) {
+    return { provider: 'huggingface', model: normalized };
+  }
+  if (/^hf:/i.test(normalized)) {
+    const huggingFaceModel = normalized.slice(3).trim();
+    return huggingFaceModel
+      ? { provider: 'huggingface', model: huggingFaceModel }
+      : null;
+  }
+
+  const slashIndex = normalized.indexOf('/');
+  if (slashIndex > 0) {
+    const rawProvider = normalized.slice(0, slashIndex).toLowerCase();
+    const provider = rawProvider === 'huggingface_endpoint' || rawProvider === 'hugging_face'
+      ? 'huggingface'
+      : rawProvider === 'z_ai'
+        ? 'zai'
+        : rawProvider;
+    if (HOSTED_PLAIN_CHAT_PROVIDERS.has(provider as LLMProvider)) {
+      return { provider: provider as LLMProvider, model: normalized };
+    }
+  }
+
+  if (/^(?:gpt-|o[134]\b|chatgpt-)/i.test(normalized)) {
+    return { provider: 'openai', model: normalized };
+  }
+  if (/^gemini[-_./]/i.test(normalized)) return { provider: 'google_ai', model: normalized };
+  if (/^sonar(?:-|$)/i.test(normalized)) return { provider: 'perplexity', model: normalized };
+  if (/^(?:mistral-|ministral-|codestral-)/i.test(normalized)) return { provider: 'mistral_ai', model: normalized };
+  if (/^deepseek-/i.test(normalized)) return { provider: 'deepseek', model: normalized };
+  if (/^(?:glm-5|glm-)/i.test(normalized)) return { provider: 'zai', model: normalized };
+  if (/^minimax-/i.test(normalized)) return { provider: 'minimax', model: normalized };
+  if (/^(?:llama-3\.3-70b-versatile|mixtral-)/i.test(normalized)) {
+    return { provider: 'groq', model: normalized };
+  }
   return null;
 }
 

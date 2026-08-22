@@ -70,7 +70,29 @@ export function resolveModelForProfile(
   // Sonnet route they have connected; otherwise the direct Anthropic model.
   const anthropicConnected = hasProvider(connectedProviders, 'anthropic');
   const orConnected = hasProvider(connectedProviders, 'openrouter');
-  if (!anthropicConnected && orConnected) return 'openrouter/anthropic/claude-sonnet-4-6';
+  if (anthropicConnected) return 'claude-sonnet-4-6';
+  if (orConnected) return 'openrouter/anthropic/claude-sonnet-4-6';
+  // Neither Sonnet route has a connected Marketplace key. Resolve through the
+  // ladder restricted to the connected providers so Auto names a model the
+  // account can actually call; lanes without the pre-dispatch fallback core
+  // (computer-task planning) would otherwise carry an uncallable Sonnet id to
+  // the edge and take a key_missing credential quarantine. With no connected
+  // providers at all, keep the Sonnet default so the catalog gate fails
+  // closed with its connect-a-provider message instead of inventing a route.
+  if (connectedProviders && connectedProviders.size > 0) {
+    const laddered = resolveModelForSoul(
+      spiritIdForProfile(profile),
+      'auto',
+      intent,
+      complexity,
+      undefined,
+      undefined,
+      connectedProviders,
+      opts,
+      message,
+    );
+    if (laddered) return laddered;
+  }
   return 'claude-sonnet-4-6';
 }
 
@@ -256,84 +278,83 @@ export function resolveModelForSoul(
 
   const directNano = firstConnected(connectedProviders, [
     ['ollama', 'ollama/llama3.2'],
-    ['openai', 'openai/gpt-5.4-nano'],
+    ['openai', 'openai/gpt-5.6-luna'],
     ['groq', 'groq/llama-3.3-70b-versatile'],
-    ['google_ai', 'google_ai/gemini-3.1-flash-lite'],
-    ['deepseek', 'deepseek/deepseek-chat'],
-    ['mistral_ai', 'mistral_ai/mistral-small-latest'],
-    ['zai', 'zai/glm-4-flash'],
-    ['minimax', 'minimax/MiniMax-Text-01'],
+    ['google_ai', 'google_ai/gemini-3.5-flash-lite'],
+    ['deepseek', 'deepseek/deepseek-v4-flash'],
+    ['mistral_ai', 'mistral_ai/mistral-small-2603'],
+    ['zai', 'zai/glm-5.1'],
+    ['minimax', 'minimax/MiniMax-M2.5-highspeed'],
   ]);
   const directFast = firstConnected(connectedProviders, [
     ['groq', 'groq/llama-3.3-70b-versatile'],
-    ['google_ai', 'google_ai/gemini-3.5-flash'],
-    ['openai', 'openai/gpt-5.4-mini'],
-    ['deepseek', 'deepseek/deepseek-chat'],
-    ['mistral_ai', 'mistral_ai/mistral-large-latest'],
+    ['google_ai', 'google_ai/gemini-3.6-flash'],
+    ['openai', 'openai/gpt-5.6-terra'],
+    ['deepseek', 'deepseek/deepseek-v4-flash'],
+    ['mistral_ai', 'mistral_ai/mistral-small-2603'],
     ['together_ai', 'together_ai/meta-llama/Llama-3.3-70B-Instruct-Turbo'],
-    ['fireworks_ai', 'fireworks_ai/accounts/fireworks/models/llama-v3p1-405b-instruct'],
+    ['fireworks_ai', 'fireworks_ai/accounts/fireworks/models/gpt-oss-120b'],
     ['huggingface', 'huggingface/Qwen/Qwen3-32B'],
-    ['zai', 'zai/glm-4-air'],
-    ['minimax', 'minimax/MiniMax-Text-01'],
+    ['zai', 'zai/glm-5.1'],
+    ['minimax', 'minimax/MiniMax-M2.7-highspeed'],
   ]);
   const directStrong = firstConnected(connectedProviders, [
-    ['openai', 'openai/gpt-5.5'],
-    ['google_ai', 'google_ai/gemini-3.5-flash'],
-    ['google_ai', 'google_ai/gemini-2.5-pro'],
-    ['deepseek', 'deepseek/deepseek-reasoner'],
-    ['mistral_ai', 'mistral_ai/mistral-large-latest'],
-    ['cohere', 'cohere/command-r-plus'],
-    ['together_ai', 'together_ai/Qwen/Qwen3-235B-A22B-fp8-tput'],
-    ['fireworks_ai', 'fireworks_ai/accounts/fireworks/models/deepseek-r1'],
-    ['zai', 'zai/glm-5'],
-    ['minimax', 'minimax/MiniMax-M1'],
+    ['openai', 'openai/gpt-5.6-sol'],
+    ['google_ai', 'google_ai/gemini-3.6-flash'],
+    ['deepseek', 'deepseek/deepseek-v4-pro'],
+    ['mistral_ai', 'mistral_ai/mistral-medium-3-5'],
+    ['cohere', 'cohere/command-a-plus-05-2026'],
+    ['together_ai', 'together_ai/deepseek-ai/DeepSeek-V4-Pro'],
+    ['fireworks_ai', 'fireworks_ai/accounts/fireworks/models/deepseek-v3p1'],
+    ['zai', 'zai/glm-5.1'],
+    ['minimax', 'minimax/MiniMax-M2.7'],
     ['huggingface', 'huggingface/Qwen/Qwen3-235B-A22B'],
   ]);
   const directCode = firstConnected(connectedProviders, [
-    ['openai', 'openai/gpt-5.5'],
-    ['mistral_ai', 'mistral_ai/codestral-latest'],
-    ['deepseek', 'deepseek/deepseek-chat'],
-    ['together_ai', 'together_ai/Qwen/Qwen3-235B-A22B-fp8-tput'],
-    ['fireworks_ai', 'fireworks_ai/accounts/fireworks/models/deepseek-r1'],
-    ['zai', 'zai/glm-5'],
+    ['openai', 'openai/gpt-5.6-sol'],
+    ['mistral_ai', 'mistral_ai/codestral-2508'],
+    ['deepseek', 'deepseek/deepseek-v4-pro'],
+    ['together_ai', 'together_ai/Qwen/Qwen3.7-Max'],
+    ['fireworks_ai', 'fireworks_ai/accounts/fireworks/models/deepseek-v3p1'],
+    ['zai', 'zai/glm-5.1'],
     ['huggingface', 'huggingface/Qwen/Qwen3-235B-A22B'],
   ]) || directStrong;
   const directReasoner = firstConnected(connectedProviders, [
-    ['openai', 'openai/gpt-5.5'],
-    ['deepseek', 'deepseek/deepseek-reasoner'],
-    ['google_ai', 'google_ai/gemini-2.5-pro'],
-    ['fireworks_ai', 'fireworks_ai/accounts/fireworks/models/deepseek-r1'],
-    ['together_ai', 'together_ai/Qwen/Qwen3-235B-A22B-fp8-tput'],
+    ['openai', 'openai/gpt-5.6-sol'],
+    ['deepseek', 'deepseek/deepseek-v4-pro'],
+    ['google_ai', 'google_ai/gemini-3.6-flash'],
+    ['fireworks_ai', 'fireworks_ai/accounts/fireworks/models/deepseek-r1-0528'],
+    ['together_ai', 'together_ai/deepseek-ai/DeepSeek-V4-Pro'],
   ]) || directStrong;
   const directResearch = firstConnected(connectedProviders, [
     ['perplexity', 'perplexity/sonar-deep-research'],
     ['perplexity', 'perplexity/sonar-reasoning-pro'],
     ['perplexity', 'perplexity/sonar-pro'],
-    ['google_ai', 'google_ai/gemini-2.5-pro'],
-    ['openai', 'openai/gpt-5.5'],
-    ['cohere', 'cohere/command-r-plus'],
-    ['deepseek', 'deepseek/deepseek-reasoner'],
+    ['google_ai', 'google_ai/gemini-3.6-flash'],
+    ['openai', 'openai/gpt-5.6-sol'],
+    ['cohere', 'cohere/command-a-reasoning-08-2025'],
+    ['deepseek', 'deepseek/deepseek-v4-pro'],
   ]) || directReasoner || directStrong;
   const directBrowser = firstConnected(connectedProviders, [
-    ['google_ai', 'google_ai/gemini-3.5-flash'],
-    ['openai', 'openai/gpt-5.4-mini'],
+    ['google_ai', 'google_ai/gemini-3.6-flash'],
+    ['openai', 'openai/gpt-5.6-terra'],
     ['anthropic', SONNET],
-    ['mistral_ai', 'mistral_ai/mistral-large-latest'],
-    ['deepseek', 'deepseek/deepseek-chat'],
+    ['mistral_ai', 'mistral_ai/mistral-medium-3-5'],
+    ['deepseek', 'deepseek/deepseek-v4-flash'],
   ]) || directFast || directStrong;
   const directLong = firstConnected(connectedProviders, [
-    ['google_ai', 'google_ai/gemini-3.5-flash'],
-    ['google_ai', 'google_ai/gemini-2.5-pro'],
-    ['minimax', 'minimax/MiniMax-M1'],
-    ['cohere', 'cohere/command-r-plus'],
-    ['openai', 'openai/gpt-5.5'],
+    ['google_ai', 'google_ai/gemini-3.6-flash'],
+    ['deepseek', 'deepseek/deepseek-v4-pro'],
+    ['minimax', 'minimax/MiniMax-M2.7'],
+    ['cohere', 'cohere/command-a-plus-05-2026'],
+    ['openai', 'openai/gpt-5.6-sol'],
   ]) || directStrong;
 
   const OR_SONNET = 'openrouter/anthropic/claude-sonnet-4-6';
-  const OR_REASONER = 'openrouter/openai/gpt-5.5';
-  const OR_FAST = 'openrouter/openai/gpt-5.4-mini';
-  const OR_LONG = 'openrouter/google/gemini-3.5-flash';
-  const OR_BROWSER = 'openrouter/google/gemini-3.5-flash';
+  const OR_REASONER = 'openrouter/openai/gpt-5.6-sol';
+  const OR_FAST = 'openrouter/openai/gpt-5.6-terra';
+  const OR_LONG = 'openrouter/google/gemini-3.6-flash';
+  const OR_BROWSER = 'openrouter/google/gemini-3.6-flash';
 
   // Exploring phase: ask one focused question — Haiku is plenty, ~2-3x
   // faster than Sonnet. User-visible latency drops hard here because
@@ -655,21 +676,25 @@ export function explainAutoModelChoice(
 const MODEL_FAILOVER: Record<string, string[]> = {
   [BLACKSWAN_ENDPOINT_MODEL_ID]:     ['claude-haiku-4-5-20251001', 'claude-sonnet-4-6'],
   [BLACKSWAN_PUBLIC_MODEL_ID]:       ['claude-haiku-4-5-20251001', 'claude-sonnet-4-6'],
-  'claude-sonnet-4-6':          ['claude-haiku-4-5-20251001', 'gemini-2.5-flash'],
+  'claude-sonnet-4-6':          ['claude-haiku-4-5-20251001', 'gemini-3.1-flash-lite'],
+  'claude-sonnet-5':            ['claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
+  'claude-opus-5':              ['claude-sonnet-5', 'claude-sonnet-4-6'],
   'claude-fable-5':             ['claude-opus-4-8', 'claude-sonnet-4-6'],
   'claude-opus-4-8':            ['claude-opus-4-7', 'claude-sonnet-4-6'],
   'claude-opus-4-7':            ['claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
   'claude-opus-4-6':            ['claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
   'gpt-5.5-pro':                ['gpt-5.5', 'gpt-5.4', 'claude-sonnet-4-6'],
+  'gpt-5.6-sol':                ['gpt-5.6-terra', 'gpt-5.6-luna', 'claude-sonnet-4-6'],
+  'gpt-5.6-terra':              ['gpt-5.6-luna', 'gpt-5.4-mini', 'claude-sonnet-4-6'],
+  'gpt-5.6-luna':               ['gpt-5.4-nano', 'gemini-3.5-flash-lite'],
   'gpt-5.5':                    ['gpt-5.4', 'gpt-5.4-mini', 'claude-sonnet-4-6'],
   'gpt-5.4':                    ['gpt-5.4-mini', 'gpt-4.1', 'claude-sonnet-4-6'],
   'gpt-5.4-mini':               ['gpt-4.1', 'gemini-3.1-flash-lite'],
-  'claude-haiku-4-5-20251001':  ['gemini-2.5-flash'],
-  'gemini-3.5-flash':           ['gemini-2.5-pro', 'gemini-2.5-flash'],
-  'gemini-3.1-pro-preview':     ['gemini-2.5-pro', 'claude-sonnet-4-6'],
-  'gemini-3.1-flash-lite':      ['gemini-2.5-flash-lite', 'gemini-2.5-flash'],
-  'gemini-2.5-pro':             ['claude-haiku-4-5-20251001'],
-  'gemini-2.5-flash':           ['claude-haiku-4-5-20251001'],
+  'claude-haiku-4-5-20251001':  ['gemini-3.1-flash-lite'],
+  'gemini-3.6-flash':           ['gemini-3.5-flash', 'gemini-3.1-flash-lite'],
+  'gemini-3.5-flash':           ['gemini-3.1-flash-lite', 'claude-haiku-4-5-20251001'],
+  'gemini-3.5-flash-lite':      ['gemini-3.1-flash-lite', 'claude-haiku-4-5-20251001'],
+  'gemini-3.1-flash-lite':      ['claude-haiku-4-5-20251001'],
   'sonar-deep-research':        ['sonar-reasoning-pro', 'sonar-pro'],
   'sonar-reasoning-pro':        ['sonar-pro', 'sonar'],
 };

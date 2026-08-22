@@ -9,12 +9,26 @@
     # strings to verify redaction. Keep Netlify secret scanning enabled for the
     # app, build output, and every other repo file; omit only the reviewed test
     # fixtures that smart detection reported as false positives.
-    SECRETS_SCAN_OMIT_PATHS = "scripts/agent-run-proof-publisher-core-smoketest.ts,scripts/approval-intent-preview-smoketest.ts,scripts/approval-preview-core-smoketest.ts,scripts/chat-multi-intent-core-smoketest.ts,scripts/chat-session-resumption-core-smoketest.ts,scripts/connected-resources-panel-core-smoketest.ts,scripts/failure-recovery-copy-core-smoketest.ts,scripts/integration-health-badge-core-smoketest.ts,scripts/memory-provenance-core-smoketest.ts,scripts/messaging-notify-smoketest.ts,scripts/office-bridge-diag-panel-core-smoketest.ts,scripts/proactive-surfacing-core-smoketest.ts,scripts/room-message-metadata-bounds-smoketest.ts,scripts/run-outcome-memory-core-smoketest.ts,scripts/transport-failover-badge-core-smoketest.ts,scripts/user-memory-caps-smoketest.ts,scripts/verification-diagnostics-core-smoketest.ts"
+    SECRETS_SCAN_OMIT_PATHS = "scripts/agent-run-proof-publisher-core-smoketest.ts,scripts/approval-intent-preview-smoketest.ts,scripts/approval-preview-core-smoketest.ts,scripts/chat-multi-intent-core-smoketest.ts,scripts/chat-session-resumption-core-smoketest.ts,scripts/connected-resources-panel-core-smoketest.ts,scripts/failure-recovery-copy-core-smoketest.ts,scripts/integration-health-badge-core-smoketest.ts,scripts/memory-provenance-core-smoketest.ts,scripts/messaging-notify-smoketest.ts,scripts/office-bridge-diag-panel-core-smoketest.ts,scripts/proactive-surfacing-core-smoketest.ts,scripts/room-message-metadata-bounds-smoketest.ts,scripts/run-outcome-memory-core-smoketest.ts,scripts/transport-failover-badge-core-smoketest.ts,scripts/user-memory-caps-smoketest.ts,scripts/verification-diagnostics-core-smoketest.ts,scripts/llm-proxy-client-error-smoketest.ts,scripts/swanbot-stream-client-error-smoketest.ts"
+
+# These public capability flags are enabled only in hosted artifacts after the
+# matching §37-followup and §45 SQL were individually applied and verified.
+# Keep local/default builds fail-closed through `.env.example`.
+[context.production.environment]
+  EXPO_PUBLIC_OFFICE_ATTENTION_SERVER_CLOCK_V1 = "true"
+  EXPO_PUBLIC_OFFICE_USER_PREFERENCES_STORAGE_V1 = "true"
+
+# The current production artifact is promoted from draft PR #7's immutable
+# deploy-preview build, so that exact build context must compile the same gates.
+[context.deploy-preview.environment]
+  EXPO_PUBLIC_OFFICE_ATTENTION_SERVER_CLOCK_V1 = "true"
+  EXPO_PUBLIC_OFFICE_USER_PREFERENCES_STORAGE_V1 = "true"
 
 # Environment variables (set these in Netlify UI: Site Settings → Environment variables)
 # EXPO_PUBLIC_SUPABASE_URL
 # EXPO_PUBLIC_SUPABASE_ANON_KEY
-# EXPO_PUBLIC_GEMINI_API_KEY
+# Never configure provider/server credentials under EXPO_PUBLIC_*. The
+# prebuild public-env security gate rejects them before Expo can inline them.
 
 # Environment variables must be configured in Netlify UI (Site Settings → Environment variables)
 # Never hardcode API keys here
@@ -27,13 +41,15 @@
     X-Content-Type-Options = "nosniff"
     X-XSS-Protection = "1; mode=block"
     Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), geolocation=(), microphone=(), payment=(), usb=()"
+    Cross-Origin-Opener-Policy = "same-origin-allow-popups"
     # connect-src allows localhost / 127.0.0.1 over both http and ws so the
     # web app at app.chrisswanson.xyz can talk to the user's locally-running
     # bridges (claude-bridge :7778, codex :7779, gemini :7780, cursor :7781,
     # openswan-proxy :18790). Without these the browser silently blocks the
     # fetch and bridges look offline. localhost is exempt from mixed-content
     # restrictions but CSP still applies.
-    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: blob:; font-src 'self' data:; connect-src 'self' https://*.supabase.co wss://*.supabase.co http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:* https://api.mainnet-beta.solana.com https://api.devnet.solana.com https://solana-rpc.publicnode.com https://rpc.ankr.com https://*.infura.io https://*.alchemy.com https://*.quicknode.pro https://generativelanguage.googleapis.com https://api.openai.com https://api.anthropic.com https://api.coinbase.com https://api.coingecko.com https://cdn-icons-png.freepik.com; frame-src 'self';"
+    Content-Security-Policy = "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: blob:; font-src 'self' data:; connect-src 'self' https://rjkniqiqdtroeholxacg.supabase.co wss://rjkniqiqdtroeholxacg.supabase.co http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:* https://api.mainnet-beta.solana.com https://api.devnet.solana.com https://solana-rpc.publicnode.com https://rpc.ankr.com https://*.infura.io https://*.alchemy.com https://*.quicknode.pro https://api.coinbase.com https://api.coingecko.com https://hacker-news.firebaseio.com https://cdn-icons-png.freepik.com; frame-src 'self'; form-action 'self' https://rjkniqiqdtroeholxacg.supabase.co; upgrade-insecure-requests;"
 
 # Cache static assets
 [[headers]]
@@ -44,7 +60,13 @@
 [[headers]]
   for = "*.js"
   [headers.values]
-    Cache-Control = "public, max-age=31536000, immutable"
+    # Expo/Metro can keep an entry-chunk filename stable while changing the
+    # dynamic-import path table embedded in that chunk. Treating every JS file
+    # as immutable can therefore mix old and new module graphs after a deploy
+    # and produce runtime errors such as "export is not a function". Always
+    # revalidate JS; images and other truly content-addressed assets stay
+    # immutable below.
+    Cache-Control = "public, max-age=0, must-revalidate"
 
 [[headers]]
   for = "*.css"
@@ -60,6 +82,16 @@
   for = "*.jpg"
   [headers.values]
     Cache-Control = "public, max-age=31536000, immutable"
+
+# Missing Expo modules must stay honest 404s. Without this shadowed rule, the
+# SPA catch-all returns index.html with HTTP 200 for a retired JavaScript chunk,
+# which turns a recoverable deploy-skew event into an opaque module parse/load
+# error. Existing files still win because this redirect is intentionally not
+# forced.
+[[redirects]]
+  from = "/_expo/*"
+  to = "/404.html"
+  status = 404
 
 # SPA redirect (must be last)
 [[redirects]]

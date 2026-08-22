@@ -53,6 +53,8 @@ for (const requiredTool of [
   'desktop.open_path',
   'desktop.convert_image',
   'browser.locator_actionability',
+  'browser.wait_for',
+  'browser.scroll',
 ]) {
   assert(v2ClientOnly.has(requiredTool), `${requiredTool}: exposed as v2 clientOnly tool`);
   assert(handled.has(requiredTool), `${requiredTool}: handled by client dispatcher`);

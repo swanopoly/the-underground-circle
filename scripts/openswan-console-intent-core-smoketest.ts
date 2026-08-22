@@ -38,6 +38,7 @@ import {
   GUARDRAIL_WATCH_OPTIONS,
   INTENT_CONTROL_STEPS,
   inferIntentFromTask,
+  shouldRequireLiveCapabilityPreflight,
   stripIntentFraming,
   buildIntentTaskDraft,
   normalizeGuardrailPrefs,
@@ -128,16 +129,31 @@ function main(): void {
   assertEq(inferIntentFromTask('investigate and audit the choices')?.key, 'research', '(4) investigate/audit → research');
   assertEq(inferIntentFromTask('automate the weekly report')?.key, 'automation', '(4) automate/weekly → automation');
   assertEq(inferIntentFromTask('schedule a daily cron job')?.key, 'automation', '(4) schedule/daily/cron → automation');
+  assertEq(inferIntentFromTask('open Adobe Illustrator for me')?.key, 'desktop', '(4) named creative desktop app → desktop');
+  assertEq(inferIntentFromTask('launch Photoshop and create a document')?.key, 'desktop', '(4) Photoshop launch → desktop');
+  assertEq(inferIntentFromTask('review the app code and run typecheck')?.key, 'files', '(4) incidental app noun does not override a code task');
+  assertEq(inferIntentFromTask('have Cursor review the code')?.key, 'files', '(4) connected Cursor agent name does not imply desktop control');
+  assertEq(inferIntentFromTask('open Cursor and focus its window')?.key, 'desktop', '(4) explicit Cursor app control → desktop');
 
   // ─── (5) inferIntentFromTask — precedence + null cases ────────────────────
   // "login" keyword group runs before the browser group.
   assertEq(inferIntentFromTask('login to the website and click submit')?.key, 'website', '(5) login precedence beats browser keywords');
+  assertEq(inferIntentFromTask('build a weekly code review automation')?.key, 'automation', '(5) overall automation job beats incidental build/code words');
+  assertEq(inferIntentFromTask('research browser automation options')?.key, 'research', '(5) research job beats incidental browser/automation nouns');
   assertEq(inferIntentFromTask(''), null, '(5) empty → null');
   assertEq(inferIntentFromTask('   '), null, '(5) whitespace → null');
   assertEq(inferIntentFromTask('hello there friend'), null, '(5) unmatched chatter → null');
   assertEq(inferIntentFromTask('the quick brown fox'), null, '(5) unmatched prose → null');
   // determinism / purity: same call, same reference twice.
   assert(inferIntentFromTask('extract data now') === inferIntentFromTask('extract data now'), '(5) deterministic (same object ref)');
+
+  // Capability checks are launch blockers only for concrete live-work modes.
+  assertEq(shouldRequireLiveCapabilityPreflight(desktop, 'execute'), true, '(5) desktop execute requires live preflight');
+  assertEq(shouldRequireLiveCapabilityPreflight(files, 'build'), true, '(5) file build requires live preflight');
+  assertEq(shouldRequireLiveCapabilityPreflight(files, 'review'), true, '(5) file review requires live preflight');
+  assertEq(shouldRequireLiveCapabilityPreflight(automation, 'plan'), false, '(5) automation planning can proceed before runtime setup');
+  assertEq(shouldRequireLiveCapabilityPreflight(research, 'research'), false, '(5) research does not inherit Browserbase execution blocking');
+  assertEq(shouldRequireLiveCapabilityPreflight(null, 'execute'), false, '(5) no inferred workflow adds no capability blocker');
 
   // ─── (6) stripIntentFraming — single frame, idempotence, stacking ─────────
   assertEq(stripIntentFraming('open example.com'), 'open example.com', '(6) unframed body unchanged');

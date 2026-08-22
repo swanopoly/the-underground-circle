@@ -17,12 +17,10 @@ function unique(values: Array<string | null | undefined>): string[] {
 
 function isOpenSwanMainAgent(agent: AgentSubjectLike): boolean {
   const id = String(agent.id || '').toLowerCase();
-  const name = String(agent.name || '').toLowerCase();
   return id === 'default::blackswan'
+    || id === 'blackswan-default'
     || id === 'blackswan'
-    || id === 'openswan:main_chat'
-    || name === 'openswan'
-    || name === 'blackswan';
+    || id === 'openswan:main_chat';
 }
 
 export type AgentRuntimeSubject = {
@@ -247,7 +245,6 @@ export function buildAgentRuntimeSubject(
       runAgentId,
       dbAgentId,
       ...baseAliases,
-      agent.name,
     ]),
     legacyIds,
     metadata,

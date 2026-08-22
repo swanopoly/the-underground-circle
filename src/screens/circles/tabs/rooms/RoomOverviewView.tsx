@@ -118,7 +118,7 @@ function RoomOverviewView({ roomId, circleId, accentColor }: Props) {
   const stats: StatCard[] = useMemo(() => [
     { label: 'FILES',    icon: '[]', value: fileCount,    color: '#6366f1' },
     { label: 'TASKS',    icon: '//', value: taskCount,    color: '#f59e0b' },
-    { label: 'MESSAGES', icon: '>#', value: messageCount, color: '#22d3ee' },
+    { label: 'MESSAGES', icon: '>#', value: messageCount, color: '#6366f1' },
     { label: 'AGENTS',   icon: '@',  value: agentCount,   color: '#22c55e' },
   ], [fileCount, taskCount, messageCount, agentCount]);
 

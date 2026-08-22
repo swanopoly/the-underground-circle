@@ -6,6 +6,7 @@
 
 import { Platform } from 'react-native';
 import { supabase } from './supabase';
+import { findSafeCircleProfileByUsername, loadSafeCircleProfiles } from './safeProfiles';
 import type { Chain, ChainConfig, Token, NFT, Transaction, SwapQuote, StakeAccount, PriceData, Portfolio, GasEstimate } from '../types';
 
 // ─── Constants & Chain Configs ──────────────────────────────────────────────
@@ -506,22 +507,13 @@ export async function removeWalletFromProfile(chain: CryptoChain): Promise<void>
   }
 }
 
-export async function getMemberWallets(userId: string): Promise<MultiWallet> {
+export async function getMemberWallets(userId: string, circleId?: string): Promise<MultiWallet> {
   const result: MultiWallet = { ethereum: null, solana: null };
+  if (!circleId) return result;
   try {
-    const { data } = await supabase
-      .from('profiles')
-      .select('wallet_address_eth, wallet_address_sol, wallet_address, wallet_chain')
-      .eq('id', userId)
-      .single();
+    const [data] = await loadSafeCircleProfiles({ circleId, userIds: [userId] });
     if (!data) return result;
-    if (data.wallet_address_eth) {
-      result.ethereum = { address: data.wallet_address_eth, chain: 'ethereum', connected: true };
-    }
-    if (data.wallet_address_sol) {
-      result.solana = { address: data.wallet_address_sol, chain: 'solana', connected: true };
-    }
-    if (!result.ethereum && !result.solana && data.wallet_address) {
+    if (data.wallet_address) {
       const chain = (data.wallet_chain || 'ethereum') as CryptoChain;
       result[chain] = { address: data.wallet_address, chain, connected: true };
     }
@@ -690,13 +682,10 @@ export async function sendSOL(
 
 // ─── Resolve Member Wallet ───────────────────────────────────────────────────
 
-export async function getMemberWallet(userId: string): Promise<{ address: string; chain: string } | null> {
+export async function getMemberWallet(userId: string, circleId?: string): Promise<{ address: string; chain: string } | null> {
+  if (!circleId) return null;
   try {
-    const { data } = await supabase
-      .from('profiles')
-      .select('wallet_address, wallet_chain')
-      .eq('id', userId)
-      .single();
+    const [data] = await loadSafeCircleProfiles({ circleId, userIds: [userId] });
     if (data?.wallet_address) {
       return { address: data.wallet_address, chain: data.wallet_chain || 'ethereum' };
     }
@@ -704,14 +693,16 @@ export async function getMemberWallet(userId: string): Promise<{ address: string
   return null;
 }
 
-export async function getMemberByUsername(username: string): Promise<{ id: string; display_name: string; wallet_address?: string; wallet_chain?: string } | null> {
+export async function getMemberByUsername(username: string, circleId?: string): Promise<{ id: string; display_name: string; wallet_address?: string; wallet_chain?: string } | null> {
+  if (!circleId) return null;
   try {
-    const { data } = await supabase
-      .from('profiles')
-      .select('id, display_name, username, wallet_address, wallet_chain')
-      .ilike('username', username)
-      .single();
-    return data;
+    const data = await findSafeCircleProfileByUsername(circleId, username);
+    return data ? {
+      id: data.id,
+      display_name: data.display_name || data.username || 'Circle member',
+      wallet_address: data.wallet_address || undefined,
+      wallet_chain: data.wallet_chain || undefined,
+    } : null;
   } catch (e) { return null; }
 }
 

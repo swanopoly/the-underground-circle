@@ -77,17 +77,23 @@ export default function AppHeader({ navigation, title }: AppHeaderProps) {
 
   useEffect(() => {
     (async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user) {
-        const { data } = await supabase
-          .from('profiles')
-          .select('username, display_name, avatar_url')
-          .eq('id', user.id)
-          .single();
-        if (data) {
-          setUsername(data.display_name || data.username || '');
-          setAvatarUrl(data.avatar_url || null);
+      try {
+        const { safeGetUser } = await import('../lib/authSession');
+        const { value: user } = await safeGetUser();
+        if (user) {
+          const { data } = await supabase
+            .from('profiles')
+            .select('username, display_name, avatar_url')
+            .eq('id', user.id)
+            .single();
+          if (data) {
+            setUsername(data.display_name || data.username || '');
+            setAvatarUrl(data.avatar_url || null);
+          }
         }
+      } catch {
+        // Header identity is cosmetic — a failed load must never surface as
+        // an unhandled rejection from a component mounted on every screen.
       }
     })();
   }, []);

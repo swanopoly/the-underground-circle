@@ -93,7 +93,7 @@ export async function createEmailInvite(
   return { invite: data };
 }
 
-// ─── Read Invites ───────────────────────────────────────────────────
+// ─── Read managed invites ───────────────────────────────────────────
 
 export async function getCircleInvites(circleId: string): Promise<CircleInvite[]> {
   const { data } = await supabase
@@ -105,117 +105,27 @@ export async function getCircleInvites(circleId: string): Promise<CircleInvite[]
   return data || [];
 }
 
-export async function lookupInvite(inviteCode: string): Promise<{
-  invite?: CircleInvite;
-  circleName?: string;
-  inviterName?: string;
-  error?: string;
-}> {
-  const { data, error } = await supabase
-    .from('circle_invites')
-    .select('*')
-    .eq('invite_code', inviteCode)
-    .eq('status', 'pending')
-    .single();
-
-  if (error || !data) return { error: 'Invite not found or expired' };
-
-  // Check expiry
-  if (data.expires_at && new Date(data.expires_at) < new Date()) {
-    return { error: 'This invite has expired' };
-  }
-
-  // Check usage limit
-  if (data.max_uses > 0 && data.use_count >= data.max_uses) {
-    return { error: 'This invite has reached its usage limit' };
-  }
-
-  // Get circle name
-  const { data: circle } = await supabase
-    .from('circles')
-    .select('name')
-    .eq('id', data.circle_id)
-    .single();
-
-  // Get inviter name
-  const { data: inviter } = await supabase
-    .from('profiles')
-    .select('display_name, username')
-    .eq('id', data.invited_by)
-    .single();
-
-  return {
-    invite: data,
-    circleName: circle?.name,
-    inviterName: inviter?.display_name || inviter?.username,
-  };
-}
-
 // ─── Accept Invite ──────────────────────────────────────────────────
 
 export async function acceptInvite(inviteCode: string): Promise<{
   circleId?: string;
   error?: string;
 }> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return { error: 'Not authenticated' };
-
-  // Look up invite
-  const { invite, error: lookupError } = await lookupInvite(inviteCode);
-  if (lookupError || !invite) return { error: lookupError || 'Invalid invite' };
-
-  // Check if already a member
-  const { data: existing } = await supabase
-    .from('circle_members')
-    .select('id')
-    .eq('circle_id', invite.circle_id)
-    .eq('user_id', user.id)
-    .single();
-
-  if (existing) return { error: 'You are already a member of this circle' };
-
-  // Add to circle — record who invited them so we can award referral credit.
-  // Self-referrals (which shouldn't happen via the UI) are skipped via the
-  // RPC's guard, but we still set referred_by for analytics integrity.
-  const isSelfReferral = invite.invited_by === user.id;
-  const { error: joinError } = await supabase
-    .from('circle_members')
-    .insert({
-      circle_id: invite.circle_id,
-      user_id: user.id,
-      role: invite.role === 'admin' ? 'creator' : 'member', // map admin → creator role
-      referred_by: isSelfReferral ? null : invite.invited_by,
-    });
-
-  if (joinError) return { error: joinError.message };
-
-  // Update invite usage
-  await supabase
-    .from('circle_invites')
-    .update({
-      use_count: invite.use_count + 1,
-      ...(invite.max_uses > 0 && invite.use_count + 1 >= invite.max_uses
-        ? { status: 'accepted' }
-        : {}),
-    })
-    .eq('id', invite.id);
-
-  // Award referral bonus to the inviter — atomic, idempotent server-side.
-  // We don't await this strictly; if the RPC fails we still want the user
-  // to land in the circle. Errors are logged so they're debuggable.
-  if (!isSelfReferral && invite.invited_by) {
-    supabase
-      .rpc('award_referral_bonus', {
-        p_inviter_id: invite.invited_by,
-        p_invitee_id: user.id,
-        p_circle_id: invite.circle_id,
-      })
-      .then(({ error: bonusErr }) => {
-        if (bonusErr) console.warn('[invites] award_referral_bonus failed:', bonusErr);
-      });
+  const { data, error } = await supabase.rpc('join_circle_by_invite_code', {
+    p_invite_code: inviteCode.trim(),
+  });
+  if (error) {
+    return {
+      error: error.message?.includes('circle_full')
+        ? 'This circle is full'
+        : 'Invite not found, expired, or unavailable',
+    };
   }
 
-  return { circleId: invite.circle_id };
+  const joined = Array.isArray(data) ? data[0] : data;
+  return joined?.circle_id
+    ? { circleId: joined.circle_id }
+    : { error: 'The join could not be verified' };
 }
 
 // ─── Referral stats ─────────────────────────────────────────────────

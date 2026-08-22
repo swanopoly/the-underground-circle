@@ -18,16 +18,30 @@ import {
   TerminalMessage,
   TerminalMessageStatus,
   TerminalResponse,
-  sendTerminalCommand,
+  sendTerminalCommandExact,
   loadTerminalHistory,
+  loadTerminalHistoryExact,
   loadResponsesForMessages,
+  loadResponsesForMessagesExact,
   subscribeToTerminalMessages,
   deleteTerminalMessage,
+  deleteTerminalMessageExact,
+  buildTerminalCommandTargetReceipt,
+  createTerminalAuthorityOperationFence,
+  isTerminalCommandDispatchReceiptCurrent,
+  isTerminalMessageDeleteReceiptCurrent,
+  normalizeTerminalExactAuthority,
+  resolveTerminalTargetSelection,
+  terminalExactAuthorityMatches,
+  type TerminalAuthorityCurrentGuard,
+  type TerminalCommandDispatchReceipt,
+  type TerminalExactAuthority,
 } from '../lib/officeTerminal';
 import { supabase } from '../lib/supabase';
 import { subscribeWithReconnect } from '../lib/subscribeWithReconnect';
 import { getStrictLocalAiModeMessage, shouldBlockExternalAiProvider } from '../lib/privacyMode';
 import { CircleOfficeAgent } from '../lib/circleOffice';
+import { isConnectedOfficeStatus } from '../lib/officeAgents';
 import { awardPoints } from '../services/rewardService';
 import { getPointsForModel } from '../lib/badges';
 import AutomationsPanel from './AutomationsPanel';
@@ -38,6 +52,7 @@ import { PROVIDER_META, type ProviderType } from '../lib/connectionManager';
 import { detectClaudeCodeBridge, execBridgeCommand } from '../lib/claudeCodeDetector';
 import { executeDeviceCommand } from '../lib/deviceManager';
 import { getAllModels, formatModelOption, type RegisteredModel } from '../lib/modelRegistry';
+import { loadModelGroups } from '../lib/integrations/modelProviderRegistry';
 import {
   buildAgentRuntimeSubject,
   isUuidLike,
@@ -75,6 +90,7 @@ const BS = {
 } as const;
 
 const MONO = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
+const DEFAULT_BLACKSWAN_TARGET_ID = 'blackswan-default';
 
 type TerminalMode = 'execute' | 'plan' | 'explore' | 'fleet' | 'autopilot';
 
@@ -97,20 +113,20 @@ const TERMINAL_MODES: Array<{ key: TerminalMode; label: string; symbol: string; 
 const BASE_MODELS: Array<{ key: string | null; label: string; icon: string; color: string }> = [
   { key: null,             label: 'Auto',           icon: 'A', color: '#9e9e9e' },
   { key: 'blackswan',     label: 'BlackSwan',       icon: 'S', color: '#e8e8e8' },
+  // These are server-owned runtime shortcuts, not proof that a user's
+  // provider account lists the corresponding model. Account-backed Claude,
+  // OpenAI, and Google choices are added below from loadModelGroups with the
+  // provider embedded in the model id. In particular, never add bare GPT or
+  // Gemini ids here: on a BlackSwan target a bare id does not carry enough
+  // routing authority and can take a different fallback path than its label.
   { key: 'claude-haiku',  label: 'Haiku',           icon: 'H', color: '#b5b5b5' },
   { key: 'claude-sonnet', label: 'Sonnet',          icon: 'S', color: '#cecece' },
   { key: 'claude-opus',   label: 'Opus',            icon: 'O', color: '#ffffff' },
-  { key: 'gemini-flash',  label: 'Gemini 2.5',      icon: 'G', color: '#b5b5b5' },
-  { key: 'gpt-4.1',       label: 'GPT-4.1',         icon: '4', color: '#b5b5b5' },
-  { key: 'o4-mini',       label: 'O4 Mini',         icon: 'o', color: '#9e9e9e' },
   // HuggingSwan open models (via HF Inference Router)
   { key: 'qwen3.5',       label: 'Qwen 3.5',        icon: 'Q', color: '#c4b5fd' },
   { key: 'qwen3-coder',   label: 'Qwen Coder',      icon: 'C', color: '#a78bfa' },
   { key: 'nemotron',      label: 'Nemotron 3',       icon: 'N', color: '#86efac' },
   { key: 'kimi-k2.5',     label: 'Kimi K2.5',        icon: 'K', color: '#67e8f9' },
-  { key: 'glm-5',         label: 'GLM 5',            icon: '5', color: '#fca5a5' },
-  { key: 'minimax',       label: 'MiniMax M2.5',     icon: 'M', color: '#fdba74' },
-  { key: 'deepseek-r1',   label: 'DeepSeek R1',      icon: 'D', color: '#93c5fd' },
   { key: 'llama-3.3',     label: 'Llama 3.3',        icon: 'L', color: '#d9f99d' },
   { key: 'gpt-oss',       label: 'gpt-oss',          icon: 'g', color: '#e5e5e5' },
 ];
@@ -165,9 +181,18 @@ interface Props {
   // ── Layout ──
   compact?: boolean;  // true = hide header bar (used in the bottom drawer)
   initialTab?: 'commands' | 'automations';
+  // Compatibility surfaces may show immutable command history without exposing
+  // dispatch, automations, local shell, training, or agent-creation controls.
+  readOnly?: boolean;
+  readOnlyReason?: string;
+
+  // Exact auth snapshot owned by the mounting Office surface. Agent commands
+  // fail closed without it; compatibility/read-only mounts may omit it.
+  terminalAuthority?: TerminalExactAuthority | null;
+  isTerminalAuthorityCurrent?: TerminalAuthorityCurrentGuard;
 
   // ── Direct invocation callback (bypasses broadcast round-trip) ──
-  onCommandSent?: (params: {
+  onCommandSent?: (params: Readonly<{
     messageId: string;
     command: string;
     targetAgentId: string | null;
@@ -177,7 +202,10 @@ interface Props {
     targetAgentSubjects?: AgentRuntimeSubjectMetadata[] | null;
     model: string | null;
     senderId: string;
-  }) => void;
+    authority: TerminalExactAuthority;
+    targetFingerprint: string;
+    receipt: TerminalCommandDispatchReceipt;
+  }>) => void;
 }
 
 // ─── Built-in command descriptions ───────────────────────────────────────────
@@ -368,6 +396,22 @@ function ResponseCard({ resp }: { resp: TerminalResponse }) {
     );
   }
 
+  if (resp.status === 'streaming') {
+    return (
+      <View style={[cardStyles.card, cardStyles.streamingCard]}>
+        <View style={[cardStyles.cardHeader, cardStyles.streamingHeader]}>
+          <View style={[cardStyles.agentDot, { backgroundColor: BS.accentDim }]} />
+          <Text style={cardStyles.agentName}>{resp.agentName}</Text>
+          <Text style={cardStyles.streamingBadge}>HANDOFF OPEN · AWAITING VERIFIED RESULT</Text>
+        </View>
+        <ResponseContent text={resp.responseText || ''} />
+        <Text style={cardStyles.streamingNotice}>
+          Completion is unverified. Check the connected agent before retrying if dispatch was uncertain.
+        </Text>
+      </View>
+    );
+  }
+
   if (resp.status === 'error') {
     return (
       <View style={[cardStyles.card, { borderLeftColor: BS.error }]}>
@@ -376,7 +420,7 @@ function ResponseCard({ resp }: { resp: TerminalResponse }) {
           <Text style={[cardStyles.agentName, { color: BS.error }]}>{resp.agentName}</Text>
           <Text style={cardStyles.errorBadge}>ERR</Text>
         </View>
-        <Text style={cardStyles.errorText}>{resp.errorMessage || 'Unknown error'}</Text>
+        <Text style={cardStyles.errorText}>{resp.errorMessage || resp.responseText || 'Unknown error'}</Text>
       </View>
     );
   }
@@ -420,6 +464,37 @@ const cardStyles = StyleSheet.create({
     gap: 6,
     marginBottom: 4,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  streamingCard: {
+    borderColor: BS.borderLit,
+    borderLeftWidth: 3,
+    borderLeftColor: BS.accentDim,
+  },
+  streamingHeader: {
+    flexWrap: 'wrap',
+    ...(Platform.OS === 'web' ? { cursor: 'default' } as any : {}),
+  },
+  streamingBadge: {
+    color: BS.accent,
+    fontFamily: MONO,
+    fontSize: 8,
+    fontWeight: '800',
+    letterSpacing: 0.7,
+    backgroundColor: BS.accentGlow,
+    borderWidth: 1,
+    borderColor: BS.borderLit,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    overflow: 'hidden',
+    marginLeft: 'auto',
+  },
+  streamingNotice: {
+    color: BS.textSecondary,
+    fontFamily: MONO,
+    fontSize: 10,
+    lineHeight: 15,
+    marginTop: 8,
   },
   agentDot: { width: 6, height: 6, borderRadius: 3 },
   agentName: {
@@ -1282,13 +1357,136 @@ export default function OfficeTerminal({
   byoProviderKeys,
   compact = false,
   initialTab,
+  readOnly = false,
+  readOnlyReason = 'Command history only.',
+  terminalAuthority,
+  isTerminalAuthorityCurrent,
   onCommandSent,
 }: Props) {
-  // Dynamic model list: base models + BYO provider models
+  const [accountModelChoices, setAccountModelChoices] = useState<Array<{ key: string; label: string; icon: string; color: string }>>([]);
+  const [modelCatalogNotice, setModelCatalogNotice] = useState<string | null>(null);
+  const normalizedTerminalAuthority = useMemo(() => normalizeTerminalExactAuthority(
+    terminalAuthority,
+  ), [
+    terminalAuthority?.accessToken,
+    terminalAuthority?.circleId,
+    terminalAuthority?.generation,
+    terminalAuthority?.userId,
+  ]);
+  const exactTerminalAuthorityRequired = (
+    terminalAuthority !== undefined || isTerminalAuthorityCurrent !== undefined
+  );
+  const terminalAuthorityRef = useRef<TerminalExactAuthority | null>(normalizedTerminalAuthority);
+  const terminalAuthorityGuardRef = useRef<TerminalAuthorityCurrentGuard | undefined>(
+    isTerminalAuthorityCurrent,
+  );
+  const terminalMountedRef = useRef(true);
+  // Render-time replacement retires the old subject before effects or awaited
+  // callbacks get another turn on the event loop.
+  terminalAuthorityRef.current = normalizedTerminalAuthority;
+  terminalAuthorityGuardRef.current = isTerminalAuthorityCurrent;
+  const capturedTerminalAuthorityIsCurrent = useCallback((captured: TerminalExactAuthority) => {
+    if (
+      !terminalMountedRef.current
+      || !terminalExactAuthorityMatches(captured, terminalAuthorityRef.current)
+    ) return false;
+    try {
+      return terminalAuthorityGuardRef.current?.(captured) === true;
+    } catch {
+      return false;
+    }
+  }, []);
+  useEffect(() => {
+    terminalMountedRef.current = true;
+    return () => {
+      terminalMountedRef.current = false;
+      terminalAuthorityRef.current = null;
+    };
+  }, []);
+
+  // The Office terminal shares Chat/Rooms' exact account-catalog contract.
+  // Keep only a compact first three ready choices per provider; Advanced
+  // catalog browsing belongs in Chat/Marketplace rather than this command bar.
+  useEffect(() => {
+    let cancelled = false;
+    const capturedAuthority = terminalAuthorityRef.current;
+    const requestIsCurrent = () => (
+      !cancelled
+      && (!exactTerminalAuthorityRequired || Boolean(
+        capturedAuthority
+        && capturedTerminalAuthorityIsCurrent(capturedAuthority)
+      ))
+    );
+    setAccountModelChoices([]);
+    if (readOnly) {
+      setModelCatalogNotice(null);
+      return () => { cancelled = true; };
+    }
+    setModelCatalogNotice('Checking account model catalogs…');
+    if (exactTerminalAuthorityRequired && !requestIsCurrent()) {
+      return () => { cancelled = true; };
+    }
+    void loadModelGroups(circleId, { includeDisconnected: false })
+      .then((groups) => {
+        if (!requestIsCurrent()) return;
+        const choices: Array<{ key: string; label: string; icon: string; color: string }> = [];
+        const seen = new Set<string>(BASE_MODELS.map((model) => String(model.key || 'auto')));
+        for (const group of groups) {
+          if (!group.connected || group.provider === 'blackswan') continue;
+          const providerKey = group.provider === 'hugging_face'
+            ? 'huggingface'
+            : group.provider === 'z_ai'
+              ? 'zai'
+              : group.provider;
+          const meta = PROVIDER_META[providerKey as keyof typeof PROVIDER_META];
+          for (const model of group.models.filter((item) => item.ready).slice(0, 3)) {
+            if (seen.has(model.id)) continue;
+            seen.add(model.id);
+            choices.push({
+              key: model.id,
+              label: model.label,
+              icon: meta?.icon || 'AI',
+              color: meta?.color || '#6366f1',
+            });
+          }
+        }
+        const fallbackGroups = groups.filter((group) => (
+          group.connected && ['curated_fallback', 'catalog_unsupported'].includes(group.catalogStatus)
+        ));
+        const emptyGroups = groups.filter((group) => (
+          group.connected && group.catalogStatus === 'account_verified_empty'
+        ));
+        setAccountModelChoices(choices);
+        setModelCatalogNotice(
+          emptyGroups.length > 0
+            ? `${emptyGroups.map((group) => group.label).join(', ')} returned no supported chat models for this key.`
+            : fallbackGroups.length > 0
+              ? `${fallbackGroups.map((group) => group.label).join(', ')} ${fallbackGroups.length === 1 ? 'is' : 'are'} using a curated fallback; exact access is checked when the command starts.`
+              : null,
+        );
+      })
+      .catch(() => {
+        if (!requestIsCurrent()) return;
+        setAccountModelChoices(buildBYOModels(byoProviderKeys || []));
+        setModelCatalogNotice('Account model catalogs could not be checked; exact access is checked when the command starts.');
+      });
+    return () => { cancelled = true; };
+  }, [
+    byoProviderKeys,
+    capturedTerminalAuthorityIsCurrent,
+    circleId,
+    exactTerminalAuthorityRequired,
+    normalizedTerminalAuthority?.accessToken,
+    normalizedTerminalAuthority?.generation,
+    normalizedTerminalAuthority?.userId,
+    readOnly,
+  ]);
+
+  // Dynamic model list: base models + exact account rows. Preserve the
+  // previous curated BYO builder only as the explicit load-failure fallback.
   const TERMINAL_MODELS = useMemo(() => {
-    const byo = buildBYOModels(byoProviderKeys || []);
-    return [...BASE_MODELS, ...byo];
-  }, [byoProviderKeys]);
+    return [...BASE_MODELS, ...accountModelChoices];
+  }, [accountModelChoices]);
 
   const [terminalTab, setTerminalTab]          = useState<TerminalTab>(initialTab || 'commands');
   useEffect(() => { if (initialTab) setTerminalTab(initialTab); }, [initialTab]);
@@ -1297,19 +1495,41 @@ export default function OfficeTerminal({
   const [messages, setMessages]               = useState<TerminalMessage[]>([]);
   const [responses, setResponses]             = useState<Map<string, TerminalResponse[]>>(new Map());
   const [localInput, setLocalInput]           = useState('');
-  const [localTargetId, setLocalTargetId]     = useState<string | null>('blackswan-default');
-  const [localTargetName, setLocalTargetName] = useState('@BlackSwan');
   const [localModel, setLocalModel]           = useState<string | null>(null);
-  const [localTargetIds, setLocalTargetIds]   = useState<string[] | null>(['blackswan-default']);
+  const [localTargetIds, setLocalTargetIds]   = useState<string[] | null>(() => (
+    agents.some(agent => agent.id === DEFAULT_BLACKSWAN_TARGET_ID)
+      ? [DEFAULT_BLACKSWAN_TARGET_ID]
+      : null
+  ));
   const [sending, setSending]                 = useState(false);
+  const [sendError, setSendError]             = useState<string | null>(null);
   const [loading, setLoading]                 = useState(true);
+  const [transcriptError, setTranscriptError] = useState<string | null>(null);
   // Command history — local per instance (UI preference)
   const [cmdHistory, setCmdHistory]           = useState<string[]>([]);
   const [historyIdx, setHistoryIdx]           = useState(-1);
   const listRef   = useRef<FlatList<TerminalMessage>>(null);
   const inputRef  = useRef<TextInput>(null);
+  const targetSelectionTouchedRef = useRef(false);
   // Track deleted message IDs to prevent stale response subscription events
   const deletedIdsRef = useRef<Set<string>>(new Set());
+  const messagesRef = useRef<TerminalMessage[]>(messages);
+  messagesRef.current = messages;
+  const transcriptGenerationRef = useRef(0);
+  const transcriptCircleRef = useRef(circleId);
+  transcriptCircleRef.current = circleId;
+  useEffect(() => {
+    // A retired async operation intentionally cannot update replacement UI.
+    // Reset its transient busy/error state from the new authority lifecycle so
+    // the replacement account is not left with the old account's spinner.
+    setSending(false);
+    setSendError(null);
+  }, [
+    normalizedTerminalAuthority?.accessToken,
+    normalizedTerminalAuthority?.circleId,
+    normalizedTerminalAuthority?.generation,
+    normalizedTerminalAuthority?.userId,
+  ]);
 
   // ── Derive active input/target from shared or local state ──────────────────
   const input = sharedInput !== undefined ? sharedInput : localInput;
@@ -1318,17 +1538,6 @@ export default function OfficeTerminal({
     else setLocalInput(v);
   }, [onSharedInputChange]);
 
-  const targetAgentId   = sharedTargetId   !== undefined ? sharedTargetId   : localTargetId;
-  const targetAgentName = sharedTargetName !== undefined ? sharedTargetName : localTargetName;
-  const selectTarget = useCallback((id: string | null, name: string) => {
-    if (onSharedSelectTarget !== undefined) {
-      onSharedSelectTarget(id, name);
-    } else {
-      setLocalTargetId(id);
-      setLocalTargetName(name);
-    }
-  }, [onSharedSelectTarget]);
-
   // ── Model selection ──
   const selectedModel = sharedModel !== undefined ? sharedModel : localModel;
   const setSelectedModel = useCallback((m: string | null) => {
@@ -1336,83 +1545,204 @@ export default function OfficeTerminal({
     else setLocalModel(m);
   }, [onSharedModelChange]);
 
-  // ── Multi-agent targeting ──
-  const targetIds = sharedTargetIds !== undefined ? sharedTargetIds : localTargetIds;
-  const selectTargets = useCallback((ids: string[] | null, names: string) => {
+  // ── Canonical agent targeting ──
+  // Multi-target ids are the single source of truth. The legacy single-target
+  // props remain compatibility mirrors only, so an older parent cannot make
+  // persistence target one agent while invocation targets another.
+  const targetIdsSource = sharedTargetIds !== undefined
+    ? sharedTargetIds
+    : sharedTargetId !== undefined
+      ? (sharedTargetId ? [sharedTargetId] : null)
+      : localTargetIds;
+  const targetIds = useMemo<string[] | null>(() => {
+    if (!targetIdsSource?.length) return null;
+    return Array.from(new Set(targetIdsSource));
+  }, [targetIdsSource]);
+  const targetSelection = useMemo(
+    () => resolveTerminalTargetSelection(targetIds, agents),
+    [agents, targetIds],
+  );
+  const targetAgentName = targetSelection.ok
+    ? targetSelection.targetAgentName
+    : (sharedTargetName?.trim() || 'Unavailable target');
+
+  const selectTargets = useCallback((ids: string[] | null) => {
+    targetSelectionTouchedRef.current = true;
+    const normalizedIds = ids?.length ? Array.from(new Set(ids)) : null;
+    const resolved = resolveTerminalTargetSelection(normalizedIds, agents);
+    const legacyId = resolved.ok
+      ? resolved.targetAgentId
+      : normalizedIds?.length === 1
+        ? normalizedIds[0]
+        : null;
+    const displayName = resolved.ok
+      ? resolved.targetAgentName
+      : 'Unavailable target';
+
     if (onSharedSelectTargets !== undefined) {
-      onSharedSelectTargets(ids, names);
-    } else {
-      setLocalTargetIds(ids);
+      onSharedSelectTargets(normalizedIds, displayName);
+    } else if (sharedTargetIds === undefined) {
+      setLocalTargetIds(normalizedIds);
     }
-  }, [onSharedSelectTargets]);
+    onSharedSelectTarget?.(legacyId, displayName);
+  }, [agents, onSharedSelectTarget, onSharedSelectTargets, sharedTargetIds]);
+
+  // If the uncontrolled terminal mounted before its targets arrived, select
+  // the visible BlackSwan target once it becomes available. An explicit @all
+  // choice remains untouched.
+  useEffect(() => {
+    if (
+      sharedTargetIds !== undefined
+      || sharedTargetId !== undefined
+      || targetSelectionTouchedRef.current
+      || localTargetIds?.length
+    ) return;
+    if (agents.some(agent => agent.id === DEFAULT_BLACKSWAN_TARGET_ID)) {
+      setLocalTargetIds([DEFAULT_BLACKSWAN_TARGET_ID]);
+    }
+  }, [agents, localTargetIds, sharedTargetId, sharedTargetIds]);
 
   // Toggle an agent in/out of multi-select
-  const toggleAgentTarget = useCallback((agentId: string, agentName: string) => {
+  const toggleAgentTarget = useCallback((agentId: string) => {
     const current = targetIds || [];
     const isSelected = current.includes(agentId);
 
     if (isSelected) {
-      // Remove agent
       const next = current.filter(id => id !== agentId);
       if (next.length === 0) {
-        // Back to @all
-        selectTarget(null, '@all');
-        selectTargets(null, '@all');
+        selectTargets(null);
       } else {
-        selectTargets(next, next.length === 1 ? `@${agentName}` : `${next.length} agents`);
+        selectTargets(next);
       }
     } else {
-      // Add agent
       const next = [...current, agentId];
-      selectTarget(agentId, `@${agentName}`); // keep legacy single for backward compat
-      selectTargets(next, next.length === 1 ? `@${agentName}` : `${next.length} agents`);
+      selectTargets(next);
     }
-  }, [targetIds, selectTarget, selectTargets]);
+  }, [targetIds, selectTargets]);
 
   // Select @all (clear multi-select)
   const selectAll = useCallback(() => {
-    selectTarget(null, '@all');
-    selectTargets(null, '@all');
-  }, [selectTarget, selectTargets]);
+    selectTargets(null);
+  }, [selectTargets]);
 
   // ── Load history + subscribe ───────────────────────────────────────────────
   // Authoritative transcript load — used for the initial fetch AND as the
   // realtime catch-up. Messages/responses written while the socket was down
   // never arrive as events, so a reconnect that does not replay this leaves the
   // terminal permanently missing whatever the agent said during the gap.
-  const reloadTranscript = useCallback(async () => {
-    // Never throws: this runs as a realtime catch-up, and a rejected catch-up
-    // would escape the subscription wrapper's synchronous try/catch.
-    try {
-      const { messages: hist } = await loadTerminalHistory(circleId, 50);
-      setMessages(hist);
+  const reloadTranscript = useCallback(async (forceRefresh = false) => {
+    const requestedCircleId = circleId;
+    const capturedAuthority = terminalAuthorityRef.current;
+    const generation = ++transcriptGenerationRef.current;
+    const requestIsCurrent = () => (
+      transcriptGenerationRef.current === generation
+      && transcriptCircleRef.current === requestedCircleId
+      && (!exactTerminalAuthorityRequired || Boolean(
+        capturedAuthority
+        && capturedAuthority.circleId === requestedCircleId
+        && capturedAuthority.userId === userId
+        && capturedTerminalAuthorityIsCurrent(capturedAuthority)
+      ))
+    );
+    setTranscriptError(null);
+    if (exactTerminalAuthorityRequired && !requestIsCurrent()) {
+      setMessages([]);
+      setResponses(new Map());
       setLoading(false);
+      setTranscriptError('Recorded command history is waiting for an exact Office session.');
+      return;
+    }
+    try {
+      const { messages: hist, error: historyError } = capturedAuthority
+        ? await loadTerminalHistoryExact(
+            capturedAuthority,
+            capturedTerminalAuthorityIsCurrent,
+            50,
+            undefined,
+            { forceRefresh },
+          )
+        : await loadTerminalHistory(requestedCircleId, 50);
+      if (historyError) throw new Error(historyError);
+      if (!requestIsCurrent()) return;
+      const nextMessages = hist.filter(message => !deletedIdsRef.current.has(message.id));
+      const nextResponses = new Map<string, TerminalResponse[]>();
       // Phase 3: load existing responses for history messages
       if (hist.length > 0) {
-        const resps = await loadResponsesForMessages(hist.map(m => m.id));
-        const map = new Map<string, TerminalResponse[]>();
-        for (const r of resps) {
+        const responseResult = capturedAuthority
+          ? await loadResponsesForMessagesExact(
+              hist.map(m => m.id),
+              capturedAuthority,
+              capturedTerminalAuthorityIsCurrent,
+              undefined,
+              { forceRefresh },
+            )
+          : { responses: await loadResponsesForMessages(hist.map(m => m.id)) };
+        if (responseResult.error) throw new Error(responseResult.error);
+        if (!requestIsCurrent()) return;
+        for (const r of responseResult.responses) {
           if (deletedIdsRef.current.has(r.messageId)) continue;
-          const arr = map.get(r.messageId) || [];
+          const arr = nextResponses.get(r.messageId) || [];
           arr.push(r);
-          map.set(r.messageId, arr);
+          nextResponses.set(r.messageId, arr);
         }
-        setResponses(map);
       }
+      if (!requestIsCurrent()) return;
+      // Publish the transcript atomically so a retired subject's message body
+      // cannot linger while the replacement response query is still pending.
+      setMessages(nextMessages);
+      setResponses(nextResponses);
     } catch (err) {
       console.error('[OfficeTerminal] transcript load failed:', err);
-      setLoading(false);
+      if (requestIsCurrent()) {
+        setTranscriptError('Recorded command history could not be loaded. Check your connection and retry.');
+      }
+    } finally {
+      if (requestIsCurrent()) setLoading(false);
     }
-  }, [circleId]);
+  }, [
+    capturedTerminalAuthorityIsCurrent,
+    circleId,
+    exactTerminalAuthorityRequired,
+    normalizedTerminalAuthority?.accessToken,
+    normalizedTerminalAuthority?.generation,
+    normalizedTerminalAuthority?.userId,
+    userId,
+  ]);
 
   useEffect(() => {
     deletedIdsRef.current.clear();
+    setLoading(true);
+    setMessages([]);
+    setResponses(new Map());
 
     void reloadTranscript();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [circleId]);
+    return () => {
+      transcriptGenerationRef.current += 1;
+    };
+  }, [
+    circleId,
+    normalizedTerminalAuthority?.accessToken,
+    normalizedTerminalAuthority?.generation,
+    normalizedTerminalAuthority?.userId,
+    reloadTranscript,
+  ]);
 
   useEffect(() => {
+    const exactSubscriptionScope = normalizedTerminalAuthority
+      ? `${normalizedTerminalAuthority.userId}-${normalizedTerminalAuthority.generation}`
+      : 'compat';
+    if (exactTerminalAuthorityRequired) {
+      // Postgres payloads are wake-ups, not render authority. Re-read through
+      // the captured bearer so a stale/shared Realtime session cannot inject
+      // another account's message body into this mounted terminal.
+      return subscribeToTerminalMessages(
+        circleId,
+        () => { void reloadTranscript(true); },
+        () => { void reloadTranscript(true); },
+        () => { void reloadTranscript(true); },
+        exactSubscriptionScope,
+      );
+    }
     const unsub = subscribeToTerminalMessages(
       circleId,
       (updated) => {
@@ -1438,9 +1768,16 @@ export default function OfficeTerminal({
         });
       },
       () => { void reloadTranscript(); },
+      exactSubscriptionScope,
     );
     return unsub;
-  }, [circleId, reloadTranscript]);
+  }, [
+    circleId,
+    exactTerminalAuthorityRequired,
+    normalizedTerminalAuthority?.generation,
+    normalizedTerminalAuthority?.userId,
+    reloadTranscript,
+  ]);
 
   // Phase 2 broadcast subscription removed — Phase 3 postgres_changes on
   // office_terminal_responses is now the single source of truth for responses.
@@ -1448,9 +1785,12 @@ export default function OfficeTerminal({
   // Phase 3: Subscribe to office_terminal_responses for this circle's responses.
   // Single stable channel — never re-created on messages change to avoid missing events.
   useEffect(() => {
+    const exactSubscriptionScope = normalizedTerminalAuthority
+      ? `${normalizedTerminalAuthority.userId}:${normalizedTerminalAuthority.generation}`
+      : 'compat';
     const handle = subscribeWithReconnect({
-      channelName: `terminal-responses:${circleId}`,
-      onCatchUp: () => { void reloadTranscript(); },
+      channelName: `terminal-responses:${circleId}:${exactSubscriptionScope}`,
+      onCatchUp: () => { void reloadTranscript(true); },
       setup: (channel) => channel
       .on(
         'postgres_changes',
@@ -1461,6 +1801,12 @@ export default function OfficeTerminal({
           filter: `circle_id=eq.${circleId}`,
         },
         (payload: any) => {
+          if (exactTerminalAuthorityRequired) {
+            // Realtime only signals that the exact RLS-backed response set may
+            // have changed. Never render response_text from the envelope.
+            void reloadTranscript(true);
+            return;
+          }
           const raw = payload.new;
           if (!raw) return;
 
@@ -1500,7 +1846,13 @@ export default function OfficeTerminal({
     return () => {
       handle.unsubscribe();
     };
-  }, [circleId, reloadTranscript]);
+  }, [
+    circleId,
+    exactTerminalAuthorityRequired,
+    normalizedTerminalAuthority?.generation,
+    normalizedTerminalAuthority?.userId,
+    reloadTranscript,
+  ]);
 
   // Scroll to bottom on new messages
   useEffect(() => {
@@ -1526,25 +1878,79 @@ export default function OfficeTerminal({
 
   // ── Delete a message ───────────────────────────────────────────────────────
   const handleDelete = useCallback(async (messageId: string) => {
-    // Track as deleted FIRST — prevents race conditions with realtime subscriptions
-    deletedIdsRef.current.add(messageId);
+    const removeVerifiedMessage = () => {
+      deletedIdsRef.current.add(messageId);
+      setMessages(prev => prev.filter(m => m.id !== messageId));
+      setResponses(prev => {
+        const next = new Map(prev);
+        next.delete(messageId);
+        return next;
+      });
+    };
 
-    // Remove from local state immediately
-    setMessages(prev => prev.filter(m => m.id !== messageId));
-    setResponses(prev => {
-      const next = new Map(prev);
-      next.delete(messageId);
-      return next;
-    });
-
-    // Delete from DB (skip local-only messages)
-    if (!messageId.startsWith('local-')) {
-      const result = await deleteTerminalMessage(messageId);
-      if (result.error) {
-        console.warn('[OfficeTerminal] Delete failed:', result.error);
-      }
+    // Local presentation rows have no durable side effect or account owner.
+    if (messageId.startsWith('local-')) {
+      removeVerifiedMessage();
+      return;
     }
-  }, []);
+
+    if (exactTerminalAuthorityRequired) {
+      const capturedAuthority = terminalAuthorityRef.current;
+      const message = messagesRef.current.find(candidate => candidate.id === messageId);
+      if (
+        !capturedAuthority
+        || capturedAuthority.userId !== userId
+        || capturedAuthority.circleId !== circleId
+        || !capturedTerminalAuthorityIsCurrent(capturedAuthority)
+      ) {
+        setSendError('Your terminal session changed. Refresh the Office before deleting this message.');
+        return;
+      }
+      if (
+        !message
+        || message.circleId !== capturedAuthority.circleId
+        || message.senderId !== capturedAuthority.userId
+      ) {
+        setSendError('Only the sender can delete this terminal message.');
+        return;
+      }
+
+      const result = await deleteTerminalMessageExact(
+        messageId,
+        capturedAuthority,
+        capturedTerminalAuthorityIsCurrent,
+      );
+      if (
+        !result.receipt
+        || !isTerminalMessageDeleteReceiptCurrent({
+          receipt: result.receipt,
+          expectedAuthority: capturedAuthority,
+          expectedMessageId: messageId,
+          isCurrent: capturedTerminalAuthorityIsCurrent,
+        })
+      ) {
+        setSendError(result.error || 'The message delete could not be verified. Refresh before retrying.');
+        return;
+      }
+
+      setSendError(null);
+      removeVerifiedMessage();
+      return;
+    }
+
+    // Compatibility mounts retain the legacy mutable-session delete path.
+    const result = await deleteTerminalMessage(messageId);
+    if (result.error) {
+      console.warn('[OfficeTerminal] Delete failed:', result.error);
+      return;
+    }
+    removeVerifiedMessage();
+  }, [
+    capturedTerminalAuthorityIsCurrent,
+    circleId,
+    exactTerminalAuthorityRequired,
+    userId,
+  ]);
 
   // ── Handle /help builtin ───────────────────────────────────────────────────
   const handleHelp = useCallback(() => {
@@ -1577,6 +1983,24 @@ export default function OfficeTerminal({
     const cmd = input.trim();
     if (!cmd || sending) return;
 
+    // Pure presentation builtins never leave this component. Every other
+    // command captures and validates the exact Office authority before it can
+    // start a DB, bridge, Edge Function, or agent operation.
+    const isPureLocalBuiltin = cmd === '/help' || cmd === '/agents' || cmd === '/spawn';
+    const capturedAuthority = isPureLocalBuiltin ? null : terminalAuthorityRef.current;
+    if (
+      exactTerminalAuthorityRequired
+      && (
+        !capturedAuthority
+        || capturedAuthority.userId !== userId
+        || capturedAuthority.circleId !== circleId
+        || !capturedTerminalAuthorityIsCurrent(capturedAuthority)
+      )
+    ) {
+      setSendError('Your terminal session changed. Wait for the Office to finish refreshing, then try again.');
+      return;
+    }
+
     // Handle builtins locally
     if (cmd === '/help') {
       setInput('');
@@ -1588,7 +2012,21 @@ export default function OfficeTerminal({
 
     // /models — show available models from registry
     if (cmd === '/models') {
-      getAllModels().then(models => {
+      const operationFence = exactTerminalAuthorityRequired
+        ? createTerminalAuthorityOperationFence(
+            capturedAuthority,
+            capturedTerminalAuthorityIsCurrent,
+          )
+        : null;
+      if (exactTerminalAuthorityRequired && !operationFence) {
+        setSendError('Your terminal session changed before the model catalog could be read.');
+        return;
+      }
+      setSending(true);
+      setSendError(null);
+      try {
+        const models = await getAllModels();
+        if (operationFence && !operationFence.isCurrent()) return;
         const grouped: Record<string, RegisteredModel[]> = {};
         for (const m of models) {
           (grouped[m.provider] ??= []).push(m);
@@ -1624,9 +2062,18 @@ export default function OfficeTerminal({
           updatedAt: new Date().toISOString(),
         };
         setMessages(prev => [localMsg, ...prev]);
-      });
-      setInput('');
-      setSending(false);
+        setInput('');
+        setCmdHistory(prev => [cmd, ...prev].slice(0, 50));
+        setHistoryIdx(-1);
+      } catch (error) {
+        if (!operationFence || operationFence.isCurrent()) {
+          setSendError(error instanceof Error ? error.message : 'The model catalog could not be read.');
+        }
+      } finally {
+        const mayUpdate = !operationFence || operationFence.isCurrent();
+        operationFence?.stop();
+        if (mayUpdate) setSending(false);
+      }
       return;
     }
 
@@ -1668,7 +2115,21 @@ export default function OfficeTerminal({
 
     // /devices — list local devices
     if (cmd === '/devices') {
-      executeDeviceCommand('devices list').then(output => {
+      const operationFence = exactTerminalAuthorityRequired
+        ? createTerminalAuthorityOperationFence(
+            capturedAuthority,
+            capturedTerminalAuthorityIsCurrent,
+          )
+        : null;
+      if (exactTerminalAuthorityRequired && !operationFence) {
+        setSendError('Your terminal session changed before local devices could be read.');
+        return;
+      }
+      setSending(true);
+      setSendError(null);
+      try {
+        const output = await executeDeviceCommand('devices list');
+        if (operationFence && !operationFence.isCurrent()) return;
         const localMsg: TerminalMessage = {
           id: `local-${Date.now()}`,
           circleId,
@@ -1689,9 +2150,18 @@ export default function OfficeTerminal({
           updatedAt: new Date().toISOString(),
         };
         setMessages(prev => [localMsg, ...prev]);
-      });
-      setInput('');
-      setSending(false);
+        setInput('');
+        setCmdHistory(prev => [cmd, ...prev].slice(0, 50));
+        setHistoryIdx(-1);
+      } catch (error) {
+        if (!operationFence || operationFence.isCurrent()) {
+          setSendError(error instanceof Error ? error.message : 'Local devices could not be read.');
+        }
+      } finally {
+        const mayUpdate = !operationFence || operationFence.isCurrent();
+        operationFence?.stop();
+        if (mayUpdate) setSending(false);
+      }
       return;
     }
 
@@ -1707,23 +2177,60 @@ export default function OfficeTerminal({
     if (cmd.startsWith('/imagine ')) {
       const imagePrompt = cmd.slice(9).trim();
       if (!imagePrompt) return;
+      const operationFence = exactTerminalAuthorityRequired
+        ? createTerminalAuthorityOperationFence(
+            capturedAuthority,
+            capturedTerminalAuthorityIsCurrent,
+          )
+        : null;
+      if (exactTerminalAuthorityRequired && (!capturedAuthority || !operationFence)) {
+        setSendError('Your terminal session changed before image generation could start.');
+        return;
+      }
       setInput('');
       setCmdHistory(prev => [cmd, ...prev].slice(0, 50));
       setHistoryIdx(-1);
       setSending(true);
+      setSendError(null);
       try {
         if (shouldBlockExternalAiProvider('openai')) {
           throw new Error(getStrictLocalAiModeMessage('openai'));
         }
         const { data, error } = await supabase.functions.invoke('image-generate', {
-          body: { provider: 'openai', prompt: imagePrompt, circleId },
+          headers: capturedAuthority
+            ? { Authorization: `Bearer ${capturedAuthority.accessToken}` }
+            : undefined,
+          signal: operationFence?.signal,
+          timeout: 120_000,
+          body: {
+            provider: 'openai',
+            prompt: imagePrompt,
+            circleId: capturedAuthority?.circleId || circleId,
+          },
         });
+        if (operationFence && !operationFence.isCurrent()) return;
         const now = new Date().toISOString();
+        const recordedEstimate = typeof data?.estimated_cost === 'number'
+          && Number.isFinite(data.estimated_cost)
+          && data.estimated_cost >= 0
+            ? `Estimated cost: $${data.estimated_cost.toFixed(3)}`
+            : null;
+        const generatedImageParts = [
+          typeof data?.url === 'string' && data.url
+            ? `![Generated Image](${data.url})`
+            : null,
+          typeof data?.revised_prompt === 'string' && data.revised_prompt.trim()
+            ? `*${data.revised_prompt.trim()}*`
+            : null,
+          recordedEstimate,
+        ].filter((part): part is string => Boolean(part));
         const responseText = error
           ? `Image generation failed: ${error.message}`
           : data?.error
             ? `Error: ${data.error}`
-            : `![Generated Image](${data.url})\n\n${data.revised_prompt ? `*${data.revised_prompt}*` : ''}\n\nCost: $${(data.estimated_cost || 0).toFixed(3)}`;
+            : generatedImageParts.length > 0
+              ? generatedImageParts.join('\n\n')
+              : 'Image generation completed without a readable image receipt.';
         const imgMsg: TerminalMessage = {
           id: `local-imagine-${Date.now()}`,
           circleId, senderId: userId, senderName: userDisplayName,
@@ -1736,6 +2243,7 @@ export default function OfficeTerminal({
         setMessages(prev => [...prev, imgMsg]);
         setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 100);
       } catch (e: any) {
+        if (operationFence && !operationFence.isCurrent()) return;
         const now = new Date().toISOString();
         const errMsg: TerminalMessage = {
           id: `local-imagine-err-${Date.now()}`,
@@ -1748,24 +2256,44 @@ export default function OfficeTerminal({
           createdAt: now, updatedAt: now,
         };
         setMessages(prev => [...prev, errMsg]);
+      } finally {
+        const mayUpdate = !operationFence || operationFence.isCurrent();
+        operationFence?.stop();
+        if (mayUpdate) setSending(false);
       }
-      setSending(false);
+      return;
+    }
+
+    // Agent commands require both a local dispatcher and one immutable auth
+    // snapshot. Saving without either creates a durable row that this mounted
+    // surface cannot safely execute, so fail before persistence and keep the
+    // user's draft intact.
+    if (!onCommandSent) {
+      setSendError('This terminal has no connected command dispatcher. Open the Office terminal and try again; your draft was not saved.');
+      return;
+    }
+    if (
+      !capturedAuthority
+      || capturedAuthority.userId !== userId
+      || capturedAuthority.circleId !== circleId
+      || !capturedTerminalAuthorityIsCurrent(capturedAuthority)
+    ) {
+      setSendError('Your terminal session changed. Wait for the Office to finish refreshing, then send again.');
+      return;
+    }
+
+    // Re-resolve at the persistence boundary against the currently supplied
+    // exact target list. Never silently discard a stale id or fall back to
+    // @all: that would execute a command against a different audience.
+    const resolvedTarget = resolveTerminalTargetSelection(targetIds, agents);
+    if (!resolvedTarget.ok) {
+      setSendError(`${resolvedTarget.error} Your draft was not saved.`);
       return;
     }
 
     setSending(true);
-    setInput('');
-    setCmdHistory(prev => [cmd, ...prev].slice(0, 50));
-    setHistoryIdx(-1);
-
-    // Build target name for display
-    const displayTargetName = targetIds && targetIds.length > 0
-      ? (targetIds.length === 1
-        ? agents.find(a => a.id === targetIds[0])?.name
-          ? `@${agents.find(a => a.id === targetIds[0])!.name}`
-          : targetAgentName
-        : `${targetIds.length} agents`)
-      : targetAgentName;
+    setSendError(null);
+    const displayTargetName = resolvedTarget.targetAgentName;
 
     // Wrap command with mode prefix (Plan/Explore/Fleet/Autopilot inject system-level context)
     let wrappedCmd = cmd;
@@ -1786,51 +2314,87 @@ export default function OfficeTerminal({
 
     const targetSubjectContext = buildTerminalTargetSubjectContext({
       agents,
-      targetAgentId: targetAgentId ?? null,
+      targetAgentId: resolvedTarget.targetAgentId,
       targetAgentName: displayTargetName,
-      targetAgentIds: targetIds ?? null,
+      targetAgentIds: resolvedTarget.targetAgentIds,
     });
-
-    const result = await sendTerminalCommand({
-      circleId,
-      senderId: userId,
-      senderName: userDisplayName,
-      commandText: wrappedCmd,
-      targetAgentId: targetAgentId ?? undefined,
+    const capturedTarget = buildTerminalCommandTargetReceipt({
+      targetAgentId: resolvedTarget.targetAgentId,
+      targetAgentIds: resolvedTarget.targetAgentIds,
       targetAgentName: displayTargetName,
-      targetAgentIds: targetIds,
-      targetAgentSubject: targetSubjectContext.targetAgentSubject,
-      targetAgentSubjects: targetSubjectContext.targetAgentSubjects,
-      model: modelWithThinking,
     });
+    const capturedDispatcher = onCommandSent;
 
-    // Award XP for terminal activity — model-aware so BlackSwan gives the most
-    if (result.messageId && userId) {
-      const xp = getPointsForModel(selectedModel || 'auto');
-      awardPoints(userId, xp, 'Terminal command', {
-        command: cmd.slice(0, 50),
-        target: displayTargetName,
-        model: selectedModel || 'auto',
-      }).catch(() => {});
-
-      // Direct invocation — bypass broadcast round-trip for immediate response
-      if (onCommandSent) {
-        onCommandSent({
-          messageId: result.messageId,
-          command: wrappedCmd,
-          targetAgentId: targetAgentId ?? null,
-          targetAgentIds: targetIds ?? null,
-          targetAgentName: displayTargetName,
-          targetAgentSubject: targetSubjectContext.targetAgentSubject,
-          targetAgentSubjects: targetSubjectContext.targetAgentSubjects,
-          model: modelWithThinking ?? null,
-          senderId: userId,
-        });
+    try {
+      const result = await sendTerminalCommandExact({
+        circleId: capturedAuthority.circleId,
+        senderId: capturedAuthority.userId,
+        senderName: userDisplayName,
+        commandText: wrappedCmd,
+        targetAgentId: resolvedTarget.targetAgentId ?? undefined,
+        targetAgentName: displayTargetName,
+        targetAgentIds: resolvedTarget.targetAgentIds,
+        targetAgentSubject: targetSubjectContext.targetAgentSubject,
+        targetAgentSubjects: targetSubjectContext.targetAgentSubjects,
+        model: modelWithThinking,
+      }, capturedAuthority, capturedTerminalAuthorityIsCurrent);
+      if (!result.messageId || !result.receipt) {
+        setSendError(result.error || 'Command could not be saved. Your draft is still here.');
+        return;
       }
-    }
+      if (
+        result.receipt.messageId !== result.messageId
+        || !isTerminalCommandDispatchReceiptCurrent({
+          receipt: result.receipt,
+          expectedAuthority: capturedAuthority,
+          expectedTargetFingerprint: capturedTarget.fingerprint,
+          isCurrent: capturedTerminalAuthorityIsCurrent,
+        })
+      ) {
+        setSendError('Command saved, but local dispatch was cancelled because the terminal session or target changed.');
+        return;
+      }
 
-    setSending(false);
-  }, [input, sending, circleId, userId, userDisplayName, targetAgentId, targetAgentName, targetIds, selectedModel, agents, handleHelp, setInput, onCommandSent, terminalMode, thinkingLevel]);
+      setInput('');
+      setCmdHistory(prev => [cmd, ...prev].slice(0, 50));
+      setHistoryIdx(-1);
+      if (result.error) setSendError(result.error);
+
+      // Award XP for terminal activity — model-aware so BlackSwan gives the most
+      if (userId) {
+        const xp = getPointsForModel(selectedModel || 'auto');
+        awardPoints(userId, xp, 'Terminal command', {
+          command: cmd.slice(0, 50),
+          target: displayTargetName,
+          model: selectedModel || 'auto',
+        }).catch(() => {});
+      }
+
+      // Direct invocation — bypass broadcast round-trip for immediate response.
+      // The dispatcher was required before persistence, so this always uses the
+      // same resolved selection that was written to the durable row.
+      capturedDispatcher(Object.freeze({
+        messageId: result.messageId,
+        command: wrappedCmd,
+        targetAgentId: resolvedTarget.targetAgentId,
+        targetAgentIds: resolvedTarget.targetAgentIds,
+        targetAgentName: displayTargetName,
+        targetAgentSubject: targetSubjectContext.targetAgentSubject,
+        targetAgentSubjects: targetSubjectContext.targetAgentSubjects,
+        model: modelWithThinking ?? null,
+        senderId: capturedAuthority.userId,
+        authority: result.receipt.authority,
+        targetFingerprint: result.receipt.target.fingerprint,
+        receipt: result.receipt,
+      }));
+    } catch (error) {
+      setSendError(error instanceof Error
+        ? error.message
+        : 'Command could not be saved. Your draft is still here.');
+    } finally {
+      setSending(false);
+    }
+  }, [input, sending, circleId, userId, userDisplayName, targetIds, selectedModel, agents, capturedTerminalAuthorityIsCurrent, exactTerminalAuthorityRequired, handleHelp, setInput, onCommandSent, terminalMode, thinkingLevel]);
 
   // ── Command history navigation (↑ / ↓) ────────────────────────────────────
   const handleKeyPress = useCallback((e: any) => {
@@ -1853,7 +2417,7 @@ export default function OfficeTerminal({
   const showAutocomplete =
     input.startsWith('@') && input.length > 1 && !input.includes(' ');
 
-  const onlineAgents = agents.filter(a => a.status !== 'offline');
+  const onlineAgents = agents.filter(a => isConnectedOfficeStatus(a.status));
   const onlineCount  = onlineAgents.length;
 
   // Compute total tokens for footer
@@ -1865,6 +2429,32 @@ export default function OfficeTerminal({
 
   const modeInfo = TERMINAL_MODES.find(m => m.key === terminalMode);
   const modelInfo = TERMINAL_MODELS.find(m => m.key === selectedModel);
+
+  const transcriptFailure = transcriptError ? (
+    <View style={styles.transcriptError} accessibilityRole="alert">
+      <View style={styles.transcriptErrorCopy}>
+        <Text style={styles.transcriptErrorTitle}>History unavailable</Text>
+        <Text style={styles.transcriptErrorText}>
+          {transcriptError}{messages.length > 0 ? ' Existing history may be stale.' : ''}
+        </Text>
+      </View>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Retry loading recorded command history"
+        onPress={() => {
+          if (messages.length === 0) setLoading(true);
+          void reloadTranscript();
+        }}
+        style={({ pressed, focused }: any) => [
+          styles.transcriptRetry,
+          focused ? styles.transcriptRetryFocused : null,
+          pressed ? styles.transcriptRetryPressed : null,
+        ]}
+      >
+        <Text style={styles.transcriptRetryText}>Retry</Text>
+      </Pressable>
+    </View>
+  ) : null;
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -1912,6 +2502,16 @@ export default function OfficeTerminal({
       )}
 
       {/* ── Tab bar ── */}
+      {readOnly ? (
+        <View
+          style={styles.readOnlyBar}
+          accessibilityRole="summary"
+          accessibilityLabel={readOnlyReason}
+        >
+          <Text style={styles.readOnlyTitle}>RECORDED HISTORY</Text>
+          <Text style={styles.readOnlyText}>{readOnlyReason}</Text>
+        </View>
+      ) : (
       <View style={styles.termTabBar}>
         {(['commands', 'automations', 'shell'] as TerminalTab[]).map(tab => (
           <Pressable
@@ -1952,17 +2552,17 @@ export default function OfficeTerminal({
           <Text style={styles.connText}>{onlineCount > 0 ? 'connected' : 'offline'}</Text>
         </View>
       </View>
+      )}
 
       {/* ── Content area ── */}
-      {terminalTab === 'spawn' ? (
+      {!readOnly && terminalTab === 'spawn' ? (
         <SpawnAgentPanel
           circleId={circleId}
           onCreated={(agentId, agentName) => {
             setTerminalTab('commands');
             // Auto-target the new agent
             if (agentId) {
-              selectTarget(agentId, `@${agentName}`);
-              selectTargets([agentId], `@${agentName}`);
+              selectTargets([agentId]);
             }
             // Post a system message announcing the new agent
             const now = new Date().toISOString();
@@ -1989,13 +2589,13 @@ export default function OfficeTerminal({
           }}
           onCancel={() => setTerminalTab('commands')}
         />
-      ) : terminalTab === 'shell' ? (
+      ) : !readOnly && terminalTab === 'shell' ? (
         <LocalShellPanel />
-      ) : terminalTab === 'train' ? (
+      ) : !readOnly && terminalTab === 'train' ? (
         <TrainingDashboard circleId={circleId} />
-      ) : terminalTab === 'key' ? (
+      ) : !readOnly && terminalTab === 'key' ? (
         <CommandKeyPanel onRunCommand={(cmd) => { setInput(cmd); setTerminalTab('commands'); }} />
-      ) : terminalTab === 'automations' ? (
+      ) : !readOnly && terminalTab === 'automations' ? (
         <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
           <AutomationsPanel circleId={circleId} />
         </ScrollView>
@@ -2003,10 +2603,13 @@ export default function OfficeTerminal({
       <>
 
       {/* Message list */}
+      {transcriptError && messages.length > 0 ? transcriptFailure : null}
       {loading ? (
         <View style={styles.loadingState}>
           <PendingDots />
         </View>
+      ) : transcriptError && messages.length === 0 ? (
+        <View style={styles.transcriptErrorEmpty}>{transcriptFailure}</View>
       ) : messages.length === 0 ? (
         <View style={styles.emptyState}>
           <View style={styles.emptyBrand}>
@@ -2014,9 +2617,11 @@ export default function OfficeTerminal({
           </View>
           <Text style={styles.emptyTitle}>BlackSwan Terminal</Text>
           <Text style={styles.emptyText}>
-            Your agentic command center.{'\n'}
-            Type a message, use /commands, or @target an agent.
+            {readOnly
+              ? 'No recorded command history is available for this circle yet.'
+              : <>Your agentic command center.{'\n'}Type a message, use /commands, or @target an agent.</>}
           </Text>
+          {!readOnly && (
           <View style={styles.emptyHints}>
             {['/help', '/status', '/models', '/agents'].map(cmd => (
               <Pressable key={cmd} style={styles.emptyHintChip} onPress={() => setInput(cmd)}>
@@ -2027,6 +2632,7 @@ export default function OfficeTerminal({
               <Text style={styles.emptyHintText}>+ Spawn Agent</Text>
             </Pressable>
           </View>
+          )}
         </View>
       ) : (
         <FlatList
@@ -2034,7 +2640,13 @@ export default function OfficeTerminal({
           data={messages}
           keyExtractor={m => m.id}
           renderItem={({ item }) => (
-            <TerminalRow msg={item} responses={responses.get(item.id)} onDelete={handleDelete} />
+            <TerminalRow
+              msg={item}
+              responses={responses.get(item.id)}
+              onDelete={!readOnly && (item.id.startsWith('local-') || item.senderId === userId)
+                ? handleDelete
+                : undefined}
+            />
           )}
           style={styles.list}
           contentContainerStyle={styles.listContent}
@@ -2043,12 +2655,14 @@ export default function OfficeTerminal({
         />
       )}
 
+      {!readOnly && (
+      <>
       {/* Autocomplete */}
       {showAutocomplete && (
         <AutocompleteSuggestions
           query={input}
-          agents={agents}
-          onSelect={(id, name) => { selectTarget(id, name); setInput(''); inputRef.current?.focus(); }}
+          agents={onlineAgents}
+          onSelect={(id) => { selectTargets(id ? [id] : null); setInput(''); inputRef.current?.focus(); }}
         />
       )}
 
@@ -2068,6 +2682,9 @@ export default function OfficeTerminal({
             />
           ))}
         </ScrollView>
+        {modelCatalogNotice ? (
+          <Text style={styles.modelCatalogNotice} numberOfLines={2}>{modelCatalogNotice}</Text>
+        ) : null}
 
         {/* Row 2: Mode + Thinking */}
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipsScroll}>
@@ -2106,7 +2723,7 @@ export default function OfficeTerminal({
               label={`@${agent.name}`}
               active={targetIds?.includes(agent.id) ?? false}
               dotColor={STATUS_DOT[agent.status] || STATUS_DOT.offline}
-              onPress={() => toggleAgentTarget(agent.id, agent.name)}
+              onPress={() => toggleAgentTarget(agent.id)}
             />
           ))}
           <View style={styles.chipDivider} />
@@ -2130,6 +2747,8 @@ export default function OfficeTerminal({
         </View>
         <TextInput
           ref={inputRef}
+          testID="office-terminal-command-input"
+          accessibilityLabel="Office terminal command"
           style={styles.input}
           value={input}
           onChangeText={(v) => { setInput(v); setHistoryIdx(-1); }}
@@ -2152,22 +2771,37 @@ export default function OfficeTerminal({
             style={[styles.sendBtn, (!input.trim() || sending) && styles.sendBtnDisabled]}
             onPress={handleSend}
             disabled={!input.trim() || sending}
+            accessibilityRole="button"
+            accessibilityLabel="Send Office terminal command"
+            accessibilityState={{ disabled: !input.trim() || sending, busy: sending }}
           >
             <Text style={styles.sendIcon}>{sending ? '...' : '>'}</Text>
           </Pressable>
         )}
       </View>
+      {sendError ? (
+        <Pressable
+          onPress={() => setSendError(null)}
+          accessibilityRole="alert"
+          accessibilityLabel={`${sendError}. Dismiss message.`}
+          style={{ paddingHorizontal: 12, paddingVertical: 7, backgroundColor: '#ef444415', borderTopWidth: 1, borderTopColor: '#ef444430' }}
+        >
+          <Text style={{ color: '#fca5a5', fontSize: 10, fontFamily: 'monospace' }}>{sendError}</Text>
+        </Pressable>
+      ) : null}
+      </>
+      )}
 
       {/* ── Footer status line (OpenSwan-style) ── */}
       <View style={styles.footer}>
         <View style={[styles.footerDot, onlineCount > 0 && { backgroundColor: BS.accent }]} />
         <Text style={styles.footerText}>
-          {thinkingLevel !== 'balanced' ? `${thinkingLevel} ` : ''}
-          {terminalMode !== 'execute' ? `${terminalMode} ` : ''}
-          {modelInfo?.label || 'auto'}
+          {readOnly
+            ? 'history only'
+            : `${thinkingLevel !== 'balanced' ? `${thinkingLevel} ` : ''}${terminalMode !== 'execute' ? `${terminalMode} ` : ''}${modelInfo?.label || 'auto'}`}
         </Text>
         <View style={{ flex: 1 }} />
-        {cmdHistory.length > 0 && (
+        {!readOnly && cmdHistory.length > 0 && (
           <Text style={styles.footerText}>{cmdHistory.length} history</Text>
         )}
         <Text style={styles.footerMuted}>|</Text>
@@ -2211,6 +2845,27 @@ const styles = StyleSheet.create({
   metricBadgeText: { fontFamily: MONO, fontSize: 8, fontWeight: '700', letterSpacing: 0.5 },
 
   // ── Tabs ──
+  readOnlyBar: {
+    minHeight: 48,
+    justifyContent: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: BS.border,
+    backgroundColor: BS.bgPanel,
+  },
+  readOnlyTitle: {
+    color: BS.textPrimary,
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+  },
+  readOnlyText: {
+    color: BS.textMuted,
+    fontSize: 9,
+    lineHeight: 13,
+    marginTop: 2,
+  },
   termTabBar: {
     flexDirection: 'row', alignItems: 'center',
     borderBottomWidth: 1, borderBottomColor: BS.border,
@@ -2239,6 +2894,37 @@ const styles = StyleSheet.create({
   list: { flex: 1 },
   listContent: { paddingTop: 8, paddingBottom: 8 },
   loadingState: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  transcriptErrorEmpty: { flex: 1, justifyContent: 'center', padding: 16 },
+  transcriptError: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    margin: 10,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#f59e0b55',
+    borderRadius: 10,
+    backgroundColor: '#f59e0b12',
+  },
+  transcriptErrorCopy: { flex: 1, minWidth: 0 },
+  transcriptErrorTitle: { color: '#f4dfb5', fontSize: 11, fontWeight: '700', marginBottom: 2 },
+  transcriptErrorText: { color: '#a8946d', fontSize: 10, lineHeight: 15 },
+  transcriptRetry: {
+    minHeight: 44,
+    minWidth: 72,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: '#f59e0b66',
+    borderRadius: 9,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  transcriptRetryFocused: {
+    ...Platform.select({ web: { outlineStyle: 'none', boxShadow: '0 0 0 3px rgba(245,158,11,0.28)' } as any, default: {} }),
+  },
+  transcriptRetryPressed: { opacity: 0.75, backgroundColor: '#f59e0b18' },
+  transcriptRetryText: { color: '#f4dfb5', fontSize: 10, fontWeight: '700' },
 
   // ── Empty state ──
   emptyState: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32 },
@@ -2267,6 +2953,10 @@ const styles = StyleSheet.create({
   rowLabel: {
     color: BS.textMuted, fontSize: 9, fontWeight: '600',
     letterSpacing: 0.5, marginRight: 4, width: 36, textTransform: 'uppercase',
+  },
+  modelCatalogNotice: {
+    color: BS.textMuted, fontSize: 9, lineHeight: 12, fontFamily: MONO,
+    paddingHorizontal: 12, paddingTop: 1,
   },
   chipDivider: { width: 1, height: 16, backgroundColor: BS.border, marginHorizontal: 6 },
   modeChip: {

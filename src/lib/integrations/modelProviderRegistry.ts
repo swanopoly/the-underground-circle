@@ -7,12 +7,31 @@
  * The picker stores the user's choice as a `model` string. Anthropic
  * models stay short ("claude-sonnet-4-6"). Provider-routed models are
  * prefixed with the integration's provider key
- * ("openrouter/anthropic/claude-sonnet-4", "huggingface/Qwen/Qwen2.5-72B-Instruct")
+ * ("openrouter/anthropic/claude-sonnet-5", "huggingface/Qwen/Qwen2.5-72B-Instruct")
  * so the edge function can dispatch to the right API.
  */
-import { listCircleIntegrations, type CircleIntegrationProvider } from '../circleIntegrations';
-import { listApiKeys, PROVIDER_MODELS, type LLMProvider } from '../llmProviders';
+import { listCircleIntegrationsExact, type CircleIntegrationProvider } from '../circleIntegrations';
+import {
+  captureProviderModelCatalogAuthority,
+  createProviderModelCatalogFallback,
+  listApiKeysStrict,
+  loadProviderModelCatalogSnapshot,
+  PROVIDER_MODELS,
+  LIVE_MODEL_CATALOG_PROVIDERS,
+  type LLMProvider,
+  type ProviderModel,
+  type ProviderModelCatalogExactAuthority,
+  type ProviderModelCatalogSnapshot,
+} from '../llmProviders';
 import { getModelsByProvider, refreshModelRegistry, type RegisteredModel } from '../modelRegistry';
+import { resolvePlainChatModelRoute } from '../crossProviderRouter';
+import {
+  buildModelCatalogReadinessProfile,
+  isProviderModelCatalogAuthorityFailure,
+  projectProviderCatalogModels,
+  type ModelCatalogReadinessProfile,
+  type ModelCatalogReadinessState,
+} from '../modelCatalogReadinessCore';
 
 export interface ModelOption {
   /** Identifier passed all the way to the edge function. */
@@ -24,6 +43,9 @@ export interface ModelOption {
   contextWindow?: number;
   /** True when the underlying credential is wired up. */
   ready: boolean;
+  /** Account inventory evidence behind the option. Curated fallback options
+   * remain runnable but are rechecked by the provider when execution starts. */
+  availability?: 'account_listed' | 'curated_fallback' | 'connection_required' | 'circle_integration';
 }
 
 export interface ModelGroup {
@@ -33,6 +55,10 @@ export interface ModelGroup {
   connected: boolean;
   /** Helper text shown when the group is collapsed/disabled. */
   hint?: string;
+  /** Do not infer account verification from `connected` or model count. */
+  catalogStatus: ModelCatalogReadinessState | 'circle_integration';
+  catalogLabel: string;
+  catalogVerifiedAt?: string;
   models: ModelOption[];
 }
 
@@ -66,93 +92,37 @@ const BLACKSWAN_MODELS: Omit<ModelOption, 'ready'>[] = [
 // fetch fails. When the integration is connected we replace this with the
 // real catalog (200+ models) fetched from openrouter.ai.
 const OPENROUTER_MODELS: Omit<ModelOption, 'ready'>[] = [
-  { id: 'openrouter/anthropic/claude-sonnet-4', label: 'Sonnet 4 · OpenRouter', provider: 'openrouter', description: 'Anthropic via OR', contextWindow: 200_000 },
-  { id: 'openrouter/anthropic/claude-opus-4', label: 'Opus 4 · OpenRouter', provider: 'openrouter', description: 'Anthropic via OR', contextWindow: 200_000 },
-  { id: 'openrouter/openai/gpt-5', label: 'GPT-5', provider: 'openrouter', description: 'OpenAI flagship' },
-  { id: 'openrouter/openai/gpt-5-mini', label: 'GPT-5 mini', provider: 'openrouter', description: 'Cheaper, fast' },
-  { id: 'openrouter/google/gemini-2.5-pro', label: 'Gemini 2.5 Pro', provider: 'openrouter', description: 'Long context' },
-  { id: 'openrouter/google/gemini-2.5-flash', label: 'Gemini 2.5 Flash', provider: 'openrouter', description: 'Fast, cheap' },
+  { id: 'openrouter/anthropic/claude-sonnet-5', label: 'Sonnet 5 · OpenRouter', provider: 'openrouter', description: 'Balanced Claude agent tier', contextWindow: 1_000_000 },
+  { id: 'openrouter/anthropic/claude-opus-5', label: 'Opus 5 · OpenRouter', provider: 'openrouter', description: 'Premium Claude agent tier', contextWindow: 1_000_000 },
+  { id: 'openrouter/openai/gpt-5.6-sol', label: 'GPT-5.6 Sol', provider: 'openrouter', description: 'Deep reasoning and coding', contextWindow: 1_050_000 },
+  { id: 'openrouter/openai/gpt-5.6-terra', label: 'GPT-5.6 Terra', provider: 'openrouter', description: 'Balanced agentic work', contextWindow: 1_050_000 },
+  { id: 'openrouter/openai/gpt-5.6-luna', label: 'GPT-5.6 Luna', provider: 'openrouter', description: 'Fast low-cost worker', contextWindow: 1_050_000 },
+  { id: 'openrouter/google/gemini-3.6-flash', label: 'Gemini 3.6 Flash', provider: 'openrouter', description: 'Fast multimodal agent work', contextWindow: 1_048_576 },
+  { id: 'openrouter/google/gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite', provider: 'openrouter', description: 'Low-latency high-volume work', contextWindow: 1_048_576 },
+  { id: 'openrouter/google/gemini-3.5-flash', label: 'Gemini 3.5 Flash', provider: 'openrouter', description: 'Current stable multimodal model' },
   { id: 'openrouter/meta-llama/llama-3.3-70b-instruct', label: 'Llama 3.3 70B', provider: 'openrouter', description: 'OSS frontier' },
-  { id: 'openrouter/qwen/qwen-2.5-72b-instruct', label: 'Qwen 2.5 72B', provider: 'openrouter', description: 'OSS frontier' },
-  { id: 'openrouter/x-ai/grok-2', label: 'Grok 2', provider: 'openrouter', description: 'xAI' },
-  { id: 'openrouter/deepseek/deepseek-r1', label: 'DeepSeek R1', provider: 'openrouter', description: 'Reasoning OSS' },
+  { id: 'openrouter/qwen/qwen3.5-397b-a17b', label: 'Qwen 3.5 397B A17B', provider: 'openrouter', description: 'Current Qwen frontier' },
+  { id: 'openrouter/deepseek/deepseek-v4-pro', label: 'DeepSeek V4 Pro', provider: 'openrouter', description: 'Current DeepSeek reasoning tier' },
 ];
 
-// 5-minute module-level cache so flipping circles doesn't refetch on every
-// open. The catalog is public (no auth required), but it's still ~200KB so
-// caching matters for picker latency.
-let _openRouterCatalogCache: { fetchedAt: number; models: Omit<ModelOption, 'ready'>[] } | null = null;
-const OPENROUTER_CATALOG_TTL_MS = 5 * 60_000;
+/** Retired models remain supported by routing/capability compatibility maps so
+ * saved conversations can render, but they must not be offered for new picks. */
+const RETIRED_DIRECT_MODEL_IDS = new Set([
+  'gpt-4o',
+  'gpt-4o-mini',
+  'gpt-4.1-nano',
+  'o3-mini',
+  'o4-mini',
+  'gemini-2.5-pro',
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+  'gemini-3.1-pro-preview',
+  'deepseek-chat',
+  'deepseek-reasoner',
+]);
 
-const OR_PRIMARY_FAMILIES = ['anthropic', 'openai', 'google', 'meta-llama', 'qwen', 'mistralai', 'deepseek', 'x-ai'];
 const DIRECT_PROVIDER_REFRESH_TTL_MS = 60 * 60_000;
 const _lastDirectProviderRefresh: Partial<Record<LLMProvider, number>> = {};
-
-async function loadLiveOpenRouterCatalog(): Promise<Omit<ModelOption, 'ready'>[] | null> {
-  const now = Date.now();
-  if (_openRouterCatalogCache && now - _openRouterCatalogCache.fetchedAt < OPENROUTER_CATALOG_TTL_MS) {
-    return _openRouterCatalogCache.models;
-  }
-  try {
-    const resp = await fetch('https://openrouter.ai/api/v1/models', {
-      method: 'GET',
-      headers: { 'Accept': 'application/json' },
-    });
-    if (!resp.ok) return null;
-    const json = await resp.json() as { data?: Array<{
-      id: string;
-      name?: string;
-      description?: string;
-      context_length?: number;
-      pricing?: { prompt?: string; completion?: string };
-    }> };
-    if (!Array.isArray(json.data)) return null;
-
-    // 200+ models in one flat list overwhelms a chat picker. We rank by
-    // family to surface household-name providers first, then alphabetise
-    // within each family. Niche/community models still appear — they
-    // just sort to the bottom of their family.
-    const familyRank = (id: string): number => {
-      const family = id.split('/')[0];
-      const idx = OR_PRIMARY_FAMILIES.indexOf(family);
-      return idx >= 0 ? idx : 999;
-    };
-
-    const sorted = [...json.data].sort((a, b) => {
-      const ra = familyRank(a.id);
-      const rb = familyRank(b.id);
-      if (ra !== rb) return ra - rb;
-      return a.id.localeCompare(b.id);
-    });
-
-    const fmtPrice = (s?: string): string | null => {
-      if (!s) return null;
-      const n = Number.parseFloat(s);
-      if (!Number.isFinite(n) || n === 0) return null;
-      const perM = n * 1_000_000;
-      return perM >= 1 ? `$${perM.toFixed(2)}/M` : `$${perM.toFixed(3)}/M`;
-    };
-
-    const models: Omit<ModelOption, 'ready'>[] = sorted.map((m) => {
-      const family = m.id.split('/')[0];
-      const inP = fmtPrice(m.pricing?.prompt);
-      const outP = fmtPrice(m.pricing?.completion);
-      const priceTag = inP && outP ? `${inP}→${outP}` : inP || outP || '';
-      return {
-        id: `openrouter/${m.id}`,
-        label: m.name || m.id,
-        provider: 'openrouter' as const,
-        description: priceTag ? `${family} · ${priceTag}` : family,
-        contextWindow: m.context_length,
-      };
-    });
-
-    _openRouterCatalogCache = { fetchedAt: now, models };
-    return models;
-  } catch {
-    return null;
-  }
-}
 
 const HUGGING_FACE_MODELS: Omit<ModelOption, 'ready'>[] = (PROVIDER_MODELS.huggingface || []).map((model) => ({
   id: `huggingface/${model.id}`,
@@ -162,10 +132,11 @@ const HUGGING_FACE_MODELS: Omit<ModelOption, 'ready'>[] = (PROVIDER_MODELS.huggi
   contextWindow: model.contextWindow,
 }));
 
-const REPLICATE_MODELS: Omit<ModelOption, 'ready'>[] = [
-  { id: 'replicate/meta/meta-llama-3.1-405b-instruct', label: 'Llama 3.1 405B', provider: 'replicate', description: 'Frontier OSS' },
-  { id: 'replicate/anthropic/claude-3.5-sonnet', label: 'Claude 3.5 Sonnet', provider: 'replicate', description: 'Anthropic via Replicate' },
-];
+// Replicate is image/deployment infrastructure in the current runtime, not a
+// text-chat route through llm-proxy. Keep the Chat group empty until that
+// provider has an actual text adapter; selectable dead ends are worse than a
+// smaller truthful catalog.
+const REPLICATE_MODELS: Omit<ModelOption, 'ready'>[] = [];
 
 const DIRECT_BYOK_PROVIDERS: Array<{
   userProvider: LLMProvider;
@@ -190,6 +161,12 @@ const DIRECT_BYOK_PROVIDERS: Array<{
     marketplaceProvider: 'groq',
     label: 'Groq',
     hint: 'Connect Groq in Marketplace for low-latency Llama and Mixtral models.',
+  },
+  {
+    userProvider: 'github-models',
+    marketplaceProvider: 'github-models' as CircleIntegrationProvider,
+    label: 'GitHub Models',
+    hint: 'Connect a GitHub token with models:read to use the account catalog and inference API.',
   },
   {
     userProvider: 'google_ai',
@@ -253,14 +230,116 @@ const DIRECT_BYOK_PROVIDERS: Array<{
   },
 ];
 
-function directModelsForProvider(userProvider: LLMProvider, marketplaceProvider: string): Omit<ModelOption, 'ready'>[] {
-  return (PROVIDER_MODELS[userProvider] || []).map((model) => ({
+function directModelsForProvider(
+  userProvider: LLMProvider,
+  marketplaceProvider: string,
+  models: readonly ProviderModel[] = PROVIDER_MODELS[userProvider] || [],
+): Omit<ModelOption, 'ready'>[] {
+  return models.map((model) => ({
     id: `${userProvider}/${model.id}`,
     label: model.label,
     provider: marketplaceProvider,
     description: `${userProvider} · ${model.costTier}`,
     contextWindow: model.contextWindow,
   }));
+}
+
+function openRouterModelsForCatalog(models: readonly ProviderModel[]): Omit<ModelOption, 'ready'>[] {
+  return models.map((model) => ({
+    id: model.id.startsWith('openrouter/') ? model.id : `openrouter/${model.id}`,
+    label: model.label,
+    provider: 'openrouter',
+    description: `${model.source === 'provider' ? 'Available to your account' : 'OpenRouter'} | ${model.costTier}`,
+    contextWindow: model.contextWindow,
+  }));
+}
+
+const LIVE_CATALOG_UI_TIMEOUT_MS = 3500;
+
+async function loadProviderCatalogWithTimeout(
+  provider: LLMProvider,
+  circleId: string | null,
+  authority: ProviderModelCatalogExactAuthority,
+  force = false,
+): Promise<ProviderModelCatalogSnapshot> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      loadProviderModelCatalogSnapshot(provider, circleId, { force, authority }),
+      new Promise<ProviderModelCatalogSnapshot>((resolve) => {
+        timeoutId = setTimeout(() => resolve(
+          createProviderModelCatalogFallback(provider, 'catalog_timeout'),
+        ), LIVE_CATALOG_UI_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+  }
+}
+
+async function loadConnectedProviderCatalogs(
+  activeProviders: ReadonlySet<LLMProvider>,
+  circleId: string | null,
+  authority: ProviderModelCatalogExactAuthority,
+  force = false,
+): Promise<Map<LLMProvider, ProviderModelCatalogSnapshot>> {
+  const providers = [...activeProviders].filter(
+    (provider) => LIVE_MODEL_CATALOG_PROVIDERS.has(provider),
+  );
+  const pairs = await Promise.all(providers.map(async (provider) => {
+    const snapshot = await loadProviderCatalogWithTimeout(provider, circleId, authority, force);
+    return [provider, snapshot] as const;
+  }));
+  if (pairs.some(([, snapshot]) => isProviderModelCatalogAuthorityFailure(snapshot.failureCode))) {
+    throw new Error('Connected model catalog account or circle authority is unavailable.');
+  }
+  return new Map(pairs);
+}
+
+function snapshotForProvider(
+  provider: LLMProvider,
+  snapshots: ReadonlyMap<LLMProvider, ProviderModelCatalogSnapshot>,
+): ProviderModelCatalogSnapshot {
+  return snapshots.get(provider)
+    || createProviderModelCatalogFallback(provider, 'request_failed');
+}
+
+function providerModelsForSnapshot(
+  provider: LLMProvider,
+  snapshot: ProviderModelCatalogSnapshot,
+): ProviderModel[] {
+  return projectProviderCatalogModels(
+    provider,
+    PROVIDER_MODELS[provider] || [],
+    snapshot,
+  );
+}
+
+function optionAvailability(
+  profile: ModelCatalogReadinessProfile,
+): NonNullable<ModelOption['availability']> {
+  if (!profile.connected) return 'connection_required';
+  return profile.accountInventoryVerified ? 'account_listed' : 'curated_fallback';
+}
+
+function readyModelOptions(
+  models: Array<Omit<ModelOption, 'ready'>>,
+  connected: boolean,
+  profile: ModelCatalogReadinessProfile,
+): ModelOption[] {
+  const availability = optionAvailability(profile);
+  return models.map((model) => ({
+    ...model,
+    ready: connected && profile.connected,
+    availability,
+  }));
+}
+
+function combinedCatalogHint(
+  profile: ModelCatalogReadinessProfile,
+  providerHint?: string | null,
+): string {
+  return [profile.hint, providerHint || ''].filter(Boolean).join(' ');
 }
 
 function registeredModelsToOptions(
@@ -272,6 +351,7 @@ function registeredModelsToOptions(
   return models
     .filter((model) => model.category === 'chat' || model.category === 'reasoning' || model.category === 'code')
     .filter((model) => !skipRuntimeFamilies.some((pattern) => model.model_id.toLowerCase().includes(pattern)))
+    .filter((model) => !RETIRED_DIRECT_MODEL_IDS.has(model.model_id.toLowerCase()))
     .map((model) => ({
       id: marketplaceProvider === 'anthropic' ? model.model_id : `${userProvider}/${model.model_id}`,
       label: model.label,
@@ -325,11 +405,34 @@ interface RegistryOpts {
    *  but with `ready=false` so the picker can grey them out instead of
    *  hiding entirely (helpful for "go connect this" affordances). */
   includeDisconnected?: boolean;
+  /** Bypass per-provider catalog caches for an exact pre-dispatch refresh. */
+  forceCatalogRefresh?: boolean;
 }
 
 export async function loadModelGroups(circleId: string | null | undefined, opts: RegistryOpts = {}): Promise<ModelGroup[]> {
   const groups: ModelGroup[] = [];
-  const userApiKeys = await listApiKeys().catch(() => []);
+  const exactCircleId = typeof circleId === 'string' && circleId.trim()
+    ? circleId.trim()
+    : null;
+  const catalogAuthority = await captureProviderModelCatalogAuthority(exactCircleId);
+  if (!catalogAuthority) {
+    throw new Error('Connected model catalog account authority is unavailable.');
+  }
+  // This registry is readiness authority for Chat Auto. A failed or malformed
+  // key inventory is not the same thing as an account with zero connections.
+  const [userApiKeys, integrations] = await Promise.all([
+    listApiKeysStrict(catalogAuthority),
+    exactCircleId
+      ? listCircleIntegrationsExact({
+          circleId: exactCircleId,
+          authority: {
+            userId: catalogAuthority.userId,
+            circleId: exactCircleId,
+            accessToken: catalogAuthority.accessToken,
+          },
+        })
+      : Promise.resolve([]),
+  ]);
   const activeUserApiProviders = new Set(
     userApiKeys
       .filter((key) => key.isActive)
@@ -340,6 +443,16 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
   if (activeUserApiProviders.has('hugging_face' as LLMProvider)) activeUserApiProviders.add('huggingface');
   if (activeUserApiProviders.has('z_ai' as LLMProvider)) activeUserApiProviders.add('zai');
 
+  // Provider-owned catalogs are account-specific, so load them through the
+  // authenticated proxy only for connected keys. Every request is parallel
+  // and bounded; a slow/offline provider falls back to the curated rows.
+  const liveCatalogs = await loadConnectedProviderCatalogs(
+    activeUserApiProviders,
+    exactCircleId,
+    catalogAuthority,
+    opts.forceCatalogRefresh === true,
+  );
+
   if (activeUserApiProviders.has('openai')) maybeRefreshDirectProviderCatalog('openai');
   if (activeUserApiProviders.has('anthropic')) maybeRefreshDirectProviderCatalog('anthropic');
 
@@ -347,26 +460,52 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
     getModelsByProvider('anthropic').catch(() => []),
     getModelsByProvider('openai').catch(() => []),
   ]);
-  const anthropicModels = mergeModelOptions(
-    ANTHROPIC_MODELS,
-    registeredModelsToOptions(registeredAnthropicModels, 'anthropic', 'anthropic'),
-  );
-
   // Anthropic is the native default path, but it still needs the user's
   // own stored key unless the backend explicitly allows platform keys for
   // that account.
   const anthropicReady = activeUserApiProviders.has('anthropic');
+  const anthropicSnapshot = snapshotForProvider('anthropic', liveCatalogs);
+  const anthropicCatalogModels = anthropicReady
+    ? providerModelsForSnapshot('anthropic', anthropicSnapshot)
+    : PROVIDER_MODELS.anthropic;
+  const liveAnthropicModels = anthropicCatalogModels.map((model) => ({
+    id: model.id,
+    label: model.label,
+    provider: 'anthropic',
+    description: `${model.source === 'provider' ? 'Listed for your key' : 'Anthropic'} | ${model.costTier}`,
+    contextWindow: model.contextWindow,
+  }));
+  const anthropicModels = mergeModelOptions(
+    mergeModelOptions(
+      anthropicSnapshot.status === 'verified' ? [] : ANTHROPIC_MODELS,
+      liveAnthropicModels,
+    ),
+    anthropicSnapshot.status === 'verified'
+      ? []
+      : registeredModelsToOptions(registeredAnthropicModels, 'anthropic', 'anthropic'),
+  );
+  const anthropicReadiness = buildModelCatalogReadinessProfile({
+    connected: anthropicReady,
+    snapshotStatus: anthropicSnapshot.status,
+    selectableModelCount: anthropicModels.length,
+    failureCode: anthropicSnapshot.failureCode,
+  });
   groups.push({
     provider: 'anthropic',
     label: 'Anthropic',
-    connected: anthropicReady,
-    hint: anthropicReady ? undefined : 'Add your Anthropic key in Marketplace > Models before using Claude chat models.',
-    models: anthropicModels.map((model) => ({ ...model, ready: anthropicReady })),
+    connected: anthropicReadiness.connected,
+    hint: anthropicReadiness.connected
+      ? combinedCatalogHint(anthropicReadiness)
+      : 'Add your Anthropic key in Marketplace > Models before using Claude chat models.',
+    catalogStatus: anthropicReadiness.state,
+    catalogLabel: anthropicReadiness.label,
+    ...(anthropicSnapshot.status === 'verified' && anthropicSnapshot.fetchedAt
+      ? { catalogVerifiedAt: anthropicSnapshot.fetchedAt }
+      : {}),
+    models: readyModelOptions(anthropicModels, anthropicReady, anthropicReadiness),
   });
 
-  if (!circleId) return groups;
-
-  const integrations = await listCircleIntegrations(circleId);
+  if (!exactCircleId) return groups;
 
   // BlackSwan group — sources from its OWN dedicated Marketplace
   // integration (`blackswan` provider). Connect once, every circle
@@ -427,7 +566,13 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
           ? 'Your circle\'s custom-trained model. Endpoint variant is instant; Inference API variant is free with cold-start.'
           : 'Your circle\'s custom-trained model. Add the Endpoint URL in Marketplace → BlackSwan to enable the instant variant.')
       : 'Connect BlackSwan in Marketplace — paste your HF token and the Endpoint URL once and every circle member can chat with the model.',
-    models: blackswanModels.map((m) => ({ ...m, ready: blackswanReady })),
+    catalogStatus: 'circle_integration',
+    catalogLabel: blackswanReady ? 'Circle endpoint connected' : 'Not connected',
+    models: blackswanModels.map((m) => ({
+      ...m,
+      ready: blackswanReady,
+      availability: blackswanReady ? 'circle_integration' : 'connection_required',
+    })),
   });
 
   // Three states matter for the picker: connected (ready to use),
@@ -461,34 +606,81 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
         : isDegraded
           ? `Key invalid (${degradedReason}). Re-enter in Marketplace.`
           : entry.hint;
+    const catalogSnapshot = snapshotForProvider(entry.userProvider, liveCatalogs);
+    const catalogModels = hasUserKey
+      ? providerModelsForSnapshot(entry.userProvider, catalogSnapshot)
+      : PROVIDER_MODELS[entry.userProvider] || [];
+    const chatReadyModels = mergeModelOptions(
+      directModelsForProvider(
+        entry.userProvider,
+        entry.marketplaceProvider,
+        catalogModels,
+      ),
+      entry.userProvider === 'openai_compatible'
+        ? businessEndpointModelsFromKeys(userApiKeys)
+        : entry.userProvider === 'openai' && catalogSnapshot.status !== 'verified'
+        ? registeredModelsToOptions(registeredOpenAIModels, 'openai', 'openai')
+        : [],
+    ).filter((model) => resolvePlainChatModelRoute(model.id) !== null);
+
+    const catalogReadiness = buildModelCatalogReadinessProfile({
+      connected: hasUserKey,
+      snapshotStatus: catalogSnapshot.status,
+      selectableModelCount: chatReadyModels.length,
+      failureCode: catalogSnapshot.failureCode,
+    });
+
+    // This registry feeds Chat, Rooms, and agent-spawn selectors. Never show a
+    // model unless the browser runtime owns an exact execution route for it.
+    // Local Ollama and arbitrary OpenAI-compatible endpoints remain available
+    // to guarded OpenSwan/local tools; the hosted edge rejects those targets.
+    if (
+      chatReadyModels.length === 0
+      && !(hasUserKey && catalogSnapshot.status === 'verified')
+    ) continue;
     groups.push({
       provider: entry.marketplaceProvider,
       label: hasUserKey ? entry.label : `${entry.label} - key needed`,
-      connected: hasUserKey,
-      hint,
-      models: mergeModelOptions(
-        directModelsForProvider(entry.userProvider, entry.marketplaceProvider),
-        entry.userProvider === 'openai_compatible'
-          ? businessEndpointModelsFromKeys(userApiKeys)
-          : entry.userProvider === 'openai'
-          ? registeredModelsToOptions(registeredOpenAIModels, 'openai', 'openai')
-          : [],
-      ).map((model) => ({ ...model, ready: hasUserKey })),
+      connected: catalogReadiness.connected,
+      hint: hasUserKey ? combinedCatalogHint(catalogReadiness, hint) : hint,
+      catalogStatus: catalogReadiness.state,
+      catalogLabel: catalogReadiness.label,
+      ...(catalogSnapshot.status === 'verified' && catalogSnapshot.fetchedAt
+        ? { catalogVerifiedAt: catalogSnapshot.fetchedAt }
+        : {}),
+      models: readyModelOptions(chatReadyModels, hasUserKey, catalogReadiness),
     });
   }
 
-  // Pull the live OpenRouter catalog when the integration is connected so
-  // the picker reflects the real ~200-model lineup (and current prices)
-  // rather than a stale 10-item shortlist. Catalog is public, so no auth
-  // is needed — we only fetch when the team has actually connected the
-  // integration to keep the request budget tight.
-  const openRouterConnected = connectedSet.has('openrouter') || activeUserApiProviders.has('openrouter');
-  const openRouterModels = openRouterConnected
-    ? (await loadLiveOpenRouterCatalog()) || OPENROUTER_MODELS
-    : OPENROUTER_MODELS;
+  // OpenRouter uses the same authenticated, fixed-endpoint, payload-bounded
+  // catalog path as the other direct providers. A circle integration alone is
+  // not a valid credential for the direct Chat proxy and must never make a
+  // model look ready.
+  const openRouterConnected = activeUserApiProviders.has('openrouter');
+  const openRouterSnapshot = snapshotForProvider('openrouter', liveCatalogs);
+  const openRouterCatalogModels = openRouterConnected
+    ? providerModelsForSnapshot('openrouter', openRouterSnapshot)
+    : PROVIDER_MODELS.openrouter;
+  const projectedOpenRouterModels = openRouterModelsForCatalog(openRouterCatalogModels);
+  const openRouterModels = openRouterConnected && openRouterSnapshot.status === 'verified'
+    ? projectedOpenRouterModels
+    : mergeModelOptions(OPENROUTER_MODELS, projectedOpenRouterModels);
   const openRouterLabel = openRouterConnected
     ? `OpenRouter (${openRouterModels.length} models)`
     : 'OpenRouter (100+ models)';
+  const huggingFaceConnected = activeUserApiProviders.has('huggingface');
+  const huggingFaceSnapshot = snapshotForProvider('huggingface', liveCatalogs);
+  const huggingFaceCatalogModels = huggingFaceConnected
+    ? providerModelsForSnapshot('huggingface', huggingFaceSnapshot)
+    : PROVIDER_MODELS.huggingface;
+  const projectedHuggingFaceModels = directModelsForProvider(
+    'huggingface',
+    'hugging_face',
+    huggingFaceCatalogModels,
+  );
+  const huggingFaceModels = huggingFaceConnected && huggingFaceSnapshot.status === 'verified'
+    ? projectedHuggingFaceModels
+    : mergeModelOptions(HUGGING_FACE_MODELS, projectedHuggingFaceModels);
 
   const providerHydrators: Array<{
     provider: CircleIntegrationProvider;
@@ -505,7 +697,7 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
     {
       provider: 'hugging_face',
       label: 'Hugging Face',
-      models: HUGGING_FACE_MODELS,
+      models: huggingFaceModels,
       hint: 'Connect Hugging Face in Marketplace for Inference Endpoints.',
     },
     {
@@ -517,24 +709,47 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
   ];
 
   for (const entry of providerHydrators) {
+    if (entry.models.length === 0) continue;
     const userProvider =
       entry.provider === 'hugging_face' ? 'huggingface'
       : entry.provider === 'replicate' ? 'replicate'
       : entry.provider === 'openrouter' ? 'openrouter'
       : null;
-    const isConnected = connectedSet.has(entry.provider) || (userProvider ? activeUserApiProviders.has(userProvider as LLMProvider) : false);
+    // These groups route through the authenticated user's model proxy. Keep
+    // circle-shared integration readiness out of this decision; otherwise the
+    // picker advertises a usable model that the exact user credential lookup
+    // cannot call.
+    const isConnected = userProvider
+      ? activeUserApiProviders.has(userProvider as LLMProvider)
+      : connectedSet.has(entry.provider);
     const degradedReason = degradedMessages.get(entry.provider);
     const isDegraded = !isConnected && !!degradedReason;
     if (!isConnected && !isDegraded && !opts.includeDisconnected) continue;
-    const hint = isDegraded
+    const providerHint = isDegraded
       ? `Key invalid (${degradedReason}). Re-enter in Marketplace.`
       : entry.hint;
+    const catalogSnapshot = userProvider
+      ? snapshotForProvider(userProvider, liveCatalogs)
+      : createProviderModelCatalogFallback('replicate', 'unsupported_provider');
+    const catalogReadiness = buildModelCatalogReadinessProfile({
+      connected: isConnected,
+      snapshotStatus: catalogSnapshot.status,
+      selectableModelCount: entry.models.length,
+      failureCode: catalogSnapshot.failureCode,
+    });
     groups.push({
       provider: entry.provider,
       label: isDegraded ? `${entry.label} — DEGRADED` : entry.label,
-      connected: isConnected,
-      hint,
-      models: entry.models.map((m) => ({ ...m, ready: isConnected })),
+      connected: catalogReadiness.connected,
+      hint: catalogReadiness.connected
+        ? combinedCatalogHint(catalogReadiness, providerHint)
+        : providerHint,
+      catalogStatus: catalogReadiness.state,
+      catalogLabel: catalogReadiness.label,
+      ...(catalogSnapshot.status === 'verified' && catalogSnapshot.fetchedAt
+        ? { catalogVerifiedAt: catalogSnapshot.fetchedAt }
+        : {}),
+      models: readyModelOptions(entry.models, isConnected, catalogReadiness),
     });
   }
 

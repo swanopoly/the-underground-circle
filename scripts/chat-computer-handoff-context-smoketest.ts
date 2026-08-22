@@ -58,8 +58,153 @@ assert(browserNoticeVisible.includes('I found the browser path for this request.
 assert(browserNoticeVisible.includes('Approve browser run'));
 assert(!browserNoticeVisible.includes('browser-plan-shopify'), 'request notice handoff hides internal browser plan id');
 
-// T7 sticky allow scopes: the standing-grant stamp rides handoff metadata
-// (scope id + bounded notice) and the visible approval/summary lines.
+const illustratorTask = 'Open Adobe Illustrator 2026, create a document, add a blue circle, and export it as PNG';
+const illustratorRoute = buildChatComputerRequestRoute(illustratorTask);
+assert(illustratorRoute?.requestedActionContract, 'multi-action route builds an A1…An contract for handoff');
+const illustratorHandoff = buildChatComputerHandoffContext({
+  task: illustratorTask,
+  entrypoint: 'agent_runtime',
+  adapterId: 'desktop_app_adapter',
+  taskKind: 'app_task',
+  taskLabel: 'Illustrator multi-action task',
+  requestedActionContract: illustratorRoute?.requestedActionContract,
+  evidenceContract: illustratorRoute?.evidenceContract,
+});
+assert.deepEqual(
+  illustratorHandoff.metadata.requestedActionContract?.actions.map((action) => action.id),
+  ['A1', 'A2', 'A3', 'A4'],
+  'handoff retains every requested action id',
+);
+assert.equal(
+  illustratorHandoff.metadata.requestedActionContract?.actions[3]?.text,
+  'export it as PNG',
+  'handoff retains the final requested action instead of only the first step',
+);
+assert(Object.isFrozen(illustratorHandoff.metadata.requestedActionContract), 'handoff action summary is immutable');
+assert.deepEqual(
+  illustratorHandoff.metadata.requestedActionCoverage?.actions.map((action) => action.status),
+  ['pending', 'pending', 'pending', 'pending'],
+  'unstarted handoff keeps every requested action pending',
+);
+assert.equal(
+  illustratorHandoff.metadata.requestedActionCoverage?.allActionsVerified,
+  false,
+  'an action ledger alone never manufactures completion',
+);
+assert(
+  formatChatComputerHandoffForMessage(illustratorHandoff, { visibility: 'debug' })
+    .includes('Requested actions: A1–A4 pending.'),
+  'debug handoff exposes bounded A-id coverage',
+);
+
+const blockedIllustratorHandoff = buildChatComputerHandoffContext({
+  task: illustratorTask,
+  entrypoint: 'agent_runtime',
+  adapterId: 'desktop_app_adapter',
+  taskKind: 'app_task',
+  requestedActionContract: illustratorRoute?.requestedActionContract,
+  outcomeStatus: 'blocked',
+  mutationDispatched: false,
+  blockers: ['Illustrator is not reachable'],
+});
+assert.deepEqual(
+  blockedIllustratorHandoff.metadata.requestedActionCoverage?.actions.map((action) => action.status),
+  ['blocked', 'pending', 'pending', 'pending'],
+  'pre-dispatch block identifies A1 and leaves later actions pending',
+);
+assert(
+  formatChatComputerHandoffForMessage(blockedIllustratorHandoff).includes(
+    'Requested actions: A1 blocked; A2–A4 pending.',
+  ),
+  'problem handoff makes unfinished action coverage visible',
+);
+
+const uncertainIllustratorHandoff = buildChatComputerHandoffContext({
+  task: illustratorTask,
+  entrypoint: 'agent_runtime',
+  adapterId: 'desktop_app_adapter',
+  taskKind: 'app_task',
+  requestedActionContract: illustratorRoute?.requestedActionContract,
+  outcomeStatus: 'partial',
+  mutationDispatched: true,
+  blockers: ['Fresh after-state proof is missing'],
+});
+assert(
+  uncertainIllustratorHandoff.metadata.requestedActionCoverage?.actions.every(
+    (action) => action.status === 'outcome_unknown',
+  ),
+  'possible mutation without whole-task proof keeps every A-id outcome-unknown',
+);
+assert(
+  formatChatComputerHandoffForMessage(uncertainIllustratorHandoff).includes('completion is not verified'),
+  'uncertain handoff never presents partial action coverage as done',
+);
+const uncertainWithoutProseBlocker = buildChatComputerHandoffContext({
+  task: illustratorTask,
+  entrypoint: 'agent_runtime',
+  adapterId: 'desktop_app_adapter',
+  requestedActionContract: illustratorRoute?.requestedActionContract,
+  outcomeStatus: 'partial',
+  mutationDispatched: true,
+});
+assert(
+  formatChatComputerHandoffForMessage(uncertainWithoutProseBlocker).includes('Needs attention'),
+  'typed unresolved A-id coverage is itself enough to surface a non-complete task',
+);
+const completedIllustratorHandoff = buildChatComputerHandoffContext({
+  task: illustratorTask,
+  entrypoint: 'agent_runtime',
+  adapterId: 'desktop_app_adapter',
+  requestedActionContract: illustratorRoute?.requestedActionContract,
+  outcomeStatus: 'completed',
+  taskCompletionVerified: true,
+  mutationDispatched: true,
+});
+assert.equal(
+  completedIllustratorHandoff.metadata.requestedActionCoverage?.allActionsVerified,
+  true,
+  'authoritative whole-task completion verifies every retained A-id',
+);
+assert.equal(
+  formatChatComputerHandoffForMessage(completedIllustratorHandoff),
+  '',
+  'verified action coverage stays quiet in the default success surface',
+);
+const unverifiedCompletedIllustratorHandoff = buildChatComputerHandoffContext({
+  task: illustratorTask,
+  entrypoint: 'agent_runtime',
+  adapterId: 'desktop_app_adapter',
+  requestedActionContract: illustratorRoute?.requestedActionContract,
+  outcomeStatus: 'completed',
+  mutationDispatched: true,
+});
+assert.equal(
+  unverifiedCompletedIllustratorHandoff.metadata.requestedActionCoverage?.overallStatus,
+  'outcome_unknown',
+  'completed status without runtime-owned task proof cannot verify A1…An',
+);
+assert(
+  formatChatComputerHandoffForMessage(unverifiedCompletedIllustratorHandoff).includes('completion is not verified'),
+  'unverified completed status remains visibly non-complete',
+);
+const malformedActionLedgerHandoff = buildChatComputerHandoffContext({
+  task: illustratorTask,
+  entrypoint: 'agent_runtime',
+  adapterId: 'desktop_app_adapter',
+  requestedActionContract: {
+    ...illustratorRoute!.requestedActionContract!,
+    actionCount: 9,
+  } as any,
+  outcomeStatus: 'completed',
+  taskCompletionVerified: true,
+});
+assert.equal(
+  malformedActionLedgerHandoff.metadata.requestedActionCoverage?.overallStatus,
+  'requires_decomposition',
+  'a mismatched handoff action count fails closed instead of borrowing a completion bit',
+);
+
+// Retired broad standing grants cannot be revived by a forged handoff stamp.
 const stickyHandoff = buildChatComputerHandoffContext({
   task: 'Save the updated pricing table on acme.com',
   entrypoint: 'browser_runtime',
@@ -67,18 +212,16 @@ const stickyHandoff = buildChatComputerHandoffContext({
   taskKind: 'browser_task',
   taskLabel: 'Browser task',
   browserPlanId: 'browser-plan-sticky',
-  stickyScopeApplied: { scopeId: 'scope-sticky-1', scopeKey: 'acme.com' },
+  stickyScopeApplied: { scopeId: 'scope-sticky-1', scopeKey: 'acme.com', categories: ['publish'] },
 });
-assert.equal(stickyHandoff.metadata.standingGrant?.scopeId, 'scope-sticky-1');
-assert.equal(stickyHandoff.metadata.standingGrant?.scopeKey, 'acme.com');
-assert(stickyHandoff.metadata.standingGrant!.notice.includes('acme.com'), 'standing grant notice names the scope');
-assert(stickyHandoff.metadata.standingGrant!.notice.length <= 240, 'standing grant notice stays bounded');
-assert(stickyHandoff.chatLines.some((line) => line.includes('Standing grant: acme.com')), 'compact summary carries the standing grant line');
+assert.equal(stickyHandoff.metadata.standingGrant, null, 'forged broad grant stays out of handoff metadata');
+assert(!stickyHandoff.chatLines.some((line) => line.includes('Standing grant:')), 'forged broad grant stays out of the compact summary');
 const stickyVisible = formatChatComputerHandoffForMessage(stickyHandoff);
-assert(stickyVisible.includes('standing grant for acme.com'), 'approval lines surface the standing grant notice');
+assert(!stickyVisible.includes('standing grant'), 'forged broad grant produces no visible approval claim');
 assert.equal(browser.metadata.standingGrant, null, 'routes without a grant keep an empty standingGrant');
 
-const desktopTask = buildDesktopAttachmentComputerTask('change APR to 2.9%', [{
+const desktopTaskRequest = 'change APR to 2.9% in the InDesign banner';
+const desktopTaskProjection = buildDesktopAttachmentComputerTask(desktopTaskRequest, [{
   name: 'dealer-banner.indd',
   mimeType: 'application/octet-stream',
   sizeBytes: 4_200_000,
@@ -97,6 +240,10 @@ const desktopTask = buildDesktopAttachmentComputerTask('change APR to 2.9%', [{
   sha256: 'b'.repeat(64),
   appName: 'Adobe Photoshop',
 }]);
+assert(!desktopTaskProjection.includes('/Users/chris'), 'desktop compatibility projection hides local paths');
+assert(!desktopTaskProjection.includes('dealer-banner.indd'), 'desktop compatibility projection hides filenames');
+assert(!desktopTaskProjection.includes(desktopTaskRequest), 'desktop compatibility projection hides the original request');
+const desktopTask = desktopTaskRequest;
 const desktop = buildChatComputerHandoffContext({
   task: desktopTask,
   entrypoint: 'agent_runtime',
@@ -108,9 +255,7 @@ const desktop = buildChatComputerHandoffContext({
 });
 assert.equal(desktop.surface, 'desktop');
 assert(desktop.touched.includes('surface:desktop_bridge'));
-assert.equal(desktop.metadata.desktopAttachmentPackage?.fileCount, 2);
-assert.equal(desktop.metadata.desktopAttachmentPackage?.sha256Count, 2);
-assert.equal(desktop.metadata.desktopAttachmentPackage?.manifestPath, `/Users/chris/Downloads/Underground Circle Attachments/banner/${DESKTOP_ATTACHMENT_MANIFEST_FILENAME}`);
+assert.equal(desktop.metadata.desktopAttachmentPackage, null, 'value-free handoff cannot reconstruct a desktop package');
 assert(desktop.touched.includes('surface:design_app'), 'InDesign handoff records design-app surface');
 assert.equal(desktop.metadata.designAppTask?.appName, 'Adobe InDesign');
 assert(desktop.metadata.designAppTask?.operations.includes('update_text_layers'), 'InDesign handoff captures text-layer operation');
@@ -118,10 +263,11 @@ assert.equal(desktop.metadata.designProofReview?.reviewTitle, 'InDesign Proof Re
 assert(desktop.metadata.designProofReview?.checklist.some((item) => /Text inventory/i.test(item)), 'InDesign handoff carries proof review checklist');
 assert.equal(formatChatComputerHandoffForMessage(desktop), '', 'successful desktop handoff stays quiet by default');
 const desktopDebug = formatChatComputerHandoffForMessage(desktop, { visibility: 'debug' });
-assert(desktopDebug.includes('Package files: 2 (2 hashed)'));
+assert(!desktopDebug.includes('Package files:'), 'debug handoff does not recreate private attachment metadata');
 assert(desktopDebug.includes('Design app: Adobe InDesign'));
 
-const photoshopTask = buildDesktopAttachmentComputerTask('remove the background with Photoshop generative fill and export a PNG proof', [{
+const photoshopTaskRequest = 'remove the background with Photoshop generative fill and export a PNG proof';
+const photoshopTaskProjection = buildDesktopAttachmentComputerTask(photoshopTaskRequest, [{
   name: 'hero.psd',
   mimeType: 'application/octet-stream',
   sizeBytes: 9_200_000,
@@ -131,6 +277,10 @@ const photoshopTask = buildDesktopAttachmentComputerTask('remove the background 
   sha256: 'c'.repeat(64),
   appName: 'Adobe Photoshop',
 }]);
+assert(!photoshopTaskProjection.includes('/Users/chris'), 'Photoshop compatibility projection hides its local path');
+assert(!photoshopTaskProjection.includes('hero.psd'), 'Photoshop compatibility projection hides its filename');
+assert(!photoshopTaskProjection.includes(photoshopTaskRequest), 'Photoshop compatibility projection hides the original request');
+const photoshopTask = photoshopTaskRequest;
 const photoshopDesktop = buildChatComputerHandoffContext({
   task: photoshopTask,
   entrypoint: 'agent_runtime',
@@ -315,9 +465,9 @@ const blockedDesktop = buildChatComputerHandoffContext({
 });
 const blockedVisible = formatChatComputerHandoffForMessage(blockedDesktop);
 assert(blockedVisible.includes('Needs attention'));
-assert(blockedVisible.includes('Uploaded package is preserved for retry/recovery (2 files, 2 hashed).'));
+assert(!blockedVisible.includes('Uploaded package is preserved'), 'problem handoff does not claim persisted private package data');
 assert(!blockedVisible.includes(DESKTOP_ATTACHMENT_MANIFEST_FILENAME), 'user-visible problem handoff hides manifest path by default');
-assert(formatChatComputerHandoffForMessage(blockedDesktop, { visibility: 'problem', includeTechnicalPaths: true }).includes(DESKTOP_ATTACHMENT_MANIFEST_FILENAME));
+assert(!formatChatComputerHandoffForMessage(blockedDesktop, { visibility: 'problem', includeTechnicalPaths: true }).includes(DESKTOP_ATTACHMENT_MANIFEST_FILENAME));
 
 const localFiles = buildChatComputerHandoffContext({
   task: 'Search files in Downloads for invoice',

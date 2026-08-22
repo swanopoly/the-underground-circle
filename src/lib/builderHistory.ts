@@ -15,6 +15,10 @@
 
 import type { SwanBotStructuredArtifact } from './swanbot';
 import { storage } from './storage';
+import {
+  chatPersonalThreadStorageKey,
+  type ChatPersonalStorageScope,
+} from './chatSessionStatePersistence';
 
 export const BUILDER_HISTORY_STORAGE_KEY = 'uc_builder_history';
 const MAX_REVISIONS = 10;
@@ -26,8 +30,16 @@ export interface BuilderRevision {
   artifact: SwanBotStructuredArtifact;
 }
 
-function historyKey(threadId: string): string {
+export type BuilderHistoryStorageScope = ChatPersonalStorageScope & {
+  threadId: string | null | undefined;
+};
+
+function legacyHistoryKey(threadId: string): string {
   return `${BUILDER_HISTORY_STORAGE_KEY}_${threadId}`;
+}
+
+function historyKey(scope: BuilderHistoryStorageScope): string | null {
+  return chatPersonalThreadStorageKey('builder_history', scope, scope.threadId);
 }
 
 function isPreviewable(artifact: SwanBotStructuredArtifact | null | undefined): boolean {
@@ -36,10 +48,13 @@ function isPreviewable(artifact: SwanBotStructuredArtifact | null | undefined): 
   return typeof artifact.content === 'string' && artifact.content.length > 0;
 }
 
-export async function loadBuilderHistory(threadId: string | null | undefined): Promise<BuilderRevision[]> {
-  if (!threadId) return [];
+export async function loadBuilderHistory(scope: BuilderHistoryStorageScope): Promise<BuilderRevision[]> {
+  const key = historyKey(scope);
+  if (!key || !scope.threadId) return [];
   try {
-    const raw = await storage.getItem(historyKey(threadId));
+    // Ownerless thread-only history can contain full source. Retire it unread.
+    await storage.removeItem(legacyHistoryKey(scope.threadId));
+    const raw = await storage.getItem(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -60,12 +75,13 @@ export async function loadBuilderHistory(threadId: string | null | undefined): P
 /** Push a new revision onto the stack. Newest-first. Deduplicates by
  * content hash so streaming the same build twice doesn't spam history. */
 export async function pushBuilderRevision(
-  threadId: string | null | undefined,
+  scope: BuilderHistoryStorageScope,
   artifact: SwanBotStructuredArtifact | null | undefined,
   brief: string | null = null,
 ): Promise<BuilderRevision[]> {
-  if (!threadId || !isPreviewable(artifact)) return [];
-  const existing = await loadBuilderHistory(threadId);
+  const key = historyKey(scope);
+  if (!key || !isPreviewable(artifact)) return [];
+  const existing = await loadBuilderHistory(scope);
   const newContent = (artifact!.content || '').trim();
   // Dedup: if the most recent revision already has this exact content,
   // skip. Users re-clicking the same artifact shouldn't create fake history.
@@ -82,26 +98,31 @@ export async function pushBuilderRevision(
     ...existing,
   ].slice(0, MAX_REVISIONS);
   try {
-    await storage.setItem(historyKey(threadId), JSON.stringify(next));
+    await storage.setItem(key, JSON.stringify(next));
   } catch {
     // Storage full or unavailable — not fatal; history just won't persist.
   }
   return next;
 }
 
-export async function clearBuilderHistory(threadId: string | null | undefined): Promise<void> {
-  if (!threadId) return;
-  try { await storage.removeItem(historyKey(threadId)); } catch {}
+export async function clearBuilderHistory(scope: BuilderHistoryStorageScope): Promise<void> {
+  const key = historyKey(scope);
+  if (!key) return;
+  try {
+    await storage.removeItem(key);
+    if (scope.threadId) await storage.removeItem(legacyHistoryKey(scope.threadId));
+  } catch {}
 }
 
 export async function removeBuilderRevision(
-  threadId: string | null | undefined,
+  scope: BuilderHistoryStorageScope,
   revisionId: string,
 ): Promise<BuilderRevision[]> {
-  if (!threadId) return [];
-  const existing = await loadBuilderHistory(threadId);
+  const key = historyKey(scope);
+  if (!key) return [];
+  const existing = await loadBuilderHistory(scope);
   const next = existing.filter(r => r.id !== revisionId);
-  try { await storage.setItem(historyKey(threadId), JSON.stringify(next)); } catch {}
+  try { await storage.setItem(key, JSON.stringify(next)); } catch {}
   return next;
 }
 

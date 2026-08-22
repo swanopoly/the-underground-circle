@@ -33,7 +33,7 @@ const CATEGORY_ORDER: ChatSlashCommandCategory[] = [
 
 const CATEGORY_ACCENT: Record<ChatSlashCommandCategory, string> = {
   general:    '#94a3b8',
-  knowledge:  '#22d3ee',
+  knowledge:  '#6366f1',
   memory:     '#a855f7',
   missions:   '#f59e0b',
   rooms:      '#6366f1',

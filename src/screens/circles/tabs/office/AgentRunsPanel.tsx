@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Platform, Pressable, ScrollView, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Platform, Pressable, Text, View } from 'react-native';
 import { MONO, formatTokens } from './AgentPanelShared';
 import OpenSwanQualityAggregate from '../../../../components/chat/OpenSwanQualityAggregate';
 import OpenSwanQualityDashboard from '../../../../components/chat/OpenSwanQualityDashboard';
@@ -8,10 +8,39 @@ import { buildOpenSwanObservedEvalAggregate, buildOpenSwanObservedEvalDashboard 
 import { buildRunMetadataSummaryProps } from '../../../../lib/runMetadataSummary';
 import { getRunSubjectSummary } from '../../../../lib/agentRunSubjectSummary';
 import { planRunReap } from '../../../../lib/runStallPolicyCore';
+import { isAwaitingConnectedAgentResultMetadata } from '../../../../lib/officeOpsBoard';
+import { bucketRunForHistory, describeRunHistoryStatus } from '../../../../lib/runHistoryFilterCore';
+import type {
+  AgentRun,
+  AgentRunExactReadAuthority,
+  AgentRunExactReadAuthorityFence,
+  AgentRunStrictReadOptions,
+  RunStep,
+} from '../../../../lib/agentRunSystem';
 
 type StatusFilter = 'all' | 'completed' | 'running' | 'failed';
 
+type RunDetailsState = {
+  rootRunId: string | null;
+  runId: string | null;
+  selectedRun: AgentRun | null;
+  status: 'idle' | 'loading' | 'ready' | 'error';
+  steps: RunStep[];
+  childRuns: AgentRun[];
+  error: string | null;
+};
+
 const PAGE_SIZE = 10;
+const EMPTY_STALE_RUN_IDS = new Set<string>();
+const EMPTY_RUN_DETAILS: RunDetailsState = {
+  rootRunId: null,
+  runId: null,
+  selectedRun: null,
+  status: 'idle',
+  steps: [],
+  childRuns: [],
+  error: null,
+};
 
 const STATUS_COLORS: Record<string, string> = {
   completed: '#22c55e',
@@ -59,52 +88,169 @@ function getWeakestSignalLabel(observedEval: any): string | null {
 
 // Matches a run object to the active filter. `running` bucket covers any
 // "in progress" state users conceptually think of as "currently working".
-function matchesFilter(run: any, filter: StatusFilter): boolean {
+function matchesFilter(run: any, filter: StatusFilter, nowMs: number): boolean {
   if (filter === 'all') return true;
-  if (filter === 'completed') return run.status === 'completed';
-  if (filter === 'failed') return run.status === 'failed';
-  if (filter === 'running') {
-    return run.status === 'running'
-      || run.status === 'planning'
-      || run.status === 'queued'
-      || run.status === 'paused'
-      || run.status === 'waiting_approval';
-  }
+  const bucket = bucketRunForHistory(run, nowMs);
+  if (filter === 'completed') return bucket === 'succeeded';
+  if (filter === 'failed') return bucket === 'failed';
+  if (filter === 'running') return bucket === 'running';
   return true;
 }
 
-export default function AgentRunsPanel({ circleId, agentId, agentAliases = [], agentName, accentColor }: { circleId: string; agentId: string; agentAliases?: string[]; agentName: string; accentColor: string }) {
+interface AgentRunsPanelProps {
+  circleId: string;
+  agentId: string;
+  agentAliases?: string[];
+  agentName: string;
+  accentColor: string;
+  identityAuthority: AgentRunExactReadAuthority | null;
+  isIdentityAuthorityCurrent: AgentRunExactReadAuthorityFence;
+}
+
+function normalizeRunsReadAuthority(
+  circleId: string,
+  authority: AgentRunExactReadAuthority | null | undefined,
+): AgentRunExactReadAuthority | null {
+  const userId = authority?.userId?.trim();
+  const authorityCircleId = authority?.circleId?.trim();
+  const accessToken = authority?.accessToken?.trim();
+  const generation = Number(authority?.generation);
+  if (
+    !circleId
+    || !userId
+    || authorityCircleId !== circleId
+    || !accessToken
+    || accessToken.length > 16_384
+    || !Number.isSafeInteger(generation)
+    || generation <= 0
+  ) return null;
+  return { userId, circleId: authorityCircleId, accessToken, generation };
+}
+
+function isRunsReadAuthorityCurrent(
+  authority: AgentRunExactReadAuthority,
+  fence: AgentRunExactReadAuthorityFence,
+): boolean {
+  try {
+    return fence(authority) === true;
+  } catch {
+    return false;
+  }
+}
+
+export default function AgentRunsPanel({
+  circleId,
+  agentId,
+  agentAliases = [],
+  agentName,
+  accentColor,
+  identityAuthority,
+  isIdentityAuthorityCurrent,
+}: AgentRunsPanelProps) {
   const [runs, setRuns] = useState<any[]>([]);
-  // Run-reaper wire: 'running' runs whose heartbeat (updated_at) is aging —
-  // flagged "STALLED?" but not yet reaped (dead ones get flipped to failed).
+  const [verifiedScopeKey, setVerifiedScopeKey] = useState<string | null>(null);
+  // Presentation-only liveness projection. This panel may flag an aging run,
+  // but opening a read surface must never mutate the canonical run ledger.
   const [staleRunIds, setStaleRunIds] = useState<Set<string>>(() => new Set());
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadGeneration, setReloadGeneration] = useState(0);
   const [expandedRun, setExpandedRun] = useState<string | null>(null);
-  const [steps, setSteps] = useState<any[]>([]);
-  const [childRuns, setChildRuns] = useState<any[]>([]);
+  const [runDetails, setRunDetails] = useState<RunDetailsState>(EMPTY_RUN_DETAILS);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [pageSize, setPageSize] = useState(PAGE_SIZE);
+  const [scanLimit, setScanLimit] = useState(1_000);
   const [hasMore, setHasMore] = useState(false);
+  const [snapshotTruncated, setSnapshotTruncated] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
-  // Run-reaper dedupe: run ids this mount already issued a DB reap for, so
-  // dep-change effect re-runs (pageSize / identity) don't re-fire writes while
-  // the conditional status flip is still in flight.
-  const reapedRunIdsRef = useRef<Set<string>>(new Set());
+  const [freshnessTick, setFreshnessTick] = useState(0);
+  const listRequestGenerationRef = useRef(0);
+  const detailRequestGenerationRef = useRef(0);
+  const normalizedAgentAliases = Array.from(new Set(
+    [agentId, ...agentAliases]
+      .map(id => String(id || '').trim())
+      .filter(Boolean),
+  )).sort();
+  const normalizedAgentAliasesKey = JSON.stringify(normalizedAgentAliases);
+  const exactReadAuthority = useMemo(
+    () => normalizeRunsReadAuthority(circleId, identityAuthority),
+    [
+      circleId,
+      identityAuthority?.accessToken,
+      identityAuthority?.circleId,
+      identityAuthority?.generation,
+      identityAuthority?.userId,
+    ],
+  );
+  // Bearer material never enters the scope key. A positive generation is the
+  // lifecycle boundary supplied by Office for one exact user/circle session.
+  const readScopeKey = useMemo(() => JSON.stringify({
+    userId: exactReadAuthority?.userId || null,
+    circleId,
+    generation: exactReadAuthority?.generation || null,
+    agentId,
+    agentAliases: normalizedAgentAliasesKey,
+    agentName,
+  }), [
+    agentId,
+    agentName,
+    circleId,
+    exactReadAuthority?.generation,
+    exactReadAuthority?.userId,
+    normalizedAgentAliasesKey,
+  ]);
+  const currentReadScopeKeyRef = useRef(readScopeKey);
+  currentReadScopeKeyRef.current = readScopeKey;
+  const hasVerifiedSnapshot = verifiedScopeKey === readScopeKey;
+  const verifiedRuns = hasVerifiedSnapshot ? runs : [];
+  const verifiedHasMore = hasVerifiedSnapshot ? hasMore : false;
+  const verifiedSnapshotTruncated = hasVerifiedSnapshot ? snapshotTruncated : false;
+  const verifiedStaleRunIds = hasVerifiedSnapshot ? staleRunIds : EMPTY_STALE_RUN_IDS;
 
   useEffect(() => {
-    let cancelled = false;
+    const timer = setInterval(() => setFreshnessTick((tick) => tick + 1), 30_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const requestGeneration = ++listRequestGenerationRef.current;
+    const capturedScopeKey = readScopeKey;
+    const capturedAuthority = exactReadAuthority;
+    const requestTargetsCurrentScope = () => (
+      listRequestGenerationRef.current === requestGeneration
+      && currentReadScopeKeyRef.current === capturedScopeKey
+    );
     (async () => {
       setLoading(true);
+      setLoadError(null);
+      if (!capturedAuthority || !isRunsReadAuthorityCurrent(capturedAuthority, isIdentityAuthorityCurrent)) {
+        if (requestTargetsCurrentScope()) {
+          setLoadError('Runs are locked until this Office session has exact user and circle authority.');
+          setLoading(false);
+          setLoadingMore(false);
+        }
+        return;
+      }
       try {
-        const { listRunsForAgentSubject, reapRun } = await import('../../../../lib/agentRunSystem');
+        const { listRunsForAgentSubjectPage } = await import('../../../../lib/agentRunSystem');
+        if (
+          !requestTargetsCurrentScope()
+          || !isRunsReadAuthorityCurrent(capturedAuthority, isIdentityAuthorityCurrent)
+        ) return;
         // Fetch one extra row so we know whether to show "load more"
-        const aliases = Array.from(new Set([agentId, ...agentAliases].map(id => String(id || '').trim()).filter(Boolean)));
-        const rawData = await listRunsForAgentSubject(circleId, {
+        const strictReadOptions: AgentRunStrictReadOptions = {
+          strict: true,
+          authority: capturedAuthority,
+          isAuthorityCurrent: isIdentityAuthorityCurrent,
+        };
+        const scanResult = await listRunsForAgentSubjectPage(circleId, {
           agentId,
-          agentAliases: aliases,
+          agentAliases: normalizedAgentAliases,
           agentName,
           limit: pageSize + 1,
-        });
+          maxScanRows: scanLimit,
+        }, strictReadOptions);
+        const rawData = scanResult.runs;
         // Run-reaper: classify liveness off the heartbeat column only.
         // started_at deliberately OMITTED so runs from producers that never
         // heartbeat classify as 'live' (core fail-safe), not false-reaped.
@@ -112,34 +258,14 @@ export default function AgentRunsPanel({ circleId, agentId, agentAliases = [], a
           rawData.map((r) => ({ id: r.id, status: r.status, updated_at: r.updated_at })),
           Date.now(),
         );
-        // Reap eligibility (fail-safe floor): every producer's row carries a
-        // non-null updated_at (DEFAULT now() + updateRunStatus), so a dead
-        // heartbeat only proves death for runs that OPTED IN to heartbeating —
-        // metadata.heartbeat, set by agentRunPersistence.createPersistedRun.
-        // Everything else (edge v2 loops, legacy runtimes, or any active
-        // client-continuation phase) gets at most the soft "STALLED?" badge
-        // below, NEVER the local 'failed' flip or the DB reap.
-        const reapEligibleIds = new Set(rawData
-          .filter((r) => r.metadata?.heartbeat === true
-            && !['client_pending', 'client_dispatching', 'client_resuming'].includes(String(r.final_stop_reason || '')))
-          .map((r) => r.id));
-        const reapIds = new Set(reapPlan.toReap.filter((id) => reapEligibleIds.has(id)));
-        const data = reapIds.size > 0
-          ? rawData.map((r) => (reapIds.has(r.id) ? { ...r, status: 'failed' as const } : r))
-          : rawData;
-        if (cancelled) return;
-        for (const runId of reapIds) {
-          // Fire-and-forget reap, once per mount: reapRun claims the row
-          // conditionally (only while still 'running'), so concurrent surfaces
-          // never duplicate the status flip or the reaped_reason metadata
-          // merge (the merge only runs for the claim winner).
-          if (reapedRunIdsRef.current.has(runId)) continue;
-          reapedRunIdsRef.current.add(runId);
-          void reapRun(runId, 'heartbeat_stale');
-        }
+        const data = rawData;
+        if (
+          !requestTargetsCurrentScope()
+          || !isRunsReadAuthorityCurrent(capturedAuthority, isIdentityAuthorityCurrent)
+        ) return;
         setStaleRunIds(new Set([
           ...reapPlan.stale,
-          ...reapPlan.toReap.filter((id) => !reapIds.has(id)),
+          ...reapPlan.toReap,
         ]));
         if (data.length > pageSize) {
           setRuns(data.slice(0, pageSize));
@@ -148,127 +274,273 @@ export default function AgentRunsPanel({ circleId, agentId, agentAliases = [], a
           setRuns(data);
           setHasMore(false);
         }
+        setSnapshotTruncated(!scanResult.complete && data.length <= pageSize);
+        setVerifiedScopeKey(capturedScopeKey);
       } catch (err) {
         console.warn('[AgentRunsPanel] Failed to list runs:', err);
+        if (requestTargetsCurrentScope()) {
+          setLoadError('Runs could not be loaded. Check the connection and try again.');
+        }
+      } finally {
+        if (requestTargetsCurrentScope()) {
+          setLoading(false);
+          setLoadingMore(false);
+        }
       }
-      if (!cancelled) setLoading(false);
     })();
-    return () => { cancelled = true; };
-  }, [agentAliases, agentId, agentName, circleId, pageSize]);
+    return () => {
+      if (listRequestGenerationRef.current === requestGeneration) {
+        listRequestGenerationRef.current += 1;
+      }
+    };
+  }, [
+    agentId,
+    agentName,
+    circleId,
+    exactReadAuthority,
+    isIdentityAuthorityCurrent,
+    normalizedAgentAliasesKey,
+    pageSize,
+    readScopeKey,
+    reloadGeneration,
+    scanLimit,
+  ]);
 
-  const loadSteps = async (runId: string) => {
+  const loadRunDetails = useCallback(async (
+    runId: string,
+    options?: { rootRunId?: string; selectedRun?: AgentRun | null },
+  ) => {
+    const requestGeneration = ++detailRequestGenerationRef.current;
+    const capturedScopeKey = readScopeKey;
+    const capturedAuthority = exactReadAuthority;
+    const rootRunId = options?.rootRunId || runId;
+    const selectedRun = options?.selectedRun || null;
+    const requestTargetsCurrentScope = () => (
+      detailRequestGenerationRef.current === requestGeneration
+      && currentReadScopeKeyRef.current === capturedScopeKey
+    );
+    setRunDetails({ rootRunId, runId, selectedRun, status: 'loading', steps: [], childRuns: [], error: null });
+    if (!capturedAuthority || !isRunsReadAuthorityCurrent(capturedAuthority, isIdentityAuthorityCurrent)) {
+      if (requestTargetsCurrentScope()) {
+        setRunDetails({
+          rootRunId,
+          runId,
+          selectedRun,
+          status: 'error',
+          steps: [],
+          childRuns: [],
+          error: 'Run details are locked until this Office session has exact authority.',
+        });
+      }
+      return;
+    }
     try {
       const { getRunSteps, listChildRuns } = await import('../../../../lib/agentRunSystem');
+      if (
+        !requestTargetsCurrentScope()
+        || !isRunsReadAuthorityCurrent(capturedAuthority, isIdentityAuthorityCurrent)
+      ) return;
+      const strictReadOptions: AgentRunStrictReadOptions = {
+        strict: true,
+        authority: capturedAuthority,
+        isAuthorityCurrent: isIdentityAuthorityCurrent,
+      };
       const [stepData, childRunData] = await Promise.all([
-        getRunSteps(runId),
-        listChildRuns(runId, 12),
+        getRunSteps(runId, strictReadOptions),
+        listChildRuns(runId, 12, strictReadOptions),
       ]);
-      setSteps(stepData);
-      setChildRuns(childRunData);
+      if (detailRequestGenerationRef.current !== requestGeneration) return;
+      if (
+        !requestTargetsCurrentScope()
+        || !isRunsReadAuthorityCurrent(capturedAuthority, isIdentityAuthorityCurrent)
+      ) return;
+      setRunDetails({ rootRunId, runId, selectedRun, status: 'ready', steps: stepData, childRuns: childRunData, error: null });
     } catch (err) {
       console.warn('[AgentRunsPanel] Failed to load run steps:', err);
-      setChildRuns([]);
+      if (!requestTargetsCurrentScope()) return;
+      setRunDetails({
+        rootRunId,
+        runId,
+        selectedRun,
+        status: 'error',
+        steps: [],
+        childRuns: [],
+        error: 'Run details could not be loaded. Try again.',
+      });
     }
-  };
+  }, [exactReadAuthority, isIdentityAuthorityCurrent, readScopeKey]);
+
+  useEffect(() => {
+    detailRequestGenerationRef.current += 1;
+    setExpandedRun(null);
+    setRunDetails(EMPTY_RUN_DETAILS);
+  }, [readScopeKey]);
+
+  useEffect(() => () => {
+    detailRequestGenerationRef.current += 1;
+    listRequestGenerationRef.current += 1;
+  }, []);
 
   const visibleRuns = useMemo(
-    () => runs.filter(r => matchesFilter(r, statusFilter)),
-    [runs, statusFilter],
+    () => verifiedRuns.filter(r => matchesFilter(r, statusFilter, Date.now())),
+    [verifiedRuns, statusFilter, freshnessTick],
   );
 
   const filterCounts = useMemo(() => ({
-    all: runs.length,
-    completed: runs.filter(r => matchesFilter(r, 'completed')).length,
-    running: runs.filter(r => matchesFilter(r, 'running')).length,
-    failed: runs.filter(r => matchesFilter(r, 'failed')).length,
-  }), [runs]);
+    all: verifiedRuns.length,
+    completed: verifiedRuns.filter(r => matchesFilter(r, 'completed', Date.now())).length,
+    running: verifiedRuns.filter(r => matchesFilter(r, 'running', Date.now())).length,
+    failed: verifiedRuns.filter(r => matchesFilter(r, 'failed', Date.now())).length,
+  }), [verifiedRuns, freshnessTick]);
   const qualityAggregate = useMemo(
     () => buildOpenSwanObservedEvalAggregate(
-      runs
+      verifiedRuns
         .map((run) => buildRunMetadataSummaryProps(run.metadata).observedEval)
         .filter(Boolean),
     ),
-    [runs],
+    [verifiedRuns],
   );
   const qualityDashboard = useMemo(
-    () => buildOpenSwanObservedEvalDashboard(runs),
-    [runs],
+    () => buildOpenSwanObservedEvalDashboard(verifiedRuns),
+    [verifiedRuns],
   );
 
   const filters: Array<{ key: StatusFilter; label: string; color: string }> = [
     { key: 'all', label: 'ALL', color: '#a0a0b0' },
     { key: 'completed', label: 'DONE', color: '#22c55e' },
-    { key: 'running', label: 'RUNNING', color: '#3b82f6' },
+    { key: 'running', label: 'ACTIVE', color: '#3b82f6' },
     { key: 'failed', label: 'FAILED', color: '#ef4444' },
   ];
+  const runDataResolved = hasVerifiedSnapshot;
 
   return (
     <View style={{ gap: 8 }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
         <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>AGENT RUNS</Text>
-        <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO }}>({runs.length}{hasMore ? '+' : ''})</Text>
+        <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO }}>({verifiedRuns.length}{verifiedHasMore ? '+' : ''})</Text>
         <Text style={{ color: '#606075', fontSize: 11, fontFamily: MONO }} numberOfLines={1}>{agentName}</Text>
+        {loading && hasVerifiedSnapshot ? (
+          <Text accessibilityLiveRegion="polite" style={{ color: '#707086', fontSize: 10, fontFamily: MONO }}>REFRESHING…</Text>
+        ) : null}
       </View>
 
-      <OpenSwanQualityAggregate
-        aggregate={qualityAggregate}
-        title="QUALITY SNAPSHOT"
-        accentColor={accentColor}
-      />
+      {loadError ? (
+        <View accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ borderWidth: 1, borderColor: '#ef444455', backgroundColor: '#2a0b0b', borderRadius: 6, padding: 10, gap: 8 }}>
+          <Text style={{ color: '#fca5a5', fontSize: 12, fontFamily: MONO, lineHeight: 17 }}>{loadError}</Text>
+          {verifiedRuns.length > 0 ? (
+            <Text style={{ color: '#d1a2a2', fontSize: 11, fontFamily: MONO }}>Showing the last loaded run list.</Text>
+          ) : null}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Retry loading agent runs"
+            accessibilityState={{ disabled: loading, busy: loading }}
+            disabled={loading}
+            onPress={() => setReloadGeneration(value => value + 1)}
+            style={[{ alignSelf: 'flex-start', minHeight: 44, minWidth: 72, paddingHorizontal: 12, borderWidth: 1, borderColor: '#ef444466', borderRadius: 6, alignItems: 'center', justifyContent: 'center', opacity: loading ? 0.55 : 1 }, Platform.OS === 'web' && ({ cursor: loading ? 'default' : 'pointer' } as any)]}
+          >
+            <Text style={{ color: '#fca5a5', fontSize: 11, fontWeight: '800', fontFamily: MONO }}>{loading ? 'RETRYING…' : 'RETRY'}</Text>
+          </Pressable>
+        </View>
+      ) : null}
 
-      <OpenSwanQualityDashboard
-        dashboard={qualityDashboard}
-        title="QUALITY DASHBOARD"
-        accentColor={accentColor}
-      />
+      {verifiedSnapshotTruncated ? (
+        <View accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ borderWidth: 1, borderColor: '#f59e0b55', backgroundColor: '#2a1908', borderRadius: 6, padding: 10, gap: 6 }}>
+          <Text style={{ color: '#fcd34d', fontSize: 11, fontFamily: MONO, lineHeight: 16 }}>
+            Run history is partial. The bounded scan reached {scanLimit.toLocaleString()} candidate rows before proving there are no older runs for this exact agent.
+          </Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={scanLimit >= 5_000 ? 'Maximum exact agent run scan reached' : 'Scan one thousand more candidate agent runs'}
+            accessibilityState={{ disabled: loading || scanLimit >= 5_000, busy: loading }}
+            disabled={loading || scanLimit >= 5_000}
+            onPress={() => setScanLimit(value => Math.min(value + 1_000, 5_000))}
+            style={[{ alignSelf: 'flex-start', minHeight: 44, minWidth: 72, paddingHorizontal: 12, borderWidth: 1, borderColor: '#f59e0b66', borderRadius: 6, alignItems: 'center', justifyContent: 'center', opacity: loading || scanLimit >= 5_000 ? 0.55 : 1 }, Platform.OS === 'web' && ({ cursor: loading || scanLimit >= 5_000 ? 'default' : 'pointer' } as any)]}
+          >
+            <Text style={{ color: '#fcd34d', fontSize: 11, fontWeight: '800', fontFamily: MONO }}>
+              {loading ? 'SCANNING…' : scanLimit >= 5_000 ? 'SCAN LIMIT REACHED' : 'SCAN 1,000 MORE'}
+            </Text>
+          </Pressable>
+        </View>
+      ) : null}
 
-      {/* Filter pills — solid background when active, tint when idle. Disabled
-          style (50% opacity) when the bucket is empty so users don't think
-          they've filtered to nothing by mistake. */}
-      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4 }}>
-        {filters.map(f => {
-          const active = statusFilter === f.key;
-          const count = filterCounts[f.key];
-          const empty = count === 0;
-          return (
-            <Pressable
-              key={f.key}
-              onPress={() => setStatusFilter(f.key)}
-              style={[
-                {
-                  paddingHorizontal: 10,
-                  paddingVertical: 5,
-                  borderRadius: 999,
-                  borderWidth: 1,
-                  borderColor: active ? f.color : '#2a2a3e',
-                  backgroundColor: active ? f.color : 'transparent',
-                  opacity: empty && !active ? 0.4 : 1,
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: 5,
-                },
-                Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
-              ]}
-            >
-              <Text style={{ color: active ? '#0a0a0a' : f.color, fontSize: 10, fontWeight: '800', letterSpacing: 1, fontFamily: MONO }}>{f.label}</Text>
-              <Text style={{ color: active ? '#0a0a0a' : '#707086', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{count}</Text>
-            </Pressable>
-          );
-        })}
-      </View>
+      {runDataResolved ? (
+        <>
+          <OpenSwanQualityAggregate
+            aggregate={qualityAggregate}
+            title="QUALITY SNAPSHOT"
+            accentColor={accentColor}
+          />
 
-      <ScrollView style={{ maxHeight: 400 }} nestedScrollEnabled showsVerticalScrollIndicator>
-        {loading ? (
-          <ActivityIndicator size="small" color={accentColor} style={{ padding: 20 }} />
-        ) : visibleRuns.length === 0 ? (
+          <OpenSwanQualityDashboard
+            dashboard={qualityDashboard}
+            title="QUALITY DASHBOARD"
+            accentColor={accentColor}
+          />
+
+          {/* Filter pills — solid background when active, tint when idle. Disabled
+              style (50% opacity) when the bucket is empty so users don't think
+              they've filtered to nothing by mistake. */}
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4 }}>
+            {filters.map(f => {
+              const active = statusFilter === f.key;
+              const count = filterCounts[f.key];
+              const empty = count === 0;
+              return (
+                <Pressable
+                  key={f.key}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Show ${f.label.toLowerCase()} runs, ${count}`}
+                  accessibilityState={{ selected: active }}
+                  onPress={() => setStatusFilter(f.key)}
+                  style={[
+                    {
+                      paddingHorizontal: 10,
+                      minHeight: 44,
+                      minWidth: 44,
+                      borderRadius: 999,
+                      borderWidth: 1,
+                      borderColor: active ? f.color : '#2a2a3e',
+                      backgroundColor: active ? f.color : 'transparent',
+                      opacity: empty && !active ? 0.4 : 1,
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: 5,
+                    },
+                    Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
+                  ]}
+                >
+                  <Text style={{ color: active ? '#0a0a0a' : f.color, fontSize: 10, fontWeight: '800', letterSpacing: 1, fontFamily: MONO }}>{f.label}</Text>
+                  <Text style={{ color: active ? '#0a0a0a' : '#707086', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{count}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </>
+      ) : null}
+
+      <View>
+        {loading && !hasVerifiedSnapshot ? (
+          <ActivityIndicator accessibilityLabel="Loading agent runs" accessibilityRole="progressbar" size="small" color={accentColor} style={{ padding: 20 }} />
+        ) : loadError && runs.length === 0 ? null : loadError && verifiedRuns.length === 0 ? null : visibleRuns.length === 0 ? (
           <Text style={{ color: '#808090', fontSize: 13, fontFamily: MONO, fontStyle: 'italic', padding: 12, textAlign: 'center' }}>
-            {runs.length === 0 ? 'No runs yet.' : `No ${statusFilter === 'all' ? '' : statusFilter + ' '}runs.`}
+            {verifiedRuns.length === 0
+              ? verifiedSnapshotTruncated
+                ? 'No matching runs were found in the verified portion of history.'
+                : 'No runs yet.'
+              : `No ${statusFilter === 'all' ? '' : statusFilter + ' '}runs.`}
           </Text>
         ) : (
           <>
             {visibleRuns.map((run: any) => {
               const isExpanded = expandedRun === run.id;
-              const sc = STATUS_COLORS[run.status] || '#606075';
+              // A specialist drill-down stays anchored beneath its visible
+              // top-level run. `rootRunId` prevents selecting a child from
+              // collapsing the only card capable of rendering its details.
+              const currentDetails = isExpanded && runDetails.rootRunId === run.id ? runDetails : null;
+              const awaitingExternalResult = isAwaitingConnectedAgentResultMetadata(run.metadata);
+              const runPresentation = describeRunHistoryStatus(run, Date.now());
+              const sc = runPresentation.stale ? '#f59e0b' : awaitingExternalResult ? '#60a5fa' : (STATUS_COLORS[run.status] || '#606075');
               // Compact summary pieces — coalesce into a single subtitle line
               const tokenSummary = run.input_tokens > 0 || run.output_tokens > 0
                 ? `${formatTokens((run.input_tokens || 0) + (run.output_tokens || 0))} tokens`
@@ -280,26 +552,34 @@ export default function AgentRunsPanel({ circleId, agentId, agentAliases = [], a
               const subjectSummary = getRunSubjectSummary(run, agentName);
 
               return (
-                <View key={run.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: isExpanded ? sc + '40' : '#1a1a28', borderRadius: 2, marginBottom: 8, overflow: 'hidden' }}>
+                <View key={run.id} style={{ backgroundColor: '#0f0f18', borderWidth: 1, borderColor: isExpanded ? sc + '40' : '#1a1a28', borderRadius: 6, marginBottom: 8, overflow: 'hidden' }}>
                   <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`${isExpanded ? 'Collapse' : 'Expand'} run: ${String(run.title || 'Untitled run')}`}
+                    accessibilityState={{ expanded: isExpanded }}
                     onPress={() => {
                       if (isExpanded) {
+                        detailRequestGenerationRef.current += 1;
                         setExpandedRun(null);
-                        setChildRuns([]);
+                        setRunDetails(EMPTY_RUN_DETAILS);
                       } else {
                         setExpandedRun(run.id);
-                        loadSteps(run.id);
+                        void loadRunDetails(run.id);
                       }
                     }}
-                    style={[{ padding: 12 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                    style={[{ padding: 12, minHeight: 44 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                   >
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                      <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: sc }} />
+                      <View style={{ width: 8, height: 8, borderRadius: 6, backgroundColor: sc }} />
                       <Text style={{ color: '#f0f0f5', fontSize: 13, fontWeight: '600', fontFamily: MONO, flex: 1 }} numberOfLines={1}>{run.title || 'Untitled run'}</Text>
-                      {staleRunIds.has(run.id) ? (
+                      {verifiedStaleRunIds.has(run.id) ? (
                         <Text style={{ color: '#f59e0b', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>STALLED?</Text>
                       ) : null}
-                      <Text style={{ color: sc, fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{run.status.toUpperCase()}</Text>
+                      <Text style={{ color: sc, fontSize: 11, fontWeight: '700', fontFamily: MONO }}>
+                        {runPresentation.stale
+                          ? (awaitingExternalResult ? 'ACCEPTED · UPDATE MISSING · NOT ACTIVE' : runPresentation.label)
+                          : (awaitingExternalResult ? 'ACCEPTED · AWAITING UPDATE' : runPresentation.label)}
+                      </Text>
                     </View>
                     <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 3 }}>
                       <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>{run.surface}</Text>
@@ -324,9 +604,9 @@ export default function AgentRunsPanel({ circleId, agentId, agentAliases = [], a
                   {isExpanded && (
                     <View style={{ paddingHorizontal: 8, paddingBottom: 8, borderTopWidth: 1, borderTopColor: '#1a1a28', paddingTop: 6 }}>
                       {(subjectSummary.subjectKey || subjectSummary.aliases.length > 0 || subjectSummary.dbId) ? (
-                        <View style={{ borderWidth: 1, borderColor: '#24243a', backgroundColor: '#0b0b14', borderRadius: 2, padding: 8, marginBottom: 8, gap: 5 }}>
+                        <View style={{ borderWidth: 1, borderColor: '#24243a', backgroundColor: '#0b0b14', borderRadius: 6, padding: 8, marginBottom: 8, gap: 5 }}>
                           <Text style={{ color: '#909098', fontSize: 10, fontWeight: '800', letterSpacing: 1, fontFamily: MONO }}>
-                            SUBJECT IDENTITY
+                            {currentDetails?.selectedRun ? 'PARENT SUBJECT IDENTITY' : 'SUBJECT IDENTITY'}
                           </Text>
                           <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
                             {subjectSummary.displayName ? (
@@ -346,12 +626,78 @@ export default function AgentRunsPanel({ circleId, agentId, agentAliases = [], a
                           ) : null}
                         </View>
                       ) : null}
-                      {childRuns.length > 0 ? (
+                      {currentDetails?.selectedRun ? (() => {
+                        const selectedChild = currentDetails.selectedRun;
+                        const selectedChildSummary = buildRunMetadataSummaryProps(selectedChild.metadata);
+                        const selectedChildSubject = getRunSubjectSummary(selectedChild, agentName);
+                        const selectedChildStatusColor = STATUS_COLORS[selectedChild.status] || '#606075';
+                        return (
+                          <View
+                            accessibilityLiveRegion="polite"
+                            style={{ borderWidth: 1, borderColor: '#6d28d955', backgroundColor: '#120b24', borderRadius: 6, padding: 10, marginBottom: 10, gap: 6 }}
+                          >
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                              <View style={{ width: 7, height: 7, borderRadius: 999, backgroundColor: selectedChildStatusColor }} />
+                              <Text style={{ color: '#c4b5fd', fontSize: 10, fontWeight: '800', letterSpacing: 1, fontFamily: MONO }}>
+                                VIEWING SPECIALIST RUN
+                              </Text>
+                              <Text style={{ color: selectedChildStatusColor, fontSize: 10, fontWeight: '800', fontFamily: MONO, marginLeft: 'auto' }}>
+                                {String(selectedChild.status || 'unknown').toUpperCase()}
+                              </Text>
+                            </View>
+                            <Text style={{ color: '#f0eaff', fontSize: 12, fontWeight: '700', fontFamily: MONO }}>
+                              {selectedChild.title || selectedChild.mode || 'Untitled specialist run'}
+                            </Text>
+                            <Text style={{ color: '#81759c', fontSize: 10, fontFamily: MONO }} numberOfLines={1}>
+                              RUN {selectedChild.id}
+                              {selectedChildSubject.subjectKey ? ` · SUBJECT ${selectedChildSubject.subjectKey}` : ''}
+                            </Text>
+                            <RunMetadataSummary
+                              {...selectedChildSummary}
+                              variant="compact"
+                              accentColor="#a855f7"
+                            />
+                            <Pressable
+                              accessibilityRole="button"
+                              accessibilityLabel={`Back to parent run: ${String(run.title || 'Untitled run')}`}
+                              onPress={() => { void loadRunDetails(run.id); }}
+                              style={[{ alignSelf: 'flex-start', minHeight: 44, paddingHorizontal: 10, borderWidth: 1, borderColor: '#7c3aed66', borderRadius: 6, justifyContent: 'center' }, Platform.OS === 'web' && ({ cursor: 'pointer' } as any)]}
+                            >
+                              <Text style={{ color: '#c4b5fd', fontSize: 10, fontWeight: '800', fontFamily: MONO }}>BACK TO PARENT RUN</Text>
+                            </Pressable>
+                          </View>
+                        );
+                      })() : null}
+                      {!currentDetails || currentDetails.status === 'loading' ? (
+                        <View accessibilityLiveRegion="polite" style={{ minHeight: 64, alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                          <ActivityIndicator accessibilityLabel={`Loading details for ${String(run.title || 'run')}`} accessibilityRole="progressbar" size="small" color={accentColor} />
+                          <Text style={{ color: '#808090', fontSize: 11, fontFamily: MONO }}>Loading run details…</Text>
+                        </View>
+                      ) : currentDetails.status === 'error' ? (
+                        <View accessibilityRole="alert" accessibilityLiveRegion="assertive" style={{ borderWidth: 1, borderColor: '#ef444455', backgroundColor: '#2a0b0b', borderRadius: 6, padding: 10, gap: 8 }}>
+                          <Text style={{ color: '#fca5a5', fontSize: 12, fontFamily: MONO }}>{currentDetails.error}</Text>
+                          <Pressable
+                            accessibilityRole="button"
+                            accessibilityLabel={`Retry loading details for ${String(currentDetails.selectedRun?.title || run.title || 'run')}`}
+                            onPress={() => {
+                              void loadRunDetails(currentDetails.runId || run.id, {
+                                rootRunId: run.id,
+                                selectedRun: currentDetails.selectedRun,
+                              });
+                            }}
+                            style={[{ alignSelf: 'flex-start', minHeight: 44, minWidth: 72, paddingHorizontal: 12, borderWidth: 1, borderColor: '#ef444466', borderRadius: 6, alignItems: 'center', justifyContent: 'center' }, Platform.OS === 'web' && ({ cursor: 'pointer' } as any)]}
+                          >
+                            <Text style={{ color: '#fca5a5', fontSize: 11, fontWeight: '800', fontFamily: MONO }}>RETRY DETAILS</Text>
+                          </Pressable>
+                        </View>
+                      ) : (
+                        <>
+                      {currentDetails.childRuns.length > 0 ? (
                         <View style={{ marginBottom: 10, gap: 6 }}>
                           <Text style={{ color: '#7c3aed', fontSize: 10, fontWeight: '800', letterSpacing: 1, fontFamily: MONO }}>
                             DELEGATED SPECIALISTS
                           </Text>
-                          {childRuns.map((childRun: any) => {
+                          {currentDetails.childRuns.map((childRun: any) => {
                             const childSummary = buildRunMetadataSummaryProps(childRun.metadata);
                             const childStatusColor = STATUS_COLORS[childRun.status] || '#606075';
                             const childObservedEval = childSummary.observedEval;
@@ -360,16 +706,21 @@ export default function AgentRunsPanel({ circleId, agentId, agentAliases = [], a
                             return (
                               <Pressable
                                 key={childRun.id}
+                                accessibilityRole="button"
+                                accessibilityLabel={`View specialist run details: ${String(childRun.title || childRun.mode || 'Untitled run')}`}
                                 onPress={() => {
-                                  setExpandedRun(childRun.id);
-                                  loadSteps(childRun.id);
+                                  void loadRunDetails(childRun.id, {
+                                    rootRunId: run.id,
+                                    selectedRun: childRun,
+                                  });
                                 }}
                                 style={{
                                   borderWidth: 1,
                                   borderColor: '#312e81',
                                   backgroundColor: '#0a1022',
-                                  borderRadius: 2,
+                                  borderRadius: 6,
                                   padding: 8,
+                                  minHeight: 44,
                                   gap: 5,
                                   ...(Platform.OS === 'web' ? { cursor: 'pointer' as const } : null),
                                 }}
@@ -423,10 +774,10 @@ export default function AgentRunsPanel({ circleId, agentId, agentAliases = [], a
                           })}
                         </View>
                       ) : null}
-                      {steps.length === 0 ? (
+                      {currentDetails.steps.length === 0 ? (
                         <Text style={{ color: '#808090', fontSize: 12, fontFamily: MONO, fontStyle: 'italic' }}>No steps recorded.</Text>
                       ) : (
-                        steps.map((step: any) => (
+                        currentDetails.steps.map((step: any) => (
                           <View key={step.id} style={{ flexDirection: 'row', gap: 6, marginBottom: 8 }}>
                             <View style={{ width: 2, backgroundColor: STEP_COLORS[step.step_kind] || '#1a1a28', borderRadius: 1 }} />
                             <View style={{ flex: 1 }}>
@@ -441,6 +792,8 @@ export default function AgentRunsPanel({ circleId, agentId, agentAliases = [], a
                           </View>
                         ))
                       )}
+                        </>
+                      )}
                     </View>
                   )}
                 </View>
@@ -450,24 +803,26 @@ export default function AgentRunsPanel({ circleId, agentId, agentAliases = [], a
             {/* Load-more: visible only when the server returned a full page. The
                 user doesn't know the true total (list endpoint has no count),
                 so we show "Load 10 more" without a running tally. */}
-            {hasMore && (
+            {verifiedHasMore && (
               <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Load ${PAGE_SIZE} more agent runs`}
                 disabled={loadingMore}
+                accessibilityState={{ disabled: loadingMore, busy: loadingMore }}
                 onPress={() => {
                   setLoadingMore(true);
                   setPageSize(size => size + PAGE_SIZE);
-                  // loadingMore clears when the fetch effect re-runs and sets loading=false.
-                  setTimeout(() => setLoadingMore(false), 600);
                 }}
                 style={[
                   {
                     marginTop: 4,
-                    paddingVertical: 10,
-                    borderRadius: 2,
+                    minHeight: 44,
+                    borderRadius: 6,
                     borderWidth: 1,
                     borderColor: accentColor + '40',
                     backgroundColor: accentColor + '10',
                     alignItems: 'center',
+                    justifyContent: 'center',
                   },
                   Platform.OS === 'web' && ({ cursor: loadingMore ? 'default' : 'pointer' } as any),
                 ]}
@@ -479,7 +834,7 @@ export default function AgentRunsPanel({ circleId, agentId, agentAliases = [], a
             )}
           </>
         )}
-      </ScrollView>
+      </View>
     </View>
   );
 }

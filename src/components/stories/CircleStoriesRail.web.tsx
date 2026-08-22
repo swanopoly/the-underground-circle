@@ -11,6 +11,7 @@ import { View, Text, Pressable, ScrollView, StyleSheet, Modal } from 'react-nati
 import Stories from 'react-insta-stories';
 import type { Story } from 'react-insta-stories/dist/interfaces';
 import { supabase } from '../../lib/supabase';
+import { indexSafeProfiles, loadSafeCircleProfiles } from '../../lib/safeProfiles';
 
 // ── Types ────────────────────────────────────────────────────────────────
 interface StoryGroup {
@@ -91,7 +92,7 @@ export default function CircleStoriesRail({ circleId, accentColor }: Props) {
       const [checkIns, agentActs] = await Promise.all([
         supabase
           .from('check_ins')
-          .select('id, user_id, content, created_at, profiles(display_name, username)')
+          .select('id, user_id, content, created_at')
           .eq('circle_id', circleId)
           .gte('created_at', since)
           .order('created_at', { ascending: false })
@@ -107,11 +108,17 @@ export default function CircleStoriesRail({ circleId, accentColor }: Props) {
 
       if (cancelled) return;
 
+      const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+        circleId,
+        userIds: (checkIns.data || []).map(row => row.user_id),
+      }));
+      if (cancelled) return;
+
       const map = new Map<string, StoryGroup>();
 
       // -- Check-ins --
       for (const row of (checkIns.data ?? [])) {
-        const profile = (row as any).profiles;
+        const profile = profileById.get(row.user_id);
         const name = profile?.display_name || profile?.username || 'Member';
         const key = `user-${row.user_id}`;
         if (!map.has(key)) {

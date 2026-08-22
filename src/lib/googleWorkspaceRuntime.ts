@@ -5,11 +5,10 @@
  * scope checks, error mapping — smoke: google-workspace-ops). This module owns
  * exactly two side effects:
  *
- *   1. TOKEN RESOLUTION — generalizes the pattern proven in
- *      `googleDocsCreate.ts`: read the caller's own `user_google_credentials`
- *      row (RLS: user-only), verify the plan's required scope was granted,
- *      and refresh near-expiry tokens through the google-oauth edge fn's
- *      `?action=token` route (the refresh_token never reaches the client).
+ *   1. TOKEN RESOLUTION — reads only safe connection metadata and a short-lived
+ *      access token from authenticated google-oauth edge actions. The browser
+ *      has no table access to `user_google_credentials`, so the long-lived
+ *      refresh token never reaches a client runtime.
  *      Unlike the docs helper it distinguishes not_connected /
  *      missing_scope / reconnect_required so the model gets an actionable,
  *      honest failure instead of a generic null.
@@ -44,9 +43,6 @@ export type GoogleWorkspaceRunResult =
 
 /** Response bodies larger than this are clipped before extraction. */
 const MAX_RESPONSE_TEXT_CHARS = 400_000;
-/** Refresh the cached access token when it expires within this window. */
-const TOKEN_EXPIRY_SLACK_MS = 30_000;
-
 const NOT_CONNECTED_MESSAGE =
   'Google Workspace is not connected for this account — connect it in Circle Settings → Google Workspace, then retry.';
 
@@ -65,23 +61,13 @@ async function resolveAccessToken(plan: { scopeAnyOf: string[] }): Promise<
   | { ok: false; code: GoogleWorkspaceErrorCode; message: string }
 > {
   try {
-    const [{ supabase }, { safeGetUserId }] = await Promise.all([
-      import('./supabase'),
-      import('./authSession'),
-    ]);
-    const userId = await safeGetUserId();
-    if (!userId) return { ok: false, code: 'not_connected', message: NOT_CONNECTED_MESSAGE };
-
-    const { data, error } = await supabase
-      .from('user_google_credentials')
-      .select('access_token, expires_at, scopes')
-      .eq('user_id', userId)
-      .maybeSingle();
-    if (error || !data || typeof data.access_token !== 'string' || !data.access_token) {
+    const { fetchGoogleWorkspaceAccessToken, getGoogleAuthStatusAuthoritative } = await import('./googleCreds');
+    const status = await getGoogleAuthStatusAuthoritative();
+    if (!status?.connected) {
       return { ok: false, code: 'not_connected', message: NOT_CONNECTED_MESSAGE };
     }
 
-    const scopes: string[] = Array.isArray(data.scopes) ? data.scopes : [];
+    const scopes: string[] = Array.isArray(status.scopes) ? status.scopes : [];
     if (scopes.length > 0 && !checkGoogleScope(scopes, plan)) {
       return {
         ok: false,
@@ -92,23 +78,15 @@ async function resolveAccessToken(plan: { scopeAnyOf: string[] }): Promise<
       };
     }
 
-    if (data.expires_at) {
-      const expiresAtMs = new Date(data.expires_at).getTime();
-      if (Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now() + TOKEN_EXPIRY_SLACK_MS) {
-        const { fetchGoogleWorkspaceAccessToken } = await import('./googleCreds');
-        const fresh = await fetchGoogleWorkspaceAccessToken();
-        if (!fresh) {
-          return {
-            ok: false,
-            code: 'reconnect_required',
-            message: 'The Google Workspace token could not be refreshed — reconnect in Circle Settings → Google Workspace.',
-          };
-        }
-        return { ok: true, token: fresh };
-      }
+    const token = await fetchGoogleWorkspaceAccessToken();
+    if (!token) {
+      return {
+        ok: false,
+        code: 'reconnect_required',
+        message: 'The Google Workspace token could not be refreshed — reconnect in Circle Settings → Google Workspace.',
+      };
     }
-
-    return { ok: true, token: data.access_token };
+    return { ok: true, token };
   } catch (e: any) {
     return { ok: false, code: 'api_error', message: `Google credential lookup failed: ${String(e?.message || e).slice(0, 200)}` };
   }

@@ -1,5 +1,7 @@
 import { storage } from './storage';
+import { safeGetUserForAccessToken } from './authSession';
 import { normalizeComputerTaskOutcomeStatus } from './computerTaskOutcome';
+import { compactExactPlanApprovalCorrelation } from './exactPlanApprovalContinuityCore';
 import {
   acknowledgeComputerTaskNotifications,
   appendComputerTaskNotification,
@@ -89,6 +91,143 @@ export type {
 } from './computerTaskStateModel';
 
 const STORAGE_PREFIX = 'computer_task_state_v1';
+const EXACT_STORAGE_PREFIX = `${STORAGE_PREFIX}_exact_v2`;
+const EXACT_STORAGE_SCHEMA_VERSION = 2;
+const MAX_EXACT_SCOPE_PART_LENGTH = 240;
+const MAX_EXACT_ACCESS_TOKEN_LENGTH = 16_384;
+
+/**
+ * Immutable account/circle authority for the private computer-task cache.
+ * The bearer is used only to prove the captured user; it is never persisted
+ * or included in a storage key.
+ */
+export type ComputerTaskStateExactAuthority = Readonly<{
+  userId: string;
+  circleId: string;
+  accessToken: string;
+  generation: number;
+}>;
+
+export type ComputerTaskStateAuthorityFence = (
+  authority: ComputerTaskStateExactAuthority,
+) => boolean;
+
+export type ComputerTaskStateExactError =
+  | 'invalid_authority'
+  | 'authority_mismatch'
+  | 'authority_retired'
+  | 'record_mismatch'
+  | 'storage_error';
+
+export type ComputerTaskStateExactLoadResult = Readonly<{
+  ok: boolean;
+  record: ComputerTaskStateRecord | null;
+  userId: string | null;
+  circleId: string | null;
+  generation: number | null;
+  error?: ComputerTaskStateExactError;
+}>;
+
+export type ComputerTaskStateExactMutationResult = Readonly<{
+  ok: boolean;
+  userId: string | null;
+  circleId: string | null;
+  generation: number | null;
+  error?: ComputerTaskStateExactError;
+}>;
+
+type ComputerTaskStateExactEnvelope = Readonly<{
+  schemaVersion: typeof EXACT_STORAGE_SCHEMA_VERSION;
+  userId: string;
+  circleId: string;
+  threadId: string | null;
+  record: ComputerTaskStateRecord;
+}>;
+
+function normalizeExactScopePart(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  if (!normalized || normalized.length > MAX_EXACT_SCOPE_PART_LENGTH) return null;
+  return normalized;
+}
+
+function normalizeExactThreadId(value: unknown): string | null | undefined {
+  if (value === null || value === undefined || value === '') return null;
+  return normalizeExactScopePart(value) || undefined;
+}
+
+function normalizeComputerTaskStateExactAuthority(
+  input: ComputerTaskStateExactAuthority | null | undefined,
+): ComputerTaskStateExactAuthority | null {
+  const userId = normalizeExactScopePart(input?.userId);
+  const circleId = normalizeExactScopePart(input?.circleId);
+  const accessToken = typeof input?.accessToken === 'string' ? input.accessToken.trim() : '';
+  const generation = input?.generation;
+  if (
+    !userId
+    || !circleId
+    || !accessToken
+    || accessToken.length > MAX_EXACT_ACCESS_TOKEN_LENGTH
+    || !Number.isSafeInteger(generation)
+    || Number(generation) <= 0
+  ) return null;
+  return Object.freeze({
+    userId,
+    circleId,
+    accessToken,
+    generation: Number(generation),
+  });
+}
+
+function computerTaskStateAuthorityIsCurrent(
+  authority: ComputerTaskStateExactAuthority,
+  fence: ComputerTaskStateAuthorityFence | null | undefined,
+): boolean {
+  if (!fence) return false;
+  try {
+    return fence(authority) === true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveComputerTaskStateExactAuthority(
+  input: ComputerTaskStateExactAuthority | null | undefined,
+  fence: ComputerTaskStateAuthorityFence | null | undefined,
+): Promise<
+  | { ok: true; authority: ComputerTaskStateExactAuthority }
+  | { ok: false; authority: ComputerTaskStateExactAuthority | null; error: ComputerTaskStateExactError }
+> {
+  const authority = normalizeComputerTaskStateExactAuthority(input);
+  if (!authority) return { ok: false, authority: null, error: 'invalid_authority' };
+  if (!computerTaskStateAuthorityIsCurrent(authority, fence)) {
+    return { ok: false, authority, error: 'authority_retired' };
+  }
+  const { value: verifiedUser } = await safeGetUserForAccessToken(authority.accessToken);
+  if (!computerTaskStateAuthorityIsCurrent(authority, fence)) {
+    return { ok: false, authority, error: 'authority_retired' };
+  }
+  if (verifiedUser?.id !== authority.userId) {
+    return { ok: false, authority, error: 'authority_mismatch' };
+  }
+  return { ok: true, authority };
+}
+
+/** Exact user/circle/thread key. Bearer material and generation never enter storage. */
+export function computerTaskStateExactStorageKey(
+  authorityInput: ComputerTaskStateExactAuthority | null | undefined,
+  threadId?: string | null,
+): string | null {
+  const authority = normalizeComputerTaskStateExactAuthority(authorityInput);
+  const normalizedThreadId = normalizeExactThreadId(threadId);
+  if (!authority || normalizedThreadId === undefined) return null;
+  return [
+    EXACT_STORAGE_PREFIX,
+    'user', encodeURIComponent(authority.userId),
+    'circle', encodeURIComponent(authority.circleId),
+    'thread', encodeURIComponent(normalizedThreadId || 'main'),
+  ].join(':');
+}
 
 function storageKey(circleId: string, threadId?: string | null): string {
   return `${STORAGE_PREFIX}_${circleId}_${threadId || 'main'}`;
@@ -107,6 +246,13 @@ function normalizeRecord(raw: string | null): ComputerTaskStateRecord | null {
       id: String(parsed.id || ''),
       circleId: String(parsed.circleId || ''),
       threadId: parsed.threadId ? String(parsed.threadId) : null,
+      requestIdentity: typeof parsed.requestIdentity === 'string'
+        && parsed.requestIdentity.trim().length > 0
+        && parsed.requestIdentity.trim().length <= 240
+        && !/[\u0000-\u001f\u007f]/.test(parsed.requestIdentity)
+        ? parsed.requestIdentity.trim()
+        : null,
+      exactPlanApproval: compactExactPlanApprovalCorrelation(parsed.exactPlanApproval),
       task: String(parsed.task || ''),
       taskKind: String(parsed.taskKind || 'unknown'),
       taskLabel: String(parsed.taskLabel || 'Computer task'),
@@ -245,8 +391,72 @@ function normalizeRecord(raw: string | null): ComputerTaskStateRecord | null {
   }
 }
 
+function normalizeExactEnvelope(
+  raw: string | null,
+  authority: ComputerTaskStateExactAuthority,
+  threadId: string | null,
+): ComputerTaskStateRecord | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<ComputerTaskStateExactEnvelope>;
+    if (
+      parsed?.schemaVersion !== EXACT_STORAGE_SCHEMA_VERSION
+      || parsed.userId !== authority.userId
+      || parsed.circleId !== authority.circleId
+      || parsed.threadId !== threadId
+      || !parsed.record
+      || typeof parsed.record !== 'object'
+    ) return null;
+    const record = normalizeRecord(JSON.stringify(parsed.record));
+    if (
+      !record
+      || record.circleId !== authority.circleId
+      || record.threadId !== threadId
+    ) return null;
+    return record;
+  } catch {
+    return null;
+  }
+}
+
+function prepareComputerTaskStateForStorage(
+  record: ComputerTaskStateRecord,
+  previous: ComputerTaskStateRecord | null,
+): ComputerTaskStateRecord {
+  const sameTask = !!previous && previous.task === record.task;
+  const surfaceEscalations = record.surfaceEscalations === undefined
+    ? sameTask ? previous?.surfaceEscalations || [] : []
+    : record.surfaceEscalations;
+  const actionTrace = record.actionTrace === undefined
+    ? sameTask ? previous?.actionTrace || null : null
+    : record.actionTrace;
+  const requestIdentity = record.requestIdentity === undefined
+    ? sameTask ? previous?.requestIdentity || null : null
+    : record.requestIdentity;
+  const boundedRequestIdentity = typeof requestIdentity === 'string'
+    && requestIdentity.trim().length > 0
+    && requestIdentity.trim().length <= 240
+    && !/[\u0000-\u001f\u007f]/.test(requestIdentity)
+    ? requestIdentity.trim()
+    : null;
+  return {
+    ...record,
+    requestIdentity: boundedRequestIdentity,
+    exactPlanApproval: compactExactPlanApprovalCorrelation(record.exactPlanApproval),
+    surfaceEscalations,
+    actionTrace,
+    capabilityBuildout: compactComputerTaskCapabilityBuildout(record.capabilityBuildout),
+    outcomeStatus: normalizeComputerTaskOutcomeStatus(record.outcomeStatus),
+    updatedAt: record.updatedAt || nowIso(),
+  };
+}
+
 export async function loadComputerTaskState(circleId: string, threadId?: string | null): Promise<ComputerTaskStateRecord | null> {
-  return normalizeRecord(await storage.getItem(storageKey(circleId, threadId)));
+  const record = normalizeRecord(await storage.getItem(storageKey(circleId, threadId)));
+  if (!record) return null;
+  return record.circleId === circleId && record.threadId === (threadId || null)
+    ? record
+    : null;
 }
 
 export async function saveComputerTaskState(record: ComputerTaskStateRecord): Promise<void> {
@@ -263,7 +473,8 @@ export async function saveComputerTaskState(record: ComputerTaskStateRecord): Pr
   // when the user reruns identical task text.
   let surfaceEscalations = record.surfaceEscalations;
   let actionTrace = record.actionTrace;
-  if (surfaceEscalations === undefined || actionTrace === undefined) {
+  let requestIdentity = record.requestIdentity;
+  if (surfaceEscalations === undefined || actionTrace === undefined || requestIdentity === undefined) {
     let previous: ComputerTaskStateRecord | null = null;
     try {
       previous = normalizeRecord(await storage.getItem(storageKey(record.circleId, record.threadId)));
@@ -275,9 +486,20 @@ export async function saveComputerTaskState(record: ComputerTaskStateRecord): Pr
     if (actionTrace === undefined) {
       actionTrace = sameTask ? previous?.actionTrace || null : null;
     }
+    if (requestIdentity === undefined) {
+      requestIdentity = sameTask ? previous?.requestIdentity || null : null;
+    }
   }
+  const boundedRequestIdentity = typeof requestIdentity === 'string'
+    && requestIdentity.trim().length > 0
+    && requestIdentity.trim().length <= 240
+    && !/[\u0000-\u001f\u007f]/.test(requestIdentity)
+    ? requestIdentity.trim()
+    : null;
   await storage.setItem(storageKey(record.circleId, record.threadId), JSON.stringify({
     ...record,
+    requestIdentity: boundedRequestIdentity,
+    exactPlanApproval: compactExactPlanApprovalCorrelation(record.exactPlanApproval),
     surfaceEscalations,
     actionTrace,
     capabilityBuildout: compactComputerTaskCapabilityBuildout(record.capabilityBuildout),
@@ -288,6 +510,162 @@ export async function saveComputerTaskState(record: ComputerTaskStateRecord): Pr
 
 export async function clearComputerTaskState(circleId: string, threadId?: string | null): Promise<void> {
   await storage.removeItem(storageKey(circleId, threadId));
+}
+
+function exactLoadFailure(
+  authority: ComputerTaskStateExactAuthority | null,
+  error: ComputerTaskStateExactError,
+): ComputerTaskStateExactLoadResult {
+  return {
+    ok: false,
+    record: null,
+    userId: authority?.userId || null,
+    circleId: authority?.circleId || null,
+    generation: authority?.generation || null,
+    error,
+  };
+}
+
+function exactMutationFailure(
+  authority: ComputerTaskStateExactAuthority | null,
+  error: ComputerTaskStateExactError,
+): ComputerTaskStateExactMutationResult {
+  return {
+    ok: false,
+    userId: authority?.userId || null,
+    circleId: authority?.circleId || null,
+    generation: authority?.generation || null,
+    error,
+  };
+}
+
+/**
+ * Read a computer-task checkpoint from one exact authenticated local lane.
+ * A stale async read can never be returned after its owning UI generation is
+ * retired, and an envelope from another account/circle/thread fails closed.
+ */
+export async function loadComputerTaskStateExact(
+  authorityInput: ComputerTaskStateExactAuthority,
+  threadId: string | null | undefined,
+  isCurrent: ComputerTaskStateAuthorityFence,
+): Promise<ComputerTaskStateExactLoadResult> {
+  const resolved = await resolveComputerTaskStateExactAuthority(authorityInput, isCurrent);
+  if (!resolved.ok) return exactLoadFailure(resolved.authority, resolved.error);
+  const { authority } = resolved;
+  const normalizedThreadId = normalizeExactThreadId(threadId);
+  const key = computerTaskStateExactStorageKey(authority, threadId);
+  if (normalizedThreadId === undefined || !key) return exactLoadFailure(authority, 'invalid_authority');
+  try {
+    const raw = await storage.getItem(key);
+    if (!computerTaskStateAuthorityIsCurrent(authority, isCurrent)) {
+      return exactLoadFailure(authority, 'authority_retired');
+    }
+    const record = normalizeExactEnvelope(raw, authority, normalizedThreadId);
+    return {
+      ok: true,
+      record,
+      userId: authority.userId,
+      circleId: authority.circleId,
+      generation: authority.generation,
+    };
+  } catch {
+    return exactLoadFailure(authority, 'storage_error');
+  }
+}
+
+/**
+ * Save to one exact authenticated local lane and require a byte-identical
+ * readback receipt. Legacy ownerless cache contents are never imported.
+ */
+export async function saveComputerTaskStateExact(
+  record: ComputerTaskStateRecord,
+  authorityInput: ComputerTaskStateExactAuthority,
+  isCurrent: ComputerTaskStateAuthorityFence,
+): Promise<ComputerTaskStateExactMutationResult> {
+  const resolved = await resolveComputerTaskStateExactAuthority(authorityInput, isCurrent);
+  if (!resolved.ok) return exactMutationFailure(resolved.authority, resolved.error);
+  const { authority } = resolved;
+  const normalizedThreadId = normalizeExactThreadId(record.threadId);
+  const key = computerTaskStateExactStorageKey(authority, record.threadId);
+  if (
+    normalizedThreadId === undefined
+    || !key
+    || record.circleId !== authority.circleId
+    || record.threadId !== normalizedThreadId
+  ) return exactMutationFailure(authority, 'record_mismatch');
+
+  try {
+    const previousRaw = await storage.getItem(key);
+    if (!computerTaskStateAuthorityIsCurrent(authority, isCurrent)) {
+      return exactMutationFailure(authority, 'authority_retired');
+    }
+    const previous = normalizeExactEnvelope(previousRaw, authority, normalizedThreadId);
+    const persistedRecord = prepareComputerTaskStateForStorage(record, previous);
+    const envelope: ComputerTaskStateExactEnvelope = {
+      schemaVersion: EXACT_STORAGE_SCHEMA_VERSION,
+      userId: authority.userId,
+      circleId: authority.circleId,
+      threadId: normalizedThreadId,
+      record: persistedRecord,
+    };
+    const serialized = JSON.stringify(envelope);
+    if (!computerTaskStateAuthorityIsCurrent(authority, isCurrent)) {
+      return exactMutationFailure(authority, 'authority_retired');
+    }
+    await storage.setItem(key, serialized);
+    if (!computerTaskStateAuthorityIsCurrent(authority, isCurrent)) {
+      return exactMutationFailure(authority, 'authority_retired');
+    }
+    const receipt = await storage.getItem(key);
+    if (!computerTaskStateAuthorityIsCurrent(authority, isCurrent)) {
+      return exactMutationFailure(authority, 'authority_retired');
+    }
+    if (receipt !== serialized) return exactMutationFailure(authority, 'storage_error');
+    return {
+      ok: true,
+      userId: authority.userId,
+      circleId: authority.circleId,
+      generation: authority.generation,
+    };
+  } catch {
+    return exactMutationFailure(authority, 'storage_error');
+  }
+}
+
+/** Remove only the captured user's exact circle/thread lane, with readback proof. */
+export async function clearComputerTaskStateExact(
+  authorityInput: ComputerTaskStateExactAuthority,
+  threadId: string | null | undefined,
+  isCurrent: ComputerTaskStateAuthorityFence,
+): Promise<ComputerTaskStateExactMutationResult> {
+  const resolved = await resolveComputerTaskStateExactAuthority(authorityInput, isCurrent);
+  if (!resolved.ok) return exactMutationFailure(resolved.authority, resolved.error);
+  const { authority } = resolved;
+  const normalizedThreadId = normalizeExactThreadId(threadId);
+  const key = computerTaskStateExactStorageKey(authority, threadId);
+  if (normalizedThreadId === undefined || !key) return exactMutationFailure(authority, 'invalid_authority');
+  try {
+    if (!computerTaskStateAuthorityIsCurrent(authority, isCurrent)) {
+      return exactMutationFailure(authority, 'authority_retired');
+    }
+    await storage.removeItem(key);
+    if (!computerTaskStateAuthorityIsCurrent(authority, isCurrent)) {
+      return exactMutationFailure(authority, 'authority_retired');
+    }
+    const receipt = await storage.getItem(key);
+    if (!computerTaskStateAuthorityIsCurrent(authority, isCurrent)) {
+      return exactMutationFailure(authority, 'authority_retired');
+    }
+    if (receipt !== null) return exactMutationFailure(authority, 'storage_error');
+    return {
+      ok: true,
+      userId: authority.userId,
+      circleId: authority.circleId,
+      generation: authority.generation,
+    };
+  } catch {
+    return exactMutationFailure(authority, 'storage_error');
+  }
 }
 
 /**

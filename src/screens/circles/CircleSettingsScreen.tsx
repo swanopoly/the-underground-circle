@@ -16,8 +16,17 @@ import {
 import { LoadingScreen } from '../../components/LoadingWave';
 import * as Clipboard from 'expo-clipboard';
 import * as ImagePicker from 'expo-image-picker';
-import { supabase } from '../../lib/supabase';
-import { safeGetUser } from '../../lib/authSession';
+import { getSupabaseClientForAccessToken, supabase } from '../../lib/supabase';
+import { useExactCircleAuthority } from '../../hooks/useAuth';
+import {
+  buildCircleImageStoragePath,
+  CIRCLE_IMAGE_PRIVATE_BUCKET,
+  CIRCLE_IMAGE_PRIVATE_SIGN_TTL_SECONDS,
+  circleImageStoragePathFromValue,
+  createCircleImageSignedUrl,
+  persistedCircleImageValue,
+  toCircleImageStorageReference,
+} from '../../lib/circleImageStorage';
 import { showConfirm } from '../../lib/alert';
 import {
   useCircleCostTelemetry,
@@ -44,7 +53,7 @@ import { Circle, CheckInFormat } from '../../types';
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const ACCENT_COLORS = [
-  '#6366f1', '#a855f7', '#22d3ee', '#22c55e', '#f43f5e', '#f59e0b',
+  '#6366f1', '#a855f7', '#22c55e', '#f43f5e', '#f59e0b',
   '#3b82f6', '#fbbf24', '#ec4899', '#14b8a6', '#8b5cf6', '#ef4444',
 ];
 
@@ -65,6 +74,10 @@ const CIRCLE_TYPES = [
 
 const CHECKIN_TYPES: CheckInFormat['type'][] = ['photo', 'number', 'text', 'yesno', 'rating'];
 
+// Keep browser reads on the member-safe Circle projection. Capability secrets
+// (legacy API/Discord credentials) stay behind creator/service-only authority.
+const CIRCLE_SETTINGS_READ_COLUMNS = 'id,name,description,invite_code,max_members,created_by,created_at,discord_guild_id,discord_connected_at,vibe,rules,circle_image_url,org_id,is_public,settings,circle_type,icon,accent_color,check_in_format,tags' as const;
+
 const SUGGESTED_TAGS = [
   'daily', 'weekly', 'morning', 'night', 'accountability', 'competitive',
   'chill', 'hardcore', 'beginner', 'advanced', 'social', 'solo',
@@ -74,6 +87,17 @@ const SUGGESTED_TAGS = [
 
 export default function CircleSettingsScreen({ route, navigation }: any) {
   const { circleId } = route.params;
+  const {
+    exactAuthority,
+    isExactAuthorityCurrent,
+  } = useExactCircleAuthority(circleId);
+  const exactClient = React.useMemo(
+    () => exactAuthority
+      ? getSupabaseClientForAccessToken(exactAuthority.accessToken)
+      : null,
+    [exactAuthority?.accessToken],
+  );
+  const loadGenerationRef = useRef(0);
   const [circle, setCircle] = useState<Circle | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [isCreator, setIsCreator] = useState(false);
@@ -95,6 +119,7 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
   const [ruleInput, setRuleInput] = useState('');
   const [expandedEmoji, setExpandedEmoji] = useState<string | null>('POPULAR');
   const [circleImageUrl, setCircleImageUrl] = useState<string | undefined>(undefined);
+  const [circleImageStoredValue, setCircleImageStoredValue] = useState<string | null>(null);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [copiedInvite, setCopiedInvite] = useState(false);
   const [copiedId, setCopiedId] = useState(false);
@@ -131,7 +156,7 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
 
   useEffect(() => {
     loadData();
-  }, [circleId]);
+  }, [circleId, exactAuthority?.generation]);
 
   // Circle SKILL.md library (read-only view) — members can SELECT via RLS.
   useEffect(() => {
@@ -145,11 +170,34 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
   }, [circleId]);
 
   const loadData = async () => {
-    const { value: user } = await safeGetUser();
-    if (user) setCurrentUserId(user.id);
-
-    const { data } = await supabase.from('circles').select('*').eq('id', circleId).single();
+    const authority = exactAuthority;
+    const client = exactClient;
+    const generation = loadGenerationRef.current + 1;
+    loadGenerationRef.current = generation;
+    setLoading(true);
+    setCircle(null);
+    setCircleImageUrl(undefined);
+    setCircleImageStoredValue(null);
+    if (!authority || !client || !isExactAuthorityCurrent(authority)) {
+      setCurrentUserId(null);
+      setIsCreator(false);
+      setLoading(false);
+      return;
+    }
+    setCurrentUserId(authority.userId);
+    const { data, error } = await client
+      .from('circles')
+      .select(CIRCLE_SETTINGS_READ_COLUMNS)
+      .eq('id', circleId)
+      .maybeSingle();
+    if (error || generation !== loadGenerationRef.current || !isExactAuthorityCurrent(authority)) {
+      setLoading(false);
+      return;
+    }
     if (data) {
+      const storedImage = persistedCircleImageValue(data.circle_image_url);
+      const signedImage = await createCircleImageSignedUrl(client, storedImage);
+      if (generation !== loadGenerationRef.current || !isExactAuthorityCurrent(authority)) return;
       setCircle(data);
       setIcon(data.icon || '⭕');
       setAccentColor(data.accent_color || '#6366f1');
@@ -160,7 +208,8 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
       setCheckInFormat(data.check_in_format || { type: 'text' });
       setVibe(data.vibe || '');
       setRules(data.rules || []);
-      setCircleImageUrl(data.circle_image_url || undefined);
+      setCircleImageStoredValue(storedImage);
+      setCircleImageUrl(signedImage || undefined);
       setSessionMemoryMode(data.settings?.sessionMemoryMode === 'shared' ? 'shared' : 'private');
       const existingCap = data.settings?.computer_use_max_cost_usd;
       setComputerUseMaxCostUsd(
@@ -178,7 +227,7 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
           ? existingClaudeTotalCap.toFixed(2)
           : '10.00'
       );
-      setIsCreator(user?.id === data.created_by);
+      setIsCreator(authority.userId === data.created_by);
     }
     setLoading(false);
   };
@@ -186,13 +235,15 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
   const markChanged = () => { if (!hasChanges) setHasChanges(true); };
 
   const saveAll = async () => {
-    if (!isCreator) return;
+    const authority = exactAuthority;
+    const client = exactClient;
+    if (!isCreator || !authority || !client || !isExactAuthorityCurrent(authority)) return;
     setSaving(true);
     try {
       const fields = {
         icon, accent_color: accentColor, name: name.trim(), description,
         circle_type: circleType, tags, check_in_format: checkInFormat,
-        vibe, rules, circle_image_url: circleImageUrl,
+        vibe, rules, circle_image_url: circleImageStoredValue,
         settings: {
           ...(circle?.settings || {}),
           sessionMemoryMode,
@@ -201,14 +252,22 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
           claude_total_max_cost_usd: parseFloat(claudeTotalMaxCostUsd)  || 10,
         },
       };
-      const { error } = await supabase.from('circles').update(fields).eq('id', circleId);
-      if (error) {
+      const { data: receipt, error } = await client.from('circles')
+        .update(fields)
+        .eq('id', circleId)
+        .select('id')
+        .maybeSingle();
+      if (error || !receipt || !isExactAuthorityCurrent(authority)) {
         console.error('SaveAll error:', error);
-        Alert.alert('Save Error', error.message || 'Failed to save changes');
+        Alert.alert('Save Error', error?.message || 'Failed to save changes');
         setSaving(false);
         return;
       }
-      setCircle(prev => prev ? { ...prev, ...fields } : prev);
+      setCircle(prev => prev ? {
+        ...prev,
+        ...fields,
+        circle_image_url: fields.circle_image_url || undefined,
+      } : prev);
       setHasChanges(false);
       setShowSaved(true);
       setTimeout(() => {
@@ -231,23 +290,38 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
     if (result.canceled || !result.assets?.[0]) return;
     setUploadingImage(true);
     try {
+      const authority = exactAuthority;
+      const client = exactClient;
+      if (!authority || !client || !isExactAuthorityCurrent(authority)) {
+        throw new Error('Your Circle access changed. Reopen settings and try again.');
+      }
       const asset = result.assets[0];
       const ext = asset.uri.split('.').pop()?.toLowerCase() || 'jpg';
-      const path = `circles/${circleId}/icon.${ext}`;
+      const path = buildCircleImageStoragePath(circleId, ext);
       const response = await fetch(asset.uri);
       const blob = await response.blob();
       const arrayBuffer = await new Response(blob).arrayBuffer();
-      const { error: uploadError } = await supabase.storage
-        .from('circle-images')
+      if (!isExactAuthorityCurrent(authority)) return;
+      const { error: uploadError } = await client.storage
+        .from(CIRCLE_IMAGE_PRIVATE_BUCKET)
         .upload(path, arrayBuffer, { contentType: `image/${ext}`, upsert: true });
       if (uploadError) throw uploadError;
-      const { data: urlData } = supabase.storage.from('circle-images').getPublicUrl(path);
-      const url = urlData.publicUrl + '?t=' + Date.now();
-      setCircleImageUrl(url);
+      if (!isExactAuthorityCurrent(authority)) return;
+      const { data: signed, error: signError } = await client.storage
+        .from(CIRCLE_IMAGE_PRIVATE_BUCKET)
+        .createSignedUrl(path, CIRCLE_IMAGE_PRIVATE_SIGN_TTL_SECONDS);
+      if (signError || !signed?.signedUrl) throw signError || new Error('The private image could not be signed.');
+      const storedValue = toCircleImageStorageReference(path);
+      setCircleImageStoredValue(storedValue);
+      setCircleImageUrl(signed.signedUrl);
       setIcon('⭕'); // clear emoji when custom image set
       markChanged();
       // Also auto-save this
-      await save({ circle_image_url: url, icon: '⭕' });
+      const saved = await save({ circle_image_url: storedValue, icon: '⭕' }, authority);
+      if (!saved) {
+        await client.storage.from(CIRCLE_IMAGE_PRIVATE_BUCKET).remove([path]);
+        throw new Error('The Circle image row was not updated.');
+      }
     } catch (e: any) {
       console.error('Upload error:', e);
       Alert.alert('Upload Failed', e.message || 'Could not upload image');
@@ -255,28 +329,46 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
     setUploadingImage(false);
   };
 
-  const removeImage = () => {
+  const removeImage = async () => {
+    const authority = exactAuthority;
+    const client = exactClient;
+    const storagePath = circleImageStoragePathFromValue(circleImageStoredValue);
     setCircleImageUrl(undefined);
+    setCircleImageStoredValue(null);
     markChanged();
-    save({ circle_image_url: null });
+    const saved = await save({ circle_image_url: null }, authority);
+    if (saved && storagePath && authority && client && isExactAuthorityCurrent(authority)) {
+      await client.storage.from(CIRCLE_IMAGE_PRIVATE_BUCKET).remove([storagePath]);
+    }
   };
 
-  const save = async (fields: Record<string, any>) => {
-    if (!isCreator) return;
+  const save = async (fields: Record<string, any>, capturedAuthority = exactAuthority) => {
+    if (!isCreator) return false;
+    const client = capturedAuthority
+      ? getSupabaseClientForAccessToken(capturedAuthority.accessToken)
+      : null;
+    if (!capturedAuthority || !client || !isExactAuthorityCurrent(capturedAuthority)) return false;
     setSaving(true);
+    let saved = false;
     try {
-      const { error } = await supabase.from('circles').update(fields).eq('id', circleId);
-      if (error) {
+      const { data: receipt, error } = await client.from('circles')
+        .update(fields)
+        .eq('id', circleId)
+        .select('id')
+        .maybeSingle();
+      if (error || !receipt) {
         console.error('Save error:', error);
-        Alert.alert('Save Error', error.message || 'Failed to save changes');
+        Alert.alert('Save Error', error?.message || 'Failed to save changes');
       } else {
         setCircle(prev => prev ? { ...prev, ...fields } : prev);
+        saved = true;
       }
     } catch (e: any) {
       console.error('Save error:', e);
       Alert.alert('Save Error', e.message || 'Failed to save changes');
     }
     setSaving(false);
+    return saved;
   };
 
   const handleDeleteCircle = async () => {
@@ -425,7 +517,7 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
 
   const removeRule = (i: number) => { setRules(rules.filter((_, idx) => idx !== i)); markChanged(); };
 
-  if (loading) {
+  if (loading || !exactAuthority || currentUserId !== exactAuthority.userId) {
     return <LoadingScreen />;
   }
 
@@ -491,7 +583,15 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
                   {emojis.map(e => (
                     <Pressable
                       key={e}
-                      onPress={() => { if (!readOnly) { setIcon(e); setCircleImageUrl(undefined); markChanged(); save({ icon: e, circle_image_url: null }); } }}
+                      onPress={() => {
+                        if (!readOnly) {
+                          setIcon(e);
+                          setCircleImageUrl(undefined);
+                          setCircleImageStoredValue(null);
+                          markChanged();
+                          void save({ icon: e, circle_image_url: null });
+                        }
+                      }}
                       style={[
                         styles.emojiBtn,
                         icon === e && { backgroundColor: accentColor + '30', borderColor: accentColor },

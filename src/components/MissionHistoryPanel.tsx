@@ -13,8 +13,10 @@ import React, { useEffect, useMemo, useState } from "react";
 import { View, Text, Pressable, ScrollView, StyleSheet, Platform } from "react-native";
 import { supabase } from "../lib/supabase";
 import { GRID, PIXEL_COLORS } from "../lib/pixelDesign";
+import { indexSafeProfiles, loadSafeCircleProfiles } from "../lib/safeProfiles";
 
 interface Props {
+  circleId: string;
   missionId: string;
   accentColor?: string;
   onClose?: () => void;
@@ -49,7 +51,7 @@ function parseSummary(summary: string | null): string[] {
   return summary.split(/\s+/).filter(Boolean);
 }
 
-export default function MissionHistoryPanel({ missionId, accentColor = PIXEL_COLORS.green, onClose }: Props) {
+export default function MissionHistoryPanel({ circleId, missionId, accentColor = PIXEL_COLORS.green, onClose }: Props) {
   const [revisions, setRevisions] = useState<Revision[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -59,33 +61,29 @@ export default function MissionHistoryPanel({ missionId, accentColor = PIXEL_COL
     setLoading(true);
     supabase
       .from("mission_revisions")
-      .select("id, editor_id, title, description, status, deadline, change_summary, created_at, editor:profiles!mission_revisions_editor_id_fkey(username, display_name)")
+      .select("id, editor_id, title, description, status, deadline, change_summary, created_at")
       .eq("mission_id", missionId)
       .order("created_at", { ascending: false })
       .limit(50)
-      .then(({ data, error }) => {
+      .then(async ({ data, error }) => {
         if (cancelled) return;
         if (error) {
-          // If the FK-join syntax isn't recognized (older supabase client),
-          // fall back to a plain fetch so the panel still works.
-          supabase
-            .from("mission_revisions")
-            .select("id, editor_id, title, description, status, deadline, change_summary, created_at")
-            .eq("mission_id", missionId)
-            .order("created_at", { ascending: false })
-            .limit(50)
-            .then((r2) => {
-              if (cancelled) return;
-              setRevisions((r2.data as Revision[]) || []);
-              setLoading(false);
-            });
+          setLoading(false);
           return;
         }
-        setRevisions((data as any) || []);
+        const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+          circleId,
+          userIds: (data || []).map(row => row.editor_id).filter(Boolean) as string[],
+        }));
+        if (cancelled) return;
+        setRevisions((data || []).map(row => ({
+          ...row,
+          editor: row.editor_id ? profileById.get(row.editor_id) || null : null,
+        })) as Revision[]);
         setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [missionId]);
+  }, [circleId, missionId]);
 
   const selected = useMemo(
     () => revisions.find((r) => r.id === selectedId) || null,

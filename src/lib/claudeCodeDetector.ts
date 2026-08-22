@@ -7,12 +7,17 @@
 import { OfficeAgent } from './officeAgents';
 import { ProviderType } from './connectionManager';
 import { estimateCostWithCache } from './modelPricing';
-import { publishAgentToCircle, PROVIDER_DISPLAY } from './circleOffice';
-import { supabase } from './supabase';
+import {
+  publishAgentToCircle,
+  PROVIDER_DISPLAY,
+  type CircleOfficeAuthScope,
+} from './circleOffice';
+import { getSupabaseClientForAccessToken, supabase } from './supabase';
 import { getCircleSessionMemoryMode } from './agentRunSystem';
 import { promoteExternalAgentSessionKnowledge } from './memoryService';
 import { deriveSessionStatus, clampToDbStatus, type AgentStatus } from './officeAgents';
 import { saveAgentUserAccountMemories, type AgentSessionForMemory } from './agentSessionMemory';
+import { isBenignAuthAbort } from './authSession';
 
 import {
   bridgeAuthHeaders,
@@ -327,14 +332,19 @@ export async function publishClaudeCodeAgent(
   circleId: string,
   sessionCount: number,
   sessions?: ClaudeCodeSession[],
+  capturedScope?: CircleOfficeAuthScope,
 ): Promise<{ agentId?: string; error?: string }> {
   const display = PROVIDER_DISPLAY['claude-code'];
+  const db = capturedScope
+    ? getSupabaseClientForAccessToken(capturedScope.accessToken)
+    : supabase;
 
   // If we have session details and multiple main sessions, publish each separately
   const mainSessions = sessions?.filter(s => s.kind === 'main' || !s.kind) || [];
 
   if (mainSessions.length > 1) {
-    const { data: auth } = await supabase.auth.getUser();
+    const ownerId = capturedScope?.userId
+      || (await supabase.auth.getUser()).data.user?.id;
     // Multiple sessions — each gets its own pixel agent
     for (let i = 0; i < mainSessions.length; i++) {
       const session = mainSessions[i];
@@ -351,9 +361,9 @@ export async function publishClaudeCodeAgent(
         toolIcon: display?.icon || '💻',
         gatewayUrl: getClaudeBridgeUrl() || 'http://localhost:7778',
         isPublic: false,
-      });
+      }, capturedScope);
 
-      let update = supabase
+      let update = db
         .from('circle_office_agents')
         .update({
           status: clampToDbStatus(status),
@@ -363,7 +373,10 @@ export async function publishClaudeCodeAgent(
         })
         .eq('circle_id', circleId)
         .eq('name', name);
-      if (auth.user?.id) update = update.eq('owner_id', auth.user.id);
+      if (ownerId) update = update.eq('owner_id', ownerId);
+      if (capturedScope) {
+        update = update.setHeader('Authorization', `Bearer ${capturedScope.accessToken}`);
+      }
       await update;
     }
     return { agentId: undefined };
@@ -378,10 +391,12 @@ export async function publishClaudeCodeAgent(
     toolIcon: display?.icon || '💻',
     gatewayUrl: getClaudeBridgeUrl() || 'http://localhost:7778',
     isPublic: false,
-  });
+  }, capturedScope);
 
   if (result.error) {
-    console.error('[claudeCodeDetector] Failed to publish agent:', result.error);
+    if (!isBenignAuthAbort(result.error)) {
+      console.error('[claudeCodeDetector] Failed to publish agent:', result.error);
+    }
     return { error: result.error };
   }
 
@@ -390,7 +405,7 @@ export async function publishClaudeCodeAgent(
     // so `sessionCount` (total) would over-report. updateClaudeCodeAgentStatus
     // overwrites this label with the subagent-aware one on the next poll.
     const activeCount = sessions ? mainSessions.length : sessionCount;
-    await supabase
+    let update = db
       .from('circle_office_agents')
       .update({
         status: 'idle',
@@ -401,6 +416,10 @@ export async function publishClaudeCodeAgent(
         updated_at: new Date().toISOString(),
       })
       .eq('id', result.agent.id);
+    if (capturedScope) {
+      update = update.setHeader('Authorization', `Bearer ${capturedScope.accessToken}`);
+    }
+    await update;
   }
 
   return { agentId: result.agent?.id };
@@ -412,10 +431,15 @@ export async function publishClaudeCodeAgent(
 export async function updateClaudeCodeAgentStatus(
   circleId: string,
   sessions: ClaudeCodeSession[],
+  capturedScope?: CircleOfficeAuthScope,
 ): Promise<void> {
   try {
-    const { data: auth } = await supabase.auth.getUser();
-    if (!auth.user) return;
+    const db = capturedScope
+      ? getSupabaseClientForAccessToken(capturedScope.accessToken)
+      : supabase;
+    const ownerId = capturedScope?.userId
+      || (await supabase.auth.getUser()).data.user?.id;
+    if (!ownerId) return;
 
     const mainSessions = sessions.filter(s => s.kind === 'main' || !s.kind);
 
@@ -427,7 +451,7 @@ export async function updateClaudeCodeAgentStatus(
         const status = sessionToDerivedStatus(session, subagents);
         const project = session.projectDir.split('/').pop() || 'project';
 
-        await supabase
+        let update = db
           .from('circle_office_agents')
           .update({
             status: clampToDbStatus(status),
@@ -436,8 +460,12 @@ export async function updateClaudeCodeAgentStatus(
             updated_at: new Date().toISOString(),
           })
           .eq('circle_id', circleId)
-          .eq('owner_id', auth.user.id)
+          .eq('owner_id', ownerId)
           .eq('name', name);
+        if (capturedScope) {
+          update = update.setHeader('Authorization', `Bearer ${capturedScope.accessToken}`);
+        }
+        await update;
       }
       return;
     }
@@ -472,7 +500,7 @@ export async function updateClaudeCodeAgentStatus(
       currentTask = 'Session ended — idling';
     }
 
-    await supabase
+    let update = db
       .from('circle_office_agents')
       .update({
         status: clampToDbStatus(status),
@@ -481,10 +509,16 @@ export async function updateClaudeCodeAgentStatus(
         updated_at: new Date().toISOString(),
       })
       .eq('circle_id', circleId)
-      .eq('owner_id', auth.user.id)
+      .eq('owner_id', ownerId)
       .eq('name', CLAUDE_CODE_AGENT_NAME);
+    if (capturedScope) {
+      update = update.setHeader('Authorization', `Bearer ${capturedScope.accessToken}`);
+    }
+    await update;
   } catch (err) {
-    console.warn('[claudeCodeDetector] Failed to update agent status:', err);
+    if (!isBenignAuthAbort(err)) {
+      console.warn('[claudeCodeDetector] Failed to update agent status:', err);
+    }
   }
 }
 
@@ -507,6 +541,7 @@ export interface ClaudeCodeLaunchRequest {
 
 export interface ClaudeCodeLaunchResult {
   ok: boolean;
+  transportAccepted: boolean | null;
   launchId?: string;
   sessions: ClaudeCodeSession[];
   launched: number;
@@ -520,6 +555,7 @@ export async function launchClaudeCodeSessions(input: ClaudeCodeLaunchRequest): 
   if (!bridgeUrl) {
     return {
       ok: false,
+      transportAccepted: false,
       sessions: [],
       launched: 0,
       failed: [{ error: 'Claude Code bridge URL is unavailable in this runtime.' }],
@@ -564,10 +600,15 @@ export async function launchClaudeCodeSessions(input: ClaudeCodeLaunchRequest): 
     const data = await res.json().catch(() => null) as Partial<ClaudeCodeLaunchResult> | null;
     if (!res.ok || !data) {
       const error = data?.error || `Claude Code bridge launch failed with HTTP ${res.status}`;
-      return { ok: false, sessions: [], launched: 0, failed: [{ error }], error };
+      const transportAccepted = res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 409
+        ? false
+        : null;
+      return { ok: false, transportAccepted, sessions: [], launched: 0, failed: [{ error }], error };
     }
 
     const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+    const launched = typeof data.launched === 'number' ? data.launched : sessions.length;
+    const accepted = data.ok === true || launched > 0;
     if (input.circleId && sessions.length > 0) {
       await publishClaudeCodeAgent(input.circleId, sessions.length, sessions);
       await updateClaudeCodeAgentStatus(input.circleId, sessions);
@@ -578,10 +619,11 @@ export async function launchClaudeCodeSessions(input: ClaudeCodeLaunchRequest): 
     }
 
     return {
-      ok: data.ok !== false,
+      ok: accepted,
+      transportAccepted: accepted ? true : data.ok === false ? false : null,
       launchId: data.launchId,
       sessions,
-      launched: typeof data.launched === 'number' ? data.launched : sessions.length,
+      launched,
       failed: Array.isArray(data.failed) ? data.failed : [],
       projectDir: data.projectDir,
       error: data.error,
@@ -590,7 +632,7 @@ export async function launchClaudeCodeSessions(input: ClaudeCodeLaunchRequest): 
     const message = err instanceof Error && err.name === 'AbortError'
       ? 'Claude Code bridge launch timed out.'
       : err instanceof Error ? err.message : String(err);
-    return { ok: false, sessions: [], launched: 0, failed: [{ error: message }], error: message };
+    return { ok: false, transportAccepted: null, sessions: [], launched: 0, failed: [{ error: message }], error: message };
   }
 }
 

@@ -12,7 +12,8 @@
  *
  *   SUBSTITUTION: cheapest→strongest ladder — a no-tool/no-vision pick →
  *   claude-haiku-4-5; a computer-use need → claude-sonnet-4-6 (the only
- *   canonical with it); a >200k context need → gemini-2.5-pro / gpt-4.1 ONLY
+ *   canonical with it); a >200k context need → gemini-3.6-flash /
+ *   gpt-5.6-terra ONLY
  *   when that provider is connected, else identity+gaps (fail-closed honesty);
  *   the same-model guard escalates haiku→sonnet instead of a no-op swap.
  *
@@ -122,7 +123,7 @@ function main(): void {
   const ctxReq: RequiredCapabilities = { minContextTokens: 300_000 };
   assertEq(detectCapabilityGaps(smallWindow, ctxReq).join(','), 'context_window', '(5) context gap when window < need');
   const r5google = resolveCapabilityFallback(smallWindow, ctxReq, { connectedProviders: ['google_ai'] });
-  assertEq(r5google.model, 'gemini-2.5-pro', '(5) >200k + google_ai connected → gemini');
+  assertEq(r5google.model, 'gemini-3.6-flash', '(5) >200k + google_ai connected → gemini');
   assertEq(r5google.substituted, true, '(5) context gap substitutes when provider connected');
   assertEq(r5google.gaps.join(','), 'context_window', '(5) context gap reported on substitute');
   const r5none = resolveCapabilityFallback(smallWindow, ctxReq);
@@ -131,15 +132,15 @@ function main(): void {
   assertEq(r5none.gaps.join(','), 'context_window', '(5) no-substitute still reports the gap');
   assert(r5none.reason.includes('no eligible substitute') && r5none.reason.includes('context_window'), '(5) fail-closed reason', r5none.reason);
   const r5openai = resolveCapabilityFallback(smallWindow, ctxReq, { connectedProviders: ['openai'] });
-  assertEq(r5openai.model, 'gpt-4.1', '(5) >200k + openai connected → gpt-4.1 (alt anchor)');
+  assertEq(r5openai.model, 'gpt-5.6-terra', '(5) >200k + openai connected → GPT-5.6 Terra (alt anchor)');
   const r5both = resolveCapabilityFallback(smallWindow, ctxReq, { connectedProviders: ['google_ai', 'openai'] });
-  assertEq(r5both.model, 'gemini-2.5-pro', '(5) both connected → gemini wins (first in ladder)');
+  assertEq(r5both.model, 'gemini-3.6-flash', '(5) both connected → gemini wins (first in ladder)');
   const r5deepseek = resolveCapabilityFallback(smallWindow, ctxReq, { connectedProviders: ['deepseek'] });
   assertEq(r5deepseek.substituted, false, '(5) unrelated provider connected → still no substitute');
   // provider-name canonicalization + bare-string form
-  assertEq(resolveCapabilityFallback(smallWindow, ctxReq, { connectedProviders: ['google'] }).model, 'gemini-2.5-pro', '(5) provider alias "google" → google_ai');
-  assertEq(resolveCapabilityFallback(smallWindow, ctxReq, { connectedProviders: ['GoogleAI'] }).model, 'gemini-2.5-pro', '(5) provider alias "GoogleAI" → google_ai');
-  assertEq(resolveCapabilityFallback(smallWindow, ctxReq, { connectedProviders: 'openai' }).model, 'gpt-4.1', '(5) bare-string connectedProviders = one provider');
+  assertEq(resolveCapabilityFallback(smallWindow, ctxReq, { connectedProviders: ['google'] }).model, 'gemini-3.6-flash', '(5) provider alias "google" → google_ai');
+  assertEq(resolveCapabilityFallback(smallWindow, ctxReq, { connectedProviders: ['GoogleAI'] }).model, 'gemini-3.6-flash', '(5) provider alias "GoogleAI" → google_ai');
+  assertEq(resolveCapabilityFallback(smallWindow, ctxReq, { connectedProviders: 'openai' }).model, 'gpt-5.6-terra', '(5) bare-string connectedProviders = one provider');
 
   // ─── (6) unknown window → NO context gap (fail-open) ───────────────────────
   const unknownWindow = mkProfile('mystery-model', { toolUse: true, vision: true }, null);
@@ -153,7 +154,7 @@ function main(): void {
   assertEq(r6a.substituted, false, '(6) tool gap but 500k need + no long-ctx provider → no candidate satisfies full set');
   assertEq(r6a.gaps.join(','), 'tool_use', '(6) only tool_use is a gap (window unknown → not context_window)');
   const r6b = resolveCapabilityFallback(unkTool, { toolUse: true, minContextTokens: 500_000 }, { connectedProviders: ['google_ai'] });
-  assertEq(r6b.model, 'gemini-2.5-pro', '(6) same, google_ai connected → gemini covers tool_use AND the 500k need');
+  assertEq(r6b.model, 'gemini-3.6-flash', '(6) same, google_ai connected → gemini covers tool_use AND the 500k need');
   assertEq(r6b.gaps.join(','), 'tool_use', '(6) reported gaps are the selected model gaps (window unknown)');
 
   // ─── (7) coding_tier gap → first strong-enough candidate ───────────────────
@@ -250,7 +251,7 @@ function main(): void {
     // cyclic + huge provider arrays never throw / stay bounded
     const cycArr: unknown[] = ['google_ai'];
     cycArr.push(cycArr);
-    assertEq(resolveCapabilityFallback(smallWindow, req5, { connectedProviders: cycArr as never }).model, 'gemini-2.5-pro', '(10) cyclic provider array → google_ai still read, gemini');
+    assertEq(resolveCapabilityFallback(smallWindow, req5, { connectedProviders: cycArr as never }).model, 'gemini-3.6-flash', '(10) cyclic provider array → google_ai still read, gemini');
     const hugeArr = new Array(100_000).fill('deepseek');
     assertEq(resolveCapabilityFallback(smallWindow, req5, { connectedProviders: hugeArr }).substituted, false, '(10) huge provider array scanned bounded, no long-ctx provider');
 
@@ -294,16 +295,16 @@ function main(): void {
   assertEq(MAX_CAPABILITY_GAPS, 5, '(13) MAX_CAPABILITY_GAPS is 5');
   assertEq(MAX_REASON_CHARS, 160, '(13) MAX_REASON_CHARS is 160');
   assertEq(CANONICAL_CAPABILITY_CANDIDATES.length, 4, '(13) four canonical candidates');
-  assertEq(CANONICAL_CAPABILITY_CANDIDATES.map((c) => c.id).join(','), 'claude-haiku-4-5,claude-sonnet-4-6,gemini-2.5-pro,gpt-4.1', '(13) ladder order cheapest→strongest');
+  assertEq(CANONICAL_CAPABILITY_CANDIDATES.map((c) => c.id).join(','), 'claude-haiku-4-5,claude-sonnet-4-6,gemini-3.6-flash,gpt-5.6-terra', '(13) ladder order cheapest→strongest');
   const byId = (id: string): CapabilityCandidate | undefined => CANONICAL_CAPABILITY_CANDIDATES.find((c) => c.id === id);
   const haiku = byId('claude-haiku-4-5')!;
   assert(haiku.platformDefault && haiku.provider === 'anthropic' && haiku.flags.toolUse && haiku.flags.vision && !haiku.flags.computerUse && haiku.flags.codingTier === 'basic' && haiku.contextWindow === 200_000, '(13) haiku facts mirror modelCapabilities');
   const sonnet = byId('claude-sonnet-4-6')!;
   assert(sonnet.platformDefault && sonnet.flags.computerUse && sonnet.flags.codingTier === 'strong' && sonnet.contextWindow === 200_000, '(13) sonnet is the computer-use / strong anchor');
-  const gemini = byId('gemini-2.5-pro')!;
-  assert(!gemini.platformDefault && gemini.provider === 'google_ai' && gemini.flags.codingTier === 'strong' && gemini.contextWindow === 1_000_000 && !gemini.flags.computerUse, '(13) gemini facts mirror modelCapabilities');
-  const gpt41 = byId('gpt-4.1')!;
-  assert(!gpt41.platformDefault && gpt41.provider === 'openai' && gpt41.contextWindow === 1_000_000 && gpt41.flags.codingTier === 'basic', '(13) gpt-4.1 = basic tier (mirrors getModelCapabilityFlags family pattern), 1M window');
+  const gemini = byId('gemini-3.6-flash')!;
+  assert(!gemini.platformDefault && gemini.provider === 'google_ai' && gemini.flags.codingTier === 'strong' && gemini.contextWindow === 1_048_576 && !gemini.flags.computerUse, '(13) gemini facts mirror modelCapabilities');
+  const terra = byId('gpt-5.6-terra')!;
+  assert(!terra.platformDefault && terra.provider === 'openai' && terra.contextWindow === 1_050_000 && terra.flags.codingTier === 'basic', '(13) GPT-5.6 Terra = basic capability-fallback tier, 1.05M window');
 
   // ─── (14) tier-rank boundaries ─────────────────────────────────────────────
   const tiers: ModelCodingTier[] = ['none', 'basic', 'strong'];

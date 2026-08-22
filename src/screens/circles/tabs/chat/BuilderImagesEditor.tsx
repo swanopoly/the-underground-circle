@@ -17,6 +17,8 @@ import {
 } from '../../../../lib/builderImages';
 
 interface Props {
+  userId: string | null | undefined;
+  circleId: string | null | undefined;
   threadId: string | null | undefined;
   visible: boolean;
   onClose: () => void;
@@ -25,27 +27,30 @@ interface Props {
 
 const ROLES: ImageRole[] = ['hero', 'feature', 'logo', 'background', 'avatar', 'product', 'gallery', 'other'];
 
-export default function BuilderImagesEditor({ threadId, visible, onClose, onChanged }: Props) {
+export default function BuilderImagesEditor({ userId, circleId, threadId, visible, onClose, onChanged }: Props) {
   const [images, setImages] = useState<BuilderImage[]>([]);
   const [urlDraft, setUrlDraft] = useState('');
   const [roleDraft, setRoleDraft] = useState<ImageRole>('hero');
   const [altDraft, setAltDraft] = useState('');
 
   useEffect(() => {
-    if (!visible || !threadId) return;
+    setImages([]);
+    setUrlDraft('');
+    setAltDraft('');
+    if (!visible || !userId || !circleId || !threadId) return;
     let cancelled = false;
-    loadBuilderImages(threadId)
+    loadBuilderImages({ userId, circleId, threadId })
       .then(imgs => { if (!cancelled) setImages(imgs); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [visible, threadId]);
+  }, [circleId, threadId, userId, visible]);
 
-  if (!threadId) return null;
+  if (!userId || !circleId || !threadId) return null;
 
   const commitAdd = async () => {
     const url = urlDraft.trim();
     if (!url) return;
-    const next = await addBuilderImage(threadId, { url, role: roleDraft, alt: altDraft });
+    const next = await addBuilderImage({ userId, circleId, threadId }, { url, role: roleDraft, alt: altDraft });
     setImages(next);
     onChanged?.(next);
     setUrlDraft('');
@@ -53,13 +58,13 @@ export default function BuilderImagesEditor({ threadId, visible, onClose, onChan
   };
 
   const commitRemove = async (id: string) => {
-    const next = await removeBuilderImage(threadId, id);
+    const next = await removeBuilderImage({ userId, circleId, threadId }, id);
     setImages(next);
     onChanged?.(next);
   };
 
   const commitRoleChange = async (id: string, role: ImageRole) => {
-    const next = await updateBuilderImage(threadId, id, { role });
+    const next = await updateBuilderImage({ userId, circleId, threadId }, id, { role });
     setImages(next);
     onChanged?.(next);
   };
@@ -190,15 +195,15 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: '#243246', backgroundColor: '#0a0f17',
     borderRadius: 6, paddingHorizontal: 10, paddingVertical: 6,
   },
-  roleChipActive: { borderColor: '#22d3ee', backgroundColor: '#22d3ee1a' },
+  roleChipActive: { borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#6366f11a' },
   roleChipText: { color: '#94a3b8', fontSize: 10, fontWeight: '800', letterSpacing: 0.5, fontFamily: 'monospace' },
-  roleChipTextActive: { color: '#22d3ee' },
+  roleChipTextActive: { color: '#6366f1' },
   primaryBtn: {
     alignSelf: 'flex-start',
     paddingHorizontal: 14, paddingVertical: 8, borderRadius: 6,
-    borderWidth: 1, borderColor: '#22d3ee', backgroundColor: '#22d3ee18',
+    borderWidth: 1, borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#6366f118',
   },
-  primaryBtnText: { color: '#22d3ee', fontSize: 10, fontWeight: '900', letterSpacing: 0.6, fontFamily: 'monospace' },
+  primaryBtnText: { color: '#6366f1', fontSize: 10, fontWeight: '900', letterSpacing: 0.6, fontFamily: 'monospace' },
   listHeader: { color: '#425066', fontSize: 9, fontWeight: '900', letterSpacing: 1.1, fontFamily: 'monospace' },
   list: { gap: 6 },
   empty: { color: '#475569', fontSize: 11, fontFamily: 'monospace', textAlign: 'center', paddingVertical: 24 },
@@ -215,9 +220,9 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: '#243246', backgroundColor: '#05070b',
     borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3,
   },
-  rolePillActive: { borderColor: '#22d3ee', backgroundColor: '#22d3ee1a' },
+  rolePillActive: { borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#6366f11a' },
   rolePillText: { color: '#7f8ea3', fontSize: 9, fontWeight: '800', letterSpacing: 0.3, fontFamily: 'monospace' },
-  rolePillTextActive: { color: '#22d3ee' },
+  rolePillTextActive: { color: '#6366f1' },
   imageAlt: { color: '#64748b', fontSize: 10, fontFamily: 'monospace' },
   removeBtn: {
     width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center',

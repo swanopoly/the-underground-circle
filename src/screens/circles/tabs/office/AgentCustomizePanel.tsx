@@ -13,19 +13,24 @@ import {
   SKIN_TONES,
 } from '../../../../lib/officeConfig';
 import { MONO } from './AgentPanelShared';
+import type { AgentIdentityExactSaveResult } from '../../../../lib/agentIdentity';
 
 const PANTS_COLORS = ['#2d2d3d', '#2a2a2a', '#3d2b1a', '#1e3a5f', '#2d1b4e', '#1a3d1a'];
 
 interface Props {
   agent: OfficeAgent;
   appearances?: Record<string, AgentAppearance>;
-  // onAppearanceChange may be sync (legacy) or return a Promise — we inspect
-  // the return value at call time so either contract works.
-  onAppearanceChange: (id: string, appearance: AgentAppearance) => void | Promise<void>;
+  // Customization is a durable command, not an optimistic presentation hook.
+  // Only a complete exact receipt may be rendered as locally saved. A durable
+  // server commit whose cache publication failed remains a distinct,
+  // non-retryable-until-refresh result.
+  onAppearanceChange: (id: string, appearance: AgentAppearance) => Promise<AgentIdentityExactSaveResult>;
+  onIdentityRefresh?: () => Promise<boolean>;
   environmentType?: EnvironmentType;
+  reduceMotion: boolean;
 }
 
-type SaveState = 'idle' | 'saving' | 'saved' | 'error';
+type SaveState = 'idle' | 'saving' | 'refreshing' | 'saved' | 'refresh-needed' | 'outcome-unknown' | 'error';
 type Category = 'colors' | 'looks' | 'accessories' | 'aura';
 
 const CATEGORIES: Array<{ key: Category; label: string; color: string }> = [
@@ -35,58 +40,117 @@ const CATEGORIES: Array<{ key: Category; label: string; color: string }> = [
   { key: 'aura', label: 'AURA', color: '#a855f7' },
 ];
 
-export default function AgentCustomizePanel({ agent, appearances, onAppearanceChange, environmentType }: Props) {
+export default function AgentCustomizePanel({
+  agent,
+  appearances,
+  onAppearanceChange,
+  onIdentityRefresh,
+  environmentType,
+  reduceMotion,
+}: Props) {
   const appearance = appearances?.[agent.id] || appearances?.[agent.name] || { ...DEFAULT_APPEARANCE, shirtColor: agent.color, hairColor: agent.color };
   const [saveState, setSaveState] = useState<SaveState>('idle');
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [category, setCategory] = useState<Category>('colors');
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveInFlightRef = useRef(false);
+  const saveGenerationRef = useRef(0);
+  const mountedRef = useRef(true);
 
-  // Clear the pending timer on unmount so we don't call setState on a dead
-  // component after a rapid close-reopen.
-  useEffect(() => () => {
-    if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
+  // Generation fencing prevents a late durable receipt from publishing into
+  // a closed or newly selected agent panel.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      saveGenerationRef.current += 1;
+      saveInFlightRef.current = false;
+      if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
+    };
   }, []);
 
-  const flashSaved = () => {
+  const flashSaved = (generation: number) => {
+    if (!mountedRef.current || saveGenerationRef.current !== generation) return;
     setSaveState('saved');
-    setErrorMsg(null);
     if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
-    savedTimerRef.current = setTimeout(() => setSaveState('idle'), 1200);
+    savedTimerRef.current = setTimeout(() => {
+      if (mountedRef.current && saveGenerationRef.current === generation) setSaveState('idle');
+    }, 1200);
   };
 
   const update = (patch: Partial<AgentAppearance>) => {
+    if (saveInFlightRef.current) return;
+    saveInFlightRef.current = true;
+    const generation = saveGenerationRef.current + 1;
+    saveGenerationRef.current = generation;
     setSaveState('saving');
-    setErrorMsg(null);
-    try {
-      const result = onAppearanceChange(agent.id, { ...appearance, ...patch });
-      if (result && typeof (result as Promise<void>).then === 'function') {
-        (result as Promise<void>)
-          .then(flashSaved)
-          .catch((err: unknown) => {
-            console.warn('[AgentCustomizePanel] Failed to persist appearance:', err);
-            setSaveState('error');
-            setErrorMsg(err instanceof Error ? err.message : 'save failed');
-          });
-      } else {
-        // Sync callback — we optimistically report "saved". This mirrors the
-        // existing behaviour where the parent debounces a background write;
-        // if that write fails, the parent should surface its own error.
-        flashSaved();
-      }
-    } catch (err) {
-      console.warn('[AgentCustomizePanel] Failed to persist appearance:', err);
-      setSaveState('error');
-      setErrorMsg(err instanceof Error ? err.message : 'save failed');
+    if (savedTimerRef.current) {
+      clearTimeout(savedTimerRef.current);
+      savedTimerRef.current = null;
     }
+
+    void (async () => {
+      try {
+        const receipt = await onAppearanceChange(agent.id, { ...appearance, ...patch });
+        if (!mountedRef.current || saveGenerationRef.current !== generation) return;
+        if (receipt.error === 'outcome_unknown' || receipt.serverSaved === null) {
+          setSaveState('outcome-unknown');
+          return;
+        }
+        if (receipt.serverSaved === true && !receipt.localSaved) {
+          setSaveState('refresh-needed');
+          return;
+        }
+        if (!receipt.ok || !receipt.localSaved || receipt.serverSaved !== true) {
+          setSaveState('error');
+          return;
+        }
+        flashSaved(generation);
+      } catch (err) {
+        console.warn('[AgentCustomizePanel] Failed to persist appearance:', err);
+        if (mountedRef.current && saveGenerationRef.current === generation) {
+          setSaveState('error');
+        }
+      } finally {
+        if (saveGenerationRef.current === generation) saveInFlightRef.current = false;
+      }
+    })();
+  };
+
+  const refreshIdentity = () => {
+    if (!onIdentityRefresh || saveInFlightRef.current) return;
+    const priorState = saveState;
+    saveInFlightRef.current = true;
+    const generation = saveGenerationRef.current + 1;
+    saveGenerationRef.current = generation;
+    setSaveState('refreshing');
+    void (async () => {
+      try {
+        const refreshed = await onIdentityRefresh();
+        if (!mountedRef.current || saveGenerationRef.current !== generation) return;
+        setSaveState(refreshed ? 'idle' : priorState);
+      } catch {
+        if (mountedRef.current && saveGenerationRef.current === generation) {
+          setSaveState(priorState);
+        }
+      } finally {
+        if (saveGenerationRef.current === generation) saveInFlightRef.current = false;
+      }
+    })();
   };
 
   const saveIndicator = (() => {
     if (saveState === 'saving') return { color: '#6366f1', dot: '#6366f1', label: 'SAVING…' };
+    if (saveState === 'refreshing') return { color: '#6366f1', dot: '#6366f1', label: 'REFRESHING SERVER TRUTH…' };
     if (saveState === 'saved') return { color: '#22c55e', dot: '#22c55e', label: '✓ SAVED' };
-    if (saveState === 'error') return { color: '#ef4444', dot: '#ef4444', label: errorMsg ? `✕ ${errorMsg.slice(0, 40)}` : '✕ NOT SAVED' };
+    if (saveState === 'refresh-needed') return { color: '#fbbf24', dot: '#f59e0b', label: 'SAVED ON SERVER — RELOAD REQUIRED' };
+    if (saveState === 'outcome-unknown') return { color: '#fbbf24', dot: '#f59e0b', label: 'OUTCOME UNKNOWN — REOPEN BEFORE RETRY' };
+    if (saveState === 'error') return { color: '#ef4444', dot: '#ef4444', label: '✕ NOT SAVED — TRY AGAIN' };
     return { color: '#606075', dot: '#2a2a3e', label: 'READY' };
   })();
+  const saveBlocked = saveState === 'saving'
+    || saveState === 'refreshing'
+    || saveState === 'refresh-needed'
+    || saveState === 'outcome-unknown';
 
   const neonSkinTones = ['#ff00ff', '#00ff88', '#00ffff', '#ff4444', '#ffff00', '#aa55ff'];
 
@@ -100,6 +164,10 @@ export default function AgentCustomizePanel({ agent, appearances, onAppearanceCh
           return (
             <Pressable
               key={color}
+              accessibilityRole="button"
+              accessibilityLabel={`${label.toLowerCase()} color ${color}`}
+              accessibilityState={{ selected: active, disabled: saveBlocked }}
+              disabled={saveBlocked}
               onPress={() => onSelect(color)}
               style={[
                 styles.swatch,
@@ -129,6 +197,10 @@ export default function AgentCustomizePanel({ agent, appearances, onAppearanceCh
         {items.map(item => (
           <Pressable
             key={item.key}
+            accessibilityRole="button"
+            accessibilityLabel={`${label.toLowerCase()} ${item.name.toLowerCase()}`}
+            accessibilityState={{ selected: item.active, disabled: saveBlocked }}
+            disabled={saveBlocked}
             onPress={() => {
               const field = label === 'HAT'
                 ? 'hat'
@@ -174,23 +246,44 @@ export default function AgentCustomizePanel({ agent, appearances, onAppearanceCh
       <View style={styles.body}>
         {/* Save status — transient feedback so users see that each color/emoji
             click actually persisted (or failed). Fades back to READY after 1.2s. */}
-        <View style={styles.saveRow}>
+        <View
+          style={styles.saveRow}
+          accessibilityRole={saveState === 'error' || saveState === 'refresh-needed' || saveState === 'outcome-unknown' ? 'alert' : undefined}
+          accessibilityLiveRegion={saveState === 'error' || saveState === 'refresh-needed' || saveState === 'outcome-unknown' ? 'assertive' : 'polite'}
+          accessibilityState={{ busy: saveState === 'saving' || saveState === 'refreshing' }}
+          accessibilityLabel={`Customization save status: ${saveIndicator.label}`}
+        >
           <View style={[styles.saveDot, { backgroundColor: saveIndicator.dot }]} />
           <Text style={[styles.saveLabel, { color: saveIndicator.color }]} numberOfLines={1}>
             {saveIndicator.label}
           </Text>
         </View>
+        {(saveState === 'refresh-needed' || saveState === 'outcome-unknown') && onIdentityRefresh ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Reload appearance from the exact server identity"
+            onPress={refreshIdentity}
+            style={styles.reloadButton}
+          >
+            <Text style={styles.reloadButtonText}>RELOAD APPEARANCE</Text>
+          </Pressable>
+        ) : null}
         <View style={styles.preview}>
           {/* Larger preview with a subtle grid background — makes subtle
               color/accessory changes much easier to spot */}
-          <View style={styles.previewInner}>
+          <View
+            style={styles.previewInner}
+            accessible
+            accessibilityRole="image"
+            accessibilityLabel={`Appearance preview for ${agent.name}`}
+          >
             <PixelAgent
               agent={agent}
               appearance={appearance}
               environmentType={environmentType}
-              onPress={() => {}}
               selected={false}
               scale={2.5}
+              reduceMotion={reduceMotion}
             />
           </View>
         </View>
@@ -202,6 +295,9 @@ export default function AgentCustomizePanel({ agent, appearances, onAppearanceCh
             return (
               <Pressable
                 key={c.key}
+                accessibilityRole="button"
+                accessibilityLabel={`Show ${c.label.toLowerCase()} customization options`}
+                accessibilityState={{ selected: active }}
                 onPress={() => setCategory(c.key)}
                 style={[
                   styles.categoryPill,
@@ -272,7 +368,7 @@ export default function AgentCustomizePanel({ agent, appearances, onAppearanceCh
         <ItemScroll label="AURA" items={['none', 'fire', 'ice', 'electric', 'nature', 'shadow', 'rainbow', 'glitch', 'cosmic', 'toxic', 'holy', 'void', 'galaxy'].map(aura => {
           const emojis: Record<string, string> = { none: '🚫', fire: '🔥', ice: '🧊', electric: '⚡', nature: '🌿', shadow: '🌑', rainbow: '🌈', glitch: '📟', cosmic: '✨', toxic: '☢️', holy: '🕊️', void: '🕳️', galaxy: '🌌' };
           const names: Record<string, string> = { none: 'NONE', fire: 'FIRE', ice: 'ICE', electric: 'BOLT', nature: 'LEAF', shadow: 'SHADOW', rainbow: 'RAINBOW', glitch: 'GLITCH', cosmic: 'COSMIC', toxic: 'TOXIC', holy: 'HOLY', void: 'VOID', galaxy: 'GALAXY' };
-          const glowColors: Record<string, string> = { fire: '#ef4444', ice: '#22d3ee', electric: '#f59e0b', nature: '#22c55e', shadow: '#6f6f6f', rainbow: '#a855f7', cosmic: '#6366f1', toxic: '#22c55e', holy: '#ffd700', galaxy: '#a855f7' };
+          const glowColors: Record<string, string> = { fire: '#ef4444', ice: '#6366f1', electric: '#f59e0b', nature: '#22c55e', shadow: '#6f6f6f', rainbow: '#a855f7', cosmic: '#6366f1', toxic: '#22c55e', holy: '#ffd700', galaxy: '#a855f7' };
           return { key: aura, emoji: emojis[aura], name: names[aura], active: (appearance.aura || 'none') === aura, glow: glowColors[aura] };
         })} />
         </>}
@@ -304,10 +400,26 @@ const styles = StyleSheet.create({
     borderColor: '#1e1e3a',
     backgroundColor: '#0a0a0a',
   },
+  reloadButton: {
+    alignSelf: 'flex-start',
+    minHeight: 44,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#f59e0b66',
+    justifyContent: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  reloadButtonText: {
+    color: '#fbbf24',
+    fontSize: 11,
+    fontWeight: '700',
+    fontFamily: MONO,
+  },
   saveDot: {
     width: 6,
     height: 6,
-    borderRadius: 3,
+    borderRadius: 6,
   },
   saveLabel: {
     fontSize: 10,
@@ -350,7 +462,8 @@ const styles = StyleSheet.create({
   },
   categoryPill: {
     flex: 1,
-    paddingVertical: 6,
+    minHeight: 44,
+    justifyContent: 'center',
     borderRadius: 6,
     borderWidth: 1,
     borderColor: '#2a2a3e',
@@ -376,8 +489,8 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   swatch: {
-    width: 32,
-    height: 32,
+    width: 44,
+    height: 44,
     borderRadius: 8,
     marginRight: 8,
     borderWidth: 2,
@@ -392,13 +505,14 @@ const styles = StyleSheet.create({
   swatchCheck: {
     color: '#fff',
     fontSize: 14,
-    fontWeight: '900',
+    fontWeight: '700',
     textShadowColor: '#000',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
   },
   itemCard: {
     width: 84,
+    minHeight: 72,
     paddingVertical: 10,
     paddingHorizontal: 8,
     marginRight: 8,

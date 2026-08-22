@@ -5,6 +5,7 @@
 import { supabase } from './supabase';
 import { updateMissionTask, addProofOfWork } from './missions';
 import { runOpenSwanSessionTurn, type OpenSwanToolEvent } from './openswanSessionRuntime';
+import type { OpenSwanTerminalReceipt } from './openswanSessionRuntimeAdapters';
 import { resolveSessionCodingProfile } from './chatSessionProfile';
 import type { OpenSwanVerificationResult } from './openswanVerificationRuntime';
 import type { SwanBotStructuredArtifact, SwanBotContext } from './swanbot';
@@ -25,6 +26,7 @@ interface DispatchResult {
   artifacts?: SwanBotStructuredArtifact[];
   verificationResults?: OpenSwanVerificationResult[];
   toolEvents?: OpenSwanToolEvent[];
+  terminal?: OpenSwanTerminalReceipt;
 }
 
 /**
@@ -76,6 +78,9 @@ export async function dispatchTaskToAgent(opts: {
     const sessionProfile = resolveSessionCodingProfile('auto', prompt, 'main_chat');
     const structured = await runOpenSwanSessionTurn({
       message: prompt,
+      originalUserTaskText: taskDescription
+        ? `${taskTitle}\n${taskDescription}`
+        : taskTitle,
       context,
       surface: 'main_chat',
       runSurface: 'feed_task',
@@ -101,6 +106,7 @@ export async function dispatchTaskToAgent(opts: {
       artifacts: structured.artifacts || [],
       verificationResults: structured.verificationResults || [],
       toolEvents: structured.toolEvents || [],
+      terminal: structured.terminal,
     });
     const completed = completion.completed;
 
@@ -120,6 +126,10 @@ export async function dispatchTaskToAgent(opts: {
         task_title: taskTitle,
         run_id: structured.runId || null,
         completed,
+        terminal_state: structured.terminal.state,
+        terminal_reason: structured.terminal.reason,
+        completion_verified: structured.terminal.completionVerified,
+        terminal_resumable: structured.terminal.resumable,
         task_kind: structured.taskPlan.kind,
         profile: structured.taskPlan.profile,
         // Why the task was (or was not) marked done — the accountability record
@@ -164,6 +174,7 @@ export async function dispatchTaskToAgent(opts: {
       artifacts: structured.artifacts || [],
       verificationResults: structured.verificationResults || [],
       toolEvents: structured.toolEvents || [],
+      terminal: structured.terminal,
     };
   } catch (err: any) {
     // Mark task back to pending on failure

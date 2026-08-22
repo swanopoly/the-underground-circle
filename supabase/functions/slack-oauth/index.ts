@@ -22,7 +22,12 @@ const corsHeaders = {
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    headers: {
+      ...corsHeaders,
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      "Pragma": "no-cache",
+    },
   });
 }
 
@@ -31,6 +36,58 @@ function svc() {
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   );
+}
+
+type ConnectionAuthority =
+  | { ok: true }
+  | { ok: false; unavailable: boolean };
+
+// Mirror the connection-table authority without its legacy OR ambiguity.
+// Every supplied target must be authorized, and an org+Circle pair must name
+// the Circle's actual organization.
+async function authorizeConnectionBinding(
+  supabase: ReturnType<typeof svc>,
+  userId: string,
+  orgId: string | null,
+  circleId: string | null,
+): Promise<ConnectionAuthority> {
+  if (!orgId && !circleId) return { ok: false, unavailable: false };
+
+  if (orgId) {
+    const { data, error } = await supabase
+      .from("org_members")
+      .select("user_id")
+      .eq("org_id", orgId)
+      .eq("user_id", userId)
+      .in("role", ["owner", "admin"])
+      .maybeSingle();
+    if (error) return { ok: false, unavailable: true };
+    if (!data) return { ok: false, unavailable: false };
+  }
+
+  if (circleId) {
+    const { data: circle, error: circleError } = await supabase
+      .from("circles")
+      .select("org_id")
+      .eq("id", circleId)
+      .maybeSingle();
+    if (circleError) return { ok: false, unavailable: true };
+    if (!circle || (orgId && circle.org_id !== orgId)) {
+      return { ok: false, unavailable: false };
+    }
+
+    const { data: membership, error: membershipError } = await supabase
+      .from("circle_members")
+      .select("user_id")
+      .eq("circle_id", circleId)
+      .eq("user_id", userId)
+      .eq("role", "creator")
+      .maybeSingle();
+    if (membershipError) return { ok: false, unavailable: true };
+    if (!membership) return { ok: false, unavailable: false };
+  }
+
+  return { ok: true };
 }
 
 // Resolve the VERIFIED caller from the Authorization: Bearer <supabase jwt>
@@ -65,16 +122,11 @@ Deno.serve(async (req: Request) => {
 
     const supabase = svc();
 
-    // A caller may only bind a Slack workspace to a circle they belong to.
-    if (circleId) {
-      const { data: member } = await supabase
-        .from("circle_members")
-        .select("id")
-        .eq("circle_id", circleId)
-        .eq("user_id", userId)
-        .limit(1)
-        .maybeSingle();
-      if (!member) return json({ error: "Not a member of this circle" }, 403);
+    const authority = await authorizeConnectionBinding(supabase, userId, orgId, circleId);
+    if (!authority.ok) {
+      return authority.unavailable
+        ? json({ error: "Slack connection access could not be verified" }, 503)
+        : json({ error: "Not authorized to connect Slack for this org/Circle" }, 403);
     }
 
     const clientId = Deno.env.get("SLACK_CLIENT_ID");
@@ -147,8 +199,26 @@ Deno.serve(async (req: Request) => {
         return Response.redirect(`${APP_URL}?slack_error=${tokenData.error}`, 302);
       }
 
+      // Membership or roles may change while the provider consent page is
+      // open. Re-prove the server-stored exact binding immediately before the
+      // service-role write; never treat a once-valid OAuth state as durable
+      // tenant authority.
+      const commitAuthority = await authorizeConnectionBinding(
+        supabase,
+        stateRow.user_id,
+        stateRow.org_id || null,
+        stateRow.circle_id || null,
+      );
+      if (!commitAuthority.ok) {
+        await supabase.from("slack_oauth_states").delete().eq("id", stateRow.id);
+        return Response.redirect(
+          `${APP_URL}?slack_error=${commitAuthority.unavailable ? "authority_unavailable" : "authorization_changed"}`,
+          302,
+        );
+      }
+
       // Bind using the SERVER-STORED circle/org, not the client-supplied state.
-      await supabase.from("slack_connections").insert({
+      const { error: insertError } = await supabase.from("slack_connections").insert({
         org_id: stateRow.org_id || null,
         circle_id: stateRow.circle_id || null,
         team_id: tokenData.team?.id,
@@ -156,12 +226,19 @@ Deno.serve(async (req: Request) => {
         bot_token: tokenData.access_token,
         bot_user_id: tokenData.bot_user_id,
         scopes: tokenData.scope?.split(",") || [],
+        installed_by: stateRow.user_id,
       });
+      if (insertError) {
+        console.error("[slack-oauth] connection commit failed");
+        return Response.redirect(`${APP_URL}?slack_error=connection_save_failed`, 302);
+      }
       await supabase.from("slack_oauth_states").delete().eq("id", stateRow.id);
 
       return Response.redirect(`${APP_URL}?slack_connected=true`, 302);
     } catch (err: unknown) {
-      console.error("Slack OAuth error:", err);
+      console.error("[slack-oauth] request failed", {
+        name: err instanceof Error ? err.name : typeof err,
+      });
       return Response.redirect(`${APP_URL}?slack_error=internal`, 302);
     }
   }

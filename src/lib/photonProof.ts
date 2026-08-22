@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { loadSafeCircleProfiles } from './safeProfiles';
 import { awardXP, getXPForAction } from './gamification';
 import { PhotonProof } from '../types';
 
@@ -423,10 +424,7 @@ export async function getCirclePhotonLeaderboard(
   
   // Get user profiles
   const userIds = Array.from(userStats.keys());
-  const { data: profiles } = await supabase
-    .from('profiles')
-    .select('id, username, display_name')
-    .in('id', userIds);
+  const profiles = await loadSafeCircleProfiles({ circleId, userIds });
     
   const profileMap = new Map((profiles || []).map(p => [p.id, p]));
   

@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   Animated,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -9,10 +10,15 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { OfficeAgent } from '../../../../lib/officeAgents';
+import type { OfficeAgent } from '../../../../lib/officeAgents';
 import { PROVIDER_META } from '../../../../lib/connectionManager';
-import { AgentPanelTab, AgentPanelTabKey } from './AgentPanelTabs';
-import { MONO } from './AgentPanelShared';
+import {
+  getAgentPanelGroupForTab,
+  type AgentPanelGroup,
+  type AgentPanelTab,
+  type AgentPanelTabKey,
+} from './AgentPanelTabs';
+import AgentPanelWebPortal from './AgentPanelWebPortal';
 
 // ── Per-tab error boundary ──────────────────────────────────────────────────
 // Wraps the active tab's rendered content so a single tab that throws (e.g.
@@ -25,45 +31,45 @@ interface TabErrorBoundaryProps {
   children: React.ReactNode;
 }
 interface TabErrorBoundaryState {
-  error: Error | null;
+  failed: boolean;
 }
 class TabErrorBoundary extends React.Component<TabErrorBoundaryProps, TabErrorBoundaryState> {
-  state: TabErrorBoundaryState = { error: null };
+  state: TabErrorBoundaryState = { failed: false };
 
-  static getDerivedStateFromError(error: Error): TabErrorBoundaryState {
-    return { error };
+  static getDerivedStateFromError(): TabErrorBoundaryState {
+    return { failed: true };
   }
 
-  componentDidCatch(error: Error, info: React.ErrorInfo) {
-    console.error('[AgentPanel] Tab threw:', this.props.tabKey, error, info);
+  componentDidCatch(_error: Error, info: React.ErrorInfo) {
+    console.error('[AgentPanel] Section render failed:', this.props.tabKey, info.componentStack);
   }
 
   componentDidUpdate(prevProps: TabErrorBoundaryProps) {
     // Auto-reset when the user switches tabs so a failed tab doesn't stick.
-    if (prevProps.tabKey !== this.props.tabKey && this.state.error) {
-      this.setState({ error: null });
+    if (prevProps.tabKey !== this.props.tabKey && this.state.failed) {
+      this.setState({ failed: false });
     }
   }
 
   render() {
-    if (this.state.error) {
-      const msg = this.state.error.message || 'Unknown error';
+    if (this.state.failed) {
       return (
         <View style={styles.errorFallback}>
-          <Text style={styles.errorFallbackTitle}>TAB CRASHED</Text>
-          <Text style={styles.errorFallbackMessage} numberOfLines={4}>{msg}</Text>
+          <Text style={styles.errorFallbackTitle}>This section could not load</Text>
           <Text style={styles.errorFallbackHint}>
-            Switch tabs to reset, or close the panel and reopen it.
+            Try again, switch sections, or reopen the agent panel. No private error details are displayed here.
           </Text>
           <Pressable
-            onPress={() => this.setState({ error: null })}
+            onPress={() => this.setState({ failed: false })}
+            accessibilityRole="button"
+            accessibilityLabel="Try loading this agent section again"
             style={[
               styles.errorFallbackBtn,
               { borderColor: this.props.accentColor + '55', backgroundColor: this.props.accentColor + '14' },
               Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
             ]}
           >
-            <Text style={[styles.errorFallbackBtnText, { color: this.props.accentColor }]}>TRY AGAIN</Text>
+            <Text style={[styles.errorFallbackBtnText, { color: this.props.accentColor }]}>Try again</Text>
           </Pressable>
         </View>
       );
@@ -82,6 +88,7 @@ interface Props {
   scaleAnim: Animated.Value;
   opacityAnim: Animated.Value;
   slideAnim: Animated.Value;
+  reduceMotion: boolean;
   backdropOpacity: number;
   panelTransition: string;
   statusColor: string;
@@ -90,22 +97,30 @@ interface Props {
   editName: string;
   setEditName: (value: string) => void;
   onStartRename: () => void;
-  onSubmitRename: () => void;
+  onSubmitRename: () => Promise<void>;
   onCancelRename: () => void;
+  canRenameAgent: boolean;
+  renameBusy: boolean;
+  actionNotice: {
+    kind: 'success' | 'warning' | 'error';
+    message: string;
+    actionLabel?: string;
+    onAction?: () => void | Promise<void>;
+  } | null;
   onClose: () => void;
   onToggleMode: () => void;
   onStartSideResize: (pageX: number) => void;
+  onResizeSideBy: (delta: number) => void;
   canRemoveAgent: boolean;
   removingAgent: boolean;
   onRemoveAgent: () => Promise<void>;
   tabs: AgentPanelTab[];
+  tabGroups: AgentPanelGroup[];
   panelTab: AgentPanelTabKey;
   setPanelTab: (tabKey: AgentPanelTabKey) => void;
+  contentKey: string;
   children: React.ReactNode;
 }
-
-// Same color palette as the loading indicator dots
-const TAB_DOT_COLORS = ['#6366f1', '#a855f7', '#3b82f6', '#22c55e', '#f59e0b', '#ec4899', '#22d3ee'];
 
 // ── Open animation ──────────────────────────────────────────────────────────
 // One-shot CSS keyframe fade. GPU-accelerated, no React re-renders during the
@@ -113,6 +128,11 @@ const TAB_DOT_COLORS = ['#6366f1', '#a855f7', '#3b82f6', '#22c55e', '#f59e0b', '
 // transform/opacity inline every frame). 110ms is short enough to feel snappy
 // while still cueing "this is a modal opening" rather than snap-appearing.
 const OPEN_ANIM_STYLE_ID = 'uc-agent-panel-open-anim';
+// Circle-level overlays such as the persistent Floating Chat currently occupy
+// z-index 9000. A centered Agent panel is a true modal and must cover/intercept
+// every non-modal Circle surface, not only the App header.
+const WEB_AGENT_MODAL_BACKDROP_Z_INDEX = 12_000;
+const WEB_AGENT_MODAL_PANEL_Z_INDEX = WEB_AGENT_MODAL_BACKDROP_Z_INDEX + 1;
 function ensureOpenAnimStyle() {
   if (Platform.OS !== 'web' || typeof document === 'undefined') return;
   if (document.getElementById(OPEN_ANIM_STYLE_ID)) return;
@@ -127,31 +147,18 @@ function ensureOpenAnimStyle() {
       animation: uc-agent-panel-open 110ms ease-out;
       will-change: opacity;
     }
+    @media (prefers-reduced-motion: reduce) {
+      .uc-agent-panel-open {
+        animation: none !important;
+        transition: none !important;
+        will-change: auto;
+      }
+      .uc-agent-panel-backdrop {
+        transition: none !important;
+      }
+    }
   `;
   document.head.appendChild(style);
-}
-
-function TabNavigationDots({ count, activeIndex, accentColor }: { count: number; activeIndex: number; accentColor: string }) {
-  return (
-    <View style={styles.tabDotsRow}>
-      {Array.from({ length: count }).map((_, i) => {
-        const isActive = i === activeIndex;
-        const color = isActive ? accentColor : TAB_DOT_COLORS[i % TAB_DOT_COLORS.length];
-        return (
-          <View
-            key={i}
-            style={{
-              width: isActive ? 10 : 7,
-              height: isActive ? 10 : 7,
-              borderRadius: 99,
-              backgroundColor: color,
-              opacity: isActive ? 1 : 0.5,
-            }}
-          />
-        );
-      })}
-    </View>
-  );
 }
 
 export default function AgentPanelShell({
@@ -162,6 +169,7 @@ export default function AgentPanelShell({
   scaleAnim,
   opacityAnim,
   slideAnim,
+  reduceMotion,
   backdropOpacity,
   panelTransition,
   statusColor,
@@ -172,434 +180,579 @@ export default function AgentPanelShell({
   onStartRename,
   onSubmitRename,
   onCancelRename,
+  canRenameAgent,
+  renameBusy,
+  actionNotice,
   onClose,
   onToggleMode,
   onStartSideResize,
+  onResizeSideBy,
   canRemoveAgent,
   removingAgent,
   onRemoveAgent,
   tabs,
+  tabGroups,
   panelTab,
   setPanelTab,
+  contentKey,
   children,
 }: Props) {
+  // AgentPanel owns the single Escape/focus-trap listener. Keeping a second
+  // listener here used to close twice and could dismiss the panel while the
+  // user was editing a field. Style injection is also an effect, never a DOM
+  // mutation during render.
   React.useEffect(() => {
-    if (!isDesktop || Platform.OS !== 'web') return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isDesktop, onClose]);
+    ensureOpenAnimStyle();
+  }, []);
 
-  // Inject the open-animation keyframes once. ensureOpenAnimStyle is a no-op
-  // on native and idempotent on web (checks document.getElementById first).
-  ensureOpenAnimStyle();
+  const renameButtonRef = React.useRef<any>(null);
+  const wasEditingRef = React.useRef(editing);
+  React.useEffect(() => {
+    const wasEditing = wasEditingRef.current;
+    wasEditingRef.current = editing;
+    if (Platform.OS !== 'web' || !wasEditing || editing || typeof requestAnimationFrame === 'undefined') return;
+    const frame = requestAnimationFrame(() => renameButtonRef.current?.focus?.());
+    return () => cancelAnimationFrame(frame);
+  }, [editing]);
 
-  const currentTabIndex = tabs.findIndex(tab => tab.key === panelTab);
-  const activeTab = currentTabIndex >= 0 ? tabs[currentTabIndex] : null;
-  const prevTab = currentTabIndex > 0 ? tabs[currentTabIndex - 1] : null;
-  const nextTab = currentTabIndex >= 0 && currentTabIndex < tabs.length - 1 ? tabs[currentTabIndex + 1] : null;
   const providerMeta = PROVIDER_META[agent.providerType];
+  const activeGroup = getAgentPanelGroupForTab(tabGroups, panelTab) || tabGroups[0] || null;
+  const activeTab = tabs.find(tab => tab.key === panelTab) || activeGroup?.tabs[0] || null;
+  const hasContextualTabs = (activeGroup?.tabs.length || 0) > 1;
+  const activeTabLabelId = hasContextualTabs
+    ? `uc-agent-panel-route-${panelTab}`
+    : `uc-agent-panel-destination-${activeGroup?.key || 'overview'}`;
+
+  const focusWebTab = (nativeId: string) => {
+    if (Platform.OS !== 'web' || typeof document === 'undefined') return;
+    const focus = () => document.getElementById(nativeId)?.focus({ preventScroll: true });
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(focus);
+    else focus();
+  };
+
+  const handleArrowNavigation = (
+    event: any,
+    keys: readonly string[],
+    currentKey: string,
+    nativeIdForKey: (key: string) => string,
+  ) => {
+    const key = event?.nativeEvent?.key || event?.key;
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key) || keys.length < 2) return;
+    event.preventDefault?.();
+    const currentIndex = Math.max(0, keys.indexOf(currentKey));
+    const nextIndex = key === 'Home'
+      ? 0
+      : key === 'End'
+        ? keys.length - 1
+        : key === 'ArrowLeft'
+          ? (currentIndex - 1 + keys.length) % keys.length
+          : (currentIndex + 1) % keys.length;
+    const nextKey = keys[nextIndex];
+    // These routes lazy-load, so follow the WAI-ARIA manual-activation model:
+    // arrows move focus without fetching or replacing the active panel. The
+    // focused Pressable activates through Enter/Space (or a pointer press).
+    focusWebTab(nativeIdForKey(nextKey));
+  };
 
   const renderRemoveButton = (desktop = false) => canRemoveAgent ? (
     <View style={desktop ? styles.desktopActionRow : styles.mobileActionRow}>
       <Pressable
         onPress={onRemoveAgent}
-        style={[styles.removeButton, removingAgent && { opacity: 0.65 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+        disabled={removingAgent || renameBusy}
+        accessibilityRole="button"
+        accessibilityLabel={`Remove ${agent.name} from this Office`}
+        accessibilityHint="Removes the published Office agent after confirmation. It does not stop the local runtime."
+        accessibilityState={{ disabled: removingAgent || renameBusy, busy: removingAgent }}
+        style={[
+          styles.removeButton,
+          (removingAgent || renameBusy) && { opacity: 0.65 },
+          Platform.OS === 'web' && { cursor: removingAgent ? 'wait' : renameBusy ? 'not-allowed' : 'pointer' } as any,
+        ]}
       >
         <Text style={styles.removeButtonText}>
-          {removingAgent ? 'REMOVING...' : 'REMOVE AGENT'}
+          {removingAgent ? 'Removing…' : 'Remove agent'}
         </Text>
       </Pressable>
     </View>
   ) : null;
 
-  const renderTabNavigation = (desktop = false) => (
-    <View
-      style={[styles.tabNavShell, desktop && styles.tabNavShellDesktop]}
-      accessibilityRole={desktop ? 'tablist' : undefined}
-    >
-      {!desktop && (
-        <Pressable
-          onPress={() => prevTab && setPanelTab(prevTab.key)}
-          disabled={!prevTab}
-          accessibilityRole="button"
-          accessibilityLabel={prevTab ? `Go to ${prevTab.label} tab` : 'No previous tab'}
-          style={[styles.tabNavArrow, { opacity: prevTab ? 1 : 0.2 }, Platform.OS === 'web' && { cursor: prevTab ? 'pointer' : 'default' } as any]}
-          hitSlop={8}
-        >
-          <Text style={styles.tabNavArrowText}>{'<'}</Text>
-        </Pressable>
-      )}
+  const renderTabNavigation = (desktop = false) => {
+    const groupKeys = tabGroups.map(group => group.key);
+    const selectGroupKey = (groupKey: string) => {
+      const group = tabGroups.find(candidate => candidate.key === groupKey);
+      if (!group) return;
+      const currentRoute = group.tabs.find(tab => tab.key === panelTab);
+      setPanelTab((currentRoute || group.tabs[0]).key);
+    };
+    const routeKeys = activeGroup?.tabs.map(tab => tab.key) || [];
 
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabNavScroller} contentContainerStyle={styles.tabNavContent}>
-        {tabs.map(tab => (
-          <Pressable
-            key={tab.key}
-            onPress={() => setPanelTab(tab.key)}
-            accessibilityRole="tab"
-            accessibilityLabel={`${tab.label} tab`}
-            accessibilityState={{ selected: panelTab === tab.key }}
-            style={[
-              styles.tabNavItem,
-              panelTab === tab.key && { borderBottomColor: agent.color || '#6366f1', backgroundColor: (agent.color || '#6366f1') + '12' },
-              ...(Platform.OS === 'web' ? [{ cursor: 'pointer', transition: 'all 0.15s ease' } as any] : []),
-            ]}
+    return (
+      <View style={[styles.navigationShell, desktop && styles.navigationShellDesktop]}>
+        <View
+          style={styles.tabNavShell}
+          accessibilityRole="tablist"
+          {...(Platform.OS === 'web' ? ({ role: 'tablist', 'aria-label': 'Agent panel destinations' } as any) : {})}
+        >
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.tabNavScroller}
+            contentContainerStyle={styles.primaryTabNavContent}
           >
-            <Text style={[styles.tabNavItemText, panelTab === tab.key && styles.tabNavItemTextActive]}>{tab.label}</Text>
-          </Pressable>
-        ))}
-      </ScrollView>
+            {tabGroups.map(group => {
+              const selected = activeGroup?.key === group.key;
+              const nativeId = `uc-agent-panel-destination-${group.key}`;
+              return (
+                <Pressable
+                  key={group.key}
+                  nativeID={nativeId}
+                  onPress={() => selectGroupKey(group.key)}
+                  accessibilityRole="tab"
+                  accessibilityLabel={`${group.label} destination`}
+                  accessibilityHint={group.description}
+                  accessibilityState={{ selected }}
+                  {...(Platform.OS === 'web' ? ({
+                    role: 'tab',
+                    'aria-selected': selected,
+                    'aria-controls': 'uc-agent-panel-tabpanel',
+                    tabIndex: selected ? 0 : -1,
+                    onKeyDown: (event: any) => handleArrowNavigation(
+                      event,
+                      groupKeys,
+                      group.key,
+                      key => `uc-agent-panel-destination-${key}`,
+                    ),
+                  } as any) : {})}
+                  style={[
+                    styles.primaryTabNavItem,
+                    selected && {
+                      borderBottomColor: agent.color || '#6366f1',
+                      backgroundColor: (agent.color || '#6366f1') + '12',
+                    },
+                    Platform.OS === 'web' && ({ cursor: 'pointer', transition: 'all 0.15s ease' } as any),
+                  ]}
+                >
+                  <Text style={[styles.primaryTabNavItemText, selected && styles.tabNavItemTextActive]}>
+                    {group.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        </View>
 
-      {!desktop && (
-        <Pressable
-          onPress={() => nextTab && setPanelTab(nextTab.key)}
-          disabled={!nextTab}
-          accessibilityRole="button"
-          accessibilityLabel={nextTab ? `Go to ${nextTab.label} tab` : 'No next tab'}
-          style={[styles.tabNavArrow, { opacity: nextTab ? 1 : 0.2 }, Platform.OS === 'web' && { cursor: nextTab ? 'pointer' : 'default' } as any]}
-          hitSlop={8}
-        >
-          <Text style={styles.tabNavArrowText}>{'>'}</Text>
-        </Pressable>
-      )}
-    </View>
-  );
-
-  const renderDesktopControls = () => (
-    <View style={styles.desktopControlStrip}>
-      <View style={styles.desktopControlGroup}>
-        <Text style={styles.desktopControlLabel}>Layout</Text>
-        <Pressable
-          onPress={() => panelMode === 'side' && onToggleMode()}
-          accessibilityRole="button"
-          accessibilityLabel="Switch to popup layout"
-          accessibilityState={{ selected: panelMode === 'center' }}
-          style={[
-            styles.desktopControlBtn,
-            panelMode === 'center' && styles.desktopControlBtnActive,
-            Platform.OS === 'web' && ({ cursor: panelMode === 'center' ? 'default' : 'pointer' } as any),
-          ]}
-        >
-          <Text style={[styles.desktopControlBtnText, panelMode === 'center' && styles.desktopControlBtnTextActive]}>POPUP</Text>
-        </Pressable>
-        <Pressable
-          onPress={() => panelMode === 'center' && onToggleMode()}
-          accessibilityRole="button"
-          accessibilityLabel="Dock panel to side"
-          accessibilityState={{ selected: panelMode === 'side' }}
-          style={[
-            styles.desktopControlBtn,
-            panelMode === 'side' && styles.desktopControlBtnActive,
-            Platform.OS === 'web' && ({ cursor: panelMode === 'side' ? 'default' : 'pointer' } as any),
-          ]}
-        >
-          <Text style={[styles.desktopControlBtnText, panelMode === 'side' && styles.desktopControlBtnTextActive]}>DOCKED</Text>
-        </Pressable>
+        {hasContextualTabs && activeGroup ? (
+          <View
+            style={styles.contextualTabNavShell}
+            accessibilityRole="tablist"
+            {...(Platform.OS === 'web' ? ({ role: 'tablist', 'aria-label': `${activeGroup.label} sections` } as any) : {})}
+          >
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.tabNavScroller}
+              contentContainerStyle={styles.contextualTabNavContent}
+            >
+              {activeGroup.tabs.map(tab => {
+                const selected = panelTab === tab.key;
+                const nativeId = `uc-agent-panel-route-${tab.key}`;
+                return (
+                  <Pressable
+                    key={tab.key}
+                    nativeID={nativeId}
+                    onPress={() => setPanelTab(tab.key)}
+                    accessibilityRole="tab"
+                    accessibilityLabel={`${tab.label} tab`}
+                    accessibilityHint={tab.description}
+                    accessibilityState={{ selected }}
+                    {...(Platform.OS === 'web' ? ({
+                      role: 'tab',
+                      'aria-selected': selected,
+                      'aria-controls': 'uc-agent-panel-tabpanel',
+                      tabIndex: selected ? 0 : -1,
+                      onKeyDown: (event: any) => handleArrowNavigation(
+                        event,
+                        routeKeys,
+                        tab.key,
+                        key => `uc-agent-panel-route-${key}`,
+                      ),
+                    } as any) : {})}
+                    style={[
+                      styles.contextualTabNavItem,
+                      selected && {
+                        borderColor: (agent.color || '#6366f1') + '70',
+                        backgroundColor: (agent.color || '#6366f1') + '14',
+                      },
+                      Platform.OS === 'web' && ({ cursor: 'pointer', transition: 'all 0.15s ease' } as any),
+                    ]}
+                  >
+                    <Text style={[styles.contextualTabNavItemText, selected && styles.tabNavItemTextActive]}>
+                      {tab.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+          </View>
+        ) : null}
       </View>
+    );
+  };
 
-      <View style={styles.desktopControlGroupRight}>
-        {panelMode === 'side' ? (
-          <Text style={styles.desktopControlHint}>Press `Esc` to close</Text>
+  const headerMeta = [
+    agent.role || null,
+    providerMeta?.label || agent.providerType || null,
+    agent.model && agent.model !== 'unknown' ? agent.model : null,
+  ].filter((value): value is string => !!value).join(' · ');
+
+  const renderHeader = () => (
+    <View style={styles.desktopHeader} accessibilityRole="header">
+      <View style={styles.desktopHeaderLeft}>
+        <View style={[styles.desktopHeaderAvatar, { backgroundColor: agent.color + '20', borderColor: agent.color + '70' }]}>
+          <Text style={[styles.desktopHeaderAvatarText, { color: agent.color }]}>{agent.name.charAt(0).toUpperCase()}</Text>
+        </View>
+        <View style={styles.desktopHeaderIdentity}>
+          {editing ? (
+            <View style={styles.desktopHeaderEditingRow}>
+              <Text nativeID="uc-agent-panel-title" style={styles.visuallyHiddenTitle}>{agent.name}</Text>
+              <TextInput
+                style={styles.desktopHeaderNameInput}
+                value={editName}
+                onChangeText={setEditName}
+                editable={!renameBusy}
+                autoFocus
+                onSubmitEditing={onSubmitRename}
+                placeholder={agent.name}
+                placeholderTextColor="#484f58"
+                accessibilityLabel="Agent name"
+                accessibilityState={{ disabled: renameBusy, busy: renameBusy }}
+              />
+              <Pressable
+                onPress={onSubmitRename}
+                disabled={renameBusy || !editName.trim()}
+                style={[
+                  styles.desktopRenameAction,
+                  (renameBusy || !editName.trim()) && styles.commandActionDisabled,
+                  Platform.OS === 'web' ? ({ cursor: renameBusy ? 'wait' : !editName.trim() ? 'not-allowed' : 'pointer' } as any) : null,
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Save agent name"
+                accessibilityState={{ disabled: renameBusy || !editName.trim(), busy: renameBusy }}
+              >
+                <Text style={styles.desktopRenameActionText}>{renameBusy ? 'Saving…' : 'Save'}</Text>
+              </Pressable>
+              <Pressable
+                onPress={onCancelRename}
+                disabled={renameBusy}
+                style={[
+                  styles.desktopRenameAction,
+                  styles.desktopRenameCancelAction,
+                  renameBusy && styles.commandActionDisabled,
+                  Platform.OS === 'web' ? ({ cursor: renameBusy ? 'not-allowed' : 'pointer' } as any) : null,
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Cancel rename"
+                accessibilityState={{ disabled: renameBusy }}
+              >
+                <Text style={[styles.desktopRenameActionText, styles.desktopRenameCancelActionText]}>Cancel</Text>
+              </Pressable>
+            </View>
+          ) : (
+            <View style={styles.desktopHeaderNameWrap}>
+              <Text nativeID="uc-agent-panel-title" style={styles.desktopHeaderName} numberOfLines={1}>{agent.name}</Text>
+              {canRenameAgent ? (
+                <Pressable
+                  ref={renameButtonRef}
+                  onPress={onStartRename}
+                  style={[styles.desktopRenameChip, Platform.OS === 'web' ? ({ cursor: 'pointer' } as any) : null]}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Rename ${agent.name}`}
+                >
+                  <Text style={styles.desktopRenameChipText}>Rename</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          )}
+          <View style={styles.desktopHeaderMeta}>
+            <View
+              style={[styles.desktopHeaderStatus, { borderColor: statusColor + '38', backgroundColor: statusColor + '12' }]}
+              accessibilityLiveRegion="polite"
+            >
+              <View style={[styles.desktopHeaderStatusDot, { backgroundColor: statusColor }]} />
+              <Text style={[styles.desktopHeaderStatusText, { color: statusColor }]}>{statusLabel}</Text>
+            </View>
+            {headerMeta ? <Text style={styles.desktopHeaderMetaText} numberOfLines={1}>{headerMeta}</Text> : null}
+          </View>
+        </View>
+      </View>
+      <View style={styles.desktopHeaderRight}>
+        {isDesktop && Platform.OS === 'web' ? (
+          <Pressable
+            onPress={onToggleMode}
+            style={({ hovered }: any) => [
+              styles.desktopIconBtn,
+              hovered && styles.desktopIconBtnHover,
+              Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel={panelMode === 'center' ? 'Dock agent panel to the right' : 'Open agent panel as a centered pop-up'}
+          >
+            <Text style={styles.desktopIconBtnText}>{panelMode === 'center' ? 'Dock' : 'Pop out'}</Text>
+          </Pressable>
         ) : null}
         <Pressable
           onPress={onClose}
-          accessibilityRole="button"
-          accessibilityLabel="Close panel"
-          style={[
-            styles.desktopCloseBtn,
+          style={({ hovered }: any) => [
+            styles.desktopCloseIconBtn,
+            hovered && styles.desktopIconBtnHover,
             Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
           ]}
+          accessibilityRole="button"
+          accessibilityLabel="Close agent panel"
         >
-          <Text style={styles.desktopCloseBtnText}>CLOSE</Text>
+          <Text style={styles.desktopCloseIconText}>×</Text>
         </Pressable>
       </View>
     </View>
   );
 
-  return (
+  const panelLayer = (
     <>
-      {isDesktop && Platform.OS === 'web' && (
-        <View
-          pointerEvents={panelMode === 'center' ? 'auto' : 'none'}
-          style={{
-            position: 'fixed',
-            top: 0, left: 0, right: 0, bottom: 0,
-            backgroundColor: 'rgba(0,0,0,0.45)',
-            zIndex: 99,
-            opacity: backdropOpacity,
-            transition: 'opacity 280ms cubic-bezier(0.4, 0, 0.2, 1)',
-            cursor: panelMode === 'center' ? 'pointer' : 'default',
-          } as any}
-          // onClick is a web-only RN Web extension; spread to bypass typing
-          {...({ onClick: onClose } as any)}
+      {panelMode === 'center' && (
+        <Pressable
+          testID="agent-panel-backdrop"
+          onPress={onClose}
+          accessible={false}
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+          {...(Platform.OS === 'web' ? ({
+            className: 'uc-agent-panel-backdrop',
+            'aria-hidden': true,
+          } as any) : {})}
+          style={[
+            styles.modalBackdrop,
+            { opacity: backdropOpacity },
+            Platform.OS === 'web' && ({
+              position: 'fixed',
+              zIndex: WEB_AGENT_MODAL_BACKDROP_Z_INDEX,
+              transition: reduceMotion ? 'none' : 'opacity 280ms cubic-bezier(0.4, 0, 0.2, 1)',
+              cursor: 'pointer',
+            } as any),
+          ]}
         />
       )}
 
       <Animated.View
         nativeID="uc-agent-panel-root"
+        accessibilityViewIsModal={panelMode === 'center'}
+        importantForAccessibility={panelMode === 'center' ? 'yes' : 'auto'}
         // The CSS keyframe (uc-agent-panel-open) drives the open fade on web.
         // scaleAnim/opacityAnim values are pinned to 1/1 by AgentPanel during
         // open, so they're no-ops here unless the close animation runs them
         // back down to 0. className is a web-only RN Web extension so we
         // spread it via `as any` to avoid TypeScript noise.
-        {...(isDesktop && Platform.OS === 'web' ? ({ className: 'uc-agent-panel-open' } as any) : {})}
+        {...(Platform.OS === 'web' ? ({
+          className: 'uc-agent-panel-open',
+          role: 'dialog',
+          'aria-modal': panelMode === 'center' ? true : undefined,
+          'aria-labelledby': 'uc-agent-panel-title',
+        } as any) : {})}
         style={[
-        styles.panel,
-        isDesktop
-          ? {
-              transform: [{ scale: scaleAnim }],
-              opacity: opacityAnim,
-              width: panelGeometry.width,
-              height: panelGeometry.height,
-              left: panelGeometry.left,
-              top: panelGeometry.top,
-            }
-          : { transform: [{ translateY: slideAnim }] },
-        isDesktop && styles.panelDesktop,
-        isDesktop && panelMode === 'side' && styles.panelSide,
-        isDesktop && Platform.OS === 'web' ? ({ transition: panelTransition } as any) : null,
-      ]}>
+          styles.panel,
+          isDesktop
+            ? {
+                transform: [{ scale: scaleAnim }],
+                opacity: opacityAnim,
+                width: panelGeometry.width,
+                height: panelGeometry.height,
+                left: panelGeometry.left,
+                top: panelGeometry.top,
+              }
+            : Platform.OS === 'web'
+              // CSS/backdrop state owns web presentation. The Animated value
+              // starts at 400 for native bottom-sheet entrance; consuming it
+              // after a desktop-to-compact web resize pushes the sheet 400px
+              // below the viewport.
+              ? null
+              : { transform: [{ translateY: slideAnim }] },
+          isDesktop && styles.panelDesktop,
+          isDesktop && panelMode === 'side' && styles.panelSide,
+          Platform.OS === 'web' && panelMode === 'center'
+            ? ({ position: 'fixed', zIndex: WEB_AGENT_MODAL_PANEL_Z_INDEX } as any)
+            : null,
+          isDesktop && Platform.OS === 'web'
+            ? ({ transition: reduceMotion ? 'none' : panelTransition } as any)
+            : null,
+        ]}>
         {isDesktop && Platform.OS === 'web' && panelMode === 'side' && (
-          <View
+          <Pressable
             onPointerDown={(e: any) => onStartSideResize(e.nativeEvent?.pageX || e.pageX || 0)}
+            accessibilityRole="adjustable"
+            accessibilityLabel="Resize docked agent panel"
+            accessibilityValue={{ min: 380, max: 720, now: Math.round(panelGeometry.width), text: `${Math.round(panelGeometry.width)} pixels wide` }}
+            accessibilityActions={[{ name: 'increment', label: 'Make panel wider' }, { name: 'decrement', label: 'Make panel narrower' }]}
+            onAccessibilityAction={(event) => {
+              if (event.nativeEvent.actionName === 'increment') onResizeSideBy(24);
+              if (event.nativeEvent.actionName === 'decrement') onResizeSideBy(-24);
+            }}
+            {...({
+              tabIndex: 0,
+              ...(Platform.OS === 'web' ? {
+                role: 'slider',
+                'aria-valuemin': 380,
+                'aria-valuemax': 720,
+                'aria-valuenow': Math.round(panelGeometry.width),
+                'aria-valuetext': `${Math.round(panelGeometry.width)} pixels wide`,
+              } : {}),
+              onKeyDown: (event: any) => {
+                if (event.key === 'ArrowLeft') {
+                  event.preventDefault?.();
+                  onResizeSideBy(24);
+                } else if (event.key === 'ArrowRight') {
+                  event.preventDefault?.();
+                  onResizeSideBy(-24);
+                }
+              },
+            } as any)}
             style={styles.sideResizeHandle as any}
           >
             <View style={styles.sideResizeGrip} />
-          </View>
-        )}
-
-        {isDesktop ? (
-          <View style={styles.desktopHeader}>
-            <View style={styles.desktopHeaderLeft}>
-              <View style={[styles.desktopHeaderAvatar, { backgroundColor: agent.color + '22', borderColor: agent.color }]}>
-                <Text style={[styles.desktopHeaderAvatarText, { color: agent.color }]}>{agent.name.charAt(0).toUpperCase()}</Text>
-              </View>
-              {editing ? (
-                <View style={styles.desktopHeaderEditingRow}>
-                  <TextInput
-                    style={styles.desktopHeaderNameInput}
-                    value={editName}
-                    onChangeText={setEditName}
-                    autoFocus
-                    onBlur={() => {
-                      const trimmed = editName.trim();
-                      if (trimmed && trimmed !== agent.name) onSubmitRename();
-                      else onCancelRename();
-                    }}
-                    onSubmitEditing={onSubmitRename}
-                    placeholder={agent.name}
-                    placeholderTextColor="#555"
-                  />
-                  <Pressable
-                    onPress={onSubmitRename}
-                    style={[styles.desktopRenameAction, Platform.OS === 'web' ? ({ cursor: 'pointer' } as any) : null]}
-                    accessibilityLabel="Save agent name"
-                  >
-                    <Text style={styles.desktopRenameActionText}>Save</Text>
-                  </Pressable>
-                  <Pressable
-                    onPress={onCancelRename}
-                    style={[styles.desktopRenameAction, styles.desktopRenameCancelAction, Platform.OS === 'web' ? ({ cursor: 'pointer' } as any) : null]}
-                    accessibilityLabel="Cancel rename"
-                  >
-                    <Text style={[styles.desktopRenameActionText, styles.desktopRenameCancelActionText]}>Cancel</Text>
-                  </Pressable>
-                </View>
-              ) : (
-                <View style={styles.desktopHeaderNameWrap}>
-                  <Pressable
-                    onPress={onStartRename}
-                    style={[
-                      { flexShrink: 1, minWidth: 0 },
-                      Platform.OS === 'web' ? ({ cursor: 'text' } as any) : null,
-                    ]}
-                    accessibilityLabel="Rename agent"
-                  >
-                    <Text style={styles.desktopHeaderName} numberOfLines={1}>{agent.name}</Text>
-                  </Pressable>
-                  <Pressable
-                    onPress={onStartRename}
-                    style={[styles.desktopRenameChip, Platform.OS === 'web' ? ({ cursor: 'pointer' } as any) : null]}
-                    accessibilityLabel="Rename agent"
-                  >
-                    <Text style={styles.desktopRenameChipText}>Rename</Text>
-                  </Pressable>
-                </View>
-              )}
-              <View style={[styles.desktopHeaderStatus, { borderColor: statusColor + '55', backgroundColor: statusColor + '14' }]}>
-                <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: statusColor, marginRight: 6 }} />
-                <Text style={[styles.desktopHeaderStatusText, { color: statusColor }]}>{statusLabel}</Text>
-              </View>
-            </View>
-            <View style={styles.desktopHeaderRight}>
-              <Pressable
-                onPress={onToggleMode}
-                style={({ hovered }: any) => [
-                  styles.desktopIconBtn,
-                  hovered && styles.desktopIconBtnHover,
-                  Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
-                ]}
-                accessibilityLabel={panelMode === 'center' ? 'Dock to right side' : 'Center panel'}
-                hitSlop={8}
-              >
-                <Text style={styles.desktopIconBtnText}>{panelMode === 'center' ? '⇥' : '⇤'}</Text>
-              </Pressable>
-              <Pressable
-                onPress={onClose}
-                style={({ hovered }: any) => [
-                  styles.desktopIconBtn,
-                  hovered && styles.desktopIconBtnHover,
-                  Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
-                ]}
-                accessibilityLabel="Close panel"
-                hitSlop={8}
-              >
-                <Text style={styles.desktopIconBtnText}>✕</Text>
-              </Pressable>
-            </View>
-          </View>
-        ) : (
-          <Pressable onPress={onClose} style={styles.handleArea}>
-            <View style={styles.handle} />
           </Pressable>
         )}
 
-        {isDesktop && (
-          <>
-            <View style={styles.desktopSubtitle}>
-              {agent.role ? (
-                <View style={styles.desktopMetaChip}>
-                  <Text style={styles.desktopMetaChipLabel}>ROLE</Text>
-                  <Text style={styles.desktopMetaChipValue} numberOfLines={1}>{agent.role}</Text>
-                </View>
-              ) : null}
-              {agent.model ? (
-                <View style={styles.desktopMetaChip}>
-                  <Text style={styles.desktopMetaChipLabel}>MODEL</Text>
-                  <Text style={styles.desktopMetaChipValue} numberOfLines={1}>{agent.model}</Text>
-                </View>
-              ) : null}
-              <View style={styles.desktopMetaChip}>
-                <Text style={styles.desktopMetaChipLabel}>PROVIDER</Text>
-                <View style={styles.desktopMetaChipInline}>
-                  <Text style={styles.desktopSubtitleIcon}>{providerMeta?.icon || '📡'}</Text>
-                  <Text style={[styles.desktopMetaChipValue, { color: providerMeta?.color || '#888' }]} numberOfLines={1}>
-                    {agent.connectionName}
-                  </Text>
-                </View>
-              </View>
-              {activeTab ? (
-                <View style={styles.desktopMetaChip}>
-                  <Text style={styles.desktopMetaChipLabel}>TAB</Text>
-                  <Text style={styles.desktopMetaChipValue}>{activeTab.label}</Text>
-                </View>
-              ) : null}
-              <View style={[styles.desktopMetaChip, styles.desktopMetaChipMode]}>
-                <Text style={styles.desktopMetaChipLabel}>LAYOUT</Text>
-                <Text style={styles.desktopMetaChipValue}>{panelMode === 'center' ? 'Centered' : 'Docked'}</Text>
-              </View>
-            </View>
-            {renderDesktopControls()}
-            {renderRemoveButton(true)}
-            {renderTabNavigation(true)}
-            {activeTab ? (
-              <View style={styles.activeTabDescription}>
-                <Text style={styles.activeTabDescriptionLabel}>CURRENT TAB</Text>
-                <Text style={styles.activeTabDescriptionText}>{activeTab.description}</Text>
-              </View>
+        {!isDesktop ? (
+          <View style={styles.handleArea} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+            <View style={styles.handle} />
+          </View>
+        ) : null}
+
+        {renderHeader()}
+        {actionNotice ? (
+          <View
+            style={[
+              styles.commandNotice,
+              actionNotice.kind === 'error'
+                ? styles.commandNoticeError
+                : actionNotice.kind === 'warning'
+                  ? styles.commandNoticeWarning
+                  : styles.commandNoticeSuccess,
+            ]}
+            accessibilityRole={actionNotice.kind === 'success' ? undefined : 'alert'}
+            accessibilityLiveRegion={actionNotice.kind === 'success' ? 'polite' : 'assertive'}
+          >
+            <Text
+              style={[
+                styles.commandNoticeText,
+                actionNotice.kind === 'error'
+                  ? styles.commandNoticeErrorText
+                  : actionNotice.kind === 'warning'
+                    ? styles.commandNoticeWarningText
+                    : styles.commandNoticeSuccessText,
+              ]}
+            >
+              {actionNotice.message}
+            </Text>
+            {actionNotice.actionLabel && actionNotice.onAction ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={actionNotice.actionLabel}
+                onPress={() => { void actionNotice.onAction?.(); }}
+                style={styles.commandNoticeAction}
+              >
+                <Text style={styles.commandNoticeActionText}>{actionNotice.actionLabel}</Text>
+              </Pressable>
             ) : null}
-            <TabNavigationDots count={tabs.length} activeIndex={Math.max(currentTabIndex, 0)} accentColor={agent.color || '#6366f1'} />
-          </>
-        )}
+          </View>
+        ) : null}
+        {renderTabNavigation(isDesktop)}
 
         <ScrollView
           style={styles.scrollContent}
-          contentContainerStyle={isDesktop ? styles.desktopScrollContent : undefined}
+          contentContainerStyle={isDesktop ? styles.desktopScrollContent : styles.mobileScrollContent}
           showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
         >
-          {!isDesktop && (
-            <>
-              <View style={styles.header}>
-                <View style={styles.headerLeft}>
-                  <View style={[styles.avatar, { backgroundColor: agent.color + '20', borderColor: agent.color }]}>
-                    <Text style={[styles.avatarText, { color: agent.color }]}>{agent.name.charAt(0)}</Text>
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    {editing ? (
-                      <View style={styles.renameRow}>
-                        <TextInput
-                          style={styles.renameInput}
-                          value={editName}
-                          onChangeText={setEditName}
-                          autoFocus
-                          onSubmitEditing={onSubmitRename}
-                        />
-                        <Pressable onPress={onSubmitRename} style={[styles.renameSaveBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                          <Text style={styles.renameSaveText}>✓</Text>
-                        </Pressable>
-                        <Pressable onPress={onCancelRename} style={[styles.renameCancelBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                          <Text style={styles.renameCancelText}>✕</Text>
-                        </Pressable>
-                      </View>
-                    ) : (
-                      <Pressable onPress={onStartRename} style={[Platform.OS === 'web' && { cursor: 'pointer' } as any]}>
-                        <View style={styles.nameRow}>
-                          <Text style={styles.name}>{agent.name}</Text>
-                          <Text style={styles.renameHint}>✏️</Text>
-                        </View>
-                      </Pressable>
-                    )}
-                    <View style={styles.roleRow}>
-                      <Text style={styles.role}>{agent.role}</Text>
-                      <View style={styles.modelBadge}>
-                        <Text style={styles.modelText}>{agent.model}</Text>
-                      </View>
-                    </View>
-                  </View>
-                </View>
-                <View style={[styles.statusBadge, { backgroundColor: statusColor + '20', borderColor: statusColor + '40' }]}>
-                  <View style={[styles.statusDotSmall, { backgroundColor: statusColor }]} />
-                  <Text style={[styles.statusText, { color: statusColor }]}>{statusLabel}</Text>
-                </View>
-              </View>
-
-              <View style={styles.connectionRow}>
-                <Text style={styles.connectionIcon}>{PROVIDER_META[agent.providerType]?.icon || '📡'}</Text>
-                <Text style={[styles.connectionName, { color: PROVIDER_META[agent.providerType]?.color || '#888' }]}>{agent.connectionName}</Text>
-                <Text style={styles.connectionType}>{PROVIDER_META[agent.providerType]?.label || agent.providerType}</Text>
-              </View>
-
-              {renderRemoveButton(false)}
-              {renderTabNavigation(false)}
-              <TabNavigationDots count={tabs.length} activeIndex={Math.max(currentTabIndex, 0)} accentColor={agent.color || '#6366f1'} />
-            </>
-          )}
-
-          <TabErrorBoundary tabKey={panelTab} accentColor={agent.color || '#6366f1'}>
-            {children}
+          <TabErrorBoundary key={contentKey} tabKey={panelTab} accentColor={agent.color || '#6366f1'}>
+            <View
+              nativeID="uc-agent-panel-tabpanel"
+              accessibilityRole={'tabpanel' as any}
+              accessibilityLabel={activeTab ? `${activeTab.label} section` : 'Agent section'}
+              style={styles.tabPanel}
+              {...(Platform.OS === 'web' ? ({
+                role: 'tabpanel',
+                'aria-labelledby': activeTabLabelId,
+                tabIndex: 0,
+              } as any) : {})}
+            >
+              {children}
+            </View>
           </TabErrorBoundary>
+          {panelTab === 'overview' ? renderRemoveButton(isDesktop) : null}
         </ScrollView>
       </Animated.View>
     </>
   );
+
+  // Native Modal creates a separate accessibility/window boundary: TalkBack
+  // cannot walk into the Office behind the compact sheet, and Android hardware
+  // Back is routed through onRequestClose. RN Web keeps the existing dialog and
+  // docked-inspector DOM so its focus trap/restoration behavior is unchanged.
+  if (Platform.OS !== 'web' && panelMode === 'center') {
+    return (
+      <Modal
+        visible
+        transparent
+        animationType={reduceMotion ? 'none' : 'fade'}
+        statusBarTranslucent
+        onRequestClose={onClose}
+      >
+        <View style={styles.nativeModalRoot}>{panelLayer}</View>
+      </Modal>
+    );
+  }
+
+  if (Platform.OS === 'web' && panelMode === 'center') {
+    return <AgentPanelWebPortal>{panelLayer}</AgentPanelWebPortal>;
+  }
+
+  return panelLayer;
 }
 
 const styles = StyleSheet.create({
+  visuallyHiddenTitle: {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    opacity: 0,
+    overflow: 'hidden',
+  },
+  nativeModalRoot: {
+    flex: 1,
+  },
+  modalBackdrop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 99,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+  },
   panel: {
     position: 'absolute',
+    zIndex: 100,
     bottom: 0,
     left: 0,
     right: 0,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#161b22',
     borderTopWidth: 1,
-    borderTopColor: '#1e1e3a',
+    borderTopColor: '#30363d',
     borderTopLeftRadius: 16,
     borderTopRightRadius: 16,
-    paddingHorizontal: 20,
-    paddingBottom: 24,
-    maxHeight: '70%' as any,
+    paddingHorizontal: 0,
+    paddingBottom: 0,
+    maxHeight: '88%' as any,
+    overflow: 'hidden' as any,
   },
   panelDesktop: {
     bottom: 'auto' as any,
@@ -607,20 +760,20 @@ const styles = StyleSheet.create({
     maxHeight: 'none' as any,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: '#2a2a3e',
+    borderColor: '#30363d',
     paddingHorizontal: 0,
     paddingBottom: 0,
     overflow: 'hidden' as any,
     ...(Platform.OS === 'web' ? {
       position: 'fixed',
       zIndex: 100,
-      boxShadow: '0 24px 60px rgba(0,0,0,0.6), 0 8px 24px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.04) inset',
+      boxShadow: '0 12px 40px rgba(0,0,0,0.45)',
     } as any : {
       shadowColor: '#000',
-      shadowOffset: { width: 0, height: 16 },
-      shadowOpacity: 0.5,
-      shadowRadius: 30,
-      elevation: 24,
+      shadowOffset: { width: 0, height: 12 },
+      shadowOpacity: 0.4,
+      shadowRadius: 24,
+      elevation: 18,
     }),
   },
   panelSide: {
@@ -630,15 +783,15 @@ const styles = StyleSheet.create({
     borderBottomRightRadius: 0,
     borderRightWidth: 0,
     ...(Platform.OS === 'web' ? {
-      boxShadow: '-16px 0 48px rgba(0,0,0,0.55), -4px 0 16px rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.04) inset',
+      boxShadow: '-8px 0 28px rgba(0,0,0,0.38)',
     } as any : {}),
   },
   sideResizeHandle: {
     position: 'absolute',
-    left: -3,
+    left: -8,
     top: 0,
     bottom: 0,
-    width: 8,
+    width: 16,
     zIndex: 12,
     cursor: 'col-resize' as any,
     justifyContent: 'center',
@@ -648,53 +801,56 @@ const styles = StyleSheet.create({
     width: 2,
     height: 48,
     borderRadius: 1,
-    backgroundColor: '#2a2a3e',
+    backgroundColor: '#484f58',
   },
   desktopHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
     borderBottomWidth: 1,
-    borderBottomColor: '#1e1e3a',
-    backgroundColor: '#08080c',
-    gap: 10,
+    borderBottomColor: '#21262d',
+    backgroundColor: '#161b22',
+    gap: 12,
+    minHeight: 68,
   },
   desktopHeaderLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 12,
     flex: 1,
     minWidth: 0,
   },
   desktopHeaderAvatar: {
-    width: 26,
-    height: 26,
-    borderRadius: 6,
-    borderWidth: 1.5,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
   },
   desktopHeaderAvatarText: {
-    fontSize: 12,
-    fontWeight: '900',
-    fontFamily: MONO,
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  desktopHeaderIdentity: {
+    flex: 1,
+    minWidth: 0,
+    gap: 5,
   },
   desktopHeaderName: {
-    color: '#e8e8ef',
-    fontSize: 14,
-    fontWeight: '700',
-    fontFamily: MONO,
-    letterSpacing: 0.3,
+    color: '#e6edf3',
+    fontSize: 16,
+    fontWeight: '600',
     flexShrink: 1,
   },
   desktopHeaderNameWrap: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 6,
     minWidth: 0,
-    flexShrink: 1,
+    flex: 1,
   },
   desktopHeaderEditingRow: {
     flexDirection: 'row',
@@ -704,555 +860,339 @@ const styles = StyleSheet.create({
     flexShrink: 1,
   },
   desktopHeaderNameInput: {
-    color: '#fff',
+    color: '#e6edf3',
     fontSize: 14,
-    fontWeight: '700',
-    fontFamily: MONO,
-    letterSpacing: 0.3,
-    backgroundColor: '#0f0f18',
+    fontWeight: '600',
+    backgroundColor: '#0d1117',
     borderWidth: 1,
     borderColor: '#6366f1',
-    borderRadius: 5,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    flexShrink: 1,
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    flex: 1,
     minWidth: 0,
     ...(Platform.OS === 'web' ? { outlineStyle: 'none' as any } : {}),
   },
   desktopRenameAction: {
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    borderRadius: 5,
+    minHeight: 44,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#2c3f2f',
-    backgroundColor: '#102016',
+    borderColor: '#30363d',
+    backgroundColor: '#21262d',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   desktopRenameActionText: {
-    color: '#9ae6b4',
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 0.6,
-    fontFamily: MONO,
+    color: '#e6edf3',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  commandActionDisabled: {
+    opacity: 0.6,
   },
   desktopRenameCancelAction: {
-    borderColor: '#2a2a36',
-    backgroundColor: '#111118',
+    borderColor: '#30363d',
+    backgroundColor: 'transparent',
   },
   desktopRenameCancelActionText: {
-    color: '#a0a0b0',
+    color: '#8b949e',
+  },
+  desktopHeaderMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    minWidth: 0,
   },
   desktopHeaderStatus: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 10,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 20,
     borderWidth: 1,
+    flexShrink: 0,
+  },
+  desktopHeaderStatusDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    marginRight: 5,
   },
   desktopHeaderStatusText: {
-    fontSize: 10,
-    fontWeight: '800',
-    letterSpacing: 1,
-    fontFamily: MONO,
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  desktopHeaderMetaText: {
+    color: '#8b949e',
+    fontSize: 12,
+    flex: 1,
+    minWidth: 0,
   },
   desktopRenameChip: {
-    paddingHorizontal: 8,
+    minWidth: 44,
+    minHeight: 44,
+    paddingHorizontal: 6,
     paddingVertical: 4,
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: '#272733',
-    backgroundColor: '#12121a',
+    borderColor: 'transparent',
+    backgroundColor: 'transparent',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   desktopRenameChipText: {
-    color: '#9fa0ad',
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 0.7,
-    fontFamily: MONO,
+    color: '#8b949e',
+    fontSize: 11,
+    fontWeight: '500',
   },
   desktopHeaderRight: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 4,
   },
   desktopIconBtn: {
-    width: 30,
-    height: 30,
-    borderRadius: 7,
-    backgroundColor: 'transparent',
+    minWidth: 44,
+    minHeight: 44,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    backgroundColor: '#21262d',
     borderWidth: 1,
-    borderColor: '#ffffff12',
+    borderColor: '#30363d',
     alignItems: 'center',
     justifyContent: 'center',
     ...(Platform.OS === 'web' ? { transition: 'background-color 140ms ease, border-color 140ms ease, color 140ms ease' } as any : {}),
   },
   desktopIconBtnHover: {
-    backgroundColor: '#ffffff0c',
-    borderColor: '#ffffff1f',
+    backgroundColor: '#30363d',
+    borderColor: '#8b949e',
   },
   desktopIconBtnText: {
-    color: '#9a9aa8',
-    fontSize: 14,
-    fontWeight: '700',
-    fontFamily: MONO,
-  },
-  desktopSubtitle: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#14141c',
-    backgroundColor: '#070709',
-  },
-  desktopMetaChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: '#20202a',
-    backgroundColor: '#101016',
-  },
-  desktopMetaChipMode: {
-    marginLeft: 'auto',
-  },
-  desktopMetaChipInline: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    minWidth: 0,
-    flexShrink: 1,
-  },
-  desktopMetaChipLabel: {
-    color: '#5f5f6b',
-    fontSize: 10,
-    fontFamily: MONO,
-    fontWeight: '800',
-    letterSpacing: 0.8,
-  },
-  desktopMetaChipValue: {
-    color: '#b3b3bf',
-    fontSize: 11,
-    fontFamily: MONO,
-    fontWeight: '700',
-    flexShrink: 1,
-  },
-  desktopSubtitleIcon: {
+    color: '#e6edf3',
     fontSize: 12,
+    fontWeight: '600',
+  },
+  desktopCloseIconBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 6,
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: 'transparent',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  desktopCloseIconText: {
+    color: '#8b949e',
+    fontSize: 24,
+    fontWeight: '400',
+    lineHeight: 26,
+  },
+  commandNotice: {
+    minHeight: 36,
+    paddingHorizontal: 16,
+    paddingVertical: 9,
+    borderBottomWidth: 1,
+    gap: 8,
+  },
+  commandNoticeError: {
+    backgroundColor: '#f8514910',
+    borderBottomColor: '#f8514938',
+  },
+  commandNoticeSuccess: {
+    backgroundColor: '#22c55e10',
+    borderBottomColor: '#22c55e38',
+  },
+  commandNoticeWarning: {
+    backgroundColor: '#f59e0b12',
+    borderBottomColor: '#f59e0b42',
+  },
+  commandNoticeText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  commandNoticeErrorText: {
+    color: '#ff7b72',
+  },
+  commandNoticeSuccessText: {
+    color: '#3fb950',
+  },
+  commandNoticeWarningText: {
+    color: '#fbbf24',
+  },
+  commandNoticeAction: {
+    alignSelf: 'flex-start',
+    minHeight: 44,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#f59e0b66',
+    justifyContent: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  commandNoticeActionText: {
+    color: '#fbbf24',
+    fontSize: 11,
+    fontWeight: '700',
   },
   desktopActionRow: {
-    paddingHorizontal: 14,
-    paddingTop: 8,
-    paddingBottom: 4,
-    backgroundColor: '#070709',
-    borderBottomWidth: 1,
-    borderBottomColor: '#14141c',
-  },
-  desktopControlStrip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
-    paddingHorizontal: 14,
-    paddingTop: 10,
-    paddingBottom: 8,
-    backgroundColor: '#070709',
-    borderBottomWidth: 1,
-    borderBottomColor: '#14141c',
-  },
-  desktopControlGroup: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    flexWrap: 'wrap',
-  },
-  desktopControlGroupRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    marginLeft: 'auto',
-  },
-  desktopControlLabel: {
-    color: '#6d6d78',
-    fontSize: 10,
-    fontFamily: MONO,
-    fontWeight: '800',
-    letterSpacing: 1.1,
-    textTransform: 'uppercase',
-  },
-  desktopControlBtn: {
-    minWidth: 78,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#242432',
-    backgroundColor: '#101016',
-    alignItems: 'center',
-    justifyContent: 'center',
-    ...(Platform.OS === 'web' ? { transition: 'background-color 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease' } as any : {}),
-  },
-  desktopControlBtnActive: {
-    borderColor: '#6366f155',
-    backgroundColor: '#6366f118',
-  },
-  desktopControlBtnText: {
-    color: '#9b9baa',
-    fontSize: 11,
-    fontFamily: MONO,
-    fontWeight: '800',
-    letterSpacing: 0.8,
-  },
-  desktopControlBtnTextActive: {
-    color: '#ececf3',
-  },
-  desktopControlHint: {
-    color: '#6d6d78',
-    fontSize: 11,
-    fontFamily: MONO,
-  },
-  desktopCloseBtn: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#ef444438',
-    backgroundColor: '#ef444410',
-    alignItems: 'center',
-    justifyContent: 'center',
-    ...(Platform.OS === 'web' ? { transition: 'background-color 140ms ease, border-color 140ms ease' } as any : {}),
-  },
-  desktopCloseBtnText: {
-    color: '#f87171',
-    fontSize: 11,
-    fontFamily: MONO,
-    fontWeight: '800',
-    letterSpacing: 0.9,
+    marginTop: 24,
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#21262d',
   },
   mobileActionRow: {
-    paddingHorizontal: 8,
-    marginBottom: 8,
+    marginTop: 20,
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#21262d',
   },
   removeButton: {
     alignSelf: 'flex-start',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 3,
+    minHeight: 44,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#ef444455',
-    backgroundColor: '#ef444414',
+    borderColor: '#f8514948',
+    backgroundColor: '#f8514910',
+    justifyContent: 'center',
   },
   removeButtonText: {
-    color: '#ef4444',
-    fontSize: 12,
-    fontWeight: '800',
-    fontFamily: MONO,
+    color: '#f85149',
+    fontSize: 13,
+    fontWeight: '600',
   },
   handleArea: {
     alignItems: 'center',
-    paddingVertical: 10,
+    paddingTop: 8,
+    paddingBottom: 4,
+    backgroundColor: '#161b22',
   },
   handle: {
-    width: 40,
+    width: 36,
     height: 4,
-    backgroundColor: '#333',
+    backgroundColor: '#484f58',
     borderRadius: 2,
   },
   scrollContent: {
     flex: 1,
   },
+  tabPanel: {
+    gap: 16,
+  },
   desktopScrollContent: {
-    paddingHorizontal: 20,
+    paddingHorizontal: 16,
     paddingTop: 16,
-    paddingBottom: 32,
+    paddingBottom: 24,
   },
-  activeTabDescription: {
-    marginHorizontal: 16,
-    marginTop: 10,
-    marginBottom: 4,
+  mobileScrollContent: {
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 24,
+  },
+  navigationShell: {
+    backgroundColor: '#161b22',
+  },
+  navigationShellDesktop: {
     paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#232338',
-    backgroundColor: '#0c0c14',
-  },
-  activeTabDescriptionLabel: {
-    color: '#71718a',
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 1.2,
-    fontFamily: MONO,
-    marginBottom: 4,
-  },
-  activeTabDescriptionText: {
-    color: '#b8b8c7',
-    fontSize: 12,
-    lineHeight: 18,
+    paddingTop: 4,
   },
   tabNavShell: {
     flexDirection: 'row',
     alignItems: 'center',
     borderBottomWidth: 1,
-    borderBottomColor: '#1a1a28',
-    marginBottom: 8,
-  },
-  tabNavShellDesktop: {
-    marginBottom: 0,
-    paddingHorizontal: 10,
-    paddingTop: 8,
-    paddingBottom: 6,
-    backgroundColor: '#08080b',
-    borderBottomColor: '#14141c',
-  },
-  tabNavArrow: {
-    paddingHorizontal: 8,
-    paddingVertical: 8,
-  },
-  tabNavArrowText: {
-    color: '#909098',
-    fontSize: 16,
-    fontWeight: '700',
-    fontFamily: MONO,
+    borderBottomColor: '#21262d',
+    backgroundColor: '#161b22',
   },
   tabNavScroller: {
     flex: 1,
-    maxHeight: 44,
   },
-  tabNavContent: {
-    gap: 4,
+  primaryTabNavContent: {
+    flexGrow: 1,
+    gap: 2,
   },
-  tabNavItem: {
-    paddingHorizontal: 14,
-    paddingVertical: 11,
-    borderBottomWidth: 3,
+  primaryTabNavItem: {
+    flexGrow: 1,
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderBottomWidth: 2,
     borderBottomColor: 'transparent',
     backgroundColor: 'transparent',
     borderRadius: 6,
-    minHeight: 40,
+    minHeight: 44,
+    minWidth: 44,
     justifyContent: 'center',
   },
-  tabNavItemText: {
-    color: '#a2a2ae',
+  primaryTabNavItemText: {
+    color: '#8b949e',
     fontSize: 13,
-    fontWeight: '600',
-    fontFamily: MONO,
-    letterSpacing: 0.2,
+    fontWeight: '500',
+  },
+  contextualTabNavShell: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderBottomWidth: 1,
+    borderBottomColor: '#21262d',
+    backgroundColor: '#0d1117',
+  },
+  contextualTabNavContent: {
+    gap: 6,
+  },
+  contextualTabNavItem: {
+    minHeight: 44,
+    minWidth: 44,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: 'transparent',
+    backgroundColor: 'transparent',
+    justifyContent: 'center',
+  },
+  contextualTabNavItemText: {
+    color: '#8b949e',
+    fontSize: 12,
+    fontWeight: '500',
   },
   tabNavItemTextActive: {
-    color: '#f7f7fb',
-    fontWeight: '800',
-  },
-  tabDotsRow: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 6,
-    marginBottom: 10,
-    marginTop: 6,
-    minHeight: 12,
+    color: '#e6edf3',
+    fontWeight: '600',
   },
   errorFallback: {
-    margin: 12,
+    margin: 0,
     padding: 16,
-    borderRadius: 4,
+    borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#ef444455',
-    backgroundColor: '#18080a',
+    borderColor: '#f8514948',
+    backgroundColor: '#f8514910',
     gap: 8,
     alignItems: 'flex-start',
   },
   errorFallbackTitle: {
-    color: '#ef4444',
-    fontSize: 12,
-    fontWeight: '800',
-    letterSpacing: 2,
-    fontFamily: MONO,
-  },
-  errorFallbackMessage: {
-    color: '#e0d0d0',
-    fontSize: 12,
-    fontFamily: MONO,
-    lineHeight: 18,
+    color: '#f85149',
+    fontSize: 14,
+    fontWeight: '600',
   },
   errorFallbackHint: {
-    color: '#808090',
-    fontSize: 11,
-    fontFamily: MONO,
-    lineHeight: 16,
+    color: '#8b949e',
+    fontSize: 12,
+    lineHeight: 18,
   },
   errorFallbackBtn: {
     paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 4,
+    minHeight: 44,
+    paddingVertical: 8,
+    borderRadius: 6,
     borderWidth: 1,
     marginTop: 4,
   },
   errorFallbackBtnText: {
-    fontSize: 11,
-    fontWeight: '800',
-    letterSpacing: 1,
-    fontFamily: MONO,
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  headerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    flex: 1,
-  },
-  avatar: {
-    width: 48,
-    height: 48,
-    borderRadius: 12,
-    borderWidth: 2,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  avatarText: {
-    fontSize: 20,
-    fontWeight: '900',
-    fontFamily: MONO,
-  },
-  name: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: '#fff',
-    fontFamily: MONO,
-  },
-  nameRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  renameHint: {
-    fontSize: 13,
-    opacity: 0.4,
-  },
-  renameRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  renameInput: {
-    flex: 1,
-    backgroundColor: '#000000',
-    borderWidth: 1,
-    borderColor: '#6366f1',
-    borderRadius: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-    color: '#eee',
-    fontFamily: MONO,
-    fontSize: 16,
-    fontWeight: '800',
-  },
-  renameSaveBtn: {
-    width: 28,
-    height: 28,
-    borderRadius: 6,
-    backgroundColor: '#22c55e15',
-    borderWidth: 1,
-    borderColor: '#22c55e30',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  renameSaveText: {
-    color: '#22c55e',
-    fontSize: 16,
-    fontWeight: '800',
-  },
-  renameCancelBtn: {
-    width: 28,
-    height: 28,
-    borderRadius: 6,
-    backgroundColor: '#ef444420',
-    borderWidth: 1,
-    borderColor: '#ef444440',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  renameCancelText: {
-    color: '#ef4444',
     fontSize: 12,
-    fontWeight: '800',
-  },
-  roleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginTop: 4,
-  },
-  role: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#a1a1aa',
-    fontFamily: MONO,
-    textTransform: 'uppercase',
-  },
-  modelBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 999,
-    backgroundColor: '#111118',
-    borderWidth: 1,
-    borderColor: '#2a2a3e',
-  },
-  modelText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#ddd',
-    fontFamily: MONO,
-  },
-  statusBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderWidth: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 999,
-  },
-  statusDotSmall: {
-    width: 8,
-    height: 8,
-    borderRadius: 999,
-    marginRight: 6,
-  },
-  statusText: {
-    fontSize: 12,
-    fontWeight: '800',
-    fontFamily: MONO,
-  },
-  connectionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 2,
-    marginBottom: 8,
-  },
-  connectionIcon: {
-    fontSize: 14,
-  },
-  connectionName: {
-    fontSize: 12,
-    fontWeight: '700',
-    fontFamily: MONO,
-    flexShrink: 1,
-  },
-  connectionType: {
-    fontSize: 11,
-    color: '#666',
-    fontFamily: MONO,
-    marginLeft: 'auto',
+    fontWeight: '600',
   },
 });

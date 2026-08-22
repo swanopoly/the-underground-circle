@@ -42,13 +42,28 @@ const objectHelper = section(
   'function isPlainObject(value: unknown)',
   'function boundedString(value: unknown',
 );
+const requestPolicyHelpers = section(
+  'const MAX_RETRIES = 2;',
+  '// Global kill switch',
+);
+const webhookPolicyHelpers = section(
+  'type ApprovedAutomationWebhook = {',
+  'async function routeOutput(',
+);
 const compiled = ts.transpileModule(
   `${objectHelper}
 ${helperSource}
+${requestPolicyHelpers}
+${webhookPolicyHelpers}
 ;(globalThis as any).__automationMutationGuard = {
   redactAutomationText,
   resolveCircleRoomId,
   validateExactMutationApprovalRecord,
+  sanitizeExternalEventPayload,
+  canManuallyRunAutomation,
+  readBoundedAutomationRequest,
+  getApprovedAutomationWebhookUrl,
+  getApprovedTelegramFallback,
 };`,
   {
     compilerOptions: {
@@ -59,7 +74,17 @@ ${helperSource}
 ).outputText;
 const sandbox: Record<string, unknown> = {
   crypto: webcrypto,
+  errResponse: (status: number, code: string, message: string) => new Response(
+    JSON.stringify({ code, message }),
+    { status },
+  ),
+  Headers,
+  ReadableStream,
+  Request,
+  Response,
+  TextDecoder,
   TextEncoder,
+  URL,
 };
 vm.runInNewContext(compiled, sandbox);
 const core = sandbox.__automationMutationGuard as {
@@ -74,6 +99,22 @@ const core = sandbox.__automationMutationGuard as {
     identity: Record<string, unknown>,
     now?: number,
   ) => string | null;
+  sanitizeExternalEventPayload: (value: unknown) => unknown;
+  canManuallyRunAutomation: (
+    userId: string,
+    circleRole: string | null,
+    automationCreatorId: unknown,
+  ) => boolean;
+  readBoundedAutomationRequest: (
+    request: Request,
+  ) => Promise<{ body: Record<string, unknown> } | { response: Response }>;
+  getApprovedAutomationWebhookUrl: (
+    value: unknown,
+  ) => { kind: string; url: string } | null;
+  getApprovedTelegramFallback: (
+    token: unknown,
+    chatId: unknown,
+  ) => { url: string; chatId: string } | null;
 };
 
 async function main() {
@@ -85,6 +126,100 @@ const automationId = '55555555-5555-4555-8555-555555555555';
 const approvalId = '66666666-6666-4666-8666-666666666666';
 const fingerprint = `args-v2:sha256:${'a'.repeat(64)}`;
 const contractFingerprint = `args-v2:sha256:${'b'.repeat(64)}`;
+
+console.log('Manual-run authority and external event bounds');
+{
+  const automationCreator = '77777777-7777-4777-8777-777777777777';
+  const otherMember = '88888888-8888-4888-8888-888888888888';
+  assert(
+    core.canManuallyRunAutomation(automationCreator, 'member', automationCreator),
+    'the automation creator may run their own automation',
+  );
+  assert(
+    core.canManuallyRunAutomation(otherMember, 'creator', automationCreator),
+    'the reviewed circle creator role may run another creator automation',
+  );
+  assert(
+    !core.canManuallyRunAutomation(otherMember, 'member', automationCreator),
+    'an ordinary circle member cannot run another creator automation',
+  );
+  assert(
+    !core.canManuallyRunAutomation(otherMember, 'admin', automationCreator),
+    'an unreviewed future role receives no implicit automation authority',
+  );
+
+  const attackPayload = JSON.parse('{"__proto__":{"polluted":true}}') as Record<string, unknown>;
+  attackPayload.title = 'x'.repeat(5000);
+  attackPayload.items = new Array(130).fill('item');
+  attackPayload.deep = { a: { b: { c: { d: { e: { f: { g: 'escape' } } } } } } };
+  const sanitized = core.sanitizeExternalEventPayload(attackPayload) as Record<string, any>;
+  assert(sanitized.title.length <= 4001, 'individual event strings are bounded');
+  assert(sanitized.items.length === 100, 'event arrays are capped');
+  assert(!Object.prototype.hasOwnProperty.call(sanitized, '__proto__'), 'prototype keys are removed');
+  assert(
+    JSON.stringify(sanitized).includes('[truncated]'),
+    'deep event content is replaced by an explicit truncation marker',
+  );
+
+  const smallRequest = new Request('https://example.test/automation', {
+    method: 'POST',
+    body: JSON.stringify({ automationId, circleId: circleA, triggerSource: 'manual' }),
+  });
+  const smallRead = await core.readBoundedAutomationRequest(smallRequest);
+  assert('body' in smallRead && smallRead.body.triggerSource === 'manual', 'small UTF-8 JSON is parsed');
+
+  const oversizedRequest = {
+    headers: new Headers(),
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(512_001));
+        controller.close();
+      },
+    }),
+  } as Request;
+  const oversizedRead = await core.readBoundedAutomationRequest(oversizedRequest);
+  assert(
+    'response' in oversizedRead && oversizedRead.response.status === 413,
+    'chunked automation bodies are stopped at the actual byte cap',
+  );
+}
+
+console.log('Exact hosted webhook destinations');
+{
+  const telegramToken = `123456789:${'A'.repeat(35)}`;
+  const credentialedSlackUrl = `https://${['user', 'pass'].join(':')}@hooks.slack.com/services/T12345678/B12345678/abcdefghijklmnopqrstuvwx`;
+  const allowed = [
+    [`https://api.telegram.org/bot${telegramToken}/sendMessage?chat_id=-100123`, 'telegram'],
+    ['https://hooks.slack.com/services/T12345678/B12345678/abcdefghijklmnopqrstuvwx', 'slack'],
+    [`https://discord.com/api/webhooks/1234567890/${'a'.repeat(30)}?wait=true`, 'discord'],
+  ] as const;
+  for (const [url, kind] of allowed) {
+    assert(core.getApprovedAutomationWebhookUrl(url)?.kind === kind, `${kind} exact webhook is accepted`);
+  }
+  for (const url of [
+    'http://hooks.slack.com/services/T12345678/B12345678/abcdefghijklmnopqrstuvwx',
+    'https://hooks.slack.com.evil.example/services/T12345678/B12345678/abcdefghijklmnopqrstuvwx',
+    credentialedSlackUrl,
+    'https://hooks.slack.com:444/services/T12345678/B12345678/abcdefghijklmnopqrstuvwx',
+    'https://hooks.slack.com/services/T12345678/B12345678/abcdefghijklmnopqrstuvwx#secret',
+    'https://127.0.0.1/internal',
+    `https://api.telegram.org/bot${telegramToken}/getUpdates`,
+    `https://api.telegram.org/bot${telegramToken}/sendMessage`,
+    `https://api.telegram.org/bot${telegramToken}/sendMessage?redirect=https://evil.example`,
+    `https://discord.com/api/webhooks/1234567890/${'a'.repeat(30)}/extra`,
+  ]) {
+    assert(core.getApprovedAutomationWebhookUrl(url) === null, `webhook SSRF shape is rejected: ${url}`);
+  }
+  assert(
+    core.getApprovedTelegramFallback(telegramToken, '-100123')?.chatId === '-100123',
+    'circle Telegram fallback validates both bot token and chat identity',
+  );
+  assert(
+    core.getApprovedTelegramFallback('bad-token', '-100123') === null
+      && core.getApprovedTelegramFallback(telegramToken, 'https://evil.example') === null,
+    'invalid Telegram fallback settings fail closed',
+  );
+}
 
 function roomClient() {
   const filters = new Map<string, unknown>();
@@ -296,6 +431,49 @@ console.log('Dispatch and retry source contract');
     source.includes('Model output is never authorization')
       && !source.includes('You have FULL ACCESS to create, update, and delete files'),
     'the model prompt cannot imply its own mutation authority',
+  );
+}
+
+console.log('Request, billing, and service-run source contract');
+{
+  const handlerStart = source.indexOf('Deno.serve(async (req: Request) => {');
+  assert(handlerStart >= 0, 'automation request handler is present');
+  const handler = source.slice(handlerStart);
+  const authAt = handler.indexOf('const authedUser = isServiceCaller ? null : await getAuthenticatedUser(req);');
+  const boundedReadAt = handler.indexOf('await readBoundedAutomationRequest(req)');
+  assert(authAt >= 0 && boundedReadAt > authAt, 'authorization precedes bounded JSON parsing');
+  assert(
+    handler.includes('.select("circle_id,role")')
+      && handler.includes('canManuallyRunAutomation(authedUser.id, callerCircleRole, automation.created_by)'),
+    'manual execution is bound to reviewed circle role and automation ownership',
+  );
+  assert(
+    handler.includes('const keyOwnerId = authedUser?.id || automation.created_by || null;')
+      && handler.includes('userId: keyOwnerId'),
+    'manual BYOK resolution and usage attribution prefer the authenticated caller',
+  );
+  assert(
+    handler.includes('triggerSource === "manual"')
+      && handler.includes('&& requestedRunId')
+      && handler.includes('&& mutationAuthorizations.length > 0')
+      && handler.includes('} else if (!interactiveMutationEligible) {'),
+    'only an exact authorized interactive run is mutation-eligible',
+  );
+  assert(
+    handler.includes('wrapUntrusted(JSON.stringify(eventPayload)')
+      && handler.includes('wrapUntrusted(githubEventsContext')
+      && handler.includes('This run is mutation-ineligible.'),
+    'event and GitHub content is fenced and non-interactive prompts deny mutation authority',
+  );
+
+  const routing = section('async function routeOutput(', '// ─── Build detailed report task');
+  assert(
+    routing.includes('getApprovedAutomationWebhookUrl(webhookUrl)')
+      && routing.includes('fetch(approvedWebhook.url')
+      && routing.includes('redirect: "manual"')
+      && !routing.includes('fetch(webhookUrl')
+      && !routing.includes('webhookUrl.includes'),
+    'webhook dispatch uses only validated exact destinations with redirects disabled',
   );
 }
 

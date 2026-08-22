@@ -68,10 +68,9 @@ export function installErrorReporter() {
   if (Platform.OS !== 'web' || typeof window === 'undefined') return;
 
   window.addEventListener('unhandledrejection', (event: PromiseRejectionEvent) => {
-    // Supabase's GoTrueClient can fire AbortError on the web's no-op lock
-    // (see CLAUDE.md "Web Platform Stability"). That particular error is a
-    // symptom we already mitigate via safeGetUser; log it at a low level so
-    // the buffer stays useful for the rest.
+    // Supabase's GoTrueClient can surface AbortError when a backgrounded tab
+    // loses a bounded Web Lock wait. Safe auth reads contain that transient
+    // failure; tag it at a low level so the buffer stays useful for the rest.
     const reason = event.reason;
     const message = toStringSafe(reason);
     const isBenignAbort = /AbortError/i.test(message);

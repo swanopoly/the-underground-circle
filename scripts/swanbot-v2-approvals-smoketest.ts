@@ -11,8 +11,8 @@
  *     signed UI or another out-of-band operator flow
  *
  * Client-side credentials.get (reimplemented from src/lib/swanbot.ts):
- *   - Requires item; passes vault + fields straight through
- *   - Bridge failure surfaces error cleanly
+ *   - Always fails before provider lookup
+ *   - Never returns raw fields into model-visible tool content
  *
  * Run: npm run smoke:swanbot-v2-approvals
  */
@@ -142,22 +142,13 @@ async function approvalsResolve(_input: any, _ctx: Ctx): Promise<Result> {
 
 // ─── credentials.get client dispatcher shim ────────────────────────
 async function dispatchCredentialsGet(
-  stubGet: (opts: { item: string; vault?: string; fields?: string[] }) => Promise<any>,
-  input: Record<string, any>,
+  _stubGet: (opts: { item: string; vault?: string; fields?: string[] }) => Promise<any>,
+  _input: Record<string, any>,
 ) {
-  const item = String(input?.item || "").trim();
-  if (!item) return { ok: false, error: "item required" };
-  const vault = typeof input?.vault === "string" ? input.vault.trim() : undefined;
-  const fields = Array.isArray(input?.fields)
-    ? (input.fields as unknown[]).map((f) => String(f)).filter(Boolean)
-    : undefined;
-  try {
-    const r = await stubGet({ item, vault, fields });
-    if (!r.ok) return { ok: false, error: r.error || "credential fetch failed" };
-    return { ok: true, data: { item, vault: vault || null, fields: r.fields } };
-  } catch (e: any) {
-    return { ok: false, error: e?.message || String(e) };
-  }
+  return {
+    ok: false,
+    error: "credentials.get is disabled for model-side tools because raw secret values must never enter model-visible tool results",
+  };
 }
 
 // ─── Test runner ───────────────────────────────────────────────────
@@ -170,6 +161,8 @@ function assert(cond: unknown, name: string, detail?: string) {
 
 async function main() {
   const edgeSource = readFileSync("supabase/functions/swanbot-v2-ai/index.ts", "utf8");
+  const swanbotSource = readFileSync("src/lib/swanbot.ts", "utf8");
+  const runtimeSource = readFileSync("src/lib/openswanToolRuntime.ts", "utf8");
   assert(
     edgeSource.includes('approvals: ["approvals.list", "approvals.request"]'),
     "source guard: approvals.resolve is not selected for model tools",
@@ -181,6 +174,40 @@ async function main() {
   assert(
     edgeSource.includes("approvals.resolve is disabled for SwanBot model-side tools"),
     "source guard: approvals.resolve handler fails closed",
+  );
+  assert(
+    edgeSource.includes("Unavailable to model-side tools: raw credential values are never returned to the model"),
+    "source guard: dormant edge definition labels credentials.get unavailable",
+  );
+  assert(
+    edgeSource.includes('const MODEL_DISABLED_TOOL_NAMES = new Set(['),
+    "source guard: edge selection withholds every disabled model tool",
+  );
+  const selectToolsStart = edgeSource.indexOf('function selectToolsForTurn(');
+  const selectToolsEnd = edgeSource.indexOf('function resolveToolsByName(', selectToolsStart);
+  const selectToolsSource = edgeSource.slice(selectToolsStart, selectToolsEnd);
+  assert(
+    selectToolsStart >= 0
+      && selectToolsEnd > selectToolsStart
+      && selectToolsSource.includes('!MODEL_DISABLED_TOOL_NAMES.has(tool.name)')
+      && selectToolsSource.includes('TOOLS.filter((tool) => !MODEL_DISABLED_TOOL_NAMES.has(tool.name))'),
+    "source guard: fresh and fallback edge tool selection both withhold disabled tools",
+  );
+  assert(
+    edgeSource.includes('credentials: ["browser.verification_state", "approvals.request"]')
+      && !edgeSource.includes('prefer browser.fill_credential_field over credentials.get'),
+    "source guard: login guidance cannot steer the model into disabled credential tools",
+  );
+  const loopSafeStart = runtimeSource.indexOf('const TOOL_LOOP_SAFE_NAMES');
+  const loopSafeEnd = runtimeSource.indexOf(']);', loopSafeStart);
+  const loopSafeSource = runtimeSource.slice(loopSafeStart, loopSafeEnd);
+  assert(
+    loopSafeStart >= 0
+      && loopSafeEnd > loopSafeStart
+      && !loopSafeSource.includes("'approvals.resolve'")
+      && !loopSafeSource.includes("'browser.fill_credential_field'")
+      && !loopSafeSource.includes("'credentials.get'"),
+    "source guard: typed model catalog withholds disabled approval and credential tools",
   );
 
   // ─── approvals.list ──────────────────────────────────────────
@@ -270,30 +297,22 @@ async function main() {
     const happyGet = async (opts: any) => { calls.push(opts); return { ok: true, fields: { username: "u", password: "p" } }; };
 
     const r1 = await dispatchCredentialsGet(happyGet, { item: "WordPress", vault: "Prod", fields: ["username", "password"] });
-    assert(r1.ok, "credentials.get: happy path ok");
-    assert((r1.data as any).vault === "Prod", "credentials.get: vault passthrough");
-    assert((r1.data as any).fields.username === "u", "credentials.get: fields returned");
-    assert(calls[0].fields[0] === "username", "credentials.get: fields array passed through");
+    assert(!r1.ok && /disabled for model-side tools/.test(r1.error!), "credentials.get: model-side retrieval is disabled");
+    assert(calls.length === 0, "credentials.get: provider lookup is never entered");
+    assert(!("data" in r1), "credentials.get: no raw field envelope can reach the model");
 
-    // Missing item
-    const r2 = await dispatchCredentialsGet(happyGet, {});
-    assert(!r2.ok && /item required/.test(r2.error!), "credentials.get: missing item rejected");
-
-    // Non-string fields filtered out
-    const r3 = await dispatchCredentialsGet(happyGet, { item: "x", fields: ["ok", "", 42, null, "also"] });
-    assert(r3.ok, "credentials.get: mixed fields still ok");
-    const passed = calls.at(-1)!.fields;
-    assert(passed.includes("ok") && passed.includes("also") && !passed.includes(""), "credentials.get: empty/junk fields filtered");
-
-    // Bridge offline
-    const deadGet = async () => ({ ok: false, error: "Bridge not running", fields: {} });
-    const r4 = await dispatchCredentialsGet(deadGet, { item: "x" });
-    assert(!r4.ok && /Bridge not running/.test(r4.error!), "credentials.get: bridge offline surfaces error");
-
-    // Thrown error
-    const throwGet = async () => { throw new Error("op CLI missing"); };
-    const r5 = await dispatchCredentialsGet(throwGet, { item: "x" });
-    assert(!r5.ok && /op CLI missing/.test(r5.error!), "credentials.get: throw surfaced as error");
+    const dispatcherStart = swanbotSource.indexOf("async function dispatchCredentialsGet(");
+    const dispatcherEnd = swanbotSource.indexOf("\nasync function dispatchVerification(", dispatcherStart);
+    const dispatcherSource = swanbotSource.slice(dispatcherStart, dispatcherEnd);
+    assert(dispatcherStart >= 0 && dispatcherEnd > dispatcherStart, "credentials.get: production dispatcher source is bounded");
+    assert(
+      dispatcherSource.includes("credentials.get is disabled for model-side tools"),
+      "credentials.get: production dispatcher fails closed",
+    );
+    assert(
+      !dispatcherSource.includes("fields: r.fields") && !dispatcherSource.includes("getCredentials"),
+      "credentials.get: production dispatcher cannot serialize or fetch secret fields",
+    );
   }
 
   if (failures > 0) {

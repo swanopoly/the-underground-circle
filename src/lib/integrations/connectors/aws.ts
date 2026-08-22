@@ -34,6 +34,7 @@
 
 import type { ConnectorAdapter } from '../types';
 import { supabase } from '../../supabase';
+import { saveCircleIntegrationSecrets } from '../../circleIntegrations';
 
 const PROVIDER_ID = 'aws';
 
@@ -153,16 +154,13 @@ export async function saveAwsConnection(opts: {
   // it's not an access credential, just an identifier). The external ID IS
   // the secret because anyone with it + our AWS account ID can theoretically
   // probe whether they can assume the role.
-  const { error: secretErr } = await supabase
-    .from('circle_integration_secrets')
-    .upsert({
-      integration_id: integration.id,
-      key: 'external_id',
-      value_encrypted: externalId, // Supabase encrypts at rest; for application-level encryption add a wrapper here.
-    }, { onConflict: 'integration_id,key' });
+  const secretSaved = await saveCircleIntegrationSecrets({
+    integrationId: integration.id,
+    secrets: { external_id: externalId },
+  });
 
-  if (secretErr) {
-    return { ok: false, error: `Saved integration but failed to store external ID: ${secretErr.message}` };
+  if (!secretSaved) {
+    return { ok: false, error: 'Saved integration but failed to store the external ID securely.' };
   }
 
   return { ok: true, integrationId: integration.id };

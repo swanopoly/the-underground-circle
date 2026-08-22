@@ -1,12 +1,12 @@
 /**
  * browserPrimitives — pure, dependency-light shapes + normalizers for the
- * Lane-A browser primitives (multi-tab, downloads, explicit waits, wheel
+ * Lane-A browser primitives (multi-tab, downloads, explicit waits, semantic
  * scroll). No fetch / no Supabase / no react-native so smoke tests import
  * this in Node, and `scripts/browser-bridge.js` (plain CommonJS) mirrors
  * the same shapes.
  *
  * Why a separate pure module: the tab-list normalizer, download-proof
- * builder, wait-spec parser, and scroll clamp are the parts most worth
+ * builder, wait parsers, and scroll normalizers are the parts most worth
  * covering with an offline smoke test — they are where garbage input,
  * duplicate-active tabs, or an oversized wheel delta would otherwise slip
  * through to the live browser. The bridge server (browser-bridge.js) and
@@ -282,6 +282,237 @@ export function describeWaitForSpec(spec: WaitForSpec): string {
   }
 }
 
+// ─── Semantic wait request ─────────────────────────────────────────────────
+
+/**
+ * Model-facing wait conditions. These deliberately avoid raw CSS selectors:
+ * element waits use an exact ARIA role + accessible name, while page waits use
+ * a named lifecycle condition. The bridge never echoes the role/name back in
+ * its receipt, keeping page-derived target text out of persisted tool results.
+ */
+export const BROWSER_SEMANTIC_WAIT_CONDITIONS = [
+  'page_loaded',
+  'dom_ready',
+  'network_idle',
+  'element_visible',
+  'element_hidden',
+  'delay',
+] as const;
+
+export type BrowserSemanticWaitCondition = typeof BROWSER_SEMANTIC_WAIT_CONDITIONS[number];
+
+/**
+ * Complete opaque identity copied from one fresh `browser.dom_snapshot`.
+ * Semantic waits and scrolls are deliberately bound to that exact live
+ * document; neither primitive is allowed to follow whichever tab happens to
+ * be current when its request reaches the bridge.
+ */
+export type BrowserSemanticPageIdentityExpectation = {
+  expectedBrowserProcessId: string;
+  expectedBrowserContextId: string;
+  expectedPageId: string;
+  expectedUrl: string;
+};
+
+export type BrowserSemanticWaitInput = BrowserSemanticPageIdentityExpectation & {
+  condition: BrowserSemanticWaitCondition;
+  role?: string;
+  name?: string;
+  /** Semantic element waits are always exact; false is rejected. */
+  exact?: true;
+  timeoutMs?: number;
+};
+
+export type BrowserSemanticWaitSpec = BrowserSemanticPageIdentityExpectation & (
+  | {
+      mode: 'state';
+      condition: 'page_loaded' | 'dom_ready' | 'network_idle';
+      state: WaitForLoadState;
+      timeoutMs: number;
+    }
+  | {
+      mode: 'element';
+      condition: 'element_visible' | 'element_hidden';
+      role: string;
+      name: string;
+      exact: true;
+      state: 'visible' | 'hidden';
+      timeoutMs: number;
+    }
+  | {
+      mode: 'delay';
+      condition: 'delay';
+      timeoutMs: number;
+    }
+);
+
+export type BrowserPrimitiveNormalization<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: string };
+
+const SEMANTIC_PAGE_IDENTITY_FIELDS = [
+  'expectedBrowserProcessId',
+  'expectedBrowserContextId',
+  'expectedPageId',
+  'expectedUrl',
+] as const;
+const SEMANTIC_WAIT_FIELDS = new Set([
+  'condition',
+  'role',
+  'name',
+  'exact',
+  'timeoutMs',
+  ...SEMANTIC_PAGE_IDENTITY_FIELDS,
+]);
+const SEMANTIC_WAIT_CONDITION_SET = new Set<string>(BROWSER_SEMANTIC_WAIT_CONDITIONS);
+const BROWSER_OPAQUE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+const BROWSER_OPAQUE_URL_IDENTITY_PATTERN = /^uc_browser_url_[a-f0-9]{64}$/;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function hasOnlyFields(value: Record<string, unknown>, allowed: ReadonlySet<string>): boolean {
+  return Reflect.ownKeys(value).every((key) => typeof key === 'string' && allowed.has(key));
+}
+
+function boundedInteger(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+): BrowserPrimitiveNormalization<number> {
+  if (value == null) return { ok: true, value: fallback };
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) {
+    return { ok: false, error: `timeoutMs must be an integer from ${min} to ${max}` };
+  }
+  return { ok: true, value };
+}
+
+function normalizeBrowserSemanticPageIdentity(
+  input: Record<string, unknown>,
+): BrowserPrimitiveNormalization<BrowserSemanticPageIdentityExpectation> {
+  const expectedBrowserProcessId = input.expectedBrowserProcessId;
+  const expectedBrowserContextId = input.expectedBrowserContextId;
+  const expectedPageId = input.expectedPageId;
+  const expectedUrl = input.expectedUrl;
+  const validOpaqueId = (value: unknown): value is string => (
+    typeof value === 'string'
+    && value.length >= 20
+    && value.length <= 180
+    && BROWSER_OPAQUE_ID_PATTERN.test(value)
+  );
+  if (
+    !validOpaqueId(expectedBrowserProcessId)
+    || !validOpaqueId(expectedBrowserContextId)
+    || !validOpaqueId(expectedPageId)
+    || typeof expectedUrl !== 'string'
+    || !BROWSER_OPAQUE_URL_IDENTITY_PATTERN.test(expectedUrl)
+  ) {
+    return {
+      ok: false,
+      error: 'a complete opaque browser process, context, page, and URL identity is required',
+    };
+  }
+  return {
+    ok: true,
+    value: {
+      expectedBrowserProcessId,
+      expectedBrowserContextId,
+      expectedPageId,
+      expectedUrl,
+    },
+  };
+}
+
+/**
+ * Strict model-facing wait normalizer. Unknown keys, selectors, fuzzy element
+ * matching, incomplete semantic locators, and unbounded/zero lifecycle waits
+ * are rejected before the local bridge is called.
+ */
+export function normalizeBrowserSemanticWait(
+  input: unknown,
+): BrowserPrimitiveNormalization<BrowserSemanticWaitSpec> {
+  if (!isPlainObject(input) || !hasOnlyFields(input, SEMANTIC_WAIT_FIELDS)) {
+    return { ok: false, error: 'wait request must contain only semantic wait fields' };
+  }
+  const identity = normalizeBrowserSemanticPageIdentity(input);
+  if (!identity.ok) return identity;
+  const condition = typeof input.condition === 'string' ? input.condition.trim().toLowerCase() : '';
+  if (!SEMANTIC_WAIT_CONDITION_SET.has(condition)) {
+    return { ok: false, error: 'condition must be a supported semantic wait condition' };
+  }
+
+  if (condition === 'delay') {
+    if ('role' in input || 'name' in input || 'exact' in input || input.timeoutMs == null) {
+      return { ok: false, error: 'delay waits require only an explicit timeoutMs' };
+    }
+    const timeout = boundedInteger(input.timeoutMs, 1_000, 0, WAIT_FOR_MAX_DELAY_MS);
+    return timeout.ok
+      ? {
+          ok: true,
+          value: {
+            ...identity.value,
+            mode: 'delay',
+            condition: 'delay',
+            timeoutMs: timeout.value,
+          },
+        }
+      : timeout;
+  }
+
+  const elementCondition = condition === 'element_visible' || condition === 'element_hidden';
+  if (elementCondition) {
+    const role = typeof input.role === 'string' ? input.role.trim().toLowerCase() : '';
+    const name = typeof input.name === 'string' ? input.name.trim() : '';
+    if (!role || role.length > 100 || !name || name.length > 500) {
+      return { ok: false, error: 'element waits require a bounded ARIA role and accessible name' };
+    }
+    if (input.exact !== undefined && input.exact !== true) {
+      return { ok: false, error: 'semantic element waits must use exact matching' };
+    }
+    const timeout = boundedInteger(input.timeoutMs, WAIT_FOR_DEFAULT_TIMEOUT_MS, 100, WAIT_FOR_MAX_TIMEOUT_MS);
+    if (!timeout.ok) return timeout;
+    return {
+      ok: true,
+      value: {
+        ...identity.value,
+        mode: 'element',
+        condition,
+        role,
+        name,
+        exact: true,
+        state: condition === 'element_visible' ? 'visible' : 'hidden',
+        timeoutMs: timeout.value,
+      },
+    };
+  }
+
+  if ('role' in input || 'name' in input || 'exact' in input) {
+    return { ok: false, error: 'page lifecycle waits do not accept an element target' };
+  }
+  const timeout = boundedInteger(input.timeoutMs, WAIT_FOR_DEFAULT_TIMEOUT_MS, 100, WAIT_FOR_MAX_TIMEOUT_MS);
+  if (!timeout.ok) return timeout;
+  const loadStateByCondition: Record<'page_loaded' | 'dom_ready' | 'network_idle', WaitForLoadState> = {
+    page_loaded: 'load',
+    dom_ready: 'domcontentloaded',
+    network_idle: 'networkidle',
+  };
+  const pageCondition = condition as 'page_loaded' | 'dom_ready' | 'network_idle';
+  return {
+    ok: true,
+    value: {
+      ...identity.value,
+      mode: 'state',
+      condition: pageCondition,
+      state: loadStateByCondition[pageCondition],
+      timeoutMs: timeout.value,
+    },
+  };
+}
+
 // ─── Scroll delta ────────────────────────────────────────────────────────────
 
 export interface ScrollDelta {
@@ -315,4 +546,76 @@ export function normalizeScrollDelta(input: unknown): ScrollDelta {
   // infinite-scroll/lazy content advances.
   if (!hasDx && !hasDy) dy = 600;
   return { dx, dy };
+}
+
+// ─── Semantic scroll request ────────────────────────────────────────────────
+
+export const BROWSER_SCROLL_DIRECTIONS = ['up', 'down', 'left', 'right'] as const;
+export const BROWSER_SCROLL_AMOUNTS = ['small', 'medium', 'large'] as const;
+
+export type BrowserScrollDirection = typeof BROWSER_SCROLL_DIRECTIONS[number];
+export type BrowserScrollAmount = typeof BROWSER_SCROLL_AMOUNTS[number];
+
+export type BrowserSemanticScrollInput = BrowserSemanticPageIdentityExpectation & {
+  direction: BrowserScrollDirection;
+  amount?: BrowserScrollAmount;
+};
+
+export interface BrowserSemanticScrollSpec extends BrowserSemanticPageIdentityExpectation {
+  direction: BrowserScrollDirection;
+  amount: BrowserScrollAmount;
+  dx: number;
+  dy: number;
+}
+
+const SEMANTIC_SCROLL_FIELDS = new Set([
+  'direction',
+  'amount',
+  ...SEMANTIC_PAGE_IDENTITY_FIELDS,
+]);
+const SEMANTIC_SCROLL_DIRECTION_SET = new Set<string>(BROWSER_SCROLL_DIRECTIONS);
+const SEMANTIC_SCROLL_AMOUNT_SET = new Set<string>(BROWSER_SCROLL_AMOUNTS);
+const SEMANTIC_SCROLL_PIXELS: Record<BrowserScrollAmount, number> = {
+  small: 300,
+  medium: 600,
+  large: 1_200,
+};
+
+/**
+ * Convert a direction/amount gesture into one bounded wheel delta. Raw dx/dy,
+ * unknown keys, and invalid enum values fail closed instead of being coerced.
+ */
+export function normalizeBrowserSemanticScroll(
+  input: unknown,
+): BrowserPrimitiveNormalization<BrowserSemanticScrollSpec> {
+  if (!isPlainObject(input) || !hasOnlyFields(input, SEMANTIC_SCROLL_FIELDS)) {
+    return { ok: false, error: 'scroll request must contain only direction, amount, and exact page identity' };
+  }
+  const identity = normalizeBrowserSemanticPageIdentity(input);
+  if (!identity.ok) return identity;
+  const direction = typeof input.direction === 'string' ? input.direction.trim().toLowerCase() : '';
+  const amount = input.amount == null
+    ? 'medium'
+    : typeof input.amount === 'string'
+      ? input.amount.trim().toLowerCase()
+      : '';
+  if (!SEMANTIC_SCROLL_DIRECTION_SET.has(direction)) {
+    return { ok: false, error: 'direction must be up, down, left, or right' };
+  }
+  if (!SEMANTIC_SCROLL_AMOUNT_SET.has(amount)) {
+    return { ok: false, error: 'amount must be small, medium, or large' };
+  }
+  const semanticDirection = direction as BrowserScrollDirection;
+  const semanticAmount = amount as BrowserScrollAmount;
+  const pixels = SEMANTIC_SCROLL_PIXELS[semanticAmount];
+  return {
+    ok: true,
+    value: {
+      ...identity.value,
+      direction: semanticDirection,
+      amount: semanticAmount,
+      dx: semanticDirection === 'left' ? -pixels : semanticDirection === 'right' ? pixels : 0,
+      dy: semanticDirection === 'up' ? -pixels : semanticDirection === 'down' ? pixels : 0,
+    },
+  };
 }

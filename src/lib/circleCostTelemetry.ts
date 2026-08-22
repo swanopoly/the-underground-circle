@@ -273,7 +273,7 @@ export function sourceLabel(src: string): string {
 
 /** Per-source accent for the stacked spend bar. */
 export function sourceAccent(src: string): string {
-  if (src.startsWith('computer-use'))  return '#22d3ee'; // cyan
+  if (src.startsWith('computer-use'))  return '#6366f1'; // cyan
   if (src.startsWith('automation'))    return '#f59e0b'; // amber
   if (src.startsWith('swanbot'))       return '#a855f7'; // purple
   if (src.startsWith('chat-stream'))   return '#38bdf8'; // sky

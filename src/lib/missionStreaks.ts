@@ -11,6 +11,9 @@
  */
 import { supabase } from './supabase';
 import { useState, useEffect, useCallback } from 'react';
+import { safeGetUserForAccessToken } from './authSession';
+import { normalizeMissionStreakRowExact } from './missionStreakExactCore';
+export { normalizeMissionStreakRowExact } from './missionStreakExactCore';
 
 export interface MissionStreak {
   userId: string;
@@ -21,6 +24,103 @@ export interface MissionStreak {
   longestStreak: number;
   lastCompletionDate: string | null; // YYYY-MM-DD
   totalTasksCompleted: number;
+}
+
+export type MissionStreakExactAuthority = Readonly<{
+  userId: string;
+  circleId: string;
+  accessToken: string;
+  generation: number;
+}>;
+
+export type MissionStreakExactAuthorityFence = (
+  authority: MissionStreakExactAuthority,
+) => boolean;
+
+export type MissionStreakExactReadResult =
+  | Readonly<{ ok: true; streak: MissionStreak | null }>
+  | Readonly<{
+      ok: false;
+      error: 'invalid_authority' | 'authority_retired' | 'authority_mismatch' | 'backend_error' | 'invalid_response';
+    }>;
+
+const EXACT_STREAK_SCOPE_PART_MAX = 240;
+const EXACT_STREAK_ACCESS_TOKEN_MAX = 16_384;
+
+function normalizeExactStreakScopePart(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return normalized && normalized.length <= EXACT_STREAK_SCOPE_PART_MAX ? normalized : null;
+}
+
+function normalizeMissionStreakExactAuthority(
+  authority: MissionStreakExactAuthority | null | undefined,
+): MissionStreakExactAuthority | null {
+  const userId = normalizeExactStreakScopePart(authority?.userId);
+  const circleId = normalizeExactStreakScopePart(authority?.circleId);
+  const accessToken = typeof authority?.accessToken === 'string' ? authority.accessToken.trim() : '';
+  const generation = Number(authority?.generation);
+  if (
+    !userId
+    || !circleId
+    || !accessToken
+    || accessToken.length > EXACT_STREAK_ACCESS_TOKEN_MAX
+    || !Number.isSafeInteger(generation)
+    || generation <= 0
+  ) return null;
+  return { userId, circleId, accessToken, generation };
+}
+
+function isExactStreakAuthorityCurrent(
+  authority: MissionStreakExactAuthority,
+  fence: MissionStreakExactAuthorityFence,
+): boolean {
+  try {
+    return fence(authority) === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Bearer-bound, generation-fenced streak read for authority-sensitive panels.
+ * Unlike the legacy local-first helper, backend and schema failures are
+ * explicit and can never be presented as a verified zero-day streak.
+ */
+export async function loadMissionStreakExact(
+  capturedAuthority: MissionStreakExactAuthority,
+  fence: MissionStreakExactAuthorityFence,
+): Promise<MissionStreakExactReadResult> {
+  const authority = normalizeMissionStreakExactAuthority(capturedAuthority);
+  if (!authority || typeof fence !== 'function') return { ok: false, error: 'invalid_authority' };
+  if (!isExactStreakAuthorityCurrent(authority, fence)) return { ok: false, error: 'authority_retired' };
+
+  try {
+    const { value: verifiedUser, error: authError } = await safeGetUserForAccessToken(authority.accessToken);
+    if (!isExactStreakAuthorityCurrent(authority, fence)) return { ok: false, error: 'authority_retired' };
+    if (authError || verifiedUser?.id !== authority.userId) {
+      return { ok: false, error: 'authority_mismatch' };
+    }
+
+    const { data, error } = await supabase
+      .from('mission_streaks')
+      .select('user_id, circle_id, current_streak, longest_streak, last_completion_date, total_tasks_completed')
+      .eq('user_id', authority.userId)
+      .eq('circle_id', authority.circleId)
+      .limit(2)
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+    if (!isExactStreakAuthorityCurrent(authority, fence)) return { ok: false, error: 'authority_retired' };
+    if (error) return { ok: false, error: 'backend_error' };
+    if (!Array.isArray(data) || data.length > 1) return { ok: false, error: 'invalid_response' };
+    const streak = normalizeMissionStreakRowExact(data[0] ?? null, authority);
+    return streak === undefined
+      ? { ok: false, error: 'invalid_response' }
+      : { ok: true, streak };
+  } catch {
+    return isExactStreakAuthorityCurrent(authority, fence)
+      ? { ok: false, error: 'backend_error' }
+      : { ok: false, error: 'authority_retired' };
+  }
 }
 
 const STREAK_KEY_PREFIX = 'uc_mission_streak_';

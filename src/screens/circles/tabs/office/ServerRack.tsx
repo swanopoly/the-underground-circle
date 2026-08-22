@@ -153,7 +153,7 @@ function AgentBlade({
         <BlinkingLED color="#3b82f6" delay={index * 150 + 160} size={2} />
         <BlinkingLED color={agent.status === 'active' ? '#22c55e' : '#333'} delay={index * 150 + 240} size={2} />
         <BlinkingLED color={agent.turns > 0 ? '#6366f1' : '#222'} delay={index * 150 + 320} size={2} />
-        <BlinkingLED color={cacheRate > 50 ? '#22d3ee' : '#222'} delay={index * 150 + 400} size={2} />
+        <BlinkingLED color={cacheRate > 50 ? '#6366f1' : '#222'} delay={index * 150 + 400} size={2} />
       </View>
 
       {/* CPU / MEM load bars */}
@@ -386,7 +386,7 @@ export default function ServerRack({ agents = [] }: { agents?: OfficeAgent[] }) 
               </View>
               <View style={s.collapsedStatCell}>
                 <Text style={s.collapsedStatLabel}>COST</Text>
-                <Text style={[s.collapsedStatVal, { color: '#22d3ee' }]}>${totalCost.toFixed(3)}</Text>
+                <Text style={[s.collapsedStatVal, { color: '#6366f1' }]}>${totalCost.toFixed(3)}</Text>
               </View>
               <View style={s.collapsedStatCell}>
                 <Text style={s.collapsedStatLabel}>SCORE</Text>
@@ -706,7 +706,7 @@ export default function ServerRack({ agents = [] }: { agents?: OfficeAgent[] }) 
         <View style={s.netPanel}>
           <View style={s.netPanelHeader}>
             <Text style={s.netPanelTitle}>NET / OPS</Text>
-            <BlinkingLED color="#22d3ee" delay={100} size={3} />
+            <BlinkingLED color="#6366f1" delay={100} size={3} />
           </View>
 
           {/* Network activity LEDs */}
@@ -1122,7 +1122,7 @@ const s = StyleSheet.create({
   },
   sysPanelTitle: {
     fontSize: 5,
-    color: '#22d3ee',
+    color: '#6366f1',
     fontFamily: 'monospace',
     fontWeight: '800',
     letterSpacing: 0.5,
@@ -1183,7 +1183,7 @@ const s = StyleSheet.create({
   },
   sysCost: {
     fontSize: 4,
-    color: '#22d3ee',
+    color: '#6366f1',
     fontFamily: 'monospace',
     fontWeight: '800',
   },
@@ -1416,7 +1416,7 @@ const s = StyleSheet.create({
     fontWeight: '700',
   },
   bladeTermCost: {
-    color: '#22d3ee',
+    color: '#6366f1',
     fontWeight: '800',
   },
   cacheHigh: {
@@ -1545,7 +1545,7 @@ const s = StyleSheet.create({
   },
   netPanelTitle: {
     fontSize: 5,
-    color: '#22d3ee',
+    color: '#6366f1',
     fontFamily: 'monospace',
     fontWeight: '800',
     letterSpacing: 0.5,

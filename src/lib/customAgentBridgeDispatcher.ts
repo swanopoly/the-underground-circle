@@ -6,6 +6,13 @@ export interface CustomAgentBridgeTarget {
   name: string;
   provider: string;
   gatewayUrl?: string | null;
+  /** Public Office ownership. Used only to prohibit borrowing local secrets. */
+  ownerId?: string | null;
+  currentUserId?: string | null;
+  isOwn?: boolean;
+  source?: 'db' | 'openswan-session' | 'bridge-session' | 'default';
+  /** Optional immutable local connection identity for a locally selected target. */
+  connectionId?: string | null;
   circleId?: string | null;
   model?: string | null;
   sessionKey?: string | null;
@@ -13,6 +20,8 @@ export interface CustomAgentBridgeTarget {
 
 export interface CustomAgentBridgeDispatchResult {
   ok: boolean;
+  /** true=explicitly accepted; false=proven pre-dispatch rejection; null=do not replay. */
+  transportAccepted: boolean | null;
   response?: string;
   error?: string;
   endpoint?: string;
@@ -54,19 +63,37 @@ export function findCustomAgentConnection(
   const targetName = normalizeName(target.name);
   const gateway = normalizeEndpoint(target.gatewayUrl);
 
+  if (target.connectionId) {
+    const exactId = connections.filter((conn) => conn.enabled && conn.id === target.connectionId);
+    return exactId.length === 1 ? exactId[0] : null;
+  }
+
+  if (gateway) {
+    const exactEndpoint = connections.filter((conn) => (
+      conn.enabled && normalizeEndpoint(conn.endpoint) === gateway
+    ));
+    return exactEndpoint.length === 1 ? exactEndpoint[0] : null;
+  }
+
+  // A published Office row is a public profile, not a private connection
+  // capability. Provider/name similarity must never select a local endpoint or
+  // authorize its token for that row. Published targets require either an
+  // immutable connection id or an explicit gateway whose endpoint matches.
+  if (target.source === 'db') return null;
+
   const candidates = connections.filter((conn) => {
     if (!conn.enabled) return false;
     const connProvider = normalizeCustomAgentProvider(conn.provider);
     if (connProvider === provider) return true;
     if (provider !== 'generic-agent' && connProvider === 'generic-agent') return true;
-    if (gateway && normalizeEndpoint(conn.endpoint) === gateway) return true;
     return targetName && normalizeName(conn.name) === targetName;
   });
 
-  return candidates.find((conn) => normalizeEndpoint(conn.endpoint) === gateway)
-    || candidates.find((conn) => normalizeCustomAgentProvider(conn.provider) === provider)
-    || candidates[0]
-    || null;
+  const providerMatches = candidates.filter((conn) => normalizeCustomAgentProvider(conn.provider) === provider);
+  if (providerMatches.length === 1) return providerMatches[0];
+  if (providerMatches.length > 1) return null;
+  const genericMatches = candidates.filter((conn) => normalizeCustomAgentProvider(conn.provider) === 'generic-agent');
+  return genericMatches.length === 1 ? genericMatches[0] : null;
 }
 
 export async function dispatchCustomAgentBridgeTask(
@@ -78,6 +105,7 @@ export async function dispatchCustomAgentBridgeTask(
   if (!supportsGenericCustomAgentDispatch(provider)) {
     return {
       ok: false,
+      transportAccepted: false,
       error: `Generic bridge dispatch is not enabled for ${target.provider || 'this provider'}.`,
       provider,
     };
@@ -85,10 +113,37 @@ export async function dispatchCustomAgentBridgeTask(
 
   const connection = findCustomAgentConnection(target, connections);
   const targetGateway = normalizeEndpoint(target.gatewayUrl);
+  const isPublishedOfficeTarget = target.source === 'db';
+  const ownerId = String(target.ownerId || '').trim();
+  const currentUserId = String(target.currentUserId || '').trim();
+  const ownerIdsAgree = !!ownerId
+    && !!currentUserId
+    && ownerId === currentUserId;
+  const hasOwnerAuthority = target.isOwn === true && ownerIdsAgree;
+  const mayUseLocalConnection = targetGateway || isPublishedOfficeTarget
+    ? hasOwnerAuthority
+    : true;
+  if (isPublishedOfficeTarget && target.isOwn === true && !hasOwnerAuthority) {
+    return {
+      ok: false,
+      transportAccepted: false,
+      error: `This published ${formatProviderLabel(provider)} agent is missing exact owner authorization. Nothing was dispatched.`,
+      provider,
+    };
+  }
   if (!connection && !targetGateway) {
     return {
       ok: false,
+      transportAccepted: false,
       error: `No enabled ${formatProviderLabel(provider)} bridge connection is available. Connect the agent from Office, or publish it with a gateway URL.`,
+      provider,
+    };
+  }
+  if (!targetGateway && !mayUseLocalConnection) {
+    return {
+      ok: false,
+      transportAccepted: false,
+      error: `This published ${formatProviderLabel(provider)} agent belongs to another circle member and has no explicitly authorized remote gateway. Nothing was dispatched.`,
       provider,
     };
   }
@@ -97,12 +152,22 @@ export async function dispatchCustomAgentBridgeTask(
   if (!endpoint || !isValidBridgeEndpoint(endpoint)) {
     return {
       ok: false,
+      transportAccepted: false,
       error: `The ${formatProviderLabel(provider)} bridge endpoint is missing or invalid.`,
       provider,
     };
   }
 
-  const headers = buildHeaders(connection?.token);
+  // A provider/name match is never authority to send a local secret to a
+  // published gateway. Credentials require both owner authority and one exact
+  // normalized endpoint match.
+  const credentialConnection = mayUseLocalConnection
+    && connection
+    && connection.enabled
+    && normalizeEndpoint(connection.endpoint) === endpoint
+      ? connection
+      : null;
+  const headers = buildHeaders(credentialConnection?.token);
   const profiledTask = applyAgentDevelopmentStandardsToPrompt(task, {
     label: 'The selected external agent bridge must follow these repo standards for this chat handoff.',
   });
@@ -122,9 +187,10 @@ export async function dispatchCustomAgentBridgeTask(
   const errors: string[] = [];
   for (const path of TASK_ENDPOINTS) {
     const url = `${endpoint}${path}`;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 20_000);
+      timeout = setTimeout(() => controller.abort(), 20_000);
       const res = await fetch(url, {
         method: 'POST',
         headers,
@@ -132,12 +198,14 @@ export async function dispatchCustomAgentBridgeTask(
         signal: controller.signal,
       });
       clearTimeout(timeout);
+      timeout = null;
 
       const text = await res.text().catch(() => '');
       const json = parseJson(text);
       if (res.ok && isSuccessfulBody(json, text)) {
         return {
           ok: true,
+          transportAccepted: true,
           response: extractResponse(json, text) || `${formatProviderLabel(provider)} accepted the task.`,
           endpoint,
           path,
@@ -148,14 +216,39 @@ export async function dispatchCustomAgentBridgeTask(
       const detail = extractError(json, text) || `HTTP ${res.status}`;
       errors.push(`${path}: ${detail}`);
       if (res.status === 404 || res.status === 405) continue;
-      if (res.status === 401 || res.status === 403) break;
+      const provenPreDispatchRejection = res.status >= 400
+        && res.status < 500
+        && res.status !== 408
+        && res.status !== 409;
+      return {
+        ok: false,
+        transportAccepted: provenPreDispatchRejection ? false : null,
+        error: provenPreDispatchRejection
+          ? `The ${formatProviderLabel(provider)} bridge rejected the request before dispatch. ${detail}`
+          : `The ${formatProviderLabel(provider)} bridge did not return trustworthy acceptance evidence. The task was not replayed. ${detail}`,
+        endpoint,
+        path,
+        provider,
+      };
     } catch (error: any) {
-      errors.push(`${path}: ${error?.name === 'AbortError' ? 'request timed out' : error?.message || 'request failed'}`);
+      const detail = error?.name === 'AbortError' ? 'request timed out' : error?.message || 'request failed';
+      errors.push(`${path}: ${detail}`);
+      return {
+        ok: false,
+        transportAccepted: null,
+        error: `The ${formatProviderLabel(provider)} bridge response was lost or unavailable. The task was not replayed. ${detail}`,
+        endpoint,
+        path,
+        provider,
+      };
+    } finally {
+      if (timeout) clearTimeout(timeout);
     }
   }
 
   return {
     ok: false,
+    transportAccepted: false,
     error: errors.length
       ? `Could not dispatch to ${formatProviderLabel(provider)} bridge. ${errors.join('; ')}`
       : `Could not dispatch to ${formatProviderLabel(provider)} bridge.`,
@@ -202,11 +295,12 @@ function parseJson(text: string): any | null {
 }
 
 function isSuccessfulBody(json: any | null, text: string): boolean {
-  if (!json) return Boolean(text.trim());
+  if (!json) return false;
+  const status = typeof json.status === 'string' ? json.status.trim().toLowerCase() : '';
+  if (['failed', 'failure', 'error', 'rejected', 'cancelled', 'canceled'].includes(status)) return false;
   if (json.ok === false || json.success === false || json.error) return false;
   if (json.ok === true || json.success === true || json.accepted === true) return true;
-  if (typeof json.response === 'string' || typeof json.message === 'string' || typeof json.result === 'string') return true;
-  return true;
+  return ['accepted', 'queued', 'started', 'running', 'ok', 'success'].includes(status);
 }
 
 function extractResponse(json: any | null, text: string): string {
@@ -219,7 +313,7 @@ function extractResponse(json: any | null, text: string): string {
 
 function extractError(json: any | null, text: string): string {
   if (!json) return text.trim();
-  const value = json.error || json.message || json.detail;
+  const value = json.error || json.message || json.detail || json.status;
   if (typeof value === 'string') return value.trim();
   if (value && typeof value === 'object') return JSON.stringify(value);
   return text.trim();

@@ -723,7 +723,7 @@ const s = StyleSheet.create({
 
   // Buttons
   primaryButton: {
-    backgroundColor: '#22d3ee', borderRadius: 12, paddingVertical: 16,
+    backgroundColor: '#6366f1', borderRadius: 12, paddingVertical: 16,
     alignItems: 'center', marginBottom: 16,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
@@ -754,7 +754,7 @@ const s = StyleSheet.create({
   methodTitle: { color: '#fff', fontSize: 18, fontWeight: '700', marginBottom: 8 },
   methodDesc: { color: '#888', fontSize: 14, textAlign: 'center', marginBottom: 12 },
   methodBadge: {
-    color: '#22d3ee', fontSize: 10, fontWeight: '800', letterSpacing: 1,
+    color: '#6366f1', fontSize: 10, fontWeight: '800', letterSpacing: 1,
     paddingHorizontal: 8, paddingVertical: 4, backgroundColor: '#0a1515',
     borderRadius: 4, borderWidth: 1, borderColor: '#1a2e2e',
   },

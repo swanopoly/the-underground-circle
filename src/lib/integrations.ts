@@ -97,15 +97,11 @@ export async function sendFriendRequest(receiverId: string, message?: string): P
       message,
       status: 'pending',
     })
-    .select(`
-      *,
-      sender:profiles!friend_requests_sender_id_fkey(*),
-      receiver:profiles!friend_requests_receiver_id_fkey(*)
-    `)
+    .select('*')
     .single();
 
   if (error) throw error;
-  return data;
+  return { ...data, sender: undefined, receiver: undefined };
 }
 
 export async function respondToFriendRequest(requestId: string, accept: boolean): Promise<void> {
@@ -130,16 +126,13 @@ export async function getFriendRequests(): Promise<FriendRequest[]> {
 
   const { data, error } = await supabase
     .from('friend_requests')
-    .select(`
-      *,
-      sender:profiles!friend_requests_sender_id_fkey(*),
-      receiver:profiles!friend_requests_receiver_id_fkey(*)
-    `)
+    .select('*')
     .or(`sender_id.eq.${user.id},receiver_id.eq.${user.id}`)
     .order('created_at', { ascending: false });
 
   if (error) throw error;
-  return data || [];
+  // Friend/private-message access does not create a public profile directory.
+  return (data || []).map((row: any) => ({ ...row, sender: undefined, receiver: undefined }));
 }
 
 export async function getFriends(): Promise<Friend[]> {
@@ -148,15 +141,12 @@ export async function getFriends(): Promise<Friend[]> {
 
   const { data, error } = await supabase
     .from('friends')
-    .select(`
-      *,
-      friend:profiles!friends_friend_id_fkey(*)
-    `)
+    .select('*')
     .eq('user_id', user.id)
     .order('since', { ascending: false });
 
   if (error) throw error;
-  return data || [];
+  return (data || []).map((row: any) => ({ ...row, friend: undefined }));
 }
 
 export async function removeFriend(friendId: string): Promise<void> {
@@ -197,14 +187,11 @@ export async function generateInviteLink(): Promise<string> {
 }
 
 export async function searchUsers(query: string, limit: number = 10): Promise<any[]> {
-  const { data, error } = await supabase
-    .from('profiles')
-    .select('id, username, display_name, avatar_url, level, xp')
-    .or(`username.ilike.%${query}%,display_name.ilike.%${query}%`)
-    .limit(limit);
-
-  if (error) throw error;
-  return data || [];
+  void query;
+  void limit;
+  // Global user discovery has no exact Circle authority. Circle-scoped member
+  // pickers use safe_profiles through loadSafeCircleProfiles instead.
+  return [];
 }
 
 // Platform-specific connection helpers

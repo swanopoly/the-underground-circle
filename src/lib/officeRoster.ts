@@ -15,6 +15,52 @@ type BuildOfficeRosterOptions = {
   selectedAgentId?: string | null;
 };
 
+export type OfficeAgentOwnershipContext = Readonly<{
+  currentUserId?: string | null;
+  defaultAgentId: string;
+  ownedDurableAgentIds: ReadonlySet<string>;
+  ownedConnectionIds: ReadonlySet<string>;
+  ownedProviderMainIds: ReadonlySet<string>;
+}>;
+
+/**
+ * Resolve a panel target from the current canonical roster, never from the
+ * object captured by an older sprite render. Duplicate ids are ambiguous and
+ * therefore close/fail the interaction instead of choosing the first row.
+ */
+export function resolveUniqueOfficeAgentById<T extends Pick<OfficeAgent, 'id'>>(
+  agents: readonly T[],
+  agentIdInput: string,
+): T | null {
+  const agentId = typeof agentIdInput === 'string' ? agentIdInput.trim() : '';
+  if (!agentId || agentId !== agentIdInput) return null;
+  let match: T | null = null;
+  for (const agent of agents) {
+    if (agent.id !== agentId) continue;
+    if (match) return null;
+    match = agent;
+  }
+  return match;
+}
+
+/**
+ * Classify the Office "Mine" lane from exact structural custody only.
+ * Display names are intentionally absent: two members may publish the same
+ * name, and customization can rename a live session without changing owner.
+ */
+export function isOfficeAgentOwnedByCurrentUser(
+  agent: Pick<OfficeAgent, 'id' | 'connectionId'>,
+  context: OfficeAgentOwnershipContext,
+): boolean {
+  const agentId = String(agent.id || '').trim();
+  if (agentId === context.defaultAgentId) return true;
+  if (!String(context.currentUserId || '').trim()) return false;
+  const connectionId = String(agent.connectionId || '').trim();
+  return context.ownedDurableAgentIds.has(agentId)
+    || (!!connectionId && context.ownedConnectionIds.has(connectionId))
+    || context.ownedProviderMainIds.has(agentId);
+}
+
 const NON_PERSISTENT_PROVIDER_TYPES = new Set<ProviderType>([
   'blackswan-local',
   'openai',

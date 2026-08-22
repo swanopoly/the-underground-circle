@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, StyleSheet, Pressable, ScrollView, TextInput, Platform, Modal, Linking,
   useWindowDimensions,
@@ -19,16 +19,21 @@ import {
 } from '../../../../lib/connectionManager';
 import {
   ProviderKey, LLMProvider, PROVIDER_MODELS, PROVIDER_HELP,
-  storeApiKey, deleteApiKey, testApiKey, listApiKeys,
+  storeApiKeyExact, deleteApiKeyExact, testApiKeyExact,
 } from '../../../../lib/llmProviders';
 import { isStrictLocalAiModeEnabled, setStrictLocalAiModeEnabled, subscribeStrictLocalAiMode } from '../../../../lib/privacyMode';
 import { BudgetConfig } from '../../../../lib/budgetAlerts';
 import { IDLE_BEHAVIORS, IdleBehaviorConfig, IdleBehaviorDef } from '../../../../lib/idleBehaviors';
 import { supabase } from '../../../../lib/supabase';
-import { safeGetUser } from '../../../../lib/authSession';
+import {
+  checkFigmaOAuthStatus,
+  disconnectFigmaOAuth,
+  openOAuthPopup,
+  type FigmaOAuthConnectionStatus,
+} from '../../../../lib/oauthConnect';
 import { showConfirm } from '../../../../lib/alert';
 import {
-  CustomThemeRecord, saveCustomTheme, deleteCustomTheme,
+  CustomThemeRecord, saveCustomThemeExact, deleteCustomThemeExact,
   CUSTOM_THEME_PREFIX, customThemeToOfficeTheme,
 } from '../../../../services/customThemes';
 import {
@@ -36,7 +41,8 @@ import {
   detectTemplate, findTemplate,
 } from '../../../../lib/soulTemplates';
 import { AGENT_SPIRITS, SPIRIT_CATEGORIES, getSpiritById } from '../../../../lib/agentSpirits';
-import { updateAgentSpirit } from '../../../../lib/circleOffice';
+import { updatePublishedAgentSpiritExact } from '../../../../lib/agentIdentity';
+import { isUuidLike } from '../../../../lib/agentRuntimeSubject';
 
 type Tab = 'theme' | 'agents' | 'souls' | 'connections' | 'api-keys' | 'telegram' | 'budget' | 'idle';
 
@@ -139,6 +145,13 @@ export interface TelegramConfig {
   chatId: string;
 }
 
+export interface CustomizeExactAuthority {
+  readonly userId: string;
+  readonly circleId: string;
+  readonly accessToken: string;
+  readonly generation: number;
+}
+
 interface Props {
   visible: boolean;
   onClose: () => void;
@@ -178,6 +191,8 @@ interface Props {
   circleId?: string;
   // Owner gating
   userEmail?: string;
+  exactAuthority?: CustomizeExactAuthority | null;
+  isExactAuthorityCurrent?: (authority: CustomizeExactAuthority) => boolean;
 }
 
 type AddStep = 'list' | 'pick-provider' | 'form';
@@ -192,13 +207,15 @@ export default function CustomizePanel({
   budgetConfig, onBudgetConfigChange,
   idleConfig, onIdleConfigChange,
   customThemes = [], onCustomThemesRefresh, circleId,
-  userEmail,
+  userEmail, exactAuthority, isExactAuthorityCurrent,
 }: Props) {
   const { width: screenWidth } = useWindowDimensions();
   const isWide = screenWidth > 768;
   const isOwner = userEmail === OWNER_EMAIL;
   const [tab, setTab] = useState<Tab>('theme');
   const [selectedAgentId, setSelectedAgentId] = useState(agents[0]?.id || '');
+  const selectedAgentIdRef = useRef(selectedAgentId);
+  selectedAgentIdRef.current = selectedAgentId;
 
   // Custom souls state
   const [customSouls, setCustomSouls] = useState<CustomSoul[]>([]);
@@ -224,6 +241,218 @@ export default function CustomizePanel({
   const [apiKeySaving, setApiKeySaving] = useState<Record<string, boolean>>({});
   const [apiKeyStatus, setApiKeyStatus] = useState<Record<string, { ok: boolean; msg: string }>>({});
   const [strictLocalAiMode, setStrictLocalAiMode] = useState<boolean>(isStrictLocalAiModeEnabled());
+  const [figmaStatus, setFigmaStatus] = useState<FigmaOAuthConnectionStatus>({
+    state: 'unavailable',
+    connected: false,
+    accountId: '',
+  });
+  const [figmaBusy, setFigmaBusy] = useState(false);
+  const [figmaStatusBusy, setFigmaStatusBusy] = useState(false);
+  const [figmaError, setFigmaError] = useState('');
+  const figmaStatusGeneration = useRef(0);
+  const figmaStatusInFlight = useRef<{
+    generation: number;
+    promise: Promise<FigmaOAuthConnectionStatus>;
+  } | null>(null);
+  const figmaOperationEpoch = useRef(0);
+  const figmaActiveOperation = useRef<number | null>(null);
+  const figmaOperationController = useRef<AbortController | null>(null);
+  const apiOperationControllers = useRef<Map<LLMProvider, AbortController>>(new Map());
+  const themeOperationController = useRef<AbortController | null>(null);
+
+  const captureCustomizeAuthority = useCallback((): CustomizeExactAuthority | null => {
+    if (!exactAuthority || !isExactAuthorityCurrent?.(exactAuthority)) return null;
+    return { ...exactAuthority };
+  }, [exactAuthority, isExactAuthorityCurrent]);
+
+  const customizeAuthorityIsCurrent = useCallback((authority: CustomizeExactAuthority): boolean => (
+    isExactAuthorityCurrent?.(authority) === true
+  ), [isExactAuthorityCurrent]);
+  const captureFigmaAuthority = captureCustomizeAuthority;
+  const figmaAuthorityIsCurrent = customizeAuthorityIsCurrent;
+
+  const refreshFigmaStatus = useCallback((): Promise<FigmaOAuthConnectionStatus> => {
+    const authority = captureFigmaAuthority();
+    if (!authority) {
+      const unavailable: FigmaOAuthConnectionStatus = {
+        state: 'unavailable', connected: false, accountId: '',
+      };
+      setFigmaStatus(unavailable);
+      setFigmaError('Your signed-in account changed. Reopen Customize and retry.');
+      return Promise.resolve(unavailable);
+    }
+    const generation = figmaStatusGeneration.current;
+    const existing = figmaStatusInFlight.current;
+    if (existing?.generation === generation) return existing.promise;
+
+    setFigmaStatusBusy(true);
+    let request!: Promise<FigmaOAuthConnectionStatus>;
+    request = checkFigmaOAuthStatus(authority.accessToken)
+      .then((status) => {
+        const current = figmaAuthorityIsCurrent(authority)
+          && generation === figmaStatusGeneration.current;
+        if (current) {
+          setFigmaStatus(status);
+          setFigmaError(status.state === 'unavailable'
+            ? 'Figma connection status is unavailable. Refresh status before connecting or disconnecting.'
+            : '');
+        }
+        if (current) return status;
+        const unavailable: FigmaOAuthConnectionStatus = {
+          state: 'unavailable', connected: false, accountId: '',
+        };
+        return unavailable;
+      })
+      .finally(() => {
+        if (figmaStatusInFlight.current?.promise === request) {
+          figmaStatusInFlight.current = null;
+        }
+        if (figmaAuthorityIsCurrent(authority) && generation === figmaStatusGeneration.current) {
+          setFigmaStatusBusy(false);
+        }
+      });
+    figmaStatusInFlight.current = { generation, promise: request };
+    return request;
+  }, [captureFigmaAuthority, figmaAuthorityIsCurrent]);
+
+  useEffect(() => {
+    if (!visible || tab !== 'connections') return undefined;
+    refreshFigmaStatus().catch(() => {});
+    return () => {
+      figmaStatusGeneration.current += 1;
+      figmaStatusInFlight.current = null;
+      figmaOperationEpoch.current += 1;
+      figmaActiveOperation.current = null;
+      figmaOperationController.current?.abort();
+      figmaOperationController.current = null;
+      setFigmaStatusBusy(false);
+      setFigmaBusy(false);
+    };
+  }, [refreshFigmaStatus, tab, visible]);
+
+  const handleFigmaConnect = async () => {
+    if (
+      figmaActiveOperation.current !== null
+      || figmaStatusInFlight.current
+      || figmaBusy
+      || figmaStatusBusy
+      || figmaStatus.state === 'unavailable'
+    ) return;
+    const authority = captureFigmaAuthority();
+    if (!authority) return;
+    const operation = ++figmaOperationEpoch.current;
+    figmaActiveOperation.current = operation;
+    const generation = ++figmaStatusGeneration.current;
+    figmaStatusInFlight.current = null;
+    setFigmaStatusBusy(false);
+    setFigmaBusy(true);
+    setFigmaError('');
+    try {
+      // Open synchronously on the user gesture; the helper refreshes auth
+      // inside the already-open blank window so popup blocking stays unlikely.
+      const result = await openOAuthPopup(
+        'figma',
+        'file_content:read',
+        authority.accessToken,
+        () => figmaAuthorityIsCurrent(authority),
+      );
+      if (
+        !figmaAuthorityIsCurrent(authority)
+        || operation !== figmaActiveOperation.current
+        || generation !== figmaStatusGeneration.current
+      ) return;
+      if (!result.success) {
+        setFigmaError(result.error || 'Figma did not complete the connection.');
+        return;
+      }
+      const status = await refreshFigmaStatus();
+      if (generation === figmaStatusGeneration.current && status.state === 'unavailable') {
+        setFigmaError('Figma finished OAuth, but its connection status could not be confirmed. Refresh status before continuing.');
+      }
+    } finally {
+      if (operation === figmaActiveOperation.current) {
+        figmaActiveOperation.current = null;
+        setFigmaBusy(false);
+      }
+    }
+  };
+
+  const handleFigmaDisconnect = async () => {
+    if (
+      figmaActiveOperation.current !== null
+      || figmaStatusInFlight.current
+      || figmaBusy
+      || figmaStatusBusy
+      || !figmaStatus.connected
+    ) return;
+    const authority = captureFigmaAuthority();
+    if (!authority) return;
+    const operation = ++figmaOperationEpoch.current;
+    figmaActiveOperation.current = operation;
+    const confirmed = await showConfirm({
+      title: 'Disconnect your Figma account?',
+      message: 'Chat will stop reading bounded private Figma file structure and layer content. Saved Office Figma links are not deleted.',
+      confirmLabel: 'Disconnect',
+      cancelLabel: 'Keep connected',
+      destructive: true,
+    });
+    if (!confirmed) {
+      if (operation === figmaActiveOperation.current) {
+        figmaActiveOperation.current = null;
+      }
+      return;
+    }
+    if (
+      !figmaAuthorityIsCurrent(authority)
+      || operation !== figmaActiveOperation.current
+      || figmaStatusInFlight.current
+      || figmaBusy
+      || figmaStatusBusy
+      || !figmaStatus.connected
+    ) {
+      if (operation === figmaActiveOperation.current) {
+        figmaActiveOperation.current = null;
+      }
+      return;
+    }
+    const generation = ++figmaStatusGeneration.current;
+    figmaStatusInFlight.current = null;
+    setFigmaStatusBusy(false);
+    setFigmaBusy(true);
+    setFigmaError('');
+    figmaOperationController.current?.abort();
+    const controller = new AbortController();
+    figmaOperationController.current = controller;
+    try {
+      const result = await disconnectFigmaOAuth(
+        authority.accessToken,
+        () => figmaAuthorityIsCurrent(authority)
+          && operation === figmaActiveOperation.current
+          && generation === figmaStatusGeneration.current,
+        controller.signal,
+      );
+      if (
+        controller.signal.aborted
+        || !figmaAuthorityIsCurrent(authority)
+        || operation !== figmaActiveOperation.current
+        || generation !== figmaStatusGeneration.current
+      ) return;
+      if (result.outcome !== 'disconnected') {
+        setFigmaStatus({ state: 'unavailable', connected: false, accountId: '' });
+        setFigmaError('The disconnect result is unknown. Refresh Figma status before trying another action.');
+        return;
+      }
+      setFigmaStatus({ state: 'disconnected', connected: false, accountId: '' });
+    } finally {
+      if (figmaOperationController.current === controller) {
+        figmaOperationController.current = null;
+      }
+      if (figmaAuthorityIsCurrent(authority) && operation === figmaActiveOperation.current) {
+        figmaActiveOperation.current = null;
+        setFigmaBusy(false);
+      }
+    }
+  };
 
   useEffect(() => {
     setStrictLocalAiMode(isStrictLocalAiModeEnabled());
@@ -244,80 +473,247 @@ export default function CustomizePanel({
   const [agentSpirit, setAgentSpirit] = useState<string | null>(null);
   const [agentDbId, setAgentDbId] = useState<string | null>(null);
   const [spiritLoaded, setSpiritLoaded] = useState<string | null>(null);
+  const [spiritReloadGeneration, setSpiritReloadGeneration] = useState(0);
+  const [spiritSaving, setSpiritSaving] = useState(false);
+  const [spiritActionStatus, setSpiritActionStatus] = useState('');
+  const spiritMutationRef = useRef<string | null>(null);
+
+  // Plaintext keys/tokens and private account state must not survive a modal
+  // close, unmount, bearer refresh, account switch, or circle switch.
+  useEffect(() => {
+    figmaOperationController.current?.abort();
+    figmaOperationController.current = null;
+    for (const controller of apiOperationControllers.current.values()) controller.abort();
+    apiOperationControllers.current.clear();
+    themeOperationController.current?.abort();
+    themeOperationController.current = null;
+    setApiKeyInputs({});
+    setApiKeyEndpoints({});
+    setApiKeyTesting({});
+    setApiKeySaving({});
+    setApiKeyStatus({});
+    setNewToken('');
+    setShowToken(false);
+    setVisibleTokenIds(new Set());
+    setCustomSouls([]);
+    setCustomSoulsLoaded(false);
+    setEditingSoul(null);
+    setSoulEditorMode('browse');
+    setPersonalityText('');
+    setPersonalitySaving(false);
+    setPersonalityLoaded(false);
+    setPersonalityStatus('');
+    setAgentDbId(null);
+    setAgentSpirit(null);
+    setSpiritLoaded(null);
+    setSpiritReloadGeneration(0);
+    setSpiritSaving(false);
+    setSpiritActionStatus('');
+    spiritMutationRef.current = null;
+    return () => {
+      figmaOperationController.current?.abort();
+      figmaOperationController.current = null;
+      for (const controller of apiOperationControllers.current.values()) controller.abort();
+      apiOperationControllers.current.clear();
+      themeOperationController.current?.abort();
+      themeOperationController.current = null;
+      setApiKeyInputs({});
+      setApiKeyEndpoints({});
+      setNewToken('');
+    };
+  }, [
+    visible,
+    exactAuthority?.accessToken,
+    exactAuthority?.circleId,
+    exactAuthority?.generation,
+    exactAuthority?.userId,
+  ]);
 
   // Load spirit from DB when selected agent changes
   useEffect(() => {
     if (tab !== 'agents' || !circleId || !selectedAgentId) return;
     if (spiritLoaded === selectedAgentId) return;
-    const agentName = selectedAgent?.name;
-    if (!agentName) return;
+    const authority = captureCustomizeAuthority();
+    if (!authority || authority.circleId !== circleId) return;
+    const capturedAgentId = selectedAgentId;
+    const selectedAgent = agents.find((agent) => agent.id === capturedAgentId);
+    const exactDbAgentId = selectedAgent?.connectionId === 'db-agent'
+      && isUuidLike(selectedAgent.sessionKey)
+      ? selectedAgent.sessionKey
+      : null;
+    if (!exactDbAgentId) {
+      setAgentDbId(null);
+      setAgentSpirit(selectedAgent?.spirit || null);
+      setSpiritLoaded(capturedAgentId);
+      setSpiritActionStatus('Shared Spirit editing requires an exact published Office agent.');
+      return;
+    }
     (async () => {
-      const { value: user } = await safeGetUser();
-      if (!user) return;
-      const { data } = await supabase
+      setSpiritActionStatus('Verifying the published Spirit…');
+      const { data, error } = await supabase
         .from('circle_office_agents')
-        .select('id, spirit, spirit_emoji')
-        .eq('circle_id', circleId)
-        .eq('owner_id', user.id)
-        .ilike('name', agentName)
+        .select('id, circle_id, owner_id, is_published, spirit, spirit_emoji')
+        .eq('id', exactDbAgentId)
+        .eq('circle_id', authority.circleId)
+        .eq('owner_id', authority.userId)
+        .setHeader('Authorization', `Bearer ${authority.accessToken}`)
         .maybeSingle();
-      if (data) {
+      if (!customizeAuthorityIsCurrent(authority) || selectedAgentIdRef.current !== capturedAgentId) return;
+      if (
+        !error
+        && data
+        && data.id === exactDbAgentId
+        && data.circle_id === authority.circleId
+        && data.owner_id === authority.userId
+        && data.is_published === true
+      ) {
         setAgentDbId(data.id);
         setAgentSpirit(data.spirit || null);
+        setSpiritActionStatus('');
       } else {
         setAgentDbId(null);
-        setAgentSpirit(null);
+        setAgentSpirit(selectedAgent?.spirit || null);
+        setSpiritActionStatus('Spirit could not be verified. Try again.');
       }
-      setSpiritLoaded(selectedAgentId);
+      setSpiritLoaded(capturedAgentId);
     })();
-  }, [tab, circleId, selectedAgentId, spiritLoaded]);
+  }, [
+    agents,
+    captureCustomizeAuthority,
+    circleId,
+    customizeAuthorityIsCurrent,
+    selectedAgentId,
+    spiritReloadGeneration,
+    spiritLoaded,
+    tab,
+  ]);
+
+  const savePublishedSpirit = useCallback(async (
+    spiritId: string | null,
+    spiritEmoji: string | null,
+  ) => {
+    const authority = captureCustomizeAuthority();
+    const officeAgentId = agentDbId;
+    const capturedAgentId = selectedAgentIdRef.current;
+    if (
+      !officeAgentId
+      || !authority
+      || authority.circleId !== circleId
+      || !isUuidLike(officeAgentId)
+    ) {
+      setSpiritActionStatus('Shared Spirit editing requires an exact published Office agent.');
+      return;
+    }
+    const mutationKey = `${authority.userId}\u0000${authority.circleId}\u0000${authority.generation}\u0000${capturedAgentId}\u0000${officeAgentId}`;
+    if (spiritMutationRef.current === mutationKey) return;
+    spiritMutationRef.current = mutationKey;
+    setSpiritSaving(true);
+    setSpiritActionStatus('Saving the verified Spirit…');
+    try {
+      const receipt = await updatePublishedAgentSpiritExact({
+        officeAgentId,
+        sessionKey: officeAgentId,
+        spiritId,
+        spiritEmoji,
+        customProfileId: null,
+      }, authority, customizeAuthorityIsCurrent);
+      if (
+        !customizeAuthorityIsCurrent(authority)
+        || selectedAgentIdRef.current !== capturedAgentId
+      ) return;
+      if (receipt.error === 'outcome_unknown') {
+        setSpiritActionStatus('Spirit outcome could not be verified. Refreshing before another attempt…');
+        setSpiritLoaded(null);
+        setSpiritReloadGeneration(value => value + 1);
+        return;
+      }
+      if (receipt.serverSaved && !receipt.localSaved) {
+        setSpiritActionStatus('Spirit was saved on the server. Refreshing this device…');
+        setSpiritLoaded(null);
+        setSpiritReloadGeneration(value => value + 1);
+        return;
+      }
+      if (!receipt.ok || !receipt.localSaved || !receipt.serverSaved) {
+        setSpiritActionStatus('Spirit was not saved. Try again.');
+        return;
+      }
+      setAgentSpirit(spiritId);
+      setSpiritActionStatus(spiritId ? 'Spirit saved.' : 'Spirit cleared.');
+    } catch (error) {
+      console.warn('[CustomizePanel] Published Spirit save failed:', error);
+      if (
+        customizeAuthorityIsCurrent(authority)
+        && selectedAgentIdRef.current === capturedAgentId
+      ) setSpiritActionStatus('Spirit was not saved. Try again.');
+    } finally {
+      if (spiritMutationRef.current === mutationKey) spiritMutationRef.current = null;
+      if (
+        customizeAuthorityIsCurrent(authority)
+        && selectedAgentIdRef.current === capturedAgentId
+      ) setSpiritSaving(false);
+    }
+  }, [agentDbId, captureCustomizeAuthority, circleId, customizeAuthorityIsCurrent]);
 
   // Load personality when agents tab is selected
   useEffect(() => {
     if (tab !== 'agents' || personalityLoaded || !circleId) return;
+    const authority = captureCustomizeAuthority();
+    if (!authority || authority.circleId !== circleId) return;
     (async () => {
-      const { value: user } = await safeGetUser();
-      if (!user) return;
       const { data } = await supabase
         .from('agent_personalities')
         .select('personality')
-        .eq('user_id', user.id)
-        .eq('circle_id', circleId)
+        .eq('user_id', authority.userId)
+        .eq('circle_id', authority.circleId)
+        .setHeader('Authorization', `Bearer ${authority.accessToken}`)
         .maybeSingle();
+      if (!customizeAuthorityIsCurrent(authority)) return;
       if (data?.personality) setPersonalityText(data.personality);
       setPersonalityLoaded(true);
     })();
-  }, [tab, personalityLoaded, circleId]);
+  }, [
+    captureCustomizeAuthority,
+    circleId,
+    customizeAuthorityIsCurrent,
+    personalityLoaded,
+    tab,
+  ]);
 
   const handleSavePersonality = async () => {
-    if (!circleId) return;
+    const authority = captureCustomizeAuthority();
+    if (!authority || !circleId || authority.circleId !== circleId) return;
     setPersonalitySaving(true);
-    const { value: user } = await safeGetUser();
-    if (!user) { setPersonalitySaving(false); return; }
     const { error } = await supabase
       .from('agent_personalities')
       .upsert({
-        user_id: user.id,
-        circle_id: circleId,
+        user_id: authority.userId,
+        circle_id: authority.circleId,
         agent_name: 'default',
         personality: personalityText.trim(),
-      }, { onConflict: 'user_id,circle_id,agent_name' });
+      }, { onConflict: 'user_id,circle_id,agent_name' })
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+    if (!customizeAuthorityIsCurrent(authority)) return;
     setPersonalityStatus(error ? `Error: ${error.message}` : 'Personality saved!');
     setPersonalitySaving(false);
-    setTimeout(() => setPersonalityStatus(''), 3000);
+    setTimeout(() => {
+      if (customizeAuthorityIsCurrent(authority)) setPersonalityStatus('');
+    }, 3000);
   };
 
   // Load custom souls
   useEffect(() => {
     if (tab !== 'souls' || customSoulsLoaded || !circleId) return;
+    const authority = captureCustomizeAuthority();
+    if (!authority || authority.circleId !== circleId) return;
     (async () => {
-      const { value: user } = await safeGetUser();
-      if (!user) return;
       const { data } = await supabase
         .from('custom_souls')
         .select('*')
-        .eq('user_id', user.id)
+        .eq('user_id', authority.userId)
+        .eq('circle_id', authority.circleId)
+        .setHeader('Authorization', `Bearer ${authority.accessToken}`)
         .order('created_at', { ascending: false });
+      if (!customizeAuthorityIsCurrent(authority)) return;
       if (data) {
         setCustomSouls(data.map((d: any) => ({
           id: d.id,
@@ -332,7 +728,13 @@ export default function CustomizePanel({
       }
       setCustomSoulsLoaded(true);
     })();
-  }, [tab, customSoulsLoaded, circleId]);
+  }, [
+    captureCustomizeAuthority,
+    circleId,
+    customSoulsLoaded,
+    customizeAuthorityIsCurrent,
+    tab,
+  ]);
 
   const handleDuplicateSoul = (tmpl: SoulTemplate) => {
     const newSoul: CustomSoul = {
@@ -364,13 +766,12 @@ export default function CustomizePanel({
   };
 
   const handleSaveCustomSoul = async () => {
-    if (!editingSoul || !circleId) return;
-    const { value: user } = await safeGetUser();
-    if (!user) return;
+    const authority = captureCustomizeAuthority();
+    if (!editingSoul || !circleId || !authority || authority.circleId !== circleId) return;
 
     const payload = {
-      user_id: user.id,
-      circle_id: circleId,
+      user_id: authority.userId,
+      circle_id: authority.circleId,
       name: editingSoul.name,
       emoji: editingSoul.emoji,
       category: editingSoul.category,
@@ -382,20 +783,43 @@ export default function CustomizePanel({
 
     const isNew = editingSoul.id.startsWith('custom-') && !customSouls.find(s => s.id === editingSoul.id);
     if (isNew) {
-      const { data, error } = await supabase.from('custom_souls').insert(payload).select().single();
+      const { data, error } = await supabase
+        .from('custom_souls')
+        .insert(payload)
+        .select()
+        .setHeader('Authorization', `Bearer ${authority.accessToken}`)
+        .single();
+      if (!customizeAuthorityIsCurrent(authority)) return;
       if (!error && data) {
         setCustomSouls(prev => [{ ...editingSoul, id: data.id }, ...prev]);
       }
     } else {
-      await supabase.from('custom_souls').update(payload).eq('id', editingSoul.id);
+      const { error } = await supabase
+        .from('custom_souls')
+        .update(payload)
+        .eq('id', editingSoul.id)
+        .eq('user_id', authority.userId)
+        .eq('circle_id', authority.circleId)
+        .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+      if (error || !customizeAuthorityIsCurrent(authority)) return;
       setCustomSouls(prev => prev.map(s => s.id === editingSoul.id ? editingSoul : s));
     }
+    if (!customizeAuthorityIsCurrent(authority)) return;
     setSoulEditorMode('browse');
     setEditingSoul(null);
   };
 
   const handleDeleteCustomSoul = async (id: string) => {
-    await supabase.from('custom_souls').delete().eq('id', id);
+    const authority = captureCustomizeAuthority();
+    if (!authority || authority.circleId !== circleId) return;
+    const { error } = await supabase
+      .from('custom_souls')
+      .delete()
+      .eq('id', id)
+      .eq('user_id', authority.userId)
+      .eq('circle_id', authority.circleId)
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+    if (error || !customizeAuthorityIsCurrent(authority)) return;
     setCustomSouls(prev => prev.filter(s => s.id !== id));
   };
 
@@ -412,29 +836,67 @@ export default function CustomizePanel({
   const getKeyForProvider = (p: LLMProvider) => providerKeys.find(k => k.provider === p && k.isActive);
 
   const handleSaveApiKey = async (provider: LLMProvider) => {
+    const authority = captureCustomizeAuthority();
     const key = apiKeyInputs[provider]?.trim();
-    if (!key) return;
+    if (!authority || !key) return;
+    apiOperationControllers.current.get(provider)?.abort();
+    const controller = new AbortController();
+    apiOperationControllers.current.set(provider, controller);
     setApiKeySaving(prev => ({ ...prev, [provider]: true }));
     setApiKeyStatus(prev => ({ ...prev, [provider]: { ok: false, msg: '' } }));
     const endpoint = apiKeyEndpoints[provider]?.trim() || undefined;
-    const result = await storeApiKey(provider, key, 'default', endpoint);
-    if (result.error) {
+    // The request owns the local copy now; keep plaintext out of component
+    // state while the network operation is in flight.
+    setApiKeyInputs(prev => ({ ...prev, [provider]: '' }));
+    const result = await storeApiKeyExact(
+      provider,
+      key,
+      'default',
+      endpoint,
+      authority,
+      customizeAuthorityIsCurrent,
+      { signal: controller.signal },
+    );
+    if (
+      controller.signal.aborted
+      || apiOperationControllers.current.get(provider) !== controller
+      || !customizeAuthorityIsCurrent(authority)
+    ) return;
+    apiOperationControllers.current.delete(provider);
+    if (!result.ok) {
       setApiKeyStatus(prev => ({ ...prev, [provider]: { ok: false, msg: result.error! } }));
     } else {
       setApiKeyStatus(prev => ({ ...prev, [provider]: { ok: true, msg: 'Key saved!' } }));
-      setApiKeyInputs(prev => ({ ...prev, [provider]: '' }));
       onProviderKeysRefresh?.();
     }
     setApiKeySaving(prev => ({ ...prev, [provider]: false }));
   };
 
   const handleTestApiKey = async (provider: LLMProvider) => {
+    const authority = captureCustomizeAuthority();
     const key = apiKeyInputs[provider]?.trim();
-    if (!key) return;
+    if (!authority || !key) return;
+    apiOperationControllers.current.get(provider)?.abort();
+    const controller = new AbortController();
+    apiOperationControllers.current.set(provider, controller);
     setApiKeyTesting(prev => ({ ...prev, [provider]: true }));
     setApiKeyStatus(prev => ({ ...prev, [provider]: { ok: false, msg: '' } }));
     const endpoint = apiKeyEndpoints[provider]?.trim() || undefined;
-    const result = await testApiKey(provider, key, endpoint);
+    const result = await testApiKeyExact(
+      provider,
+      key,
+      endpoint,
+      undefined,
+      authority,
+      customizeAuthorityIsCurrent,
+      controller.signal,
+    );
+    if (
+      controller.signal.aborted
+      || apiOperationControllers.current.get(provider) !== controller
+      || !customizeAuthorityIsCurrent(authority)
+    ) return;
+    apiOperationControllers.current.delete(provider);
     setApiKeyStatus(prev => ({
       ...prev,
       [provider]: result.success ? { ok: true, msg: 'Key works!' } : { ok: false, msg: result.error || 'Test failed' },
@@ -443,10 +905,25 @@ export default function CustomizePanel({
   };
 
   const handleDeleteApiKey = async (provider: LLMProvider) => {
+    const authority = captureCustomizeAuthority();
     const existing = getKeyForProvider(provider);
-    if (!existing) return;
-    const result = await deleteApiKey(existing.id);
-    if (result.error) {
+    if (!authority || !existing) return;
+    apiOperationControllers.current.get(provider)?.abort();
+    const controller = new AbortController();
+    apiOperationControllers.current.set(provider, controller);
+    const result = await deleteApiKeyExact(
+      existing.id,
+      authority,
+      customizeAuthorityIsCurrent,
+      controller.signal,
+    );
+    if (
+      controller.signal.aborted
+      || apiOperationControllers.current.get(provider) !== controller
+      || !customizeAuthorityIsCurrent(authority)
+    ) return;
+    apiOperationControllers.current.delete(provider);
+    if (!result.ok) {
       setApiKeyStatus(prev => ({ ...prev, [provider]: { ok: false, msg: result.error! } }));
     } else {
       setApiKeyStatus(prev => ({ ...prev, [provider]: { ok: true, msg: 'Key deleted' } }));
@@ -462,6 +939,17 @@ export default function CustomizePanel({
   const [editorColors, setEditorColors] = useState<Record<string, string>>({});
   const [editorShared, setEditorShared] = useState(false);
   const [editorSaving, setEditorSaving] = useState(false);
+
+  useEffect(() => {
+    setEditorSaving(false);
+    setShowThemeEditor(false);
+  }, [
+    visible,
+    exactAuthority?.accessToken,
+    exactAuthority?.circleId,
+    exactAuthority?.generation,
+    exactAuthority?.userId,
+  ]);
 
   const openNewThemeEditor = () => {
     setEditingThemeId(null);
@@ -482,24 +970,37 @@ export default function CustomizePanel({
   };
 
   const handleSaveCustomTheme = async () => {
+    const authority = captureCustomizeAuthority();
+    if (!authority || authority.circleId !== circleId) return;
+    themeOperationController.current?.abort();
+    const controller = new AbortController();
+    themeOperationController.current = controller;
     setEditorSaving(true);
-    const result = await saveCustomTheme({
+    const result = await saveCustomThemeExact({
       id: editingThemeId || undefined,
       name: editorName,
       environment_type: editorEnv,
       colors: editorColors,
-      circle_id: circleId || null,
+      circle_id: authority.circleId,
       is_shared: editorShared,
-    });
+    }, authority, customizeAuthorityIsCurrent, controller.signal);
+    if (
+      controller.signal.aborted
+      || themeOperationController.current !== controller
+      || !customizeAuthorityIsCurrent(authority)
+    ) return;
+    themeOperationController.current = null;
     setEditorSaving(false);
-    if (result) {
+    if (result.ok && result.theme) {
       setShowThemeEditor(false);
       onCustomThemesRefresh?.();
-      onThemeChange(CUSTOM_THEME_PREFIX + result.id);
+      onThemeChange(CUSTOM_THEME_PREFIX + result.theme.id);
     }
   };
 
   const handleDeleteCustomTheme = async (id: string) => {
+    const authority = captureCustomizeAuthority();
+    if (!authority || authority.circleId !== circleId) return;
     const confirmed = await showConfirm({
       title: 'Delete this theme?',
       message: 'Anyone in your circle who was using this theme will fall back to the Underground default on their next reload.',
@@ -507,9 +1008,23 @@ export default function CustomizePanel({
       cancelLabel: 'Keep it',
       destructive: true,
     });
-    if (!confirmed) return;
-    const ok = await deleteCustomTheme(id);
-    if (ok) {
+    if (!confirmed || !customizeAuthorityIsCurrent(authority)) return;
+    themeOperationController.current?.abort();
+    const controller = new AbortController();
+    themeOperationController.current = controller;
+    const result = await deleteCustomThemeExact(
+      id,
+      authority,
+      customizeAuthorityIsCurrent,
+      controller.signal,
+    );
+    if (
+      controller.signal.aborted
+      || themeOperationController.current !== controller
+      || !customizeAuthorityIsCurrent(authority)
+    ) return;
+    themeOperationController.current = null;
+    if (result.ok) {
       onCustomThemesRefresh?.();
       if (currentTheme === CUSTOM_THEME_PREFIX + id) {
         onThemeChange('underground');
@@ -854,7 +1369,6 @@ export default function CustomizePanel({
                     <PixelAgent
                       agent={selectedAgent}
                       appearance={currentAppearance}
-                      onPress={() => {}}
                       selected={false}
                       scale={1.8}
                     />
@@ -1121,19 +1635,46 @@ export default function CustomizePanel({
                       </View>
                     </View>
                     <Pressable
-                      onPress={async () => {
-                        if (agentDbId) {
-                          await updateAgentSpirit(agentDbId, null, null);
-                          setAgentSpirit(null);
-                        }
-                      }}
-                      style={[{ backgroundColor: '#1a1a1a', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 6, borderWidth: 1, borderColor: '#333' }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                      accessibilityRole="button"
+                      accessibilityLabel="Clear the published agent Spirit"
+                      accessibilityState={{ disabled: spiritSaving || !agentDbId, busy: spiritSaving }}
+                      disabled={spiritSaving || !agentDbId}
+                      onPress={() => { void savePublishedSpirit(null, null); }}
+                      style={[
+                        { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', backgroundColor: '#1a1a1a', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 6, borderWidth: 1, borderColor: '#333' },
+                        (spiritSaving || !agentDbId) && { opacity: 0.5 },
+                        Platform.OS === 'web' && { cursor: spiritSaving || !agentDbId ? 'default' : 'pointer' } as any,
+                      ]}
                     >
-                      <Text style={{ color: '#888', fontSize: 10, fontWeight: '600' }}>CLEAR</Text>
+                      <Text style={{ color: '#888', fontSize: 10, fontWeight: '600' }}>{spiritSaving ? 'SAVING…' : 'CLEAR'}</Text>
                     </Pressable>
                   </View>
                 ) : null;
               })()}
+
+              {spiritActionStatus ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
+                  <Text
+                    accessibilityLiveRegion="polite"
+                    style={{ color: /not saved|could not|requires/i.test(spiritActionStatus) ? '#fca5a5' : '#8f8fa2', fontSize: 11, lineHeight: 16, flexShrink: 1 }}
+                  >
+                    {spiritActionStatus}
+                  </Text>
+                  {spiritActionStatus === 'Spirit could not be verified. Try again.' ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Retry loading the exact published Spirit"
+                      onPress={() => {
+                        setSpiritLoaded(null);
+                        setSpiritReloadGeneration(value => value + 1);
+                      }}
+                      style={[{ minHeight: 44, paddingHorizontal: 10, justifyContent: 'center', borderWidth: 1, borderColor: '#3a3a4e', borderRadius: 6 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                    >
+                      <Text style={{ color: '#c7c7d3', fontSize: 10, fontWeight: '700' }}>RETRY</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              ) : null}
 
               {/* Spirit grid by category */}
               {SPIRIT_CATEGORIES.map(cat => {
@@ -1149,17 +1690,17 @@ export default function CustomizePanel({
                         return (
                           <Pressable
                             key={spirit.id}
-                            onPress={async () => {
-                              if (agentDbId) {
-                                await updateAgentSpirit(agentDbId, spirit.id, spirit.emoji);
-                                setAgentSpirit(spirit.id);
-                              }
-                            }}
+                            accessibilityRole="button"
+                            accessibilityLabel={`Use ${spirit.name} as the published agent Spirit`}
+                            accessibilityState={{ selected: active, disabled: spiritSaving || !agentDbId, busy: spiritSaving }}
+                            disabled={spiritSaving || !agentDbId}
+                            onPress={() => { void savePublishedSpirit(spirit.id, spirit.emoji); }}
                             style={[
                               styles.itemCard,
                               { minWidth: 72 },
                               active && { borderColor: spirit.color + '60', backgroundColor: spirit.color + '15' },
-                              Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                              (spiritSaving || !agentDbId) && { opacity: 0.5 },
+                              Platform.OS === 'web' && { cursor: spiritSaving || !agentDbId ? 'default' : 'pointer' } as any,
                             ]}
                           >
                             <Text style={styles.itemEmoji}>{spirit.emoji}</Text>
@@ -1860,44 +2401,75 @@ export default function CustomizePanel({
                 </>
               )}
 
-              {/* Figma Integration */}
-              <Text style={[styles.sectionTitle, { marginTop: 16 }]}>FIGMA</Text>
+              {/* Personal Figma OAuth; separate from circle-scoped integration credentials. */}
+              <Text style={[styles.sectionTitle, { marginTop: 16 }]}>MY FIGMA ACCOUNT</Text>
               <View style={styles.connCard}>
                 <View style={styles.connCardHeader}>
                   <Text style={styles.connProviderIcon}>🎨</Text>
                   <View style={styles.connCardInfo}>
-                    <Text style={styles.connCardName}>Figma</Text>
-                    <Text style={styles.connCardEndpoint}>Connect your Figma account via OAuth</Text>
+                    <Text style={styles.connCardName}>Figma OAuth</Text>
+                    <Text style={styles.connCardEndpoint}>
+                      {figmaStatus.state === 'connected'
+                        ? `Connected${figmaStatus.accountId ? ` · account ${figmaStatus.accountId}` : ''}`
+                        : figmaStatus.state === 'reconnect_required'
+                          ? 'Reconnect required'
+                          : figmaStatus.state === 'disconnected'
+                            ? 'Not connected'
+                            : 'Connection status unavailable'}
+                    </Text>
                   </View>
                 </View>
+                {figmaError ? (
+                  <View style={styles.connCardErrorBox}>
+                    <Text style={styles.connCardErrorIcon}>!</Text>
+                    <Text style={styles.connCardError}>{figmaError}</Text>
+                  </View>
+                ) : null}
                 <Pressable
-                  onPress={() => {
-                    // Start Figma OAuth flow. Mint the authorize URL server-side
-                    // (nonce state) so the JWT never lands in the URL/history (advisory #7).
-                    (async () => {
-                      const { data: auth } = await supabase.auth.getSession();
-                      const token = auth.session?.access_token || '';
-                      if (!token) return;
-                      const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
-                      try {
-                        const res = await fetch(`${supabaseUrl}/functions/v1/figma-oauth/authorize`, {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                        });
-                        const data = await res.json().catch(() => ({}));
-                        if (data?.url) Linking.openURL(data.url);
-                      } catch {}
-                    })();
-                  }}
-                  style={[styles.quickConnectBtn, { alignSelf: 'flex-start' }]}
+                  onPress={figmaStatus.connected ? handleFigmaDisconnect : handleFigmaConnect}
+                  disabled={figmaBusy || figmaStatusBusy || figmaStatus.state === 'unavailable'}
+                  accessibilityRole="button"
+                  accessibilityLabel={figmaStatus.state === 'unavailable'
+                    ? 'Refresh Figma connection status before continuing'
+                    : figmaStatus.connected
+                      ? 'Disconnect personal Figma account'
+                      : 'Connect personal Figma account'}
+                  style={[styles.quickConnectBtn, {
+                    alignSelf: 'flex-start',
+                    opacity: figmaBusy || figmaStatusBusy || figmaStatus.state === 'unavailable' ? 0.5 : 1,
+                  }]}
                 >
-                  <Text style={styles.quickConnectText}>CONNECT FIGMA</Text>
+                  <Text style={styles.quickConnectText}>
+                    {figmaStatusBusy
+                      ? 'CHECKING STATUS...'
+                      : figmaBusy
+                        ? 'WORKING...'
+                        : figmaStatus.state === 'unavailable'
+                          ? 'REFRESH STATUS TO CONTINUE'
+                          : figmaStatus.connected
+                            ? 'DISCONNECT FIGMA'
+                            : figmaStatus.state === 'reconnect_required'
+                              ? 'RECONNECT FIGMA'
+                              : 'CONNECT FIGMA'}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => refreshFigmaStatus().catch(() => {})}
+                  disabled={figmaBusy || figmaStatusBusy}
+                  accessibilityRole="button"
+                  accessibilityLabel="Refresh Figma connection status"
+                  style={[styles.quickConnectBtn, {
+                    alignSelf: 'flex-start',
+                    opacity: figmaBusy || figmaStatusBusy ? 0.5 : 1,
+                  }]}
+                >
+                  <Text style={styles.quickConnectText}>{figmaStatusBusy ? 'CHECKING...' : 'REFRESH STATUS'}</Text>
                 </Pressable>
                 <View style={styles.connectInfo}>
                   <Text style={styles.connectInfoTitle}>What you get</Text>
-                  <Text style={styles.connectInfoText}>🎨 Link Figma files to circle tasks</Text>
-                  <Text style={styles.connectInfoText}>🖼️ Auto-render design thumbnails</Text>
-                  <Text style={styles.connectInfoText}>🔗 OAuth — no manual API keys needed</Text>
+                  <Text style={styles.connectInfoText}>🎨 Read bounded file structure and layer content when you paste a Figma link in Chat</Text>
+                  <Text style={styles.connectInfoText}>🔒 OAuth tokens stay on the server and are never returned to the browser</Text>
+                  <Text style={styles.connectInfoText}>🏢 Circle-wide Figma credentials and Figma Board furniture links remain separate</Text>
                 </View>
               </View>
             </View>
@@ -2269,6 +2841,12 @@ export default function CustomizePanel({
               <Text style={[styles.connectInfoText, { marginBottom: 12 }]}>
                 Agents do useful work in the background when idle — checking streaks, scanning tasks, curating knowledge.
               </Text>
+              <View style={idleStyles.sharedChatNotice}>
+                <Text style={idleStyles.sharedChatNoticeTitle}>SHARED CHAT · OWNER OPT-IN</Text>
+                <Text style={idleStyles.sharedChatNoticeText}>
+                  Chat nudges stay off until the owner explicitly enables one. Private data checks do not gain permission to post messages.
+                </Text>
+              </View>
 
               {/* Master toggle */}
               <View style={styles.budgetToggle}>
@@ -2289,26 +2867,48 @@ export default function CustomizePanel({
                   {IDLE_BEHAVIORS.filter(b => b.tier === 1).map(b => {
                     const state = idleConfig.behaviors[b.id];
                     if (!state) return null;
+                    const ownerOnlyBehavior = b.ownerOnly || b.writesToSharedChat;
+                    const ownerRestricted = ownerOnlyBehavior && !isOwner;
+                    const effectivelyEnabled = state.enabled
+                      && (!b.writesToSharedChat || (idleConfig.sharedChatOptIn && isOwner));
                     return (
-                      <View key={b.id} style={idleStyles.behaviorRow}>
+                      <View key={b.id} style={[idleStyles.behaviorRow, ownerRestricted && idleStyles.behaviorRowDisabled]}>
                         <View style={idleStyles.behaviorInfo}>
-                          <Text style={idleStyles.behaviorName}>{b.icon} {b.name}</Text>
+                          <Text style={idleStyles.behaviorName}>
+                            {b.icon} {b.name}{b.writesToSharedChat ? ' · SHARED CHAT' : ''}{ownerOnlyBehavior ? ' · OWNER ONLY' : ''}
+                          </Text>
                           <Text style={idleStyles.behaviorDesc}>{b.description}</Text>
                           <Text style={idleStyles.behaviorMeta}>
                             Cooldown: {b.defaultCooldownMinutes >= 1440 ? `${Math.round(b.defaultCooldownMinutes / 1440)}d` : b.defaultCooldownMinutes >= 60 ? `${Math.round(b.defaultCooldownMinutes / 60)}h` : `${b.defaultCooldownMinutes}m`}
                             {state.lastRanAt ? ` · Last: ${formatLastRan(state.lastRanAt)}` : ' · Never ran'}
+                            {b.writesToSharedChat && !idleConfig.sharedChatOptIn ? ' · Opt-in required' : ''}
+                            {ownerRestricted ? ' · Only the owner can enable this' : ''}
                           </Text>
                         </View>
                         <Pressable
+                          accessibilityRole="switch"
+                          accessibilityLabel={`${b.name}${b.writesToSharedChat ? ' shared Chat opt-in' : ' idle behavior'}`}
+                          accessibilityState={{ checked: effectivelyEnabled, disabled: ownerRestricted }}
+                          disabled={ownerRestricted}
                           onPress={() => {
+                            if (ownerRestricted) return;
+                            const nextEnabled = !effectivelyEnabled;
                             onIdleConfigChange({
                               ...idleConfig,
-                              behaviors: { ...idleConfig.behaviors, [b.id]: { ...state, enabled: !state.enabled } },
+                              sharedChatOptIn: b.writesToSharedChat && nextEnabled
+                                ? true
+                                : idleConfig.sharedChatOptIn,
+                              behaviors: { ...idleConfig.behaviors, [b.id]: { ...state, enabled: nextEnabled } },
                             });
                           }}
-                          style={[styles.toggle, state.enabled && styles.toggleActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                          style={[
+                            styles.toggle,
+                            effectivelyEnabled && styles.toggleActive,
+                            ownerRestricted && idleStyles.toggleDisabled,
+                            Platform.OS === 'web' && { cursor: ownerRestricted ? 'not-allowed' : 'pointer' } as any,
+                          ]}
                         >
-                          <View style={[styles.toggleKnob, state.enabled && styles.toggleKnobActive]} />
+                          <View style={[styles.toggleKnob, effectivelyEnabled && styles.toggleKnobActive]} />
                         </Pressable>
                       </View>
                     );
@@ -2320,26 +2920,48 @@ export default function CustomizePanel({
                   {IDLE_BEHAVIORS.filter(b => b.tier === 2).map(b => {
                     const state = idleConfig.behaviors[b.id];
                     if (!state) return null;
+                    const ownerOnlyBehavior = b.ownerOnly || b.writesToSharedChat;
+                    const ownerRestricted = ownerOnlyBehavior && !isOwner;
+                    const effectivelyEnabled = state.enabled
+                      && (!b.writesToSharedChat || (idleConfig.sharedChatOptIn && isOwner));
                     return (
-                      <View key={b.id} style={idleStyles.behaviorRow}>
+                      <View key={b.id} style={[idleStyles.behaviorRow, ownerRestricted && idleStyles.behaviorRowDisabled]}>
                         <View style={idleStyles.behaviorInfo}>
-                          <Text style={idleStyles.behaviorName}>{b.icon} {b.name}</Text>
+                          <Text style={idleStyles.behaviorName}>
+                            {b.icon} {b.name}{b.writesToSharedChat ? ' · SHARED CHAT' : ''}{ownerOnlyBehavior ? ' · OWNER ONLY' : ''}
+                          </Text>
                           <Text style={idleStyles.behaviorDesc}>{b.description}</Text>
                           <Text style={idleStyles.behaviorMeta}>
                             Cooldown: {b.defaultCooldownMinutes >= 1440 ? `${Math.round(b.defaultCooldownMinutes / 1440)}d` : `${Math.round(b.defaultCooldownMinutes / 60)}h`}
                             {state.lastRanAt ? ` · Last: ${formatLastRan(state.lastRanAt)}` : ' · Never ran'}
+                            {b.writesToSharedChat && !idleConfig.sharedChatOptIn ? ' · Opt-in required' : ''}
+                            {ownerRestricted ? ' · Only the owner can enable this' : ''}
                           </Text>
                         </View>
                         <Pressable
+                          accessibilityRole="switch"
+                          accessibilityLabel={`${b.name}${b.writesToSharedChat ? ' shared Chat opt-in' : ' idle behavior'}`}
+                          accessibilityState={{ checked: effectivelyEnabled, disabled: ownerRestricted }}
+                          disabled={ownerRestricted}
                           onPress={() => {
+                            if (ownerRestricted) return;
+                            const nextEnabled = !effectivelyEnabled;
                             onIdleConfigChange({
                               ...idleConfig,
-                              behaviors: { ...idleConfig.behaviors, [b.id]: { ...state, enabled: !state.enabled } },
+                              sharedChatOptIn: b.writesToSharedChat && nextEnabled
+                                ? true
+                                : idleConfig.sharedChatOptIn,
+                              behaviors: { ...idleConfig.behaviors, [b.id]: { ...state, enabled: nextEnabled } },
                             });
                           }}
-                          style={[styles.toggle, state.enabled && styles.toggleActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                          style={[
+                            styles.toggle,
+                            effectivelyEnabled && styles.toggleActive,
+                            ownerRestricted && idleStyles.toggleDisabled,
+                            Platform.OS === 'web' && { cursor: ownerRestricted ? 'not-allowed' : 'pointer' } as any,
+                          ]}
                         >
-                          <View style={[styles.toggleKnob, state.enabled && styles.toggleKnobActive]} />
+                          <View style={[styles.toggleKnob, effectivelyEnabled && styles.toggleKnobActive]} />
                         </Pressable>
                       </View>
                     );
@@ -2357,27 +2979,39 @@ export default function CustomizePanel({
                       {IDLE_BEHAVIORS.filter(b => b.tier === 3).map(b => {
                         const state = idleConfig.behaviors[b.id];
                         if (!state) return null;
+                        const effectivelyEnabled = state.enabled
+                          && (!b.writesToSharedChat || idleConfig.sharedChatOptIn);
                         return (
                           <View key={b.id} style={idleStyles.behaviorRow}>
                             <View style={idleStyles.behaviorInfo}>
-                              <Text style={idleStyles.behaviorName}>{b.icon} {b.name}</Text>
+                              <Text style={idleStyles.behaviorName}>
+                                {b.icon} {b.name}{b.writesToSharedChat ? ' · SHARED CHAT · OWNER ONLY' : ''}
+                              </Text>
                               <Text style={idleStyles.behaviorDesc}>{b.description}</Text>
                               <Text style={idleStyles.behaviorMeta}>
                                 Cooldown: {b.defaultCooldownMinutes >= 1440 ? `${Math.round(b.defaultCooldownMinutes / 1440)}d` : `${Math.round(b.defaultCooldownMinutes / 60)}h`}
                                 {state.lastRanAt ? ` · Last: ${formatLastRan(state.lastRanAt)}` : ' · Never ran'}
                                 {b.requiresBridge ? ' · Needs bridge' : ''}
+                                {b.writesToSharedChat && !idleConfig.sharedChatOptIn ? ' · Opt-in required' : ''}
                               </Text>
                             </View>
                             <Pressable
+                              accessibilityRole="switch"
+                              accessibilityLabel={`${b.name}${b.writesToSharedChat ? ' shared Chat opt-in' : ' idle behavior'}`}
+                              accessibilityState={{ checked: effectivelyEnabled }}
                               onPress={() => {
+                                const nextEnabled = !effectivelyEnabled;
                                 onIdleConfigChange({
                                   ...idleConfig,
-                                  behaviors: { ...idleConfig.behaviors, [b.id]: { ...state, enabled: !state.enabled } },
+                                  sharedChatOptIn: b.writesToSharedChat && nextEnabled
+                                    ? true
+                                    : idleConfig.sharedChatOptIn,
+                                  behaviors: { ...idleConfig.behaviors, [b.id]: { ...state, enabled: nextEnabled } },
                                 });
                               }}
-                              style={[styles.toggle, state.enabled && styles.toggleActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+                              style={[styles.toggle, effectivelyEnabled && styles.toggleActive, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
                             >
-                              <View style={[styles.toggleKnob, state.enabled && styles.toggleKnobActive]} />
+                              <View style={[styles.toggleKnob, effectivelyEnabled && styles.toggleKnobActive]} />
                             </Pressable>
                           </View>
                         );
@@ -2404,6 +3038,27 @@ function formatLastRan(iso: string): string {
 }
 
 const idleStyles = StyleSheet.create({
+  sharedChatNotice: {
+    borderWidth: 1,
+    borderColor: '#f5920050',
+    backgroundColor: '#f592000d',
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 12,
+  },
+  sharedChatNoticeTitle: {
+    color: '#f5a623',
+    fontSize: 10,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+    marginBottom: 4,
+  },
+  sharedChatNoticeText: {
+    color: '#a8a8a8',
+    fontSize: 10,
+    lineHeight: 15,
+    fontFamily: 'monospace',
+  },
   behaviorRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2413,6 +3068,8 @@ const idleStyles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#ffffff08',
   },
+  behaviorRowDisabled: { opacity: 0.55 },
+  toggleDisabled: { opacity: 0.6 },
   behaviorInfo: { flex: 1, marginRight: 12 },
   behaviorName: {
     fontSize: 12,

@@ -34,6 +34,7 @@ export default function TrainingPrivacySettings({ userId }: Props) {
   const [optOutFields, setOptOutFields] = useState<DataFieldKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
 
   // Load current settings
@@ -53,10 +54,21 @@ export default function TrainingPrivacySettings({ userId }: Props) {
     })();
   }, [userId]);
 
-  // Save handler
-  const save = useCallback(async (newOptOut: boolean, newFields: DataFieldKey[]) => {
+  // Save handler.
+  //
+  // This is a CONSENT control, so an optimistic toggle that silently fails is
+  // the worst possible outcome: the switch reads "opted out" while the data
+  // keeps being used for training. supabase-js resolves with `{ error }`
+  // rather than throwing, so the write must be checked explicitly, and the UI
+  // must fall back to the real stored value when it did not land.
+  const save = useCallback(async (
+    newOptOut: boolean,
+    newFields: DataFieldKey[],
+    revert: () => void,
+  ) => {
     setSaving(true);
-    await supabase
+    setSaveError(null);
+    const { error } = await supabase
       .from('profiles')
       .update({
         training_opt_out: newOptOut,
@@ -64,21 +76,27 @@ export default function TrainingPrivacySettings({ userId }: Props) {
       })
       .eq('id', userId);
     setSaving(false);
+    if (error) {
+      revert();
+      setSaveError('Could not save — your preference was NOT changed. Please try again.');
+    }
   }, [userId]);
 
   // Toggle master opt-out
   const toggleOptOut = useCallback((value: boolean) => {
+    const prev = optOut;
     setOptOut(value);
-    save(value, optOutFields);
-  }, [optOutFields, save]);
+    save(value, optOutFields, () => setOptOut(prev));
+  }, [optOut, optOutFields, save]);
 
   // Toggle individual field
   const toggleField = useCallback((field: DataFieldKey) => {
-    const next = optOutFields.includes(field)
-      ? optOutFields.filter(f => f !== field)
-      : [...optOutFields, field];
+    const prev = optOutFields;
+    const next = prev.includes(field)
+      ? prev.filter(f => f !== field)
+      : [...prev, field];
     setOptOutFields(next);
-    save(optOut, next);
+    save(optOut, next, () => setOptOutFields(prev));
   }, [optOut, optOutFields, save]);
 
   if (loading) return null;
@@ -155,6 +173,9 @@ export default function TrainingPrivacySettings({ userId }: Props) {
 
           {saving && (
             <Text style={styles.savingText}>Saving...</Text>
+          )}
+          {!saving && saveError && (
+            <Text style={styles.saveErrorText}>{saveError}</Text>
           )}
         </View>
       )}
@@ -289,6 +310,12 @@ const styles = StyleSheet.create({
   },
   savingText: {
     color: '#6366f1',
+    fontSize: 9,
+    marginTop: 8,
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  },
+  saveErrorText: {
+    color: '#f87171',
     fontSize: 9,
     marginTop: 8,
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',

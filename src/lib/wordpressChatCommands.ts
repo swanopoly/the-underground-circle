@@ -99,69 +99,23 @@ async function fetchExistingPostSlugs(
   }
 }
 
-// ── Featured image generation ───────────────────────────────────────────────
-
-const GEMINI_API_KEY = process.env.EXPO_PUBLIC_ALLOW_PLATFORM_MODEL_KEYS === 'true'
-  ? process.env.EXPO_PUBLIC_GEMINI_API_KEY || ''
-  : '';
-
-async function generateFeaturedImage(title: string): Promise<{ blob: Blob; fileName: string } | null> {
-  if (!GEMINI_API_KEY) return null;
-  try {
-    const prompt = `Create a professional, high-quality blog featured image for an article titled: "${title}". Modern, clean, visually striking. No text in the image.`;
-    const resp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
-        }),
-      },
-    );
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    const parts = data?.candidates?.[0]?.content?.parts || [];
-    for (const part of parts) {
-      if (part.inlineData?.mimeType?.startsWith('image/')) {
-        const binary = atob(part.inlineData.data);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        const ext = part.inlineData.mimeType.includes('png') ? 'png' : 'jpg';
-        const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40);
-        return { blob: new Blob([bytes], { type: part.inlineData.mimeType }), fileName: `${slug}-featured.${ext}` };
-      }
-    }
-    return null;
-  } catch (e) {
-    console.warn('[WP] Featured image generation failed:', e);
-    return null;
-  }
-}
-
 async function uploadFeaturedImage(
   siteUrl: string, username: string, appPassword: string,
-  title: string, imageUrl?: string,
+  title: string, imageUrl: string,
 ): Promise<number | undefined> {
-  // If a URL is provided, use it directly via publishToWordPress's built-in handler
-  if (imageUrl) {
-    try {
-      const imgResp = await fetch(imageUrl);
-      if (!imgResp.ok) return undefined;
-      const blob = await imgResp.blob();
-      const ext = imageUrl.split('.').pop()?.split('?')[0] || 'jpg';
-      const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40);
-      const result = await uploadWordPressMedia(siteUrl, username, appPassword, blob, `${slug}-featured.${ext}`, title);
-      return result.success ? result.mediaId : undefined;
-    } catch { return undefined; }
+  // Image generation belongs to the guarded image/tool runtime. This command
+  // accepts an explicit URL and never reads a model-provider key in-browser.
+  try {
+    const imgResp = await fetch(imageUrl);
+    if (!imgResp.ok) return undefined;
+    const blob = await imgResp.blob();
+    const ext = imageUrl.split('.').pop()?.split('?')[0] || 'jpg';
+    const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40);
+    const result = await uploadWordPressMedia(siteUrl, username, appPassword, blob, `${slug}-featured.${ext}`, title);
+    return result.success ? result.mediaId : undefined;
+  } catch {
+    return undefined;
   }
-
-  // Otherwise, generate one with AI
-  const generated = await generateFeaturedImage(title);
-  if (!generated) return undefined;
-  const result = await uploadWordPressMedia(siteUrl, username, appPassword, generated.blob, generated.fileName, title);
-  return result.success ? result.mediaId : undefined;
 }
 
 // ── Parse "title | image_url" syntax ────────────────────────────────────────

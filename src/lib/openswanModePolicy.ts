@@ -111,7 +111,7 @@ export const OPENSWAN_MODE_POLICIES: Record<OpenSwanChatMode, OpenSwanModePolicy
     key: 'review',
     label: 'Review',
     icon: '?',
-    color: '#22d3ee',
+    color: '#6366f1',
     description: 'Audit code, changes, or plans with a critical eye.',
     outcome: 'Findings, regressions, risks, and missing tests.',
     preferredCapabilityProfile: 'browser_qa',

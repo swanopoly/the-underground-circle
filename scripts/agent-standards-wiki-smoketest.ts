@@ -302,6 +302,22 @@ const currentWorktreeCoverage = buildAgentWorktreeQualityChecklist({
     ' M src/components/AppHeader.tsx',
     ' M scripts/claude-bridge.js',
     '?? docs/SWANBOT_PIPELINE_RESEARCH_2026-05-15.md',
+    ' M src/lib/swanbotV2BatchRuntime.ts',
+    ' M src/lib/chatApprovalGate.ts',
+    ' M src/lib/exactPlanApprovalContinuityCore.ts',
+    ' M scripts/chat-lane-outcome-smoketest.ts',
+    '?? scripts/chat-plan-tool-manifest-smoketest.ts',
+    ' M src/lib/browserPrimitives.ts',
+    ' M src/lib/computerSequenceProgramCore.ts',
+    '?? src/lib/computerForegroundOwnership.ts',
+    '?? scripts/computer-foreground-ownership-smoketest.ts',
+    '?? scripts/chat-file-permission-demand-smoketest.ts',
+    ' M scripts/database-authority-guards-smoketest.ts',
+    '?? scripts/exact-program-authority-smoketest.ts',
+    ' M scripts/thinking-label-hook-order-smoketest.ts',
+    ' M scripts/photoshop-extendscript-adapters-smoketest.ts',
+    ' M docs/UC_APP_TASK_RELIABILITY_ARCHITECTURE.md',
+    ' M docs/CHAT_SWANBOT_OPENSWAN_CAPABILITY_AND_FUTURE.md',
   ],
   hasUnrelatedChanges: true,
 });
@@ -314,6 +330,30 @@ assert(coverageOwners.has('chat_computer_runtime'), 'worktree coverage maps exec
 assert(coverageOwners.has('app_automation_control_surfaces'), 'worktree coverage maps InDesign recovery');
 assert(coverageOwners.has('product_ui_surfaces'), 'worktree coverage maps product UI surfaces');
 assert(coverageOwners.has('planning_research_docs'), 'worktree coverage maps planning research docs');
+assert(currentWorktreeCoverage.pathFindings.some((finding) => (
+  finding.path === 'scripts/chat-lane-outcome-smoketest.ts'
+  && finding.ownerRuleId === 'chat_task_planning_metadata'
+)), 'worktree coverage maps chat lane outcome smoke');
+assert(currentWorktreeCoverage.pathFindings.some((finding) => (
+  finding.path === 'scripts/chat-plan-tool-manifest-smoketest.ts'
+  && finding.ownerRuleId === 'chat_task_planning_metadata'
+)), 'worktree coverage maps Chat plan manifest smoke');
+assert(currentWorktreeCoverage.pathFindings.some((finding) => (
+  finding.path === 'src/lib/computerForegroundOwnership.ts'
+  && finding.ownerRuleId === 'chat_computer_runtime'
+)), 'worktree coverage maps foreground ownership core');
+assert(currentWorktreeCoverage.pathFindings.some((finding) => (
+  finding.path === 'scripts/computer-foreground-ownership-smoketest.ts'
+  && finding.ownerRuleId === 'chat_computer_runtime'
+)), 'worktree coverage maps foreground ownership smoke');
+assert(currentWorktreeCoverage.pathFindings.some((finding) => (
+  finding.path === 'scripts/chat-file-permission-demand-smoketest.ts'
+  && finding.ownerRuleId === 'chat_computer_runtime'
+)), 'worktree coverage maps demand-driven file permission smoke');
+assert(currentWorktreeCoverage.pathFindings.some((finding) => (
+  finding.path === 'scripts/database-authority-guards-smoketest.ts'
+  && finding.ownerRuleId === 'agent_runtime_sql'
+)), 'worktree coverage maps database authority guard smoke');
 assert(![...coverageOwners].some((owner) => owner.startsWith('unmapped_') || owner === 'general_worktree'),
   'worktree coverage sample has no unmapped or generic owners');
 

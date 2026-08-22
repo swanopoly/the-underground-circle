@@ -112,8 +112,10 @@ Deno.serve(async (req: Request) => {
     // (e.g. executing commands), it MUST verify the Bot Framework JWT / channel
     // clientState secret — otherwise anyone can POST a forged "message".
     if (body.type === "message" && body.text) {
-      // Log received message — future: handle commands (gate on signature first)
-      console.log("Teams message received:", body.text);
+      // Do not copy private Teams message content into hosted logs. Command
+      // handling remains disabled until the Bot Framework signature is
+      // verified; this acknowledgement intentionally carries no content.
+      console.info("[teams-webhook] Inbound message ignored pending signature verification");
 
       return new Response(
         JSON.stringify({ success: true }),

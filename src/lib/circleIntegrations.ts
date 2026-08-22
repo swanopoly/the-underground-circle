@@ -1,4 +1,5 @@
-import { supabase } from './supabase';
+import { safeGetUserForAccessToken } from './authSession';
+import { getSupabaseClientForAccessToken, supabase } from './supabase';
 import { buildIntegrationSaveHealthState } from './integrationHealthBadgeCore';
 
 export type CircleIntegrationProvider =
@@ -108,6 +109,68 @@ export interface CircleIntegrationRecord {
   last_validated_at?: string | null;
   created_at?: string;
   updated_at?: string;
+}
+
+export interface CircleCapabilityExactReadAuthority {
+  userId: string;
+  circleId: string;
+  accessToken: string;
+  generation: number;
+}
+
+export type CircleIntegrationExactReadAuthority = Readonly<{
+  userId: string;
+  circleId: string;
+  accessToken: string;
+}>;
+
+export type CircleCapabilityPreflight = {
+  ok: boolean;
+  missingCapabilities: string[];
+  missingConnectors: string[];
+};
+
+export type CircleCapabilityPreflightExactResult =
+  | { readOk: true; preflight: CircleCapabilityPreflight }
+  | { readOk: false; error: string };
+
+function normalizeCircleCapabilityReadAuthority(
+  circleId: string,
+  authority: CircleCapabilityExactReadAuthority | null | undefined,
+): CircleCapabilityExactReadAuthority | null {
+  const userId = authority?.userId?.trim();
+  const authorityCircleId = authority?.circleId?.trim();
+  const accessToken = authority?.accessToken?.trim();
+  const generation = Number(authority?.generation);
+  if (
+    !circleId
+    || !userId
+    || authorityCircleId !== circleId
+    || !accessToken
+    || !Number.isSafeInteger(generation)
+    || generation <= 0
+  ) return null;
+  return { userId, circleId: authorityCircleId, accessToken, generation };
+}
+
+function normalizeCircleIntegrationReadAuthority(
+  circleId: string,
+  authority: CircleIntegrationExactReadAuthority | null | undefined,
+): CircleIntegrationExactReadAuthority | null {
+  const normalizedCircleId = String(circleId || '').trim();
+  const userId = authority?.userId?.trim();
+  const authorityCircleId = authority?.circleId?.trim();
+  const accessToken = authority?.accessToken?.trim();
+  if (
+    !normalizedCircleId
+    || normalizedCircleId.length > 240
+    || !userId
+    || userId.length > 240
+    || authorityCircleId !== normalizedCircleId
+    || !accessToken
+    || accessToken.length > 16_384
+  ) return null;
+  return Object.freeze({ userId, circleId: authorityCircleId, accessToken });
 }
 
 export interface IntegrationDefinition {
@@ -863,7 +926,7 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_token'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'black-forest-labs/flux-schnell' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'black-forest-labs/flux-schnell', required: false },
     ],
     validationHints: ['API tokens scope per-account. Pin a default model so agents converge fast.'],
   },
@@ -887,7 +950,7 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'anthropic/claude-sonnet-4' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'anthropic/claude-sonnet-5', required: false },
     ],
     validationHints: ['Set a default_model so the agent has a safe fallback when route resolution is ambiguous.'],
   },
@@ -1009,19 +1072,19 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'claude-sonnet-4-6' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'claude-sonnet-5', required: false },
     ],
     validationHints: ['Get the key from https://console.anthropic.com/settings/keys. Scope: full account.'],
   },
   openai: {
     provider: 'openai',
     label: 'OpenAI',
-    description: 'GPT-5 / GPT-4o / o-series reasoning models direct from OpenAI. BYOK so requests bill against your OpenAI account.',
+    description: 'Current GPT-5.6, GPT-5.5, GPT-5.4, GPT-4.1, and o3 reasoning models direct from OpenAI. BYOK requests bill against your account.',
     capabilityFlags: ['gpt_chat', 'function_calling', 'vision', 'reasoning_models'],
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: ['organization_id'],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'gpt-5' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'gpt-5.6-terra', required: false },
     ],
     validationHints: ['Get the key from https://platform.openai.com/api-keys. Set organization_id if you belong to multiple orgs.'],
   },
@@ -1034,55 +1097,55 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     optionalSecretKeys: ['endpoint_url'],
     metadataFields: [
       { key: 'endpoint_url', label: 'Endpoint URL', placeholder: 'https://models.company.com/v1 or /v1/chat/completions' },
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'company-agent' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'company-agent', required: false },
     ],
     validationHints: ['Use any endpoint that accepts OpenAI Chat Completions request/response shape. Store this per user so usage bills to the business account.'],
   },
   google_ai: {
     provider: 'google_ai',
     label: 'Google AI',
-    description: 'Gemini 2.5 Pro / Flash via Google AI Studio. Long-context and multimodal directly from Google.',
+    description: 'Current Gemini 3.x models via Google AI Studio, with long-context and multimodal support directly from Google.',
     capabilityFlags: ['gemini_chat', 'multimodal', 'long_context', 'function_calling'],
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'gemini-2.5-pro' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'gemini-3.6-flash', required: false },
     ],
     validationHints: ['Generate an API key at https://aistudio.google.com/apikey. No project setup needed.'],
   },
   groq: {
     provider: 'groq',
     label: 'Groq',
-    description: 'Ultra-fast Llama / Mixtral inference on LPU hardware. Sub-second latency for chat-heavy workloads.',
-    capabilityFlags: ['llama_chat', 'mixtral_chat', 'fast_inference', 'function_calling'],
+    description: 'Ultra-fast GPT-OSS, Compound, and Llama inference on LPU hardware for latency-sensitive agent workloads.',
+    capabilityFlags: ['llama_chat', 'gpt_oss_chat', 'compound_agents', 'fast_inference', 'function_calling'],
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'llama-3.3-70b-versatile' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'openai/gpt-oss-120b', required: false },
     ],
     validationHints: ['Create a key at https://console.groq.com/keys. Free tier covers light usage.'],
   },
   mistral_ai: {
     provider: 'mistral_ai',
     label: 'Mistral AI',
-    description: 'Mistral Large / Codestral / Pixtral direct from Mistral. Strong Europe-hosted alternative for code + chat.',
+    description: 'Current Mistral Medium, Large, Small, Codestral, and Ministral models direct from Mistral.',
     capabilityFlags: ['mistral_chat', 'codestral', 'pixtral_vision', 'function_calling'],
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'mistral-large-latest' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'mistral-medium-3-5', required: false },
     ],
     validationHints: ['Get a key at https://console.mistral.ai/api-keys. Pay-as-you-go billing.'],
   },
   cohere: {
     provider: 'cohere',
     label: 'Cohere',
-    description: 'Command R+ chat + Embed v3 + Rerank. Strong for retrieval-augmented agents and enterprise use cases.',
+    description: 'Current Command A chat and reasoning models, plus Cohere Embed and Rerank for enterprise retrieval agents.',
     capabilityFlags: ['command_chat', 'embeddings', 'rerank', 'function_calling'],
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'command-r-plus' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'command-a-plus-05-2026', required: false },
     ],
     validationHints: ['Generate a key at https://dashboard.cohere.com/api-keys. Production keys are separate from trial keys.'],
   },
@@ -1094,7 +1157,7 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'sonar-pro' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'sonar-pro', required: false },
     ],
     validationHints: ['Get a key at https://www.perplexity.ai/settings/api. $5 free credit on signup.'],
   },
@@ -1106,7 +1169,7 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'meta-llama/Llama-3.3-70B-Instruct-Turbo' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', required: false },
     ],
     validationHints: ['Generate a key at https://api.together.xyz/settings/api-keys.'],
   },
@@ -1118,43 +1181,43 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'accounts/fireworks/models/firefunction-v2' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'accounts/fireworks/models/firefunction-v2', required: false },
     ],
     validationHints: ['Create a key at https://fireworks.ai/account/api-keys.'],
   },
   deepseek: {
     provider: 'deepseek',
     label: 'DeepSeek',
-    description: 'DeepSeek R1 reasoning + V3 chat. Strong reasoning at OSS prices, ideal for code review and planning.',
+    description: 'DeepSeek V4 Flash and Pro for current long-context reasoning, coding, review, and planning.',
     capabilityFlags: ['deepseek_chat', 'deepseek_reasoner', 'function_calling', 'long_context'],
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'deepseek-chat' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'deepseek-v4-flash', required: false },
     ],
     validationHints: ['Get a key at https://platform.deepseek.com/api_keys.'],
   },
   z_ai: {
     provider: 'z_ai',
     label: 'Z.AI / GLM',
-    description: 'GLM-4 / GLM-4.5 chat from Zhipu / Z.AI. Multilingual coverage and strong on reasoning benchmarks.',
+    description: 'GLM-5.1 chat and reasoning from Z.AI, with multilingual coverage and long-context tool use.',
     capabilityFlags: ['glm_chat', 'multilingual', 'function_calling', 'long_context'],
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'glm-4-plus' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'glm-5.1', required: false },
     ],
     validationHints: ['Generate a key at https://open.bigmodel.cn/usercenter/apikeys.'],
   },
   minimax: {
     provider: 'minimax',
     label: 'MiniMax',
-    description: 'MiniMax-Text + Speech 2.5. Long-context chat with strong Chinese / multilingual coverage.',
+    description: 'MiniMax M2.7 and high-speed variants for long-context multilingual chat and agent work.',
     capabilityFlags: ['minimax_chat', 'speech', 'multilingual', 'long_context'],
     requiredSecretKeys: ['api_key'],
     optionalSecretKeys: [],
     metadataFields: [
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'MiniMax-Text-01' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'MiniMax-M2.7', required: false },
     ],
     validationHints: ['Get a key at https://www.minimaxi.com/platform/account/keys.'],
   },
@@ -1167,7 +1230,7 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     optionalSecretKeys: ['api_key'],
     metadataFields: [
       { key: 'baseUrl', label: 'Base URL', placeholder: 'http://localhost:11434' },
-      { key: 'defaultModel', label: 'Default Model', placeholder: 'llama3.3' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'llama3.3', required: false },
     ],
     validationHints: ['Run `ollama serve` on the same network. The chat will hit baseUrl + /v1/chat/completions (Ollama exposes an OpenAI-compatible endpoint).'],
   },
@@ -1185,9 +1248,10 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
       // Paste it once and every member of the circle can chat with
       // BlackSwan; they don't each need to set up their own HF integration.
       { key: 'endpoint_url', label: 'Inference Endpoint URL', placeholder: 'https://abc123.us-east-1.aws.endpoints.huggingface.cloud' },
-      // Lets us swap the served model later without changing client
-      // code — defaults to cswan801/BlackSwan-v5.
-      { key: 'model_id', label: 'Model ID', placeholder: 'cswan801/BlackSwan-v5' },
+      // Lets us swap the served model later without changing client code.
+      // Optional because the registry already defaults to the one canonical
+      // BlackSwan model when older integrations do not store this metadata.
+      { key: 'model_id', label: 'Model ID', placeholder: 'cswan801/BlackSwan-v5', required: false },
     ],
     validationHints: [
       'Endpoint URL is the host HF assigns when you create the Endpoint — it\'s on the detail page in ui.endpoints.huggingface.co.',
@@ -1195,26 +1259,6 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     ],
   },
 };
-
-function encodeSecret(value: string): string {
-  try {
-    return btoa(unescape(encodeURIComponent(value)));
-  } catch {
-    return btoa(value);
-  }
-}
-
-function decodeSecret(value: string): string {
-  try {
-    return decodeURIComponent(escape(atob(value)));
-  } catch {
-    try {
-      return atob(value);
-    } catch {
-      return value;
-    }
-  }
-}
 
 export async function listCircleIntegrations(circleId: string): Promise<CircleIntegrationRecord[]> {
   const { data, error } = await supabase
@@ -1229,6 +1273,90 @@ export async function listCircleIntegrations(circleId: string): Promise<CircleIn
     return [];
   }
   return (data || []) as CircleIntegrationRecord[];
+}
+
+/**
+ * Strict Marketplace catalog read for one captured subject and circle. An
+ * empty integration result is accepted only after the same pinned bearer
+ * proves exact membership; database/auth failures never become a verified
+ * circle with no model connections.
+ */
+export async function listCircleIntegrationsExact(opts: {
+  circleId: string;
+  authority: CircleIntegrationExactReadAuthority;
+}): Promise<CircleIntegrationRecord[]> {
+  const authority = normalizeCircleIntegrationReadAuthority(opts.circleId, opts.authority);
+  if (!authority) {
+    throw new Error('Connected circle model integration authority is invalid.');
+  }
+  const { value: verifiedUser } = await safeGetUserForAccessToken(authority.accessToken);
+  if (verifiedUser?.id !== authority.userId) {
+    throw new Error('Connected circle model integration authority could not be verified.');
+  }
+
+  const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+  const [membershipResult, integrationResult] = await Promise.all([
+    exactClient
+      .from('circle_members')
+      .select('circle_id,user_id')
+      .eq('circle_id', authority.circleId)
+      .eq('user_id', authority.userId)
+      .maybeSingle(),
+    exactClient
+      .from('circle_integrations')
+      .select('*')
+      .eq('circle_id', authority.circleId)
+      .eq('is_active', true)
+      .order('created_at', { ascending: false })
+      .limit(101),
+  ]);
+
+  if (membershipResult.error || integrationResult.error) {
+    throw new Error('Connected circle model integration inventory is unavailable.');
+  }
+  const membership = membershipResult.data as { circle_id?: unknown; user_id?: unknown } | null;
+  if (
+    membership?.circle_id !== authority.circleId
+    || membership?.user_id !== authority.userId
+  ) {
+    throw new Error('This signed-in account is not a member of this circle.');
+  }
+  if (!Array.isArray(integrationResult.data) || integrationResult.data.length > 100) {
+    throw new Error('Connected circle model integration inventory is invalid.');
+  }
+
+  const integrations: CircleIntegrationRecord[] = [];
+  for (const row of integrationResult.data) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) {
+      throw new Error('Connected circle model integration inventory is invalid.');
+    }
+    const value = row as Record<string, unknown>;
+    const provider = typeof value.provider === 'string' ? value.provider.trim() : '';
+    const metadataValid = value.metadata === null
+      || value.metadata === undefined
+      || (typeof value.metadata === 'object' && !Array.isArray(value.metadata));
+    const capabilitiesValid = value.capability_flags === null
+      || value.capability_flags === undefined
+      || (Array.isArray(value.capability_flags)
+        && value.capability_flags.length <= 200
+        && value.capability_flags.every(flag => typeof flag === 'string' && flag.length <= 128));
+    if (
+      typeof value.id !== 'string'
+      || value.circle_id !== authority.circleId
+      || !/^[a-z0-9][a-z0-9_-]{0,127}$/.test(provider)
+      || typeof value.label !== 'string'
+      || value.label.length > 240
+      || !['connected', 'degraded', 'disabled', 'planned'].includes(String(value.status))
+      || !['circle', 'room', 'user'].includes(String(value.connection_scope))
+      || value.is_active !== true
+      || !metadataValid
+      || !capabilitiesValid
+    ) {
+      throw new Error('Connected circle model integration inventory is invalid.');
+    }
+    integrations.push({ ...value, provider } as unknown as CircleIntegrationRecord);
+  }
+  return integrations;
 }
 
 export async function getCircleIntegration(
@@ -1308,30 +1436,27 @@ export async function saveCircleIntegrationSecrets(opts: {
   secrets: Record<string, string>;
 }): Promise<boolean> {
   try {
-    const { data: auth } = await supabase.auth.getUser();
-    const userId = auth.user?.id;
-    if (!userId) return false;
+    const secrets = Object.fromEntries(
+      Object.entries(opts.secrets)
+        .filter(([, value]) => typeof value === 'string' && value.trim().length > 0),
+    );
 
-    const rows = Object.entries(opts.secrets)
-      .filter(([, value]) => value.trim().length > 0)
-      .map(([key, value]) => ({
-        integration_id: opts.integrationId,
-        key,
-        value_encrypted: encodeSecret(value),
-        created_by: userId,
-      }));
+    if (Object.keys(secrets).length === 0) return true;
 
-    if (rows.length === 0) return true;
-
-    const { error } = await supabase
-      .from('circle_integration_secrets')
-      .upsert(rows, { onConflict: 'integration_id,key' });
+    // The database derives the caller from auth.uid(), verifies current
+    // manager membership, and encrypts every value before storage. Never add
+    // a browser-side encoding or direct-table fallback here: that would turn
+    // the ciphertext boundary back into an exposed client implementation.
+    const { data, error } = await supabase.rpc('save_circle_integration_secrets', {
+      p_integration_id: opts.integrationId,
+      p_secrets: secrets,
+    });
 
     if (error) {
       console.error('[circleIntegrations] save secrets error:', error);
       return false;
     }
-    return true;
+    return data === true;
   } catch (err) {
     console.error('[circleIntegrations] save secrets exception:', err);
     return false;
@@ -1339,34 +1464,51 @@ export async function saveCircleIntegrationSecrets(opts: {
 }
 
 export async function listCircleIntegrationSecretKeys(integrationId: string): Promise<string[]> {
-  const { data, error } = await supabase
-    .from('circle_integration_secrets')
-    .select('key')
-    .eq('integration_id', integrationId)
-    .order('key');
+  const { data, error } = await supabase.rpc('list_circle_integration_secret_keys', {
+    p_integration_id: integrationId,
+  });
 
   if (error) {
     console.error('[circleIntegrations] secret key list error:', error);
     return [];
   }
 
-  return (data || []).map((row: { key: string }) => row.key);
+  return (Array.isArray(data) ? data : [])
+    .map((row: unknown) => (
+      row && typeof row === 'object' && typeof (row as { key?: unknown }).key === 'string'
+        ? (row as { key: string }).key
+        : ''
+    ))
+    .filter(Boolean);
 }
 
 export async function getCircleIntegrationSecretValues(integrationId: string): Promise<Record<string, string>> {
-  const { data, error } = await supabase
-    .from('circle_integration_secrets')
-    .select('key, value_encrypted')
-    .eq('integration_id', integrationId);
+  const { data, error } = await supabase.rpc('get_circle_integration_secret_values', {
+    p_integration_id: integrationId,
+  });
 
   if (error) {
     console.error('[circleIntegrations] secret value load error:', error);
     return {};
   }
 
-  const out: Record<string, string> = {};
-  for (const row of (data || []) as Array<{ key: string; value_encrypted: string }>) {
-    out[row.key] = decodeSecret(row.value_encrypted);
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return {};
+
+  // Build a null-prototype map so a malicious/corrupt key cannot mutate an
+  // object's prototype. The RPC already validates names and returns plaintext
+  // only after current manager authorization; ciphertext and encryption keys
+  // never reach this module.
+  const out = Object.create(null) as Record<string, string>;
+  for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
+    if (
+      /^[A-Za-z0-9_.-]{1,128}$/.test(key)
+      && key !== '__proto__'
+      && key !== 'prototype'
+      && key !== 'constructor'
+      && typeof value === 'string'
+    ) {
+      out[key] = value;
+    }
   }
   return out;
 }
@@ -1498,6 +1640,65 @@ export async function buildCircleCapabilityPreflight(opts: {
   };
 }
 
+/**
+ * Strict read-side preflight for authority-sensitive UI. This deliberately
+ * bypasses the legacy list helpers because they convert database errors into
+ * an empty integration list, which is indistinguishable from a verified
+ * circle with no connectors.
+ */
+export async function buildCircleCapabilityPreflightExact(opts: {
+  circleId: string;
+  requiredCapabilities?: string[];
+  requiredConnectors?: string[];
+  authority: CircleCapabilityExactReadAuthority;
+}): Promise<CircleCapabilityPreflightExactResult> {
+  const authority = normalizeCircleCapabilityReadAuthority(opts.circleId, opts.authority);
+  if (!authority) return { readOk: false, error: 'invalid_authority' };
+  const { value: verifiedUser } = await safeGetUserForAccessToken(authority.accessToken);
+  if (!verifiedUser || verifiedUser.id !== authority.userId) {
+    return { readOk: false, error: 'authority_mismatch' };
+  }
+
+  try {
+    const exactClient = getSupabaseClientForAccessToken(authority.accessToken);
+    const { data, error } = await exactClient
+      .from('circle_integrations')
+      .select('circle_id, provider, status, is_active, capability_flags')
+      .eq('circle_id', authority.circleId)
+      .eq('is_active', true)
+      .order('created_at', { ascending: false })
+      .setHeader('Authorization', `Bearer ${authority.accessToken}`);
+    if (error) return { readOk: false, error: error.message || 'integration_read_failed' };
+    if (!Array.isArray(data)) return { readOk: false, error: 'invalid_integration_response' };
+    if (data.some(row => String((row as any)?.circle_id || '') !== authority.circleId)) {
+      return { readOk: false, error: 'mismatched_integration_response' };
+    }
+    const integrations = data
+      .filter(row => isIntegrationUsableForCapability(row as CircleIntegrationRecord));
+    const providers = new Set(integrations.map(row => row.provider as CircleIntegrationProvider));
+    const capabilities = new Set(integrations.flatMap(row => (
+      Array.isArray(row.capability_flags) ? row.capability_flags : []
+    )));
+    const missingCapabilities = (opts.requiredCapabilities || [])
+      .filter(capability => !capabilities.has(capability));
+    const missingConnectors = (opts.requiredConnectors || []).filter(requirement => {
+      const mapped = CONNECTOR_PROVIDER_ALIASES[requirement] || [];
+      if (mapped.length === 0) return !providers.has(requirement as CircleIntegrationProvider);
+      return !mapped.some(provider => providers.has(provider));
+    });
+    return {
+      readOk: true,
+      preflight: {
+        ok: missingCapabilities.length === 0 && missingConnectors.length === 0,
+        missingCapabilities,
+        missingConnectors,
+      },
+    };
+  } catch (error: any) {
+    return { readOk: false, error: error?.message || 'integration_read_failed' };
+  }
+}
+
 export type CircleOwnershipReadiness = {
   level: 'full' | 'assisted' | 'blocked';
   headline: string;
@@ -1580,6 +1781,13 @@ export async function validateCircleIntegrationSetup(
   const secretSet = new Set(secretKeys);
   const metadata = integration.metadata || {};
   const missingSecretKeys = definition.requiredSecretKeys.filter(key => !secretSet.has(key));
+  // NOTE the default: `required !== false` means a field that OMITS `required`
+  // is treated as REQUIRED. That is easy to miss when adding a definition, and
+  // the failure is invisible at the point of the mistake — the integration
+  // saves fine, then its Marketplace card reads "Degraded" forever, because
+  // IntegrationsTab maps `!validation.ok` to `validationOk: false`. Re-entering
+  // the API key cannot clear it, since the key was never the problem.
+  // All 16 provider `defaultModel` fields hit exactly that (fixed 2026-08-07).
   const missingMetadataFields = (definition.metadataFields || [])
     .filter(field => field.required !== false)
     .map(field => field.key)
@@ -1989,6 +2197,36 @@ export async function validateProviderApiKey(
   }
 }
 
+const MODEL_CATALOG_INTEGRATION_PROVIDERS: ReadonlySet<CircleIntegrationProvider> = new Set([
+  'anthropic',
+  'openai',
+  'openai_compatible',
+  'openrouter',
+  'hugging_face',
+  'google_ai',
+  'groq',
+  'mistral_ai',
+  'cohere',
+  'perplexity',
+  'together_ai',
+  'fireworks_ai',
+  'deepseek',
+  'z_ai',
+  'minimax',
+  'ollama',
+  'blackswan',
+]);
+
+function notifyModelCatalogIntegrationChange(provider: CircleIntegrationProvider): void {
+  if (!MODEL_CATALOG_INTEGRATION_PROVIDERS.has(provider)) return;
+  // Keep circle integration ownership independent of the model-key module;
+  // the lazy import avoids a registry cycle while still invalidating an
+  // already-mounted Chat/Rooms catalog after a successful Marketplace save.
+  void import('./llmProviders')
+    .then(({ notifyUserApiKeyChanges }) => notifyUserApiKeyChanges())
+    .catch(() => { /* the saved connection remains durable; next focus retries */ });
+}
+
 export async function connectGenericCircleIntegration(opts: {
   circleId: string;
   provider: CircleIntegrationProvider;
@@ -2061,5 +2299,6 @@ export async function connectGenericCircleIntegration(opts: {
     if (!ok) return null;
   }
 
+  notifyModelCatalogIntegrationChange(opts.provider);
   return integration;
 }

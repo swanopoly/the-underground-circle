@@ -15,6 +15,19 @@ export interface SessionTags {
   timestamp: string;
 }
 
+/**
+ * Exact authenticated owner boundary for Office-private local state.
+ *
+ * New Office callers must always supply this scope. The optional parameters on
+ * the public functions below exist only so older, non-migrated surfaces keep
+ * their historical ownerless namespace until they can be moved deliberately.
+ * A scoped read never falls back to, copies, or imports that legacy data.
+ */
+export interface OfficeSessionStorageScope {
+  userId: string;
+  circleId: string;
+}
+
 // Common tag categories
 export const TAG_CATEGORIES = {
   project: { label: 'Project', color: '#3b82f6', icon: '📁' },
@@ -29,34 +42,179 @@ export type TagCategory = keyof typeof TAG_CATEGORIES;
 
 const STORAGE_KEY_SESSION_TAGS = '@office_session_tags';
 const STORAGE_KEY_TAG_SUGGESTIONS = '@office_tag_suggestions';
+export const OFFICE_SESSION_TAGS_SCOPED_PREFIX = '@office_session_tags_v2:';
+export const OFFICE_TAG_SUGGESTIONS_SCOPED_PREFIX = '@office_tag_suggestions_v2:';
+
+const OFFICE_SESSION_STORAGE_SCHEMA_VERSION = 2 as const;
+const OFFICE_SESSION_STORAGE_MAX_BYTES = 1_000_000;
+const OFFICE_SESSION_STORAGE_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+interface ScopedOfficeSessionEnvelope<T> {
+  schemaVersion: typeof OFFICE_SESSION_STORAGE_SCHEMA_VERSION;
+  userId: string;
+  circleId: string;
+  value: T;
+}
+
+function normalizeOfficeSessionStorageScope(
+  scope: OfficeSessionStorageScope | undefined,
+): OfficeSessionStorageScope | null {
+  if (!scope || typeof scope !== 'object') return null;
+  const userId = typeof scope.userId === 'string' ? scope.userId.trim().toLowerCase() : '';
+  const circleId = typeof scope.circleId === 'string' ? scope.circleId.trim().toLowerCase() : '';
+  if (!OFFICE_SESSION_STORAGE_UUID_RE.test(userId) || !OFFICE_SESSION_STORAGE_UUID_RE.test(circleId)) {
+    return null;
+  }
+  return { userId, circleId };
+}
+
+export function isValidOfficeSessionStorageScope(
+  scope: OfficeSessionStorageScope | null | undefined,
+): scope is OfficeSessionStorageScope {
+  return normalizeOfficeSessionStorageScope(scope || undefined) !== null;
+}
+
+function scopedStorageKey(
+  prefix: string,
+  scope: OfficeSessionStorageScope | undefined,
+): string | null {
+  if (scope === undefined) return null;
+  const normalized = normalizeOfficeSessionStorageScope(scope);
+  if (!normalized) return null;
+  return `${prefix}${normalized.userId}:${normalized.circleId}`;
+}
+
+export function officeSessionTagsStorageKey(scope: OfficeSessionStorageScope): string | null {
+  return scopedStorageKey(OFFICE_SESSION_TAGS_SCOPED_PREFIX, scope);
+}
+
+export function officeTagSuggestionsStorageKey(scope: OfficeSessionStorageScope): string | null {
+  return scopedStorageKey(OFFICE_TAG_SUGGESTIONS_SCOPED_PREFIX, scope);
+}
+
+function boundedString(value: unknown, maxLength: number): string {
+  return typeof value === 'string' ? value.trim().slice(0, maxLength) : '';
+}
+
+function sanitizedTag(value: unknown): SessionTag | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  const key = boundedString(candidate.key, 200);
+  const label = boundedString(candidate.label, 200);
+  const color = boundedString(candidate.color, 16);
+  if (!key || !label || !/^#[0-9a-f]{3,8}$/i.test(color)) return null;
+  return { key, label, color };
+}
+
+function sanitizedTags(value: unknown): SessionTag[] {
+  if (!Array.isArray(value)) return [];
+  const unique = new Map<string, SessionTag>();
+  for (const item of value.slice(0, 64)) {
+    const tag = sanitizedTag(item);
+    if (tag && !unique.has(tag.key)) unique.set(tag.key, tag);
+  }
+  return Array.from(unique.values());
+}
+
+function decodeSessionTags(value: unknown): Map<string, SessionTag[]> {
+  if (!Array.isArray(value)) return new Map();
+  const result = new Map<string, SessionTag[]>();
+  for (const item of value.slice(0, 2_000)) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const candidate = item as Record<string, unknown>;
+    const sessionKey = boundedString(candidate.sessionKey, 500);
+    const tags = sanitizedTags(candidate.tags);
+    if (sessionKey && tags.length > 0) result.set(sessionKey, tags);
+  }
+  return result;
+}
+
+function readScopedEnvelope<T>(
+  raw: string,
+  expectedScope: OfficeSessionStorageScope,
+): T | null {
+  if (!raw || raw.length > OFFICE_SESSION_STORAGE_MAX_BYTES) return null;
+  const normalized = normalizeOfficeSessionStorageScope(expectedScope);
+  if (!normalized) return null;
+  try {
+    const candidate = JSON.parse(raw) as Partial<ScopedOfficeSessionEnvelope<T>>;
+    if (
+      !candidate
+      || typeof candidate !== 'object'
+      || Array.isArray(candidate)
+      || candidate.schemaVersion !== OFFICE_SESSION_STORAGE_SCHEMA_VERSION
+      || candidate.userId !== normalized.userId
+      || candidate.circleId !== normalized.circleId
+    ) return null;
+    return candidate.value as T;
+  } catch {
+    return null;
+  }
+}
+
+function serializeScopedEnvelope<T>(
+  scope: OfficeSessionStorageScope,
+  value: T,
+): string | null {
+  const normalized = normalizeOfficeSessionStorageScope(scope);
+  if (!normalized) return null;
+  try {
+    const serialized = JSON.stringify({
+      schemaVersion: OFFICE_SESSION_STORAGE_SCHEMA_VERSION,
+      ...normalized,
+      value,
+    } satisfies ScopedOfficeSessionEnvelope<T>);
+    return serialized.length <= OFFICE_SESSION_STORAGE_MAX_BYTES ? serialized : null;
+  } catch {
+    return null;
+  }
+}
 
 // ─── Storage Functions ──────────────────────────────────
 
-export async function loadSessionTags(): Promise<Map<string, SessionTag[]>> {
+export async function loadSessionTags(
+  scope?: OfficeSessionStorageScope,
+): Promise<Map<string, SessionTag[]>> {
   try {
-    const raw = await storage.getItem(STORAGE_KEY_SESSION_TAGS);
+    const key = scope === undefined
+      ? STORAGE_KEY_SESSION_TAGS
+      : officeSessionTagsStorageKey(scope);
+    if (!key) return new Map();
+    const raw = await storage.getItem(key);
     if (!raw) return new Map();
-    
-    const data = JSON.parse(raw) as SessionTags[];
-    const map = new Map<string, SessionTag[]>();
-    data.forEach(item => {
-      map.set(item.sessionKey, item.tags);
-    });
-    return map;
+
+    if (scope !== undefined) {
+      return decodeSessionTags(readScopedEnvelope<SessionTags[]>(raw, scope));
+    }
+    return decodeSessionTags(JSON.parse(raw));
   } catch {
     return new Map();
   }
 }
 
-export async function saveSessionTags(tagsMap: Map<string, SessionTag[]>): Promise<void> {
+export async function saveSessionTags(
+  tagsMap: Map<string, SessionTag[]>,
+  scope?: OfficeSessionStorageScope,
+): Promise<void> {
   try {
     const data: SessionTags[] = [];
     tagsMap.forEach((tags, sessionKey) => {
-      if (tags.length > 0) {
-        data.push({ sessionKey, tags, timestamp: new Date().toISOString() });
+      const safeSessionKey = boundedString(sessionKey, 500);
+      const safeTags = sanitizedTags(tags);
+      if (safeSessionKey && safeTags.length > 0 && data.length < 2_000) {
+        data.push({ sessionKey: safeSessionKey, tags: safeTags, timestamp: new Date().toISOString() });
       }
     });
-    await storage.setItem(STORAGE_KEY_SESSION_TAGS, JSON.stringify(data));
+    const key = scope === undefined
+      ? STORAGE_KEY_SESSION_TAGS
+      : officeSessionTagsStorageKey(scope);
+    if (!key) return;
+    const serialized = scope === undefined
+      ? JSON.stringify(data)
+      : serializeScopedEnvelope(scope, data);
+    if (!serialized) return;
+    await storage.setItem(key, serialized);
   } catch {
     console.error('Failed to save session tags');
   }
@@ -65,21 +223,26 @@ export async function saveSessionTags(tagsMap: Map<string, SessionTag[]>): Promi
 export async function addSessionTag(
   sessionKey: string,
   tag: SessionTag,
-  existingTags: Map<string, SessionTag[]>
+  existingTags: Map<string, SessionTag[]>,
+  scope?: OfficeSessionStorageScope,
 ): Promise<Map<string, SessionTag[]>> {
-  const currentTags = existingTags.get(sessionKey) || [];
+  if (scope !== undefined && !normalizeOfficeSessionStorageScope(scope)) return existingTags;
+  const safeSessionKey = boundedString(sessionKey, 500);
+  const safeTag = sanitizedTag(tag);
+  if (!safeSessionKey || !safeTag) return existingTags;
+  const currentTags = existingTags.get(safeSessionKey) || [];
   
   // Don't add duplicate tags
-  if (currentTags.some(t => t.key === tag.key)) {
+  if (currentTags.some(t => t.key === safeTag.key)) {
     return existingTags;
   }
   
   const updated = new Map(existingTags);
-  updated.set(sessionKey, [...currentTags, tag]);
-  await saveSessionTags(updated);
+  updated.set(safeSessionKey, [...currentTags, safeTag]);
+  await saveSessionTags(updated, scope);
   
   // Add to suggestions for auto-complete
-  await addTagSuggestion(tag);
+  await addTagSuggestion(safeTag, scope);
   
   return updated;
 }
@@ -87,43 +250,71 @@ export async function addSessionTag(
 export async function removeSessionTag(
   sessionKey: string,
   tagKey: string,
-  existingTags: Map<string, SessionTag[]>
+  existingTags: Map<string, SessionTag[]>,
+  scope?: OfficeSessionStorageScope,
 ): Promise<Map<string, SessionTag[]>> {
-  const currentTags = existingTags.get(sessionKey) || [];
-  const filtered = currentTags.filter(t => t.key !== tagKey);
+  if (scope !== undefined && !normalizeOfficeSessionStorageScope(scope)) return existingTags;
+  const safeSessionKey = boundedString(sessionKey, 500);
+  const safeTagKey = boundedString(tagKey, 200);
+  if (!safeSessionKey || !safeTagKey) return existingTags;
+  const currentTags = existingTags.get(safeSessionKey) || [];
+  const filtered = currentTags.filter(t => t.key !== safeTagKey);
   
   const updated = new Map(existingTags);
   if (filtered.length === 0) {
-    updated.delete(sessionKey);
+    updated.delete(safeSessionKey);
   } else {
-    updated.set(sessionKey, filtered);
+    updated.set(safeSessionKey, filtered);
   }
   
-  await saveSessionTags(updated);
+  await saveSessionTags(updated, scope);
   return updated;
 }
 
 // ─── Tag Suggestions (for auto-complete) ──────────────────
 
-export async function loadTagSuggestions(): Promise<SessionTag[]> {
+export async function loadTagSuggestions(
+  scope?: OfficeSessionStorageScope,
+): Promise<SessionTag[]> {
   try {
-    const raw = await storage.getItem(STORAGE_KEY_TAG_SUGGESTIONS);
+    const key = scope === undefined
+      ? STORAGE_KEY_TAG_SUGGESTIONS
+      : officeTagSuggestionsStorageKey(scope);
+    if (!key) return [];
+    const raw = await storage.getItem(key);
     if (!raw) return [];
-    return JSON.parse(raw);
+    const decoded = scope === undefined
+      ? JSON.parse(raw)
+      : readScopedEnvelope<SessionTag[]>(raw, scope);
+    return sanitizedTags(decoded).slice(0, 512);
   } catch {
     return [];
   }
 }
 
-export async function addTagSuggestion(tag: SessionTag): Promise<void> {
+export async function addTagSuggestion(
+  tag: SessionTag,
+  scope?: OfficeSessionStorageScope,
+): Promise<void> {
   try {
-    const suggestions = await loadTagSuggestions();
+    if (scope !== undefined && !normalizeOfficeSessionStorageScope(scope)) return;
+    const safeTag = sanitizedTag(tag);
+    if (!safeTag) return;
+    const suggestions = await loadTagSuggestions(scope);
     
     // Don't add duplicates
-    if (suggestions.some(s => s.key === tag.key)) return;
+    if (suggestions.some(s => s.key === safeTag.key)) return;
     
-    const updated = [...suggestions, tag];
-    await storage.setItem(STORAGE_KEY_TAG_SUGGESTIONS, JSON.stringify(updated));
+    const updated = [...suggestions, safeTag].slice(-512);
+    const key = scope === undefined
+      ? STORAGE_KEY_TAG_SUGGESTIONS
+      : officeTagSuggestionsStorageKey(scope);
+    if (!key) return;
+    const serialized = scope === undefined
+      ? JSON.stringify(updated)
+      : serializeScopedEnvelope(scope, updated);
+    if (!serialized) return;
+    await storage.setItem(key, serialized);
   } catch {
     console.error('Failed to save tag suggestion');
   }

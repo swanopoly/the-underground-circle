@@ -1,33 +1,44 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import {
+  getRun,
   getRunArtifacts,
   getRunSteps,
   listChatSessionRuns,
   listChildRuns,
   listRuns,
+  cancelStaleRunExact,
   projectPersistedRunStepForDisplay,
   subscribeToRun,
   subscribeToRunSteps,
   type AgentRun,
+  type AgentRunExactReadAuthority,
+  type AgentRunExactReadAuthorityFence,
   type RunArtifact,
   type RunStep,
 } from '../../lib/agentRunSystem';
 import type { BrowserPlanCardData, BrowserPlanEvent } from '../../lib/computerUse';
-import { applyOpenSwanMemoryRecommendation, type OpenSwanMemoryRecommendation, type PromptMemoryReference } from '../../lib/memoryService';
+import type { OpenSwanMemoryRecommendation, PromptMemoryReference } from '../../lib/memoryService';
 import { getOpenSwanExecutionStatusColor, getOpenSwanExecutionStatusLabel, type OpenSwanExecutionContract } from '../../lib/openswanExecution';
-import { decayMemoryImportance, pinMemory, promoteMemory, recordMemoryFeedback, softDeleteMemory } from '../../lib/memoryActions';
 import {
   buildRunMetadataSummaryProps,
   readRunBrowserPlanEvents,
   readRunExecutionStream,
 } from '../../lib/runMetadataSummary';
 import { buildOpenSwanObservedEvalAggregate, buildOpenSwanObservedEvalDashboard } from '../../lib/openswanObservedEvals';
-import { filterAndStatRuns, type RunStatusFilter } from '../../lib/runHistoryFilterCore';
+import {
+  aggregateRunHistoryRealtimeState,
+  describeRunHistoryStatus,
+  filterAndStatRuns,
+  type RunHistoryRealtimeState,
+  type RunStatusFilter,
+} from '../../lib/runHistoryFilterCore';
+import { showConfirm } from '../../lib/alert';
 import RunHistoryFilterBar from './RunHistoryFilterBar';
 import OpenSwanQualityAggregate from './OpenSwanQualityAggregate';
 import OpenSwanQualityDashboard from './OpenSwanQualityDashboard';
 import RunMetadataSummary from './RunMetadataSummary';
+import { isAwaitingConnectedAgentResultMetadata } from '../../lib/officeOpsBoard';
 
 type Props = {
   visible: boolean;
@@ -37,14 +48,48 @@ type Props = {
   chatSessionId?: string | null;
   roomId?: string | null;
   /**
-   * Deep-link focus: when provided and the run is present in the loaded first
-   * page, select it once on load. Never fights later user selection (applied
-   * at most once per distinct id), and when the run is NOT in the first page
-   * the drawer keeps its existing default (first run) selection.
+   * Deep-link focus: select the exact same-circle run once on load, fetching it
+   * directly when it falls outside the first history page. A missing,
+   * inaccessible, or cross-circle id renders an unavailable state and never
+   * silently selects another run.
    */
   initialRunId?: string | null;
+  /** Exact user/circle bearer captured by the owning surface. */
+  exactAuthority: AgentRunExactReadAuthority | null;
+  /** Live lifecycle fence; old confirmations cannot mutate after retirement. */
+  isExactAuthorityCurrent: AgentRunExactReadAuthorityFence;
   onClose: () => void;
 };
+
+const RUN_DRAWER_PAGE_LIMIT = 40;
+
+type RunHistoryReadState = 'idle' | 'loading' | 'ready' | 'blocked' | 'error';
+type RunHistoryRealtimeReceipt = Readonly<{
+  authority: AgentRunExactReadAuthority;
+  runId: string;
+  refreshTick: number;
+  openGeneration: number;
+  state: RunHistoryRealtimeState;
+}>;
+type RunHistoryExactRefreshRequest = Readonly<{
+  authority: AgentRunExactReadAuthority;
+  runId: string;
+  tick: number;
+}>;
+
+function isSameRunReadAuthority(
+  left: AgentRunExactReadAuthority | null,
+  right: AgentRunExactReadAuthority | null,
+): boolean {
+  return Boolean(
+    left
+    && right
+    && left.userId === right.userId
+    && left.circleId === right.circleId
+    && left.accessToken === right.accessToken
+    && left.generation === right.generation,
+  );
+}
 
 function getChildQualityTone(outcome?: string | null): { border: string; bg: string; text: string } {
   switch (outcome) {
@@ -120,100 +165,389 @@ function formatMemorySourceLabel(ref: PromptMemoryReference): string | null {
 export default function RunHistoryDrawer({
   visible,
   circleId,
-  currentUserId = null,
   title = 'Run History',
   chatSessionId = null,
   roomId = null,
   initialRunId = null,
+  exactAuthority,
+  isExactAuthorityCurrent,
   onClose,
 }: Props) {
   const [qualityWindow, setQualityWindow] = useState<'all' | 'recent'>('all');
   const [runs, setRuns] = useState<AgentRun[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [unavailableInitialRunId, setUnavailableInitialRunId] = useState<string | null>(null);
   const [filterQuery, setFilterQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<RunStatusFilter>('all');
   // Deep-link focus is applied at most once per distinct initialRunId so a
-  // later user selection is never overridden by a reload.
-  const appliedInitialRunIdRef = useRef<string | null>(null);
+  // later user selection is never overridden by a reload. The full authority
+  // receipt makes even a same-circle bearer rotation resolve the target anew.
+  const appliedInitialRunIdRef = useRef<{
+    authority: AgentRunExactReadAuthority;
+    runId: string;
+  } | null>(null);
+  const [exactRefreshTick, setExactRefreshTick] = useState(0);
+  const exactRefreshSequenceRef = useRef(0);
+  const exactRefreshRequestRef = useRef<RunHistoryExactRefreshRequest | null>(null);
+  const [realtimeReceipt, setRealtimeReceipt] = useState<RunHistoryRealtimeReceipt | null>(null);
+  const wasVisibleRef = useRef(false);
+  const openGenerationRef = useRef(0);
+  if (visible && !wasVisibleRef.current) openGenerationRef.current += 1;
+  wasVisibleRef.current = visible;
+  const [verifiedReadAuthority, setVerifiedReadAuthority] = useState<AgentRunExactReadAuthority | null>(null);
+  const [runHistoryReadState, setRunHistoryReadState] = useState<RunHistoryReadState>('idle');
   const [steps, setSteps] = useState<RunStep[]>([]);
   const [artifacts, setArtifacts] = useState<RunArtifact[]>([]);
   const [childRuns, setChildRuns] = useState<AgentRun[]>([]);
-  const [memoryActionTick, setMemoryActionTick] = useState(0);
+  const [detailReadState, setDetailReadState] = useState<RunHistoryReadState>('idle');
+  const [closingStaleRunId, setClosingStaleRunId] = useState<string | null>(null);
+  const [staleRunCancelError, setStaleRunCancelError] = useState<string | null>(null);
+  const staleRunCancelAttemptRef = useRef<string | null>(null);
+  const [freshnessTick, setFreshnessTick] = useState(0);
+  const liveDrawerScopeRef = useRef({ visible, circleId, mounted: true });
+  liveDrawerScopeRef.current = { visible, circleId, mounted: true };
+  // In-flight confirmation handlers call this stable wrapper, which always
+  // delegates to the newest surface fence rather than a stale render closure.
+  const suppliedExactAuthorityFenceRef = useRef(isExactAuthorityCurrent);
+  suppliedExactAuthorityFenceRef.current = isExactAuthorityCurrent;
+  const isLiveExactAuthorityCurrent = useCallback((authority: AgentRunExactReadAuthority): boolean => {
+    try {
+      return suppliedExactAuthorityFenceRef.current(authority) === true;
+    } catch {
+      return false;
+    }
+  }, []);
+  const exactReadAuthorityCurrent = Boolean(
+    exactAuthority
+    && exactAuthority.circleId === circleId
+    && isLiveExactAuthorityCurrent(exactAuthority),
+  );
+  // A retired generation's rows may remain in component state while React is
+  // scheduling cleanup, but they are never eligible for rendering or selection.
+  const hasVerifiedReadSnapshot = Boolean(
+    exactReadAuthorityCurrent
+    && isSameRunReadAuthority(verifiedReadAuthority, exactAuthority),
+  );
+  const verifiedRuns = hasVerifiedReadSnapshot ? runs : [];
+  const selectedRun = useMemo(
+    () => verifiedRuns.find((run) => run.id === selectedRunId) || null,
+    [verifiedRuns, selectedRunId],
+  );
+  const selectedRunRef = useRef<AgentRun | null>(selectedRun);
+  selectedRunRef.current = selectedRun;
+  const selectedRunRealtimeState: RunHistoryRealtimeState | 'idle' = !visible || !selectedRun || !exactAuthority
+    ? 'idle'
+    : realtimeReceipt
+      && realtimeReceipt.runId === selectedRun.id
+      && realtimeReceipt.refreshTick === exactRefreshTick
+      && realtimeReceipt.openGeneration === openGenerationRef.current
+      && isSameRunReadAuthority(realtimeReceipt.authority, exactAuthority)
+      ? realtimeReceipt.state
+      : 'connecting';
+
+  const handleExactRefreshAndReconnect = useCallback(() => {
+    const capturedAuthority = exactAuthority;
+    const capturedRunId = selectedRunRef.current?.id || '';
+    if (
+      !capturedAuthority
+      || !capturedRunId
+      || capturedAuthority.circleId !== circleId
+      || !isLiveExactAuthorityCurrent(capturedAuthority)
+    ) return;
+    exactRefreshSequenceRef.current += 1;
+    const nextTick = exactRefreshSequenceRef.current;
+    exactRefreshRequestRef.current = {
+      authority: capturedAuthority,
+      runId: capturedRunId,
+      tick: nextTick,
+    };
+    setExactRefreshTick(nextTick);
+  }, [circleId, exactAuthority, isLiveExactAuthorityCurrent]);
+
+  useEffect(() => () => {
+    liveDrawerScopeRef.current = {
+      visible: false,
+      circleId: liveDrawerScopeRef.current.circleId,
+      mounted: false,
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!visible) return;
+    const timer = setInterval(() => setFreshnessTick((tick) => tick + 1), 30_000);
+    return () => clearInterval(timer);
+  }, [visible]);
 
   useEffect(() => {
     if (!visible) return;
     let cancelled = false;
     const load = async () => {
-      const nextRuns = chatSessionId
-        ? await listChatSessionRuns(circleId, chatSessionId, 40)
-        : await listRuns(circleId, { roomId: roomId || undefined, limit: 40 });
-      if (cancelled) return;
-      setRuns(nextRuns);
-      // Deep-link focus: honored only when the run is present in this first
-      // page; otherwise fall back to the existing default-selection behavior.
-      const wantInitial = !!initialRunId
-        && appliedInitialRunIdRef.current !== initialRunId
-        && nextRuns.some((run) => run.id === initialRunId);
-      if (wantInitial) {
-        appliedInitialRunIdRef.current = initialRunId;
-        setSelectedRunId(initialRunId);
-      } else {
-        setSelectedRunId((current) => current || nextRuns[0]?.id || null);
+      const capturedAuthority = exactAuthority;
+      if (
+        !capturedAuthority
+        || capturedAuthority.circleId !== circleId
+        || !isLiveExactAuthorityCurrent(capturedAuthority)
+      ) {
+        setVerifiedReadAuthority(null);
+        setRunHistoryReadState('blocked');
+        setRuns([]);
+        setSelectedRunId(null);
+        setUnavailableInitialRunId(null);
+        return;
+      }
+      const strictReadOptions = {
+        strict: true as const,
+        authority: capturedAuthority,
+        isAuthorityCurrent: isLiveExactAuthorityCurrent,
+      };
+      const pendingExactRefresh = exactRefreshRequestRef.current;
+      const exactRefreshRequest = pendingExactRefresh
+        && pendingExactRefresh.tick === exactRefreshTick
+        && isSameRunReadAuthority(pendingExactRefresh.authority, capturedAuthority)
+        ? pendingExactRefresh
+        : null;
+      const retireExactRefreshRequest = () => {
+        if (exactRefreshRequestRef.current?.tick === exactRefreshTick) {
+          exactRefreshRequestRef.current = null;
+        }
+      };
+      setRunHistoryReadState('loading');
+      try {
+        const nextRuns = chatSessionId
+          ? await listChatSessionRuns(
+              circleId,
+              chatSessionId,
+              RUN_DRAWER_PAGE_LIMIT,
+              strictReadOptions,
+            )
+          : await listRuns(
+              circleId,
+              { roomId: roomId || undefined, limit: RUN_DRAWER_PAGE_LIMIT },
+              strictReadOptions,
+            );
+        if (cancelled || !isLiveExactAuthorityCurrent(capturedAuthority)) return;
+        // Run history is presentation-only. Freshness projection below can mark
+        // an aging heartbeat STALE / NOT ACTIVE, but opening a read surface must
+        // never terminalize the canonical ledger. A lease-owning runtime or
+        // background maintenance path may reap a dead run with server authority;
+        // this drawer only offers the explicit, confirmed Cancel action below.
+        const requestedInitialRunId = exactRefreshRequest?.runId
+          || (typeof initialRunId === 'string' ? initialRunId.trim() : '');
+        const appliedInitial = appliedInitialRunIdRef.current;
+        const shouldApplyInitial = !!requestedInitialRunId
+          && (exactRefreshRequest != null || (
+            !isSameRunReadAuthority(
+              appliedInitial?.authority ?? null,
+              capturedAuthority,
+            )
+            || appliedInitial?.runId !== requestedInitialRunId
+          ));
+
+        if (shouldApplyInitial) {
+          let focusedRun = nextRuns.find((run) => run.id === requestedInitialRunId) || null;
+          let resolvedRuns = nextRuns;
+
+          // Exact focus cannot degrade to “open the newest run.” If the target is
+          // outside the bounded first page, fetch it by id and accept it only
+          // after validating the circle boundary locally.
+          if (!focusedRun) {
+            const exactRun = await getRun(requestedInitialRunId, strictReadOptions);
+            if (cancelled || !isLiveExactAuthorityCurrent(capturedAuthority)) return;
+            if (exactRun?.circle_id === circleId) {
+              focusedRun = exactRun;
+              resolvedRuns = [exactRun, ...nextRuns.filter((run) => run.id !== exactRun.id)]
+                .slice(0, RUN_DRAWER_PAGE_LIMIT);
+            }
+          }
+          if (cancelled || !isLiveExactAuthorityCurrent(capturedAuthority)) return;
+
+          setRuns(resolvedRuns);
+          setVerifiedReadAuthority(capturedAuthority);
+          setRunHistoryReadState('ready');
+          if (focusedRun) {
+            if (!exactRefreshRequest) {
+              appliedInitialRunIdRef.current = {
+                authority: capturedAuthority,
+                runId: requestedInitialRunId,
+              };
+            }
+            setUnavailableInitialRunId(null);
+            setSelectedRunId(focusedRun.id);
+          } else {
+            setUnavailableInitialRunId(requestedInitialRunId);
+            setSelectedRunId(null);
+          }
+          retireExactRefreshRequest();
+          return;
+        }
+
+        setRuns(nextRuns);
+        setVerifiedReadAuthority(capturedAuthority);
+        setRunHistoryReadState('ready');
+        setUnavailableInitialRunId(null);
+        setSelectedRunId((current) => (
+          current && nextRuns.some((run) => run.id === current)
+            ? current
+            : nextRuns[0]?.id || null
+        ));
+        retireExactRefreshRequest();
+      } catch {
+        if (cancelled || !isLiveExactAuthorityCurrent(capturedAuthority)) return;
+        retireExactRefreshRequest();
+        setVerifiedReadAuthority(null);
+        setRunHistoryReadState('error');
+        setRuns([]);
+        setSelectedRunId(null);
+        setUnavailableInitialRunId(null);
       }
     };
     void load();
     return () => { cancelled = true; };
-  }, [visible, circleId, chatSessionId, roomId, initialRunId]);
+  }, [
+    visible,
+    circleId,
+    chatSessionId,
+    roomId,
+    initialRunId,
+    exactAuthority?.userId,
+    exactAuthority?.circleId,
+    exactAuthority?.accessToken,
+    exactAuthority?.generation,
+    exactRefreshTick,
+    isLiveExactAuthorityCurrent,
+  ]);
 
   useEffect(() => {
-    if (!visible || !selectedRunId) {
+    if (!visible || !selectedRunId || !exactAuthority || !hasVerifiedReadSnapshot) {
       setSteps([]);
       setArtifacts([]);
       setChildRuns([]);
+      setDetailReadState('idle');
       return;
     }
     let cancelled = false;
-    Promise.all([getRunSteps(selectedRunId), getRunArtifacts(selectedRunId), listChildRuns(selectedRunId)])
+    const capturedAuthority = exactAuthority;
+    const strictReadOptions = {
+      strict: true as const,
+      authority: capturedAuthority,
+      isAuthorityCurrent: isLiveExactAuthorityCurrent,
+    };
+    setSteps([]);
+    setArtifacts([]);
+    setChildRuns([]);
+    setDetailReadState('loading');
+    Promise.all([
+      getRunSteps(selectedRunId, strictReadOptions),
+      getRunArtifacts(selectedRunId, strictReadOptions),
+      listChildRuns(selectedRunId, 20, strictReadOptions),
+    ])
       .then(([nextSteps, nextArtifacts, nextChildRuns]) => {
-        if (cancelled) return;
+        if (cancelled || !isLiveExactAuthorityCurrent(capturedAuthority)) return;
         setSteps(nextSteps);
         setArtifacts(nextArtifacts);
         setChildRuns(nextChildRuns);
+        setDetailReadState('ready');
       })
       .catch(() => {
-        if (cancelled) return;
+        if (cancelled || !isLiveExactAuthorityCurrent(capturedAuthority)) return;
         setSteps([]);
         setArtifacts([]);
         setChildRuns([]);
+        setDetailReadState('error');
       });
     return () => { cancelled = true; };
-  }, [visible, selectedRunId, memoryActionTick]);
+  }, [
+    visible,
+    selectedRunId,
+    exactRefreshTick,
+    hasVerifiedReadSnapshot,
+    exactAuthority,
+    isLiveExactAuthorityCurrent,
+  ]);
 
   useEffect(() => {
-    if (!visible || !selectedRunId) return;
-    const runChannel = subscribeToRun(selectedRunId, (run) => {
-      setRuns((prev) => prev.map((item) => item.id === run.id ? run : item));
-    });
-    const stepChannel = subscribeToRunSteps(selectedRunId, (step) => {
-      setSteps((prev) => {
-        const exists = prev.some((item) => item.id === step.id);
-        const next = exists ? prev.map((item) => item.id === step.id ? step : item) : [...prev, step];
-        return next.sort((a, b) => a.step_index - b.step_index);
-      });
-    });
-    return () => {
-      try { runChannel.unsubscribe(); } catch {}
-      try { stepChannel.unsubscribe(); } catch {}
+    if (!visible || !selectedRunId || !exactAuthority || !hasVerifiedReadSnapshot) {
+      setRealtimeReceipt(null);
+      return;
+    }
+    const capturedAuthority = exactAuthority;
+    const capturedRunId = selectedRunId;
+    const capturedRefreshTick = exactRefreshTick;
+    const capturedOpenGeneration = openGenerationRef.current;
+    const strictReadOptions = {
+      strict: true as const,
+      authority: capturedAuthority,
+      isAuthorityCurrent: isLiveExactAuthorityCurrent,
     };
-  }, [visible, selectedRunId]);
+    const channelStates: { run: RunHistoryRealtimeState; steps: RunHistoryRealtimeState } = {
+      run: 'connecting',
+      steps: 'connecting',
+    };
+    let disposed = false;
+    let runChannel: ReturnType<typeof subscribeToRun> | null = null;
+    let stepChannel: ReturnType<typeof subscribeToRunSteps> | null = null;
+    const lifecycleIsCurrent = () => Boolean(
+      !disposed
+      && isLiveExactAuthorityCurrent(capturedAuthority)
+      && liveDrawerScopeRef.current.visible
+      && liveDrawerScopeRef.current.circleId === capturedAuthority.circleId
+      && selectedRunRef.current?.id === capturedRunId
+      && openGenerationRef.current === capturedOpenGeneration
+    );
+    const publishLifecycle = (channel: 'run' | 'steps', state: RunHistoryRealtimeState) => {
+      if (!lifecycleIsCurrent()) return;
+      channelStates[channel] = state;
+      setRealtimeReceipt({
+        authority: capturedAuthority,
+        runId: capturedRunId,
+        refreshTick: capturedRefreshTick,
+        openGeneration: capturedOpenGeneration,
+        state: aggregateRunHistoryRealtimeState(channelStates.run, channelStates.steps),
+      });
+    };
+    setRealtimeReceipt({
+      authority: capturedAuthority,
+      runId: capturedRunId,
+      refreshTick: capturedRefreshTick,
+      openGeneration: capturedOpenGeneration,
+      state: 'connecting',
+    });
+    try {
+      runChannel = subscribeToRun(capturedRunId, (run) => {
+        if (
+          !lifecycleIsCurrent()
+          || run.circle_id !== capturedAuthority.circleId
+        ) return;
+        setRuns((prev) => prev.map((item) => item.id === run.id ? run : item));
+      }, strictReadOptions, (state) => publishLifecycle('run', state));
+      stepChannel = subscribeToRunSteps(capturedRunId, (step) => {
+        if (!lifecycleIsCurrent()) return;
+        setSteps((prev) => {
+          const exists = prev.some((item) => item.id === step.id);
+          const next = exists ? prev.map((item) => item.id === step.id ? step : item) : [...prev, step];
+          return next.sort((a, b) => a.step_index - b.step_index);
+        });
+      }, strictReadOptions, (state) => publishLifecycle('steps', state));
+    } catch {
+      publishLifecycle('run', 'unavailable');
+    }
+    return () => {
+      disposed = true;
+      try { runChannel?.unsubscribe(); } catch {}
+      try { stepChannel?.unsubscribe(); } catch {}
+    };
+  }, [
+    visible,
+    selectedRunId,
+    exactAuthority,
+    exactRefreshTick,
+    hasVerifiedReadSnapshot,
+    isLiveExactAuthorityCurrent,
+  ]);
 
-  const selectedRun = useMemo(
-    () => runs.find((run) => run.id === selectedRunId) || null,
-    [runs, selectedRunId],
-  );
   const parentRun = useMemo(
-    () => (selectedRun?.parent_run_id ? runs.find((run) => run.id === selectedRun.parent_run_id) || null : null),
-    [runs, selectedRun],
+    () => (selectedRun?.parent_run_id ? verifiedRuns.find((run) => run.id === selectedRun.parent_run_id) || null : null),
+    [verifiedRuns, selectedRun],
   );
   const selectedRunMemoryRefs = useMemo(() => {
     const raw = selectedRun?.metadata?.memoryReferences;
@@ -237,15 +571,15 @@ export default function RunHistoryDrawer({
   );
   const runQualityAggregate = useMemo(
     () => buildOpenSwanObservedEvalAggregate(
-      runs
+      verifiedRuns
         .map((run) => buildRunMetadataSummaryProps(run.metadata).observedEval)
         .filter(Boolean),
     ),
-    [runs],
+    [verifiedRuns],
   );
   const qualityRuns = useMemo(
-    () => qualityWindow === 'recent' ? runs.slice(0, 10) : runs,
-    [qualityWindow, runs],
+    () => qualityWindow === 'recent' ? verifiedRuns.slice(0, 10) : verifiedRuns,
+    [qualityWindow, verifiedRuns],
   );
   const runQualityDashboard = useMemo(
     () => buildOpenSwanObservedEvalDashboard(qualityRuns),
@@ -256,73 +590,130 @@ export default function RunHistoryDrawer({
     () => readRunBrowserPlanEvents(selectedRun?.metadata) as BrowserPlanEvent[],
     [selectedRun],
   );
-  // Sidebar search/status filter + rollup-header stats (pure core). With the
-  // default query/'all' filter, `visible` is exactly `runs` in order, so the
-  // no-props render is unchanged apart from the new bar itself.
+  // Sidebar search/status filter + rollup-header stats (pure core). Only the
+  // snapshot proven for the current account/circle/token generation is visible.
   const runFilterResult = useMemo(
-    () => filterAndStatRuns(runs, { query: filterQuery, statusFilter, nowMs: Date.now() }),
-    [runs, filterQuery, statusFilter],
+    () => filterAndStatRuns(verifiedRuns, { query: filterQuery, statusFilter, nowMs: Date.now() }),
+    [verifiedRuns, filterQuery, statusFilter, freshnessTick],
   );
   const visibleRuns = runFilterResult.visible as unknown as AgentRun[];
+  const selectedRunPresentation = useMemo(
+    () => describeRunHistoryStatus(selectedRun, Date.now()),
+    [selectedRun, freshnessTick],
+  );
 
-  const handlePromote = async (ref: PromptMemoryReference) => {
-    const ok = await promoteMemory(ref.id);
-    if (ok) {
-      void recordMemoryFeedback({
-        memoryId: ref.id,
-        action: 'promoted',
-        note: ref.matchReason || 'Promoted from run history',
-        userId: currentUserId || undefined,
-        source: 'run_history',
-      });
-      setMemoryActionTick((v) => v + 1);
+  const exactCancelAuthorityCurrent = useMemo(() => {
+    if (!exactAuthority) return false;
+    return isLiveExactAuthorityCurrent(exactAuthority);
+  }, [exactAuthority, isLiveExactAuthorityCurrent]);
+  const canCancelSelectedStaleRun = Boolean(
+    exactCancelAuthorityCurrent
+    && exactAuthority
+    && selectedRun
+    && selectedRun.circle_id === circleId
+    && selectedRun.user_id === exactAuthority.userId
+    && typeof selectedRun.updated_at === 'string'
+    && selectedRun.updated_at.trim(),
+  );
+
+  useEffect(() => {
+    setStaleRunCancelError(null);
+  }, [circleId, selectedRunId, visible]);
+
+  const handleCloseStaleRun = async () => {
+    if (!selectedRun || !selectedRunPresentation.stale || staleRunCancelAttemptRef.current) return;
+    const capturedRun = selectedRun;
+    const capturedAuthority = exactAuthority;
+    const expectedUpdatedAt = typeof capturedRun.updated_at === 'string'
+      ? capturedRun.updated_at.trim()
+      : '';
+    if (
+      !capturedAuthority
+      || !exactCancelAuthorityCurrent
+      || capturedAuthority.circleId !== circleId
+      || capturedRun.circle_id !== circleId
+      || capturedRun.user_id !== capturedAuthority.userId
+      || !expectedUpdatedAt
+    ) {
+      setStaleRunCancelError('Cancellation is unavailable because this run is not bound to the current signed-in authority. Refresh and try again.');
+      return;
     }
-  };
-
-  const handlePin = async (ref: PromptMemoryReference) => {
-    const ok = await pinMemory(ref.id);
-    if (ok) {
-      void recordMemoryFeedback({
-        memoryId: ref.id,
-        action: 'pinned',
-        note: ref.matchReason || 'Pinned from run history',
-        userId: currentUserId || undefined,
-        source: 'run_history',
-      });
-      setMemoryActionTick((v) => v + 1);
-    }
-  };
-
-  const handleNotHelpful = async (ref: PromptMemoryReference) => {
-    const ok = await decayMemoryImportance(ref.id);
-    if (ok) {
-      void recordMemoryFeedback({
-        memoryId: ref.id,
-        action: 'not_helpful',
-        note: ref.matchReason || 'Marked not helpful from run history',
-        userId: currentUserId || undefined,
-        source: 'run_history',
-      });
-      setMemoryActionTick((v) => v + 1);
-    }
-  };
-
-  const handleForget = async (ref: PromptMemoryReference) => {
-    if (!currentUserId) return;
-    const ok = await softDeleteMemory(ref.id, currentUserId, 'run_history_forget');
-    if (ok) setMemoryActionTick((v) => v + 1);
-  };
-
-  const handleApplyRecommendation = async (recommendation: OpenSwanMemoryRecommendation) => {
-    if (!currentUserId) return;
-    const ok = await applyOpenSwanMemoryRecommendation({
-      circleId,
-      userId: currentUserId,
-      agentId: 'openswan:main_chat',
-      agentName: 'OpenSwan',
-      recommendation,
+    const attemptKey = `${capturedRun.id}:${capturedRun.status}:${expectedUpdatedAt}:${capturedAuthority.generation}`;
+    staleRunCancelAttemptRef.current = attemptKey;
+    setStaleRunCancelError(null);
+    const confirmed = await showConfirm({
+      title: 'Close stale run?',
+      message: 'This run has no fresh activity. It will be marked Cancelled, not Completed, because no completion proof was received.',
+      confirmLabel: 'Close as cancelled',
+      destructive: true,
     });
-    if (ok) setMemoryActionTick((v) => v + 1);
+    if (!confirmed) {
+      if (staleRunCancelAttemptRef.current === attemptKey) staleRunCancelAttemptRef.current = null;
+      return;
+    }
+
+    const currentRun = selectedRunRef.current;
+    const authorityStillCurrent = isLiveExactAuthorityCurrent(capturedAuthority);
+    const currentPresentation = describeRunHistoryStatus(currentRun, Date.now());
+    if (
+      staleRunCancelAttemptRef.current !== attemptKey
+      || !liveDrawerScopeRef.current.mounted
+      || !liveDrawerScopeRef.current.visible
+      || liveDrawerScopeRef.current.circleId !== circleId
+      || !authorityStillCurrent
+      || currentRun?.id !== capturedRun.id
+      || currentRun?.circle_id !== circleId
+      || currentRun?.user_id !== capturedAuthority.userId
+      || currentRun?.status !== capturedRun.status
+      || currentRun?.updated_at !== expectedUpdatedAt
+      || !currentPresentation.stale
+    ) {
+      if (staleRunCancelAttemptRef.current === attemptKey) staleRunCancelAttemptRef.current = null;
+      setStaleRunCancelError('The run or signed-in authority changed while confirmation was open. Nothing was cancelled. Refresh the run before trying again.');
+      return;
+    }
+
+    setClosingStaleRunId(capturedRun.id);
+    try {
+      const result = await cancelStaleRunExact({
+        runId: capturedRun.id,
+        circleId,
+        expectedStatus: capturedRun.status,
+        expectedUpdatedAt,
+        metadata: capturedRun.metadata,
+      }, {
+        strict: true,
+        authority: capturedAuthority,
+        isAuthorityCurrent: isLiveExactAuthorityCurrent,
+      });
+      const responseAuthorityCurrent = isLiveExactAuthorityCurrent(capturedAuthority);
+      if (result.ok && responseAuthorityCurrent) {
+        setRuns((current) => current.map((run) => run.id === result.run.id ? result.run : run));
+        setStaleRunCancelError(null);
+      } else if (result.ok) {
+        setStaleRunCancelError('The signed-in authority changed before the cancellation receipt could be adopted. Refresh to confirm the run’s current server status.');
+      } else if (!result.ok) {
+        if (result.currentRun && responseAuthorityCurrent) {
+          setRuns((current) => current.map((run) => run.id === result.currentRun!.id ? result.currentRun! : run));
+        }
+        const authorityChanged = result.reason === 'authority_retired'
+          || result.reason === 'authority_mismatch'
+          || result.reason === 'invalid_authority'
+          || result.reason === 'membership_denied'
+          || result.reason === 'scope_mismatch'
+          || !responseAuthorityCurrent;
+        setStaleRunCancelError(authorityChanged
+          ? 'The signed-in authority changed before cancellation could be proven. The run was not changed locally; refresh to confirm its current status.'
+          : result.reason === 'no_match'
+            ? 'This run changed before cancellation could be applied. Its latest server state was reloaded; no cancellation was replayed.'
+            : result.reason === 'not_found'
+              ? 'The run is no longer available to this signed-in user. No cancellation receipt was returned.'
+              : 'Cancellation could not be proven by an exact server receipt. The run remains unchanged here; refresh and retry if it is still stale.');
+      }
+    } finally {
+      if (staleRunCancelAttemptRef.current === attemptKey) staleRunCancelAttemptRef.current = null;
+      setClosingStaleRunId((current) => current === capturedRun.id ? null : current);
+    }
   };
 
   return (
@@ -336,6 +727,39 @@ export default function RunHistoryDrawer({
             </Pressable>
           </View>
 
+          {hasVerifiedReadSnapshot && selectedRun && selectedRunRealtimeState !== 'live' ? (
+            <View style={styles.realtimeNotice}>
+              <Text
+                accessibilityRole="alert"
+                accessibilityLiveRegion="polite"
+                style={styles.realtimeNoticeText}
+              >
+                {runHistoryReadState === 'loading'
+                  ? 'Refreshing the verified snapshot and reconnecting live updates…'
+                  : selectedRunRealtimeState === 'unavailable'
+                    ? 'Live updates unavailable. This verified snapshot may be stale.'
+                    : 'Connecting live updates. This verified snapshot is point-in-time until connected.'}
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Refresh the verified run snapshot and reconnect live updates"
+                accessibilityState={{
+                  disabled: runHistoryReadState === 'loading' || !exactReadAuthorityCurrent,
+                }}
+                disabled={runHistoryReadState === 'loading' || !exactReadAuthorityCurrent}
+                onPress={handleExactRefreshAndReconnect}
+                style={[
+                  styles.realtimeRetryButton,
+                  (runHistoryReadState === 'loading' || !exactReadAuthorityCurrent) && { opacity: 0.55 },
+                ]}
+              >
+                <Text style={styles.realtimeRetryButtonText}>
+                  {runHistoryReadState === 'loading' ? 'REFRESHING…' : 'REFRESH & RECONNECT'}
+                </Text>
+              </Pressable>
+            </View>
+          ) : null}
+
           <View style={styles.body}>
             <View style={styles.sidebar}>
               <Text style={styles.sectionTitle}>RUNS</Text>
@@ -347,20 +771,36 @@ export default function RunHistoryDrawer({
                 stats={runFilterResult.stats}
               />
               <ScrollView>
-                {runs.length === 0 ? (
+                {!hasVerifiedReadSnapshot ? (
+                  <Text accessibilityRole="alert" style={styles.empty}>
+                    {exactReadAuthorityCurrent && runHistoryReadState === 'error'
+                      ? 'Run history could not be verified. Refresh and try again.'
+                      : exactReadAuthorityCurrent
+                        ? 'Loading verified run history…'
+                        : 'Run history is waiting for current signed-in access.'}
+                  </Text>
+                ) : verifiedRuns.length === 0 ? (
                   <Text style={styles.empty}>No runs yet.</Text>
                 ) : visibleRuns.length === 0 ? (
                   <Text style={styles.empty}>No runs match the filter.</Text>
                 ) : visibleRuns.map((run) => {
                   const active = run.id === selectedRunId;
+                  const awaitingExternalResult = isAwaitingConnectedAgentResultMetadata(run.metadata);
+                  const presentation = describeRunHistoryStatus(run, Date.now());
+                  const statusLabel = presentation.stale
+                    ? (awaitingExternalResult ? 'STALE · ACCEPTED UPDATE MISSING' : presentation.label)
+                    : (awaitingExternalResult ? 'ACCEPTED · AWAITING UPDATE' : presentation.label);
                   return (
                     <Pressable
                       key={run.id}
-                      onPress={() => setSelectedRunId(run.id)}
+                      onPress={() => {
+                        setUnavailableInitialRunId(null);
+                        setSelectedRunId(run.id);
+                      }}
                       style={[styles.runItem, active && styles.runItemActive]}
                     >
                       <Text style={styles.runTitle} numberOfLines={1}>{run.title || run.mode}</Text>
-                      <Text style={styles.runMeta}>{run.status.toUpperCase()} · {new Date(run.created_at).toLocaleString()}</Text>
+                      <Text style={[styles.runMeta, presentation.stale && styles.runMetaStale]}>{statusLabel} · {new Date(run.created_at).toLocaleString()}</Text>
                     </Pressable>
                   );
                 })}
@@ -368,7 +808,20 @@ export default function RunHistoryDrawer({
             </View>
 
             <View style={styles.detail}>
-              {selectedRun ? (
+              {!hasVerifiedReadSnapshot ? (
+                <Text style={styles.empty}>
+                  {exactReadAuthorityCurrent && runHistoryReadState === 'error'
+                    ? 'Run details are unavailable because the verified history read failed.'
+                    : 'Waiting for verified run access.'}
+                </Text>
+              ) : unavailableInitialRunId ? (
+                <View style={styles.unavailableCard}>
+                  <Text style={styles.unavailableTitle}>RUN UNAVAILABLE</Text>
+                  <Text style={styles.empty}>
+                    Run {unavailableInitialRunId.slice(0, 12)} is not available in this circle. It may have been removed or you may not have access.
+                  </Text>
+                </View>
+              ) : selectedRun ? (
                 <ScrollView>
                   <View style={styles.qualityHeaderRow}>
                     <Text style={styles.sectionTitle}>QUALITY VIEW</Text>
@@ -405,7 +858,49 @@ export default function RunHistoryDrawer({
                   <Text style={styles.sectionTitle}>SUMMARY</Text>
                   <View style={styles.summaryCard}>
                     <Text style={styles.summaryTitle}>{selectedRun.title}</Text>
-                    <Text style={styles.summaryMeta}>{selectedRun.status.toUpperCase()} · {selectedRun.mode}</Text>
+                    <Text style={styles.summaryMeta}>
+                      {selectedRunPresentation.stale
+                        ? `STALE · NOT ACTIVE · ${selectedRun.mode} · COMPLETION UNVERIFIED`
+                        : isAwaitingConnectedAgentResultMetadata(selectedRun.metadata)
+                          ? 'ACCEPTED · AWAITING CONNECTED-AGENT UPDATE · COMPLETION UNVERIFIED'
+                          : `${selectedRunPresentation.label} · ${selectedRun.mode}`}
+                    </Text>
+                    {selectedRunPresentation.stale ? (
+                      <View style={styles.staleRunNotice}>
+                        <Text style={styles.staleRunNoticeText}>
+                          No fresh activity has been recorded for this run. It is excluded from Active and has not been marked completed.
+                        </Text>
+                        <Pressable
+                          accessibilityRole="button"
+                          accessibilityLabel={`Close stale run as cancelled: ${selectedRun.title || selectedRun.mode}`}
+                          accessibilityState={{ disabled: closingStaleRunId === selectedRun.id || !canCancelSelectedStaleRun }}
+                          onPress={() => { void handleCloseStaleRun(); }}
+                          disabled={closingStaleRunId === selectedRun.id || !canCancelSelectedStaleRun}
+                          style={[
+                            styles.closeStaleRunBtn,
+                            (closingStaleRunId === selectedRun.id || !canCancelSelectedStaleRun) && { opacity: 0.55 },
+                          ]}
+                        >
+                          <Text style={styles.closeStaleRunBtnText}>
+                            {closingStaleRunId === selectedRun.id
+                              ? 'CLOSING…'
+                              : canCancelSelectedStaleRun
+                                ? 'CLOSE AS CANCELLED'
+                                : 'CANCEL UNAVAILABLE'}
+                          </Text>
+                        </Pressable>
+                        {!canCancelSelectedStaleRun ? (
+                          <Text style={styles.staleRunCancelUnavailableText}>
+                            Refresh this signed-in workspace before cancelling; stale status remains presentation-only.
+                          </Text>
+                        ) : null}
+                      </View>
+                    ) : null}
+                    {staleRunCancelError ? (
+                      <Text accessibilityRole="alert" style={styles.staleRunCancelErrorText}>
+                        {staleRunCancelError}
+                      </Text>
+                    ) : null}
                     {parentRun ? (
                       <Pressable onPress={() => setSelectedRunId(parentRun.id)} style={styles.parentRunLink}>
                         <Text style={styles.parentRunLinkText}>↑ BACK TO PARENT RUN</Text>
@@ -437,22 +932,6 @@ export default function RunHistoryDrawer({
                                 {ref.helpfulness != null ? `${ref.matchReason ? ' · ' : ''}prior feedback: ${formatMemoryTrustLabel(ref)}` : ''}
                               </Text>
                             ) : null}
-                            <View style={styles.memoryActionRow}>
-                              <Pressable onPress={() => handlePromote(ref)} style={styles.memoryActionButton}>
-                                <Text style={styles.memoryActionButtonText}>PROMOTE</Text>
-                              </Pressable>
-                              <Pressable onPress={() => handlePin(ref)} style={styles.memoryActionButton}>
-                                <Text style={styles.memoryActionButtonText}>PIN</Text>
-                              </Pressable>
-                              {currentUserId ? (
-                                <Pressable onPress={() => handleForget(ref)} style={[styles.memoryActionButton, styles.memoryForgetButton]}>
-                                  <Text style={[styles.memoryActionButtonText, styles.memoryForgetButtonText]}>FORGET</Text>
-                                </Pressable>
-                              ) : null}
-                              <Pressable onPress={() => handleNotHelpful(ref)} style={styles.memoryActionButton}>
-                                <Text style={styles.memoryActionButtonText}>NOT HELPFUL</Text>
-                              </Pressable>
-                            </View>
                           </View>
                         )) : (
                           <View style={styles.memoryChipRow}>
@@ -463,6 +942,9 @@ export default function RunHistoryDrawer({
                             ))}
                           </View>
                         )}
+                        <Text style={styles.executionMeta}>
+                          Run History preserves memory evidence as read-only proof. Manage memory from the canonical Memory surface.
+                        </Text>
                       </View>
                     </>
                   ) : null}
@@ -478,34 +960,11 @@ export default function RunHistoryDrawer({
                               {recommendation.priority.toUpperCase()} · {recommendation.memoryKind.toUpperCase()} · {recommendation.target.replace(/_/g, ' ').toUpperCase()}
                             </Text>
                             <Text style={styles.executionMeta}>{recommendation.rationale}</Text>
-                            {currentUserId ? (
-                              <View style={styles.memoryActionRow}>
-                                <Pressable onPress={() => handleApplyRecommendation(recommendation)} style={styles.memoryActionButton}>
-                                  <Text style={styles.memoryActionButtonText}>
-                                    {recommendation.recommendationType === 'promote_existing' ? 'PROMOTE MEMORY' : 'SAVE RECOMMENDED MEMORY'}
-                                  </Text>
-                                </Pressable>
-                                {recommendation.memoryId ? (
-                                  <Pressable
-                                    onPress={() => {
-                                      void recordMemoryFeedback({
-                                        memoryId: recommendation.memoryId!,
-                                        action: 'dismissed',
-                                        note: recommendation.rationale,
-                                        userId: currentUserId || undefined,
-                                        source: 'run_history_recommendation',
-                                      });
-                                      setMemoryActionTick((v) => v + 1);
-                                    }}
-                                    style={[styles.memoryActionButton, styles.memoryForgetButton]}
-                                  >
-                                    <Text style={[styles.memoryActionButtonText, styles.memoryForgetButtonText]}>DISMISS</Text>
-                                  </Pressable>
-                                ) : null}
-                              </View>
-                            ) : null}
                           </View>
                         ))}
+                        <Text style={styles.executionMeta}>
+                          Recommendations are evidence only here. Review and apply them from the canonical Memory surface.
+                        </Text>
                       </View>
                     </>
                   ) : null}
@@ -576,10 +1035,15 @@ export default function RunHistoryDrawer({
                     </>
                   ) : null}
 
-                  {childRuns.length > 0 ? (
-                    <>
-                      <Text style={styles.sectionTitle}>DELEGATED SPECIALISTS</Text>
-                      <View style={styles.summaryCard}>
+                  <Text style={styles.sectionTitle}>DELEGATED SPECIALISTS</Text>
+                  {detailReadState === 'loading' ? (
+                    <Text style={styles.empty}>Loading verified specialist runs…</Text>
+                  ) : detailReadState === 'error' ? (
+                    <Text accessibilityRole="alert" style={styles.empty}>Specialist runs could not be verified for this signed-in scope.</Text>
+                  ) : childRuns.length === 0 ? (
+                    <Text style={styles.empty}>No delegated specialists.</Text>
+                  ) : (
+                    <View style={styles.summaryCard}>
                         {childRuns.map((childRun) => {
                           const childSummary = buildRunMetadataSummaryProps(childRun.metadata);
                           const childObservedEval = childSummary.observedEval;
@@ -626,12 +1090,15 @@ export default function RunHistoryDrawer({
                             </Pressable>
                           );
                         })}
-                      </View>
-                    </>
-                  ) : null}
+                    </View>
+                  )}
 
                   <Text style={styles.sectionTitle}>STEPS</Text>
-                  {steps.length === 0 ? (
+                  {detailReadState === 'loading' ? (
+                    <Text style={styles.empty}>Loading verified steps…</Text>
+                  ) : detailReadState === 'error' ? (
+                    <Text accessibilityRole="alert" style={styles.empty}>Steps could not be verified for this signed-in scope.</Text>
+                  ) : steps.length === 0 ? (
                     <Text style={styles.empty}>No recorded steps.</Text>
                   ) : steps.map((step) => {
                     const display = projectPersistedRunStepForDisplay(step);
@@ -648,7 +1115,11 @@ export default function RunHistoryDrawer({
                   })}
 
                   <Text style={styles.sectionTitle}>ARTIFACTS</Text>
-                  {artifacts.length === 0 ? (
+                  {detailReadState === 'loading' ? (
+                    <Text style={styles.empty}>Loading verified artifacts…</Text>
+                  ) : detailReadState === 'error' ? (
+                    <Text accessibilityRole="alert" style={styles.empty}>Artifacts could not be verified for this signed-in scope.</Text>
+                  ) : artifacts.length === 0 ? (
                     <Text style={styles.empty}>No recorded artifacts.</Text>
                   ) : artifacts.map((artifact) => (
                     <View key={artifact.id} style={styles.stepCard}>
@@ -708,6 +1179,38 @@ const styles = StyleSheet.create({
     backgroundColor: '#111827',
   },
   closeBtnText: { color: '#94a3b8', fontSize: 18, fontWeight: '900' },
+  realtimeNotice: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#92400e66',
+    backgroundColor: '#2a1b054d',
+  },
+  realtimeNoticeText: {
+    flex: 1,
+    minWidth: 220,
+    color: '#fbbf24',
+    fontSize: 10,
+    lineHeight: 15,
+  },
+  realtimeRetryButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#f59e0b88',
+    backgroundColor: '#451a03',
+  },
+  realtimeRetryButtonText: {
+    color: '#fde68a',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
   body: { flex: 1, flexDirection: 'row' },
   sidebar: {
     width: 300,
@@ -766,11 +1269,12 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   runItemActive: {
-    borderColor: '#22d3ee',
+    borderColor: 'rgba(99, 102, 241, 0.67)',
     backgroundColor: '#0d1c2b',
   },
   runTitle: { color: '#e2e8f0', fontSize: 12, fontWeight: '700' },
   runMeta: { color: '#64748b', fontSize: 10, marginTop: 4 },
+  runMetaStale: { color: '#f59e0b' },
   summaryCard: {
     padding: 12,
     borderRadius: 12,
@@ -780,7 +1284,29 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   summaryTitle: { color: '#f8fafc', fontSize: 14, fontWeight: '800' },
-  summaryMeta: { color: '#22d3ee', fontSize: 10, fontWeight: '900', marginTop: 4 },
+  summaryMeta: { color: '#6366f1', fontSize: 10, fontWeight: '900', marginTop: 4 },
+  staleRunNotice: {
+    marginTop: 10,
+    padding: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#f59e0b55',
+    backgroundColor: '#2a1b054d',
+    gap: 8,
+  },
+  staleRunNoticeText: { color: '#fbbf24', fontSize: 11, lineHeight: 16 },
+  staleRunCancelUnavailableText: { color: '#d6a74a', fontSize: 10, lineHeight: 14 },
+  staleRunCancelErrorText: { color: '#fca5a5', fontSize: 10, lineHeight: 15, marginTop: 8 },
+  closeStaleRunBtn: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#f59e0b88',
+    backgroundColor: '#451a03',
+  },
+  closeStaleRunBtnText: { color: '#fde68a', fontSize: 9, fontWeight: '900', letterSpacing: 0.5 },
   parentRunLink: {
     alignSelf: 'flex-start',
     marginTop: 8,
@@ -882,33 +1408,6 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 8,
   },
-  memoryActionRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-    marginTop: 6,
-  },
-  memoryActionButton: {
-    borderRadius: 999,
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    borderWidth: 1,
-    borderColor: '#334155',
-    backgroundColor: '#0b1220',
-  },
-  memoryActionButtonText: {
-    color: '#cbd5e1',
-    fontSize: 9,
-    fontWeight: '800',
-    letterSpacing: 0.6,
-  },
-  memoryForgetButton: {
-    borderColor: '#7f1d1d',
-    backgroundColor: '#2a0c0c',
-  },
-  memoryForgetButtonText: {
-    color: '#fca5a5',
-  },
   memoryChip: {
     borderRadius: 999,
     paddingHorizontal: 10,
@@ -940,7 +1439,7 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: '#22d3ee66',
+    borderColor: '#6366f166',
     backgroundColor: '#0891b222',
   },
   browserPlanOpenButtonText: {
@@ -970,6 +1469,20 @@ const styles = StyleSheet.create({
     color: '#64748b',
     fontSize: 10,
     marginTop: 3,
+    fontFamily: 'monospace',
+  },
+  unavailableCard: {
+    padding: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#f59e0b55',
+    backgroundColor: '#1f1605',
+  },
+  unavailableTitle: {
+    color: '#fbbf24',
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.8,
     fontFamily: 'monospace',
   },
   empty: { color: '#64748b', fontSize: 12, paddingVertical: 8 },

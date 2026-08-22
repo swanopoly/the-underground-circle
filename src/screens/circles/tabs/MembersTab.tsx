@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
@@ -9,9 +9,10 @@ import {
   RefreshControl,
   ActivityIndicator,
 } from 'react-native';
-import { supabase } from '../../../lib/supabase';
-import { safeGetUser } from '../../../lib/authSession';
+import { getSupabaseClientForAccessToken } from '../../../lib/supabase';
 import { usePaginated } from '../../../hooks/usePaginated';
+import { useAuth } from '../../../hooks/useAuth';
+import { indexSafeProfiles, loadSafeCircleProfiles } from '../../../lib/safeProfiles';
 
 // Supabase's generated types return the `user:profiles(...)` join as an array
 // even though the relationship is one-to-one; loose-typing matches the original
@@ -37,23 +38,22 @@ type Member = {
 const PAGE_SIZE = 25;
 
 export default function MembersTab({ circleId }: { circleId: string }) {
-  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const { session, user, loading: authLoading } = useAuth();
   const [checkedInIds, setCheckedInIds] = useState<Set<string>>(new Set());
-
-  // Who is the current user? One-shot — session doesn't change inside this tab.
-  useEffect(() => {
-    let cancelled = false;
-    safeGetUser().then(({ value }) => {
-      if (!cancelled && value) setCurrentUserId(value.id);
-    });
-    return () => { cancelled = true; };
-  }, []);
+  const authUserId = user?.id || null;
+  const currentUserId = !authLoading && authUserId === session?.user.id ? authUserId : null;
+  const accessToken = currentUserId ? session?.access_token || null : null;
+  const exactReadClient = useMemo(
+    () => accessToken ? getSupabaseClientForAccessToken(accessToken) : null,
+    [accessToken],
+  );
 
   // Today's check-ins — separate query so it doesn't slow first paint of the
   // members list. Refreshed whenever members refresh.
-  const loadCheckIns = async () => {
+  const loadCheckIns = useCallback(async () => {
+    if (!exactReadClient) return;
     const today = new Date().toISOString().split('T')[0];
-    const { data, error } = await supabase
+    const { data, error } = await exactReadClient
       .from('check_ins')
       .select('user_id')
       .eq('circle_id', circleId)
@@ -63,23 +63,35 @@ export default function MembersTab({ circleId }: { circleId: string }) {
       return;
     }
     setCheckedInIds(new Set((data || []).map((c: any) => c.user_id)));
-  };
+  }, [circleId, exactReadClient]);
 
   const page = usePaginated<MemberRow>({
-    key: ['members', circleId],
+    key: ['members', circleId, currentUserId],
     pageSize: PAGE_SIZE,
     fetchPage: async (from, to) => {
-      const { data, error } = await supabase
+      if (!exactReadClient) {
+        return { rows: [], error: new Error('Authenticated member access is not ready.') };
+      }
+      const { data, error } = await exactReadClient
         .from('circle_members')
-        .select('role, joined_at, user:profiles(id, username, display_name, current_streak, longest_streak, bio)')
+        .select('user_id, role, joined_at')
         .eq('circle_id', circleId)
         .range(from, to);
-      return { rows: (data as MemberRow[]) || [], error: error || undefined };
+      if (error) return { rows: [], error };
+      const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+        circleId,
+        userIds: (data || []).map((row: any) => row.user_id),
+        client: exactReadClient,
+      }));
+      return {
+        rows: (data || []).map((row: any) => ({ ...row, user: profileById.get(row.user_id) || null })) as MemberRow[],
+      };
     },
+    manual: authLoading || !exactReadClient,
   });
 
   // Refresh check-ins in parallel with the first page.
-  useEffect(() => { void loadCheckIns(); /* eslint-disable-line react-hooks/exhaustive-deps */ }, [circleId]);
+  useEffect(() => { void loadCheckIns(); }, [loadCheckIns]);
 
   const members: Member[] = useMemo(() => {
     const out: Member[] = [];

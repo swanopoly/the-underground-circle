@@ -133,7 +133,7 @@ export default function AgentSetupWizard({ visible, onClose, onComplete }: Props
   }, [agentName, provider, endpoint, token, isPublic, publicUrl, onComplete, resetAndClose]);
 
   return (
-    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={resetAndClose}>
+    <Modal visible={visible} animationType="fade" presentationStyle="pageSheet" onRequestClose={resetAndClose}>
       <KeyboardAvoidingView style={s.root} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         {/* Header */}
         <View style={s.header}>

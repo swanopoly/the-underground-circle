@@ -39,13 +39,41 @@ import type {
 } from './appAutomationControlSurfaces';
 import {
   formatStickyScopeAppliedNotice,
+  STICKY_GRANTABLE_CATEGORIES,
   type StickyScopeAppliedSummary,
 } from './computerGrantGate';
 import type { ComputerTaskEvidenceContract } from './computerTaskEvidenceContract';
+import type { ChatComputerRequestedActionContract } from './chatComputerRequestRouter';
+import type { IntentConnective } from './chatMultiIntentCore';
 import { getModelCapabilityFlags, normalizeModelId } from './modelCapabilities';
-import type { ComputerTaskOutcomeStatus, ComputerTaskReplayPolicy } from './computerTaskOutcome';
+import {
+  buildComputerTaskRequestedActionCoverage,
+  formatComputerTaskRequestedActionCoverage,
+  normalizeDeterministicReadOnlyFileRequestedActionProgress,
+  type ComputerTaskOutcomeStatus,
+  type ComputerTaskReplayPolicy,
+  type ComputerTaskRequestedActionCoverage,
+  type ComputerTaskRequestedActionProgress,
+} from './computerTaskOutcome';
 
 export type ChatComputerSurfaceKind = 'browser' | 'desktop' | 'local_files' | 'computer';
+
+/** Stable, value-free identity for the one read-only check allowed after an
+ * uncertain mutation. Persisting this with the handoff prevents refresh from
+ * silently retargeting the check to whichever app or file is current later. */
+export interface ChatComputerVerificationTarget {
+  appName?: string | null;
+  browserIdentity?: {
+    browserProcessId: string;
+    browserContextId: string;
+    pageId: string;
+    url: string;
+  } | null;
+  expectedDocumentName?: string | null;
+  expectedWidthPx?: number | null;
+  expectedHeightPx?: number | null;
+  filePath?: string | null;
+}
 
 export interface ChatComputerHandoffContextInput {
   task: string;
@@ -61,24 +89,30 @@ export interface ChatComputerHandoffContextInput {
   browserActionCount?: number | null;
   runId?: string | null;
   outcomeStatus?: ComputerTaskOutcomeStatus | null;
+  /** True only for a runtime-owned outer task-acceptance receipt. */
+  taskCompletionVerified?: boolean;
+  /** Value-free deterministic read-only A-id progress; never mutation authority. */
+  requestedActionProgress?: ComputerTaskRequestedActionProgress | null;
   replayPolicy?: ComputerTaskReplayPolicy | null;
   mutationDispatched?: boolean;
   verificationOnlyTools?: string[];
+  verificationBridgeInstanceId?: string | null;
+  verificationTarget?: ChatComputerVerificationTarget | null;
   preflightStatus?: string | null;
   preflightSummary?: string | null;
   groundingStatus?: string | null;
   groundingSummary?: string | null;
   designObjectManifestArtifact?: DesignAppObjectManifestArtifact | null;
   requestNotice?: ChatComputerRequestUserNotice | null;
+  requestedActionContract?: ChatComputerRequestedActionContract | null;
   evidenceContract?: ComputerTaskEvidenceContract | null;
   appAutomationRouteDecision?: AppAutomationRouteDecision | null;
   /**
-   * T7 sticky allow scopes: set when the route's `stickyScopeApplied` stamp
-   * downgraded approval via a standing grant, so handoff metadata and the
-   * compact route summary carry the visible notice + scope id. Optional and
-   * persisted-compatible — rows written before this field keep parsing.
+   * Compatibility seam for a canonical route-owned standing-grant stamp.
+   * The categories are revalidated here before any notice enters handoff
+   * metadata; retired, partial, or forged stamps remain inert.
    */
-  stickyScopeApplied?: Pick<StickyScopeAppliedSummary, 'scopeId' | 'scopeKey'> | null;
+  stickyScopeApplied?: Pick<StickyScopeAppliedSummary, 'scopeId' | 'scopeKey' | 'categories'> | null;
   warnings?: string[];
   rawWarnings?: string[];
   blockers?: string[];
@@ -112,6 +146,8 @@ export interface ChatComputerHandoffMetadata {
   replayPolicy?: ComputerTaskReplayPolicy | null;
   mutationDispatched?: boolean;
   verificationOnlyTools?: string[];
+  verificationBridgeInstanceId?: string | null;
+  verificationTarget?: ChatComputerVerificationTarget | null;
   preflightStatus?: string | null;
   preflightSummary?: string | null;
   groundingStatus?: string | null;
@@ -240,10 +276,35 @@ export interface ChatComputerHandoffMetadata {
   } | null;
   designObjectManifestArtifact?: DesignAppObjectManifestArtifactSummary | null;
   requestNotice?: ChatComputerRequestUserNotice | null;
+  requestedActionContract?: ChatComputerRequestedActionHandoffSummary | null;
+  requestedActionCoverage?: ComputerTaskRequestedActionCoverage | null;
+  requestedActionProgress?: ComputerTaskRequestedActionProgress | null;
+  taskCompletionVerified: boolean;
   evidenceContract?: ComputerTaskEvidenceContract | null;
   appRouteDecision?: ChatComputerAppRouteDecisionSummary | null;
   /** T7: standing-grant stamp (scope id + bounded user-visible notice). */
   standingGrant?: { scopeId: string; scopeKey: string; notice: string } | null;
+}
+
+/**
+ * Bounded durable projection of the request-level A1…An ledger. The global
+ * `all_actions_required` semantics live in the router/evidence contract; this
+ * summary retains the exact user-action identities across chat persistence and
+ * recovery without duplicating long completion-policy prose in every row.
+ */
+export interface ChatComputerRequestedActionHandoffSummary {
+  schemaVersion: 1;
+  mode: 'all_actions_required';
+  actionCount: number;
+  capped: boolean;
+  requiresDecompositionBeforeMutation: boolean;
+  actions: ReadonlyArray<{
+    id: string;
+    text: string;
+    verb: string;
+    connective: IntentConnective;
+    dependsOnActionIds: ReadonlyArray<string>;
+  }>;
 }
 
 export interface ChatComputerAppRouteDecisionSummary {
@@ -285,6 +346,7 @@ export interface ChatComputerHandoffContext {
  */
 const HANDOFF_TEXT_MAX = 600;
 const HANDOFF_LINE_MAX = 240;
+const STICKY_GRANTABLE_CATEGORY_SET: ReadonlySet<string> = new Set(STICKY_GRANTABLE_CATEGORIES);
 
 function boundedText(value: string | null | undefined, max = HANDOFF_TEXT_MAX): string | null {
   const text = String(value || '').replace(/\r/g, '').trim();
@@ -295,6 +357,119 @@ function compactList(values: Array<string | null | undefined>, max = 3, itemMax 
   return Array.from(new Set(
     values.map((value) => String(value || '').trim().slice(0, itemMax)).filter(Boolean),
   )).slice(0, max);
+}
+
+const REQUEST_ACTION_CONNECTIVES = new Set<IntentConnective>([
+  'lead',
+  'then',
+  'also',
+  'comma',
+  'enumerated',
+  'newline',
+  'semicolon',
+]);
+
+function buildRequestedActionHandoffSummary(
+  contract: ChatComputerRequestedActionContract | null | undefined,
+): ChatComputerRequestedActionHandoffSummary | null {
+  if (!contract || contract.schemaVersion !== 1 || contract.mode !== 'all_actions_required') return null;
+  const rawActions = Array.isArray(contract.actions) ? contract.actions : [];
+  const rawActionIdentityMismatch = rawActions.some((action, index) => (
+    action?.id !== `A${index + 1}` || !boundedText(action?.text, 300)
+  ));
+  const actionLedgerShapeMismatch = rawActions.length > 8
+    || !Number.isInteger(contract.actionCount)
+    || contract.actionCount !== rawActions.length
+    || rawActionIdentityMismatch;
+  const actions = rawActions
+    .slice(0, 8)
+    .map((action, index) => {
+      const id = `A${index + 1}`;
+      const text = boundedText(action?.text, 300);
+      if (!text) return null;
+      const rawVerb = String(action?.verb || '').trim().toLowerCase();
+      const verb = /^[a-z][a-z-]{0,31}$/.test(rawVerb) ? rawVerb : 'act';
+      const rawConnective = action?.connective as IntentConnective;
+      const connective = index === 0
+        ? 'lead'
+        : REQUEST_ACTION_CONNECTIVES.has(rawConnective) && rawConnective !== 'lead'
+        ? rawConnective
+        : 'also';
+      const rawDependencies: unknown[] = Array.isArray(action?.dependsOnActionIds)
+        ? action.dependsOnActionIds
+        : [];
+      const dependsOnActionIds: ReadonlyArray<string> = Object.freeze(Array.from(new Set(
+        rawDependencies
+          .map((value: unknown) => String(value || '').trim())
+          .filter((value: string) => {
+            const match = value.match(/^A([1-8])$/);
+            return Boolean(match && Number(match[1]) < index + 1);
+          }),
+      )).slice(0, 7));
+      return Object.freeze({ id, text, verb, connective, dependsOnActionIds });
+    })
+    .filter((action): action is NonNullable<typeof action> => Boolean(action));
+  if (actions.length < 2 && contract.requiresDecompositionBeforeMutation !== true) return null;
+  return Object.freeze({
+    schemaVersion: 1 as const,
+    mode: 'all_actions_required' as const,
+    actionCount: actions.length,
+    capped: contract.capped === true || rawActions.length > 8,
+    requiresDecompositionBeforeMutation: contract.requiresDecompositionBeforeMutation === true
+      || actionLedgerShapeMismatch
+      || actions.length !== Math.min(rawActions.length, 8),
+    actions: Object.freeze(actions),
+  });
+}
+
+function boundedVerificationDimension(value: unknown): number | null {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 && number <= 100_000 ? number : null;
+}
+
+function buildVerificationTarget(
+  input: ChatComputerHandoffContextInput,
+  designAppTask: ChatDesignAppTaskSummary | null,
+  appRouteDecision: ChatComputerAppRouteDecisionSummary | null,
+  attachedFiles: ReturnType<typeof parseDesktopAttachmentTaskFiles>,
+): ChatComputerVerificationTarget | null {
+  if (input.replayPolicy !== 'manual_verify_only' || input.mutationDispatched !== true) return null;
+  const supplied = input.verificationTarget || {};
+  const onlyFile = attachedFiles.length === 1 ? attachedFiles[0] : null;
+  const appName = boundedText(
+    supplied.appName || designAppTask?.appName || appRouteDecision?.targetName || null,
+    160,
+  );
+  const browserIdentity = supplied.browserIdentity
+    && boundedText(supplied.browserIdentity.browserProcessId, 160)
+    && boundedText(supplied.browserIdentity.browserContextId, 160)
+    && boundedText(supplied.browserIdentity.pageId, 160)
+    && /^uc_browser_url_[a-f0-9]{64}$/.test(String(supplied.browserIdentity.url || ''))
+    ? {
+        browserProcessId: boundedText(supplied.browserIdentity.browserProcessId, 160)!,
+        browserContextId: boundedText(supplied.browserIdentity.browserContextId, 160)!,
+        pageId: boundedText(supplied.browserIdentity.pageId, 160)!,
+        url: supplied.browserIdentity.url,
+      }
+    : null;
+  const expectedDocumentName = boundedText(
+    supplied.expectedDocumentName
+      || (designAppTask?.appId === 'adobe_photoshop' && onlyFile ? onlyFile.name : null),
+    240,
+  );
+  const expectedWidthPx = boundedVerificationDimension(supplied.expectedWidthPx);
+  const expectedHeightPx = boundedVerificationDimension(supplied.expectedHeightPx);
+  const dimensionsArePaired = expectedWidthPx != null && expectedHeightPx != null;
+  const filePath = boundedText(supplied.filePath || onlyFile?.localPath || null, 4_096);
+  const target: ChatComputerVerificationTarget = {
+    appName,
+    browserIdentity,
+    expectedDocumentName,
+    expectedWidthPx: dimensionsArePaired ? expectedWidthPx : null,
+    expectedHeightPx: dimensionsArePaired ? expectedHeightPx : null,
+    filePath,
+  };
+  return Object.values(target).some((value) => value != null) ? target : null;
 }
 
 function summarizeAppAutomationRouteDecision(
@@ -400,10 +575,26 @@ export function buildChatComputerHandoffContext(input: ChatComputerHandoffContex
         })),
       }
     : null;
+  const verificationTarget = buildVerificationTarget(
+    input,
+    designAppTask,
+    appRouteDecision,
+    attachedFiles,
+  );
+  const verificationBridgeInstanceId = input.replayPolicy === 'manual_verify_only'
+    && input.mutationDispatched === true
+    ? boundedText(input.verificationBridgeInstanceId, 128)
+    : null;
   const warnings = compactList(input.warnings || [], 4);
   const rawWarnings = compactList(input.rawWarnings || input.warnings || [], 8);
   const blockers = compactList(input.blockers || [], 4);
-  const standingGrant = input.stickyScopeApplied?.scopeId && input.stickyScopeApplied.scopeKey
+  const stickyScopeCategories = Array.isArray(input.stickyScopeApplied?.categories)
+    ? input.stickyScopeApplied.categories.map((category) => String(category || '').trim())
+    : [];
+  const standingGrant = input.stickyScopeApplied?.scopeId
+    && input.stickyScopeApplied.scopeKey
+    && stickyScopeCategories.length > 0
+    && stickyScopeCategories.every((category) => STICKY_GRANTABLE_CATEGORY_SET.has(category))
     ? {
         scopeId: String(input.stickyScopeApplied.scopeId).slice(0, 80),
         scopeKey: String(input.stickyScopeApplied.scopeKey).slice(0, 120),
@@ -420,6 +611,18 @@ export function buildChatComputerHandoffContext(input: ChatComputerHandoffContex
   const groundingSummaryText = boundedText(input.groundingSummary);
   const grantSummaryText = boundedText(input.grantSummary, HANDOFF_LINE_MAX);
   const approvalSummaryText = boundedText(input.approvalSummary, HANDOFF_LINE_MAX);
+  const requestedActionContract = buildRequestedActionHandoffSummary(input.requestedActionContract);
+  const requestedActionProgress = normalizeDeterministicReadOnlyFileRequestedActionProgress(
+    input.requestedActionProgress,
+  );
+  const requestedActionCoverage = buildComputerTaskRequestedActionCoverage({
+    contract: requestedActionContract,
+    outcomeStatus: input.outcomeStatus,
+    taskCompletionVerified: input.taskCompletionVerified,
+    mutationDispatched: input.mutationDispatched,
+    requestedActionProgress,
+  });
+  const requestedActionCoverageText = formatComputerTaskRequestedActionCoverage(requestedActionCoverage);
   const chatLines = [
     `- Surface: ${surfaceLabel(surface)} via ${adapterLabel(input, surface)}`,
     taskLabelText ? `- Task: ${taskLabelText}` : null,
@@ -438,6 +641,7 @@ export function buildChatComputerHandoffContext(input: ChatComputerHandoffContex
     appRouteDecision ? `- App route decision: ${appRouteDecision.status} via ${appRouteDecision.chosenSurfaceLabel} for ${appRouteDecision.taskFamily}` : null,
     groundingStatusText ? `- Grounding: ${groundingStatusText}` : null,
     input.outcomeStatus ? `- Outcome: ${input.outcomeStatus.replace(/_/g, ' ')}` : null,
+    requestedActionCoverageText ? `- Requested actions: ${requestedActionCoverageText}` : null,
     input.replayPolicy === 'manual_verify_only' ? '- Replay: blocked; read-only verification only' : null,
     approvalSummaryText ? `- Approval: ${approvalSummaryText}` : null,
     standingGrant ? `- Standing grant: ${standingGrant.scopeKey}` : null,
@@ -474,6 +678,8 @@ export function buildChatComputerHandoffContext(input: ChatComputerHandoffContex
       replayPolicy: input.replayPolicy || 'normal',
       mutationDispatched: input.mutationDispatched === true,
       verificationOnlyTools: compactList(input.verificationOnlyTools || [], 4),
+      verificationBridgeInstanceId,
+      verificationTarget,
       preflightStatus: preflightStatusText,
       preflightSummary: preflightSummaryText,
       groundingStatus: groundingStatusText,
@@ -592,6 +798,10 @@ export function buildChatComputerHandoffContext(input: ChatComputerHandoffContex
         : null,
       designObjectManifestArtifact: objectManifestArtifact,
       requestNotice: input.requestNotice || null,
+      requestedActionContract,
+      requestedActionCoverage,
+      requestedActionProgress,
+      taskCompletionVerified: input.taskCompletionVerified === true,
       evidenceContract: input.evidenceContract || null,
       appRouteDecision,
       standingGrant,
@@ -619,11 +829,19 @@ export interface FormatChatComputerHandoffOptions {
   includeTechnicalPaths?: boolean;
 }
 
+function requestedActionCoverageLine(context: ChatComputerHandoffContext): string | null {
+  const summary = formatComputerTaskRequestedActionCoverage(
+    context.metadata.requestedActionCoverage,
+  );
+  return summary ? `- Requested actions: ${summary}` : null;
+}
+
 function problemLines(context: ChatComputerHandoffContext, includeTechnicalPaths: boolean): string[] {
   const design = context.metadata.designAppTask;
   const routeDecision = context.metadata.appRouteDecision;
   const lines = [
     `- ${context.surfaceLabel}: ${context.adapterLabel}`,
+    requestedActionCoverageLine(context),
     design ? `- ${design.appName}: ${design.operations.slice(0, 4).join(', ')}` : null,
     routeDecision && routeDecision.status !== 'ready_to_execute'
       ? `- Route: ${routeDecision.status.replace(/_/g, ' ')} via ${routeDecision.chosenSurfaceLabel} for ${routeDecision.taskFamily}.`
@@ -654,11 +872,17 @@ function approvalLines(context: ChatComputerHandoffContext): string[] {
       .split('\n')
       .filter((line) => line.trim() && !/^\*\*[^*]+\*\*$/.test(line.trim()))
       .slice(0, 5);
-    return standingGrantLine ? [...noticeLines, standingGrantLine].slice(0, 6) : noticeLines;
+    const coverageLine = requestedActionCoverageLine(context);
+    return [
+      ...noticeLines,
+      coverageLine,
+      standingGrantLine,
+    ].filter((line): line is string => Boolean(line)).slice(0, 7);
   }
   const design = context.metadata.designAppTask;
   const lines = [
     `- ${context.surfaceLabel}: ready for review.`,
+    requestedActionCoverageLine(context),
   ];
   if (design) {
     lines.push(`- ${design.appName}: ${design.operations.slice(0, 4).join(', ')}.`);
@@ -675,7 +899,7 @@ function approvalLines(context: ChatComputerHandoffContext): string[] {
   if (standingGrantLine) {
     lines.push(standingGrantLine);
   }
-  return lines.slice(0, 6);
+  return lines.filter((line): line is string => Boolean(line)).slice(0, 7);
 }
 
 export function formatChatComputerHandoffForMessage(
@@ -695,10 +919,20 @@ export function formatChatComputerHandoffForMessage(
   // belong in metadata, not the chat bubble (user feedback: "too much info").
   // A warning-only task with an approval/notice falls through to the terse
   // "Ready for review", or stays hidden.
+  const coverageStatus = context.metadata.requestedActionCoverage?.overallStatus || null;
+  const coverageNeedsProblem = Boolean(
+    coverageStatus
+    && coverageStatus !== 'complete'
+    && coverageStatus !== 'pending'
+    && coverageStatus !== 'awaiting_approval',
+  );
   const resolvedVisibility = visibility === 'auto'
-    ? context.metadata.blockerCount > 0
+    ? context.metadata.blockerCount > 0 || coverageNeedsProblem
       ? 'problem'
-      : context.metadata.requestNotice?.visibility === 'user' || context.metadata.approvalSummary || context.metadata.browserPlanId
+      : coverageStatus === 'awaiting_approval'
+        || context.metadata.requestNotice?.visibility === 'user'
+        || context.metadata.approvalSummary
+        || context.metadata.browserPlanId
         ? 'approval'
         : 'hidden'
     : visibility;

@@ -50,7 +50,7 @@ export default function MorningRoutineScreen({ navigation, route }: MorningRouti
       // Load circle data
       const { data: circle } = await supabase
         .from('circles')
-        .select('*')
+        .select('id, name, invite_code, max_members, created_by, created_at, check_in_format')
         .eq('id', circleId)
         .single();
       

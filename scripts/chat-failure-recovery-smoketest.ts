@@ -7,6 +7,8 @@
  * Run: npm run smoke:chat-failure-recovery
  */
 
+import { readFileSync } from 'node:fs';
+
 import {
   buildChatFailureRecoveryArchive,
   buildChatFailureRecoveryFingerprint,
@@ -20,6 +22,8 @@ import {
   formatChatFailureRecoveryOptionSelectionForPrompt,
   formatChatFailureRecoveryUserMessage,
   formatChatFailureRecoveryDetail,
+  executeChatManualVerification,
+  issueChatManualVerificationAuthority,
   parseChatFailureRecoveryOptionSelection,
   resolveChatFailureRecoveryOptionFollowup,
   shouldSuppressDuplicateChatFailureHandoff,
@@ -54,6 +58,269 @@ function assert(condition: unknown, message: string, detail?: string) {
 }
 
 async function main() {
+  const manualRecoverySource = readFileSync('src/lib/chatFailureRecovery.ts', 'utf8');
+  assert(
+    /tool === 'desktop\.photoshop_document_status'[\s\S]*?photoshopDocumentStatus\([\s\S]*?\{ ok: true, \.\.\.status\.data \}/.test(manualRecoverySource),
+    'production manual verification keeps structured Photoshop dimensions instead of a text-only tool result',
+  );
+  const bridgeInstanceId = 'bridge-instance-aaaaaaaaaaaaaaaa';
+  const browserIdentity = {
+    browserProcessId: 'browser-process-1',
+    browserContextId: 'browser-context-1',
+    pageId: 'browser-page-1',
+    url: `uc_browser_url_${'a'.repeat(64)}`,
+  };
+  const manualVerificationScope = {
+    circleId: 'circle-manual-verify',
+    userId: 'user-manual-verify',
+    threadId: 'thread-manual-verify',
+    taskStateId: 'task-manual-verify',
+    sourceMessageId: 'message-manual-verify',
+    requesterUserId: 'user-manual-verify',
+    currentUserId: 'user-manual-verify',
+    bridgeInstanceId,
+    currentBridgeInstanceId: bridgeInstanceId,
+  };
+  const photoshopVerificationAuthority = issueChatManualVerificationAuthority({
+    ...manualVerificationScope,
+    currentScope: manualVerificationScope,
+    replayPolicy: 'manual_verify_only',
+    mutationDispatched: true,
+    verificationOnlyTools: ['desktop.photoshop_document_status'],
+    target: {
+      appName: 'Adobe Photoshop',
+      expectedWidthPx: 600,
+      expectedHeightPx: 600,
+    },
+  });
+  assert(photoshopVerificationAuthority != null, 'matching live task state mints a manual-verification authority');
+  const dispatchedManualVerificationCalls: Array<{ tool: string; args: Record<string, unknown>; context: Record<string, unknown> }> = [];
+  const photoshopVerificationResult = await executeChatManualVerification({
+    authority: photoshopVerificationAuthority!,
+    getCurrentScope: () => manualVerificationScope,
+    getCurrentBridgeInstanceId: () => bridgeInstanceId,
+    now: () => new Date('2026-08-05T12:00:00.000Z'),
+    dispatch: async (tool, args, context) => {
+      dispatchedManualVerificationCalls.push({ tool, args, context });
+      return {
+        ok: true,
+        widthPx: 600,
+        heightPx: 600,
+        activeDocumentName: 'Untitled-1',
+        resultsText: 'raw bridge detail must not be copied',
+      };
+    },
+  });
+  assert(photoshopVerificationResult.status === 'observed', 'manual verification reports a fresh observed state');
+  assert(photoshopVerificationResult.taskCompletionVerified === false, 'a read-only observation never self-certifies whole-task completion');
+  assert(photoshopVerificationResult.mutationReplayed === false, 'manual verification reports that no mutation was replayed');
+  assert(photoshopVerificationResult.originalPromptReplayed === false, 'manual verification reports that no original prompt was replayed');
+  assert(photoshopVerificationResult.observations[0]?.matchesExpectedState === true, 'Photoshop observation compares bound expected dimensions');
+  assert(photoshopVerificationResult.userMessage.includes('600x600'), 'manual verification surfaces bounded expected-state evidence');
+  assert(!photoshopVerificationResult.userMessage.includes('raw bridge detail'), 'manual verification does not surface raw bridge payloads');
+  assert(dispatchedManualVerificationCalls.length === 1, 'manual verification dispatches exactly one declared observation');
+  assert(dispatchedManualVerificationCalls[0]?.tool === 'desktop.photoshop_document_status', 'manual verification dispatches only the authority-bound tool');
+  assert(dispatchedManualVerificationCalls[0]?.args.appName === 'Photoshop', 'Photoshop verification uses fixed app-native status args');
+  assert(!('task' in (dispatchedManualVerificationCalls[0]?.args || {})), 'manual verification tool args contain no original task prompt');
+  assert(!('prompt' in (dispatchedManualVerificationCalls[0]?.args || {})), 'manual verification tool args contain no replay prompt');
+  assert(dispatchedManualVerificationCalls[0]?.context.circleId === manualVerificationScope.circleId, 'manual verification dispatch remains bound to the exact circle');
+  assert(dispatchedManualVerificationCalls[0]?.context.threadId === manualVerificationScope.threadId, 'manual verification dispatch remains bound to the exact thread');
+
+  const reusedManualVerificationResult = await executeChatManualVerification({
+    authority: photoshopVerificationAuthority!,
+    getCurrentScope: () => manualVerificationScope,
+    getCurrentBridgeInstanceId: () => bridgeInstanceId,
+    dispatch: async () => ({ ok: true }),
+  });
+  assert(reusedManualVerificationResult.reasonCode === 'authority_already_used', 'manual-verification authority is single-use');
+
+  let forgedDispatchCount = 0;
+  const forgedManualVerificationResult = await executeChatManualVerification({
+    authority: { ...photoshopVerificationAuthority! },
+    getCurrentScope: () => manualVerificationScope,
+    getCurrentBridgeInstanceId: () => bridgeInstanceId,
+    dispatch: async () => {
+      forgedDispatchCount += 1;
+      return { ok: true };
+    },
+  });
+  assert(forgedManualVerificationResult.reasonCode === 'invalid_authority', 'serialized or forged verification authority fails closed');
+  assert(forgedDispatchCount === 0, 'forged verification authority dispatches no tool');
+
+  assert(issueChatManualVerificationAuthority({
+    ...manualVerificationScope,
+    currentUserId: 'another-circle-member',
+    currentScope: { ...manualVerificationScope, userId: 'another-circle-member' },
+    replayPolicy: 'manual_verify_only',
+    mutationDispatched: true,
+    verificationOnlyTools: ['desktop.photoshop_document_status'],
+    target: { appName: 'Photoshop', expectedWidthPx: 600, expectedHeightPx: 600 },
+  }) === null, 'a different circle member cannot mint verification for the original requester');
+  assert(issueChatManualVerificationAuthority({
+    ...manualVerificationScope,
+    currentScope: manualVerificationScope,
+    currentBridgeInstanceId: 'bridge-instance-bbbbbbbbbbbbbbbb',
+    replayPolicy: 'manual_verify_only',
+    mutationDispatched: true,
+    verificationOnlyTools: ['desktop.photoshop_document_status'],
+    target: { appName: 'Photoshop', expectedWidthPx: 600, expectedHeightPx: 600 },
+  }) === null, 'another device or restarted bridge cannot mint verification for stale desktop state');
+
+  const staleVerificationAuthority = issueChatManualVerificationAuthority({
+    ...manualVerificationScope,
+    currentScope: manualVerificationScope,
+    replayPolicy: 'manual_verify_only',
+    mutationDispatched: true,
+    verificationOnlyTools: ['browser.dom_snapshot'],
+    target: { browserIdentity },
+  });
+  let staleDispatchCount = 0;
+  const staleVerificationResult = await executeChatManualVerification({
+    authority: staleVerificationAuthority!,
+    getCurrentScope: () => ({ ...manualVerificationScope, threadId: 'another-thread' }),
+    getCurrentBridgeInstanceId: () => bridgeInstanceId,
+    dispatch: async () => {
+      staleDispatchCount += 1;
+      return { ok: true };
+    },
+  });
+  assert(staleVerificationResult.reasonCode === 'stale_task_scope', 'stale circle/thread/task binding blocks verification');
+  assert(staleDispatchCount === 0, 'stale verification action performs no observation');
+
+  const midAwaitScope = {
+    ...manualVerificationScope,
+    taskStateId: 'task-mid-await-scope',
+    sourceMessageId: 'message-mid-await-scope',
+  };
+  const midAwaitScopeAuthority = issueChatManualVerificationAuthority({
+    ...midAwaitScope,
+    currentScope: midAwaitScope,
+    replayPolicy: 'manual_verify_only',
+    mutationDispatched: true,
+    verificationOnlyTools: ['desktop.observe_app'],
+    target: { appName: 'Preview' },
+  });
+  let liveMidAwaitScope = midAwaitScope;
+  const midAwaitScopeResult = await executeChatManualVerification({
+    authority: midAwaitScopeAuthority!,
+    getCurrentScope: () => liveMidAwaitScope,
+    getCurrentBridgeInstanceId: () => bridgeInstanceId,
+    dispatch: async () => {
+      liveMidAwaitScope = { ...midAwaitScope, taskStateId: 'newer-task' };
+      return { ok: true };
+    },
+  });
+  assert(midAwaitScopeResult.reasonCode === 'stale_task_scope', 'scope is rechecked after the awaited observation dispatch');
+  assert(midAwaitScopeResult.observations.length === 0, 'an observation finishing after task supersession is discarded');
+
+  const midAwaitBridgeScope = {
+    ...manualVerificationScope,
+    taskStateId: 'task-mid-await-bridge',
+    sourceMessageId: 'message-mid-await-bridge',
+  };
+  const midAwaitBridgeAuthority = issueChatManualVerificationAuthority({
+    ...midAwaitBridgeScope,
+    currentScope: midAwaitBridgeScope,
+    replayPolicy: 'manual_verify_only',
+    mutationDispatched: true,
+    verificationOnlyTools: ['desktop.observe_app'],
+    target: { appName: 'Preview' },
+  });
+  let liveBridgeInstanceId = bridgeInstanceId;
+  const midAwaitBridgeResult = await executeChatManualVerification({
+    authority: midAwaitBridgeAuthority!,
+    getCurrentScope: () => midAwaitBridgeScope,
+    getCurrentBridgeInstanceId: () => liveBridgeInstanceId,
+    dispatch: async () => {
+      liveBridgeInstanceId = 'bridge-instance-cccccccccccccccc';
+      return { ok: true };
+    },
+  });
+  assert(midAwaitBridgeResult.reasonCode === 'bridge_instance_mismatch', 'bridge identity is rechecked after the awaited observation dispatch');
+  assert(midAwaitBridgeResult.observations.length === 0, 'an observation from a changed bridge process is discarded');
+
+  const browserScope = {
+    ...manualVerificationScope,
+    taskStateId: 'task-browser-identity',
+    sourceMessageId: 'message-browser-identity',
+  };
+  assert(issueChatManualVerificationAuthority({
+    ...browserScope,
+    currentScope: browserScope,
+    replayPolicy: 'manual_verify_only',
+    mutationDispatched: true,
+    verificationOnlyTools: ['browser.dom_snapshot'],
+    target: { browserPlanId: 'plan-is-not-page-proof' } as any,
+  }) === null, 'a browser plan id is never accepted as exact page identity');
+  const browserIdentityAuthority = issueChatManualVerificationAuthority({
+    ...browserScope,
+    currentScope: browserScope,
+    replayPolicy: 'manual_verify_only',
+    mutationDispatched: true,
+    verificationOnlyTools: ['browser.dom_snapshot'],
+    target: { browserIdentity },
+  });
+  const browserIdentityResult = await executeChatManualVerification({
+    authority: browserIdentityAuthority!,
+    getCurrentScope: () => browserScope,
+    getCurrentBridgeInstanceId: () => bridgeInstanceId,
+    dispatch: async () => ({ ok: true, ...browserIdentity }),
+  });
+  assert(browserIdentityResult.observations[0]?.matchesExpectedState === true, 'browser verification compares exact process/context/page/opaque-URL identity');
+
+  assert(issueChatManualVerificationAuthority({
+    ...manualVerificationScope,
+    currentScope: manualVerificationScope,
+    replayPolicy: 'manual_verify_only',
+    mutationDispatched: true,
+    verificationOnlyTools: ['desktop.photoshop_document_status', 'desktop.photoshop_create_document'],
+    target: { appName: 'Photoshop' },
+  }) === null, 'an injected mutation tool prevents authority issuance');
+  assert(issueChatManualVerificationAuthority({
+    ...manualVerificationScope,
+    currentScope: manualVerificationScope,
+    replayPolicy: 'manual_verify_only',
+    mutationDispatched: true,
+    verificationOnlyTools: ['desktop.file_stat'],
+  }) === null, 'file verification without an exact bound path fails closed');
+
+  const boundedPartialAuthority = issueChatManualVerificationAuthority({
+    ...manualVerificationScope,
+    taskStateId: 'task-manual-verify-partial',
+    sourceMessageId: 'message-manual-verify-partial',
+    currentScope: {
+      ...manualVerificationScope,
+      taskStateId: 'task-manual-verify-partial',
+      sourceMessageId: 'message-manual-verify-partial',
+    },
+    replayPolicy: 'manual_verify_only',
+    mutationDispatched: true,
+    verificationOnlyTools: ['browser.dom_snapshot', 'desktop.observe_app'],
+    target: { appName: 'Preview', browserIdentity },
+  });
+  let partialDispatchCount = 0;
+  const partialScope = {
+    ...manualVerificationScope,
+    taskStateId: 'task-manual-verify-partial',
+    sourceMessageId: 'message-manual-verify-partial',
+  };
+  const boundedPartialResult = await executeChatManualVerification({
+    authority: boundedPartialAuthority!,
+    getCurrentScope: () => partialScope,
+    getCurrentBridgeInstanceId: () => bridgeInstanceId,
+    now: () => new Date('2026-08-05T12:00:00.000Z'),
+    dispatch: async (tool) => {
+      partialDispatchCount += 1;
+      return tool === 'browser.dom_snapshot'
+        ? { ok: true, resultsText: 'SECRET PAGE CONTENT' }
+        : { ok: false, resultsText: 'SECRET WINDOW TITLE' };
+    },
+  });
+  assert(boundedPartialResult.status === 'partial', 'mixed observation results surface as partial rather than complete');
+  assert(partialDispatchCount === 2, 'bounded verifier runs each declared read once');
+  assert(!boundedPartialResult.userMessage.includes('SECRET'), 'manual verification result excludes raw DOM and accessibility content');
+  assert(boundedPartialResult.taskCompletionVerified === false, 'mixed manual observations cannot complete the original task');
+
   const checkpointRecovery: ComputerTaskCheckpointRecoveryContext = {
     level: 'complex',
     complexityScore: 9,

@@ -6,12 +6,12 @@
 import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, Pressable, ScrollView,
-  TextInput, ActivityIndicator, Platform,
+  TextInput, ActivityIndicator, Platform, Alert,
 } from 'react-native';
 import {
   useProjectRooms, useRoomAgents, useRoomActivity,
   createRoom, updateRoomStatus, deleteRoom,
-  ProjectRoom, RoomAgent, RoomActivity, RoomStatus,
+  ProjectRoom, RoomStatus,
 } from '../services/projectRooms';
 
 interface Props {
@@ -47,6 +47,63 @@ const ACTIVITY_ICONS: Record<string, { icon: string; color: string }> = {
   handoff:        { icon: '⇌', color: '#ec4899' },
 };
 
+interface ActionError {
+  message: string;
+  retry?: () => void;
+}
+
+function messageFrom(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
+function confirmDelete(title: string, message: string): Promise<boolean> {
+  if (Platform.OS === 'web' && typeof window !== 'undefined') {
+    return Promise.resolve(window.confirm(message));
+  }
+  return new Promise(resolve => {
+    Alert.alert(title, message, [
+      { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+      { text: 'Delete', style: 'destructive', onPress: () => resolve(true) },
+    ], { cancelable: true, onDismiss: () => resolve(false) });
+  });
+}
+
+function ErrorNotice({ error, onDismiss }: { error: ActionError; onDismiss?: () => void }) {
+  return (
+    <View
+      style={s.errorNotice}
+      accessible
+      accessibilityRole="alert"
+      accessibilityLiveRegion="assertive"
+      accessibilityLabel={error.message}
+    >
+      <Text style={s.errorNoticeText}>{error.message}</Text>
+      <View style={s.errorNoticeActions}>
+        {error.retry ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Retry failed project room action"
+            onPress={error.retry}
+            style={s.errorNoticeButton}
+          >
+            <Text style={s.errorNoticeButtonText}>RETRY</Text>
+          </Pressable>
+        ) : null}
+        {onDismiss ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Dismiss error"
+            onPress={onDismiss}
+            style={s.errorNoticeButton}
+          >
+            <Text style={s.errorNoticeButtonText}>DISMISS</Text>
+          </Pressable>
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
 function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
   const m = Math.floor(diff / 60000);
@@ -63,14 +120,26 @@ function RoomCard({
   room,
   onStatusChange,
   onDelete,
+  busy,
 }: {
   room: ProjectRoom;
-  onStatusChange: (id: string, status: RoomStatus) => void;
-  onDelete: (id: string) => void;
+  onStatusChange: (id: string, status: RoomStatus) => Promise<void>;
+  onDelete: (room: ProjectRoom) => Promise<void>;
+  busy: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const { agents } = useRoomAgents(room.id);
-  const { activity } = useRoomActivity(expanded ? room.id : null);
+  const {
+    agents,
+    isLoading: agentsLoading,
+    error: agentsError,
+    refresh: refreshAgents,
+  } = useRoomAgents(room.id);
+  const {
+    activity,
+    isLoading: activityLoading,
+    error: activityError,
+    refresh: refreshActivity,
+  } = useRoomActivity(expanded ? room.id : null);
 
   const activeAgents = agents.filter(a => a.status === 'active');
   const idleAgents = agents.filter(a => a.status === 'idle');
@@ -79,7 +148,13 @@ function RoomCard({
   return (
     <View style={[s.roomCard, { borderLeftColor: room.color }]}>
       {/* Room header */}
-      <Pressable style={s.roomHeader} onPress={() => setExpanded(v => !v)}>
+      <Pressable
+        style={s.roomHeader}
+        onPress={() => setExpanded(v => !v)}
+        accessibilityRole="button"
+        accessibilityLabel={`${room.name} project room`}
+        accessibilityState={{ expanded }}
+      >
         <View style={[s.roomColorDot, { backgroundColor: room.color }]} />
         <View style={s.roomHeaderInfo}>
           <Text style={s.roomName}>{room.name}</Text>
@@ -114,7 +189,21 @@ function RoomCard({
         </ScrollView>
       )}
 
-      {agents.length === 0 && (
+      {agentsLoading && agents.length === 0 ? (
+        <ActivityIndicator color="#6366f1" size="small" style={s.inlineLoader} />
+      ) : agentsError ? (
+        <View style={s.inlineError} accessibilityRole="alert" accessibilityLiveRegion="assertive">
+          <Text style={s.inlineErrorText}>{agentsError}</Text>
+          <Pressable
+            onPress={() => { void refreshAgents(); }}
+            accessibilityRole="button"
+            accessibilityLabel={`Retry loading agents for ${room.name}`}
+            style={s.inlineRetry}
+          >
+            <Text style={s.inlineRetryText}>RETRY</Text>
+          </Pressable>
+        </View>
+      ) : agents.length === 0 && (
         <Text style={s.emptyAgents}>No agents in this room yet</Text>
       )}
 
@@ -135,7 +224,21 @@ function RoomCard({
           {/* Activity feed */}
           <Text style={s.sectionLabel}>ACTIVITY</Text>
           <ScrollView style={s.activityScroll} showsVerticalScrollIndicator={false}>
-            {activity.length === 0 ? (
+            {activityLoading && activity.length === 0 ? (
+              <ActivityIndicator color="#6366f1" size="small" style={s.inlineLoader} />
+            ) : activityError ? (
+              <View style={s.inlineError} accessibilityRole="alert" accessibilityLiveRegion="assertive">
+                <Text style={s.inlineErrorText}>{activityError}</Text>
+                <Pressable
+                  onPress={() => { void refreshActivity(); }}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Retry loading activity for ${room.name}`}
+                  style={s.inlineRetry}
+                >
+                  <Text style={s.inlineRetryText}>RETRY</Text>
+                </Pressable>
+              </View>
+            ) : activity.length === 0 ? (
               <Text style={s.emptyActivity}>No activity yet</Text>
             ) : activity.map(a => {
               const meta = ACTIVITY_ICONS[a.activity_type] ?? { icon: '·', color: '#9CA3AF' };
@@ -156,8 +259,11 @@ function RoomCard({
           <View style={s.roomControls}>
             {room.status !== 'completed' && (
               <Pressable
-                style={[s.controlBtn, { borderColor: '#F59E0B55' }]}
-                onPress={() => onStatusChange(room.id, room.status === 'active' ? 'paused' : 'active')}
+                style={[s.controlBtn, { borderColor: '#F59E0B55' }, busy && s.controlBtnDisabled]}
+                onPress={() => { void onStatusChange(room.id, room.status === 'active' ? 'paused' : 'active'); }}
+                disabled={busy}
+                accessibilityRole="button"
+                accessibilityLabel={`${room.status === 'active' ? 'Pause' : 'Resume'} ${room.name}`}
               >
                 <Text style={[s.controlBtnText, { color: '#F59E0B' }]}>
                   {room.status === 'active' ? 'Pause' : 'Resume'}
@@ -165,16 +271,22 @@ function RoomCard({
               </Pressable>
             )}
             <Pressable
-              style={[s.controlBtn, { borderColor: '#10B98155' }]}
-              onPress={() => onStatusChange(room.id, 'completed')}
+              style={[s.controlBtn, { borderColor: '#10B98155' }, (busy || room.status === 'completed') && s.controlBtnDisabled]}
+              onPress={() => { void onStatusChange(room.id, 'completed'); }}
+              disabled={busy || room.status === 'completed'}
+              accessibilityRole="button"
+              accessibilityLabel={`Mark ${room.name} done`}
             >
               <Text style={[s.controlBtnText, { color: '#10B981' }]}>Mark Done</Text>
             </Pressable>
             <Pressable
-              style={[s.controlBtn, { borderColor: '#EF444455' }]}
-              onPress={() => onDelete(room.id)}
+              style={[s.controlBtn, { borderColor: '#EF444455' }, busy && s.controlBtnDisabled]}
+              onPress={() => { void onDelete(room); }}
+              disabled={busy}
+              accessibilityRole="button"
+              accessibilityLabel={`Delete ${room.name}`}
             >
-              <Text style={[s.controlBtnText, { color: '#EF4444' }]}>Delete</Text>
+              <Text style={[s.controlBtnText, { color: '#EF4444' }]}>{busy ? 'Working…' : 'Delete'}</Text>
             </Pressable>
           </View>
         </View>
@@ -185,7 +297,7 @@ function RoomCard({
 
 // ─── Create Room Form ─────────────────────────────────────────────────────────
 
-function CreateRoomForm({ circleId, onCreated }: { circleId: string; onCreated: () => void }) {
+function CreateRoomForm({ circleId, onCreated }: { circleId: string; onCreated: () => Promise<void> }) {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [color, setColor] = useState(ROOM_COLORS[0]);
@@ -206,11 +318,12 @@ function CreateRoomForm({ circleId, onCreated }: { circleId: string; onCreated: 
         tags: tags.split(',').map(t => t.trim()).filter(Boolean),
       });
       setName(''); setDescription(''); setTags('');
-      onCreated();
-    } catch (e: any) {
-      setError(e.message || 'Failed to create room');
+      setLoading(false);
+      await onCreated();
+    } catch (createError) {
+      setError(messageFrom(createError, 'Failed to create room.'));
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   return (
@@ -251,9 +364,29 @@ function CreateRoomForm({ circleId, onCreated }: { circleId: string; onCreated: 
         ))}
       </View>
 
-      {error ? <Text style={s.errorText}>{error}</Text> : null}
+      {error ? (
+        <View style={s.inlineError} accessibilityRole="alert" accessibilityLiveRegion="assertive">
+          <Text style={s.inlineErrorText}>{error}</Text>
+          <Pressable
+            onPress={() => { void handleCreate(); }}
+            disabled={loading}
+            accessibilityRole="button"
+            accessibilityLabel="Retry creating project room"
+            style={s.inlineRetry}
+          >
+            <Text style={s.inlineRetryText}>RETRY</Text>
+          </Pressable>
+        </View>
+      ) : null}
 
-      <Pressable style={[s.createBtn, { backgroundColor: color }]} onPress={handleCreate} disabled={loading}>
+      <Pressable
+        style={[s.createBtn, { backgroundColor: color }, loading && s.controlBtnDisabled]}
+        onPress={() => { void handleCreate(); }}
+        disabled={loading}
+        accessibilityRole="button"
+        accessibilityLabel="Create project room"
+        accessibilityState={{ busy: loading, disabled: loading }}
+      >
         {loading
           ? <ActivityIndicator color="#fff" size="small" />
           : <Text style={s.createBtnText}>CREATE ROOM</Text>
@@ -266,19 +399,77 @@ function CreateRoomForm({ circleId, onCreated }: { circleId: string; onCreated: 
 // ─── Main Panel ───────────────────────────────────────────────────────────────
 
 export default function ProjectRoomsPanel({ circleId }: Props) {
-  const { rooms, isLoading, refresh } = useProjectRooms(circleId);
+  const { rooms, isLoading, error: loadError, refresh } = useProjectRooms(circleId);
   const [creating, setCreating] = useState(false);
   const [filter, setFilter] = useState<RoomStatus | 'all'>('active');
+  const [busyRoomId, setBusyRoomId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<ActionError | null>(null);
 
   const handleStatusChange = async (id: string, status: RoomStatus) => {
-    await updateRoomStatus(id, status).catch(() => {});
-    refresh();
+    setBusyRoomId(id);
+    setActionError(null);
+    try {
+      await updateRoomStatus(id, status);
+      const refreshed = await refresh();
+      if (refreshed === null) {
+        setActionError({
+          message: 'The room status changed, but the room list could not be refreshed.',
+          retry: () => { void refresh(); },
+        });
+      }
+    } catch (statusError) {
+      setActionError({
+        message: messageFrom(statusError, 'The room status could not be changed.'),
+        retry: () => { void handleStatusChange(id, status); },
+      });
+    } finally {
+      setBusyRoomId(null);
+    }
   };
 
-  const handleDelete = async (id: string) => {
-    await deleteRoom(id).catch(() => {});
-    refresh();
+  const handleDelete = async (room: ProjectRoom) => {
+    const confirmed = await confirmDelete(
+      'Delete project room?',
+      `Delete “${room.name}”? Its room activity and agent grouping may also be removed.`,
+    );
+    if (!confirmed) return;
+
+    setBusyRoomId(room.id);
+    setActionError(null);
+    try {
+      await deleteRoom(room.id);
+      const refreshed = await refresh();
+      if (refreshed === null) {
+        setActionError({
+          message: 'The room was deleted, but the room list could not be refreshed.',
+          retry: () => { void refresh(); },
+        });
+      }
+    } catch (deleteError) {
+      setActionError({
+        message: messageFrom(deleteError, `“${room.name}” could not be deleted.`),
+        retry: () => { void handleDelete(room); },
+      });
+    } finally {
+      setBusyRoomId(null);
+    }
   };
+
+  const handleCreated = async () => {
+    setCreating(false);
+    const refreshed = await refresh();
+    if (refreshed === null) {
+      setActionError({
+        message: 'The room was created, but the room list could not be refreshed.',
+        retry: () => { void refresh(); },
+      });
+    }
+  };
+
+  const visibleError: ActionError | null = actionError ?? (loadError ? {
+    message: loadError,
+    retry: () => { void refresh(); },
+  } : null);
 
   const filtered = filter === 'all' ? rooms : rooms.filter(r => r.status === filter);
 
@@ -290,14 +481,27 @@ export default function ProjectRoomsPanel({ circleId }: Props) {
           <Text style={s.headerTitle}>PROJECT ROOMS</Text>
           <Text style={s.headerSub}>{rooms.length} rooms · {rooms.filter(r => r.status === 'active').length} active</Text>
         </View>
-        <Pressable style={s.newBtn} onPress={() => setCreating(v => !v)}>
+        <Pressable
+          style={s.newBtn}
+          onPress={() => setCreating(v => !v)}
+          accessibilityRole="button"
+          accessibilityLabel={creating ? 'Close new project room form' : 'Create a new project room'}
+          accessibilityState={{ expanded: creating }}
+        >
           <Text style={s.newBtnText}>{creating ? '✕' : '+ NEW'}</Text>
         </Pressable>
       </View>
 
+      {visibleError ? (
+        <ErrorNotice
+          error={visibleError}
+          onDismiss={actionError ? () => setActionError(null) : undefined}
+        />
+      ) : null}
+
       {/* Create form */}
       {creating && circleId && (
-        <CreateRoomForm circleId={circleId} onCreated={() => { setCreating(false); refresh(); }} />
+        <CreateRoomForm circleId={circleId} onCreated={handleCreated} />
       )}
 
       {/* Filter tabs */}
@@ -337,6 +541,7 @@ export default function ProjectRoomsPanel({ circleId }: Props) {
               room={room}
               onStatusChange={handleStatusChange}
               onDelete={handleDelete}
+              busy={busyRoomId !== null}
             />
           ))}
         </ScrollView>
@@ -424,7 +629,31 @@ const s = StyleSheet.create({
     flex: 1, paddingVertical: 6, borderRadius: 6, borderWidth: 1, alignItems: 'center',
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
+  controlBtnDisabled: { opacity: 0.5 },
   controlBtnText: { fontSize: 11, fontWeight: '700', fontFamily: 'monospace' },
+
+  errorNotice: {
+    backgroundColor: '#2A1116', borderWidth: 1, borderColor: '#7F1D1D', borderRadius: 8,
+    padding: 10, marginBottom: 12, gap: 8,
+  },
+  errorNoticeText: { color: '#FCA5A5', fontSize: 12, lineHeight: 17 },
+  errorNoticeActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 8 },
+  errorNoticeButton: {
+    minHeight: 36, justifyContent: 'center', paddingHorizontal: 10, borderRadius: 6,
+    borderWidth: 1, borderColor: '#991B1B',
+  },
+  errorNoticeButtonText: { color: '#FCA5A5', fontSize: 10, fontWeight: '800', letterSpacing: 0.5 },
+  inlineLoader: { marginVertical: 10 },
+  inlineError: {
+    flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#2A1116',
+    borderRadius: 6, padding: 8, marginBottom: 8,
+  },
+  inlineErrorText: { color: '#FCA5A5', fontSize: 11, lineHeight: 15, flex: 1 },
+  inlineRetry: {
+    minHeight: 32, justifyContent: 'center', paddingHorizontal: 8, borderRadius: 5,
+    borderWidth: 1, borderColor: '#991B1B',
+  },
+  inlineRetryText: { color: '#FCA5A5', fontSize: 9, fontWeight: '800' },
 
   // Create form
   createForm: { backgroundColor: '#0D1117', borderRadius: 8, padding: 16, marginBottom: 12, borderWidth: 1, borderColor: '#1F2937' },

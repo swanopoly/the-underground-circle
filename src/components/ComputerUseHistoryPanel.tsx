@@ -7,12 +7,20 @@
  * Drop-in for ProfileTab, a chat header drawer, or a standalone screen.
  */
 
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Linking, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { listCircleComputerUseRuns, type ComputerUseRunRow } from '../lib/computerUseHistory';
+import {
+  listCircleComputerUseRunsExact,
+  type ComputerUseHistoryAuthorityFence,
+  type ComputerUseHistoryExactAuthority,
+  type ComputerUseRunRow,
+} from '../lib/computerUseHistory';
+import { PROFILE_DASHBOARD_TOKENS as PD } from './profile/profileDashboardTheme';
 
 interface Props {
   circleId: string;
+  exactAuthority: ComputerUseHistoryExactAuthority | null;
+  isExactAuthorityCurrent: ComputerUseHistoryAuthorityFence;
   accentColor?: string;
   /** Optional — lets the parent kick off a re-run / follow-up via the
    *  existing Computer Use flow. If omitted, the re-run button is hidden. */
@@ -27,25 +35,74 @@ interface Props {
 const CACHE = new Map<string, { at: number; rows: ComputerUseRunRow[] }>();
 const CACHE_TTL_MS = 30_000;
 
-export default function ComputerUseHistoryPanel({ circleId, accentColor = '#22d3ee', onRerun, compact, limit = 20 }: Props) {
+export default function ComputerUseHistoryPanel({
+  circleId,
+  exactAuthority,
+  isExactAuthorityCurrent,
+  accentColor = '#6366f1',
+  onRerun,
+  compact,
+  limit = 20,
+}: Props) {
   const [rows, setRows] = useState<ComputerUseRunRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadedScopeKey, setLoadedScopeKey] = useState<string | null>(null);
+  const requestGenerationRef = useRef(0);
+  const scopeKey = exactAuthority && isExactAuthorityCurrent(exactAuthority)
+    ? `${exactAuthority.userId}:${exactAuthority.circleId}:${exactAuthority.generation}`
+    : null;
+  const visibleRows = loadedScopeKey === scopeKey ? rows : [];
 
   const refresh = useCallback(async (force = false) => {
-    const cached = CACHE.get(circleId);
+    const requestedAuthority = exactAuthority;
+    const requestedScopeKey = scopeKey;
+    const requestGeneration = requestGenerationRef.current + 1;
+    requestGenerationRef.current = requestGeneration;
+    const requestIsCurrent = (candidate: ComputerUseHistoryExactAuthority) => (
+      requestGenerationRef.current === requestGeneration
+      && requestedScopeKey !== null
+      && candidate.userId === requestedAuthority?.userId
+      && candidate.circleId === requestedAuthority?.circleId
+      && candidate.accessToken === requestedAuthority?.accessToken
+      && candidate.generation === requestedAuthority?.generation
+      && isExactAuthorityCurrent(candidate)
+    );
+    if (!requestedAuthority || !requestedScopeKey || !requestIsCurrent(requestedAuthority)) {
+      setRows([]);
+      setLoadedScopeKey(null);
+      setLoading(false);
+      return;
+    }
+    const cached = CACHE.get(requestedScopeKey);
     if (!force && cached && Date.now() - cached.at < CACHE_TTL_MS) {
       setRows(cached.rows);
+      setLoadedScopeKey(requestedScopeKey);
       setLoading(false);
       return;
     }
     setLoading(true);
-    const fresh = await listCircleComputerUseRuns(circleId, limit);
-    CACHE.set(circleId, { at: Date.now(), rows: fresh });
+    const result = await listCircleComputerUseRunsExact(
+      circleId,
+      limit,
+      requestedAuthority,
+      requestIsCurrent,
+    );
+    if (!requestIsCurrent(requestedAuthority)) return;
+    const fresh = result.ok ? result.rows : [];
+    if (result.ok) CACHE.set(requestedScopeKey, { at: Date.now(), rows: fresh });
     setRows(fresh);
+    setLoadedScopeKey(requestedScopeKey);
     setLoading(false);
-  }, [circleId, limit]);
+  }, [circleId, exactAuthority, isExactAuthorityCurrent, limit, scopeKey]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    requestGenerationRef.current += 1;
+    setRows([]);
+    setLoadedScopeKey(null);
+    setLoading(Boolean(scopeKey));
+    void refresh();
+    return () => { requestGenerationRef.current += 1; };
+  }, [refresh, scopeKey]);
 
   return (
     <View style={[s.card, compact && { marginHorizontal: 0, marginTop: 0 }]}>
@@ -56,17 +113,17 @@ export default function ComputerUseHistoryPanel({ circleId, accentColor = '#22d3
           </View>
           <Text style={s.title}>BROWSER HISTORY</Text>
           <View style={s.countPill}>
-            <Text style={s.countText}>{rows.length}</Text>
+            <Text style={s.countText}>{visibleRows.length}</Text>
           </View>
-          <Pressable onPress={() => refresh(true)} style={s.refreshBtn} accessibilityRole="button">
+          <Pressable onPress={() => refresh(true)} style={s.refreshBtn} accessibilityRole="button" accessibilityLabel="Refresh browser history">
             <Text style={s.refreshText}>↻</Text>
           </Pressable>
         </View>
       ) : null}
 
-      {loading && rows.length === 0 ? (
+      {loading && visibleRows.length === 0 ? (
         <Text style={s.hint}>LOADING…</Text>
-      ) : rows.length === 0 ? (
+      ) : visibleRows.length === 0 ? (
         <View style={s.emptyBox}>
           <Text style={s.emptyTitle}>No computer tasks yet</Text>
           <Text style={s.emptyHint}>Ask the chat to "research X" or "find top 5 Y" and your runs show up here.</Text>
@@ -74,7 +131,7 @@ export default function ComputerUseHistoryPanel({ circleId, accentColor = '#22d3
       ) : (
         <ScrollView style={{ maxHeight: 520 }} showsVerticalScrollIndicator={false}>
           <View style={{ gap: 8 }}>
-            {rows.map((r) => (
+            {visibleRows.map((r) => (
               <RunRow key={r.id} row={r} accentColor={accentColor} onRerun={onRerun} />
             ))}
           </View>
@@ -111,12 +168,22 @@ function RunRow({ row, accentColor, onRerun }: { row: ComputerUseRunRow; accentC
           <Text style={s.rowMeta}>{timeAgo(row.created_at)}</Text>
           {row.iterations > 0 ? <Text style={s.rowMeta}>{row.iterations} step{row.iterations === 1 ? '' : 's'}</Text> : null}
           {row.live_url ? (
-            <Pressable onPress={() => Linking.openURL(row.live_url!)} style={s.rowAction} accessibilityRole="button">
+            <Pressable
+              onPress={() => Linking.openURL(row.live_url!)}
+              style={s.rowAction}
+              accessibilityRole="button"
+              accessibilityLabel={`Open live browser session for ${row.task}`}
+            >
               <Text style={[s.rowActionText, { color: '#38bdf8' }]}>OPEN ↗</Text>
             </Pressable>
           ) : null}
           {onRerun && row.status !== 'running' ? (
-            <Pressable onPress={() => onRerun(row.task)} style={s.rowAction} accessibilityRole="button">
+            <Pressable
+              onPress={() => onRerun(row.task)}
+              style={s.rowAction}
+              accessibilityRole="button"
+              accessibilityLabel={`Run ${row.task} again`}
+            >
               <Text style={[s.rowActionText, { color: accentColor }]}>RE-RUN</Text>
             </Pressable>
           ) : null}
@@ -140,12 +207,10 @@ function timeAgo(iso: string): string {
 
 const s = StyleSheet.create({
   card: {
-    marginHorizontal: 16,
-    marginTop: 16,
-    backgroundColor: '#0f172a',
+    backgroundColor: PD.panel,
     borderWidth: 1,
-    borderColor: '#1f2937',
-    borderRadius: 16,
+    borderColor: PD.border,
+    borderRadius: PD.panelRadius,
     padding: 16,
   },
   header: {
@@ -169,7 +234,7 @@ const s = StyleSheet.create({
   },
   title: {
     flex: 1,
-    color: '#e2e8f0',
+    color: PD.text,
     fontFamily: 'monospace',
     fontSize: 12,
     fontWeight: '900',
@@ -180,13 +245,13 @@ const s = StyleSheet.create({
     paddingHorizontal: 7,
     paddingVertical: 2,
     borderRadius: 999,
-    backgroundColor: '#111827',
+    backgroundColor: PD.inset,
     borderWidth: 1,
-    borderColor: '#243041',
+    borderColor: PD.borderStrong,
     alignItems: 'center',
   },
   countText: {
-    color: '#94a3b8',
+    color: PD.textSecondary,
     fontSize: 10,
     fontWeight: '900',
     fontFamily: 'monospace',
@@ -201,12 +266,12 @@ const s = StyleSheet.create({
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   refreshText: {
-    color: '#94a3b8',
+    color: PD.textSecondary,
     fontSize: 14,
     fontWeight: '700',
   },
   hint: {
-    color: '#64748b',
+    color: PD.textMuted,
     fontSize: 10,
     fontWeight: '700',
     letterSpacing: 1.2,
@@ -215,20 +280,20 @@ const s = StyleSheet.create({
   },
   emptyBox: {
     padding: 16,
-    borderRadius: 12,
+    borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#1f2937',
-    backgroundColor: '#0a0f1c',
+    borderColor: PD.border,
+    backgroundColor: PD.inset,
     gap: 6,
     alignItems: 'center',
   },
   emptyTitle: {
-    color: '#e2e8f0',
+    color: PD.text,
     fontSize: 13,
     fontWeight: '800',
   },
   emptyHint: {
-    color: '#64748b',
+    color: PD.textMuted,
     fontSize: 11,
     lineHeight: 16,
     textAlign: 'center',
@@ -240,8 +305,8 @@ const s = StyleSheet.create({
     padding: 10,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#1f2937',
-    backgroundColor: '#020617',
+    borderColor: PD.border,
+    backgroundColor: PD.inset,
   },
   rowDot: {
     width: 8,
@@ -250,13 +315,13 @@ const s = StyleSheet.create({
     marginTop: 6,
   },
   rowTask: {
-    color: '#e2e8f0',
+    color: PD.text,
     fontSize: 12,
     fontWeight: '700',
     lineHeight: 17,
   },
   rowSummary: {
-    color: '#94a3b8',
+    color: PD.textSecondary,
     fontSize: 11,
     lineHeight: 15,
   },
@@ -284,7 +349,7 @@ const s = StyleSheet.create({
     fontFamily: 'monospace',
   },
   rowMeta: {
-    color: '#64748b',
+    color: PD.textMuted,
     fontSize: 9,
     fontFamily: 'monospace',
     letterSpacing: 0.4,
@@ -294,7 +359,7 @@ const s = StyleSheet.create({
     paddingVertical: 2,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#1e293b',
+    borderColor: PD.borderStrong,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   rowActionText: {

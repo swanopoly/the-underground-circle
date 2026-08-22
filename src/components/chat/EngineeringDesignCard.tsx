@@ -324,7 +324,7 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: '#22d3ee66',
+    borderColor: '#6366f166',
     backgroundColor: '#0891b222',
   },
   nextStepChipDisabled: {

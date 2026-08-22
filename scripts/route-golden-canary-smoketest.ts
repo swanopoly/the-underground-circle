@@ -45,6 +45,7 @@ import {
 type ExecutionKind = ChatAutomationPlan['execution']['kind'];
 type IntentKind = ChatAutomationPlan['intent']['kind'];
 type RouteId = ChatAutomationPlan['execution']['routeId'];
+type ComputerKind = NonNullable<ChatAutomationPlan['computerRequestRoute']>['kind'];
 
 type Canary = {
   /** Short lane label for grouping the failure output. */
@@ -56,6 +57,8 @@ type Canary = {
   intentKind?: IntentKind;
   /** Optional: assert the route lane where it is deterministic. */
   routeId?: RouteId;
+  /** Canonical computer surface. Never infer native desktop work from routeId. */
+  computerKind?: ComputerKind;
   /** Optional attachments (wp-image-post anchors need these). */
   attachments?: Array<{ uri?: string; type?: string; id?: string }>;
   /** Optional selected mode (a few plain-chat rows pin OpenSwan mode). */
@@ -123,6 +126,19 @@ function runCanary(c: Canary): void {
       console.log(`pass [${c.lane}]: "${c.prompt}" route → ${gotRoute ?? 'null'}`);
     }
   }
+
+  if (c.computerKind !== undefined) {
+    assertions += 1;
+    const gotComputerKind = plan.computerRequestRoute?.kind ?? null;
+    if (gotComputerKind !== c.computerKind) {
+      failures += 1;
+      console.error(
+        `FAIL [${c.lane}]: "${c.prompt}"\n    computerRequestRoute.kind → got ${gotComputerKind ?? 'null'}, expected ${c.computerKind}`,
+      );
+    } else {
+      console.log(`pass [${c.lane}]: "${c.prompt}" computer kind → ${gotComputerKind}`);
+    }
+  }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -174,24 +190,24 @@ const CANARIES: Canary[] = [
     lane: 'desktop',
     prompt: 'open Photoshop',
     kind: 'run_computer_task',
-    routeId: 'browser',
+    computerKind: 'desktop_app',
     anchor: true,
     why: 'P22/P23: bare app launch must hit the computer/app adapter, not plain chat',
   },
-  { lane: 'desktop', prompt: 'open Photoshop and crop this image', kind: 'run_computer_task', routeId: 'browser' },
-  { lane: 'desktop', prompt: 'open Affinity Designer', kind: 'run_computer_task', routeId: 'browser' },
-  { lane: 'desktop', prompt: 'click the Save button in Photoshop', kind: 'run_computer_task', routeId: 'browser' },
-  { lane: 'desktop', prompt: 'click File > Save As in Photoshop', kind: 'run_computer_task', routeId: 'browser' },
-  { lane: 'desktop', prompt: 'type "hello world" in TextEdit', kind: 'run_computer_task', routeId: 'browser' },
-  { lane: 'desktop', prompt: 'press Command S in Photoshop', kind: 'run_computer_task', routeId: 'browser' },
-  { lane: 'desktop', prompt: 'open TextEdit then type "hello" then press Command S', kind: 'run_computer_task', routeId: 'browser' },
-  { lane: 'desktop', prompt: 'Search files in my Downloads folder for invoice', kind: 'run_computer_task', routeId: 'browser' },
-  { lane: 'desktop', prompt: 'Open InDesign and export high quality pdf as brochure.pdf', kind: 'run_computer_task', routeId: 'browser' },
+  { lane: 'desktop', prompt: 'open Photoshop and crop this image', kind: 'run_computer_task', computerKind: 'desktop_app' },
+  { lane: 'desktop', prompt: 'open Affinity Designer', kind: 'run_computer_task', computerKind: 'desktop_app' },
+  { lane: 'desktop', prompt: 'click the Save button in Photoshop', kind: 'run_computer_task', computerKind: 'desktop_app' },
+  { lane: 'desktop', prompt: 'click File > Save As in Photoshop', kind: 'run_computer_task', computerKind: 'desktop_app' },
+  { lane: 'desktop', prompt: 'type "hello world" in TextEdit', kind: 'run_computer_task', computerKind: 'desktop_app' },
+  { lane: 'desktop', prompt: 'press Command S in Photoshop', kind: 'run_computer_task', computerKind: 'desktop_app' },
+  { lane: 'desktop', prompt: 'open TextEdit then type "hello" then press Command S', kind: 'run_computer_task', computerKind: 'desktop_app' },
+  { lane: 'desktop', prompt: 'Search files in my Downloads folder for invoice', kind: 'run_computer_task', computerKind: 'local_file' },
+  { lane: 'desktop', prompt: 'Open InDesign and export high quality pdf as brochure.pdf', kind: 'run_computer_task', computerKind: 'desktop_app' },
   {
     lane: 'desktop',
     prompt: 'Use Ableton Live to create a four-bar drum loop and export it after approval',
     kind: 'run_computer_task',
-    routeId: 'browser',
+    computerKind: 'desktop_app',
     why: 'unfamiliar app → universal app control, not plain chat',
   },
 
@@ -513,7 +529,7 @@ const CANARIES: Canary[] = [
   },
 
   // ── W-A1 regression classics re-pinned from the probe battery ───────────────
-  { lane: 'desktop', prompt: 'open Photoshop and create a new project', kind: 'run_computer_task', routeId: 'browser' },
+  { lane: 'desktop', prompt: 'open Photoshop and create a new project', kind: 'run_computer_task', computerKind: 'desktop_app' },
   { lane: 'browser', prompt: 'book me a hotel in Miami', kind: 'run_computer_task', routeId: 'browser', why: 'travel booking → zero-tap browser runtime' },
   { lane: 'create', prompt: 'add a task buy milk', kind: 'run_command_handler', intentKind: 'conversational_action', routeId: 'mission' },
   { lane: 'meta', prompt: 'how do I crop an image in Photoshop?', kind: 'run_plain_chat', why: 'how-to question about an app is guidance, not desktop automation' },

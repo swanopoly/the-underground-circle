@@ -30,8 +30,8 @@ const dispatchEnd = runtimeSource.indexOf('export async function executeOpenSwan
 const dispatchSource = runtimeSource.slice(dispatchStart, dispatchEnd);
 
 assert(
-  executeSource.indexOf('prepareGuardedBrowserToggle(args, context)')
-    < executeSource.indexOf('maybeRequestToolApproval(tool, approvalArgs, context)'),
+  executeSource.indexOf('prepareGuardedBrowserToggle(runtimeArgs, context)')
+    < executeSource.indexOf('maybeAuthorizeToolWithWorkflowReview('),
   'fresh exact toggle observation occurs before approval lookup/request',
 );
 assert(
@@ -73,9 +73,12 @@ assert(
 );
 assert(
   dispatchSource.includes('buildComputerAppToolArgsFingerprintAsync(')
+    && runtimeSource.includes('const dispatched = await dispatchAuthorizedComputerAppMutation({')
+    && runtimeSource.includes('normalizedArgs: input.normalizedArgs')
+    && dispatchSource.includes('const dispatched = await dispatchDurableComputerAppMutation({')
     && dispatchSource.includes('normalizedArgs: prepared.dispatchArgs')
     && dispatchSource.includes('handler: async (sealedArgs)')
-    && dispatchSource.includes('setGuardedBrowserToggleState({ ...sealedArgs })'),
+    && dispatchSource.includes('setGuardedBrowserToggleState({\n        ...sealedArgs,'),
   'handler entry receives only the cryptographically sealed transient dispatch args',
 );
 assert(

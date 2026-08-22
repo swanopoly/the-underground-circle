@@ -683,8 +683,8 @@ async function defaultFileApproval(input: {
  * githubChatCommands.ts helpers (`getToken` + `getDefaultRepo`), reached
  * lazily so this module stays tsx-loadable:
  *   1. circle PAT via github.getStoredToken (localSecrets `github_pat`);
- *   2. the user's OAuth token from `user_github_tokens`;
- *   3. the most recently active `circle_github_connections` row for the repo.
+ *   2. the most recently active `circle_github_connections` row for the repo.
+ * OAuth provider tokens remain server-only and are never resolved here.
  */
 async function defaultResolveConnection(
   circleId: string,
@@ -697,22 +697,9 @@ async function defaultResolveConnection(
     // 1. Try PAT stored per-circle.
     let token: string | null = (await getStoredToken(circleId)) || null;
 
-    // 2. Try OAuth token from user_github_tokens table.
-    if (!token) {
-      try {
-        const { data } = await supabase
-          .from('user_github_tokens')
-          .select('access_token')
-          .eq('user_id', userId)
-          .maybeSingle();
-        if (data?.access_token) token = data.access_token;
-      } catch {
-        // Silently fall through — table may not exist or RLS may block.
-      }
-    }
     if (!token) return {};
 
-    // 3. Default connected repo — most recently active connection.
+    // 2. Default connected repo — most recently active connection.
     let repo: { owner: string; repo: string } | null = null;
     try {
       const { data } = await supabase

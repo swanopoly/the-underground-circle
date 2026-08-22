@@ -36,6 +36,116 @@ export interface ChatComputerOutcomePresentation {
   nextSteps: string[];
 }
 
+/**
+ * Closed read-only recovery surface for an outcome whose mutation may already
+ * have crossed a dispatch boundary. This list is deliberately smaller than
+ * the general OpenSwan read catalog: adding a tool here creates a user-visible
+ * post-dispatch affordance and therefore requires an explicit safety review.
+ */
+export const CHAT_MANUAL_VERIFICATION_TOOL_ALLOWLIST = [
+  'browser.dom_snapshot',
+  'desktop.observe_app',
+  'desktop.photoshop_document_status',
+  'desktop.file_stat',
+] as const;
+
+export type ChatManualVerificationTool = typeof CHAT_MANUAL_VERIFICATION_TOOL_ALLOWLIST[number];
+
+export interface ChatManualVerificationRecoveryAction {
+  id: 'verify_current_state';
+  label: 'Verify current state';
+  tools: ChatManualVerificationTool[];
+  mutationAllowed: false;
+  promptReplayAllowed: false;
+}
+
+export interface ChatManualVerificationCurrentTaskInput {
+  replayPolicy?: ComputerTaskReplayPolicy | null;
+  mutationDispatched?: boolean;
+  verificationOnlyTools?: string[] | null;
+  requestAuthorId?: string | null;
+  currentRequestAuthorId?: string | null;
+  currentUserId?: string | null;
+  expectedTaskStateId?: string | null;
+  currentTaskStateId?: string | null;
+  expectedSourceMessageId?: string | null;
+  currentSourceMessageId?: string | null;
+  hasNewerUserMessage?: boolean;
+  verificationBridgeInstanceId?: string | null;
+  currentVerificationBridgeInstanceId?: string | null;
+  targetBound?: boolean;
+}
+
+const CHAT_MANUAL_VERIFICATION_TOOL_SET = new Set<string>(CHAT_MANUAL_VERIFICATION_TOOL_ALLOWLIST);
+
+/**
+ * Returns the one action that may remain visible after mutation dispatch is
+ * uncertain. The complete declared tool list must be safe; an injected or
+ * future unreviewed tool invalidates the whole affordance instead of being
+ * silently ignored.
+ */
+export function buildChatManualVerificationRecoveryAction(input: {
+  replayPolicy?: ComputerTaskReplayPolicy | null;
+  mutationDispatched?: boolean;
+  verificationOnlyTools?: string[] | null;
+}): ChatManualVerificationRecoveryAction | null {
+  if (input.replayPolicy !== 'manual_verify_only' || input.mutationDispatched !== true) return null;
+  const declared = Array.isArray(input.verificationOnlyTools)
+    ? input.verificationOnlyTools.map((tool) => String(tool || '').trim()).filter(Boolean)
+    : [];
+  if (declared.length === 0 || declared.length > CHAT_MANUAL_VERIFICATION_TOOL_ALLOWLIST.length) return null;
+  if (declared.some((tool) => !CHAT_MANUAL_VERIFICATION_TOOL_SET.has(tool))) return null;
+  const tools = Array.from(new Set(declared)) as ChatManualVerificationTool[];
+  if (tools.length === 0) return null;
+  return {
+    id: 'verify_current_state',
+    label: 'Verify current state',
+    tools,
+    mutationAllowed: false,
+    promptReplayAllowed: false,
+  };
+}
+
+/**
+ * Shared render/issue/click predicate for the post-dispatch read-only action.
+ * Every identity must be explicit and exact: legacy cards without requester,
+ * task, bridge-process, or target lineage intentionally lose the affordance.
+ */
+export function isChatManualVerificationCurrentTask(
+  input: ChatManualVerificationCurrentTaskInput,
+): boolean {
+  if (!buildChatManualVerificationRecoveryAction(input)) return false;
+  const exact = (value: unknown, max: number): string | null => {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    return trimmed && trimmed.length <= max && !/[\u0000-\u001f\u007f]/.test(trimmed) ? trimmed : null;
+  };
+  const requestAuthorId = exact(input.requestAuthorId, 200);
+  const currentRequestAuthorId = exact(input.currentRequestAuthorId, 200);
+  const currentUserId = exact(input.currentUserId, 200);
+  const expectedTaskStateId = exact(input.expectedTaskStateId, 240);
+  const currentTaskStateId = exact(input.currentTaskStateId, 240);
+  const expectedSourceMessageId = exact(input.expectedSourceMessageId, 240);
+  const currentSourceMessageId = exact(input.currentSourceMessageId, 240);
+  const bridgeInstanceId = exact(input.verificationBridgeInstanceId, 128);
+  const currentBridgeInstanceId = exact(input.currentVerificationBridgeInstanceId, 128);
+  return Boolean(
+    requestAuthorId
+    && currentRequestAuthorId
+    && currentUserId
+    && requestAuthorId === currentRequestAuthorId
+    && requestAuthorId === currentUserId
+    && expectedTaskStateId
+    && expectedTaskStateId === currentTaskStateId
+    && expectedSourceMessageId
+    && expectedSourceMessageId === currentSourceMessageId
+    && input.hasNewerUserMessage !== true
+    && bridgeInstanceId
+    && bridgeInstanceId === currentBridgeInstanceId
+    && input.targetBound === true
+  );
+}
+
 const PHOTOSHOP_SAVE_FOR_WEB_RECONNECT_STEP = 'Tap the desktop bridge button to reconnect, then retry the Photoshop Save for Web request.';
 const PHOTOSHOP_SAVE_FOR_WEB_BLOCKER = 'Desktop bridge needs to reconnect before Photoshop Save for Web can continue.';
 const DIRECT_IMAGE_CONVERSION_RECONNECT_STEP = 'Reconnect the desktop bridge, approve the requested folder if prompted, then retry the image conversion.';

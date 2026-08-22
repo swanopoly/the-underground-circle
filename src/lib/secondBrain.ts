@@ -1,6 +1,6 @@
 import { supabase } from './supabase';
 import { saveMemory, type MemoryEntry, type MemoryScope } from './agentRunSystem';
-import { EMBEDDING_MODEL, embedText, semanticSearchMemories } from './memoryEmbeddings';
+import { EMBEDDING_MODEL, embedText } from './memoryEmbeddings';
 import {
   buildNextSecondBrainReviewMetadata,
   buildSecondBrainAgentBrief,
@@ -80,6 +80,15 @@ export interface SecondBrainSearchResult {
   raw: SecondBrainNote | MemoryEntry | Record<string, unknown>;
 }
 
+export type SecondBrainSearchScope =
+  | Readonly<{ mode: 'mine'; userId: string }>
+  | Readonly<{ mode: 'circle' }>;
+
+export type SecondBrainSearchOptions = SecondBrainSearchScope & Readonly<{
+  limit?: number;
+  includeMemories?: boolean;
+}>;
+
 export interface SecondBrainCaptureInput {
   circleId: string;
   userId: string;
@@ -108,6 +117,47 @@ export interface SecondBrainGraph {
   }>;
   clusters: Array<{ tag: string; count: number; noteIds: string[] }>;
 }
+
+// Keep routine reads lightweight and avoid asking PostgREST to serialize the
+// pgvector payload. Semantic search still retrieves through the dedicated RPC.
+const SECOND_BRAIN_NOTE_READ_COLUMNS = [
+  'id',
+  'circle_id',
+  'created_by',
+  'source_memory_id',
+  'parent_note_id',
+  'status',
+  'note_kind',
+  'visibility',
+  'title',
+  'content',
+  'summary',
+  'tags',
+  'aliases',
+  'importance',
+  'metadata',
+  'embedding_model',
+  'embedded_at',
+  'created_at',
+  'updated_at',
+].join(',');
+
+const SECOND_BRAIN_MEMORY_READ_COLUMNS = [
+  'id',
+  'circle_id',
+  'user_id',
+  'scope',
+  'memory_kind',
+  'title',
+  'content',
+  'source_surface',
+  'is_active',
+  'visibility',
+  'importance',
+  'created_at',
+  'updated_at',
+  'metadata',
+].join(',');
 
 const SECOND_BRAIN_UNAVAILABLE_CACHE_KEY = 'openswan:second_brain_unavailable_until';
 const SECOND_BRAIN_UNAVAILABLE_REASON_KEY = 'openswan:second_brain_unavailable_reason';
@@ -194,7 +244,9 @@ function normalizeRow(row: any): SecondBrainNote {
     parent_note_id: row.parent_note_id ?? null,
     status: row.status || 'inbox',
     note_kind: row.note_kind || 'note',
-    visibility: row.visibility || 'circle_shared',
+    // Missing visibility must fail closed. A legacy or malformed row is never
+    // inferred to be circle-shareable.
+    visibility: row.visibility === 'circle_shared' ? 'circle_shared' : 'private',
     title: row.title || '',
     content: row.content || '',
     summary: row.summary ?? null,
@@ -224,6 +276,112 @@ function normalizeLink(row: any): SecondBrainLink {
   };
 }
 
+export function isCircleShareableSecondBrainNote(
+  note: Pick<SecondBrainNote, 'visibility'>,
+): boolean {
+  return note.visibility === 'circle_shared';
+}
+
+export function isCircleShareableSecondBrainMemory(
+  memory: Pick<MemoryEntry, 'visibility'>,
+): boolean {
+  return memory.visibility === 'circle_shared';
+}
+
+export function isPersonalSecondBrainMemory(
+  memory: Pick<MemoryEntry, 'user_id' | 'visibility'>,
+  userId: string,
+): boolean {
+  return memory.user_id === userId && memory.visibility === 'private';
+}
+
+function isSecondBrainNoteInSearchScope(
+  note: SecondBrainNote,
+  circleId: string,
+  scope: SecondBrainSearchScope,
+): boolean {
+  if (note.circle_id !== circleId) return false;
+  return scope.mode === 'circle'
+    ? isCircleShareableSecondBrainNote(note)
+    : note.created_by === scope.userId;
+}
+
+function isSecondBrainMemoryInSearchScope(
+  memory: MemoryEntry,
+  circleId: string,
+  scope: SecondBrainSearchScope,
+): boolean {
+  if (memory.circle_id !== circleId || memory.is_active !== true) return false;
+  return scope.mode === 'circle'
+    ? isCircleShareableSecondBrainMemory(memory)
+    : isPersonalSecondBrainMemory(memory, scope.userId);
+}
+
+export async function loadSecondBrainMemoriesForScope(input: {
+  circleId: string;
+  userId?: string;
+  mode: 'mine' | 'circle';
+  limit?: number;
+}): Promise<{ memories: MemoryEntry[]; error?: string }> {
+  if (!input.circleId) return { memories: [], error: 'A circle is required for Knowledge memory.' };
+  if (input.mode === 'mine' && !input.userId?.trim()) {
+    return { memories: [], error: 'A signed-in user is required for personal Knowledge memory.' };
+  }
+  const limit = input.limit || 200;
+  try {
+    const sharedRequest = supabase
+      .from('memory_entries')
+      .select(SECOND_BRAIN_MEMORY_READ_COLUMNS)
+      .eq('circle_id', input.circleId)
+      .eq('is_active', true)
+      .eq('visibility', 'circle_shared')
+      .order('updated_at', { ascending: false })
+      .limit(limit);
+    const privateRequest = input.mode === 'mine'
+      ? supabase
+        .from('memory_entries')
+        .select(SECOND_BRAIN_MEMORY_READ_COLUMNS)
+        .eq('circle_id', input.circleId)
+        .eq('user_id', input.userId as string)
+        .eq('is_active', true)
+        .eq('visibility', 'private')
+        .order('updated_at', { ascending: false })
+        .limit(limit)
+      : null;
+    const [sharedResult, privateResult] = await Promise.all([
+      sharedRequest,
+      privateRequest || Promise.resolve({ data: [], error: null }),
+    ]);
+    if (sharedResult.error || privateResult.error) {
+      return { memories: [], error: 'Knowledge memory could not be loaded.' };
+    }
+    const scope: SecondBrainSearchScope = input.mode === 'circle'
+      ? { mode: 'circle' }
+      : { mode: 'mine', userId: input.userId as string };
+    const rows = input.mode === 'circle'
+      ? (sharedResult.data || [])
+      : [...(sharedResult.data || []), ...(privateResult.data || [])];
+    const seen = new Set<string>();
+    const memories = (rows as unknown as MemoryEntry[]).filter(memory => {
+      if (seen.has(memory.id)) return false;
+      const inScope = input.mode === 'circle'
+        ? isSecondBrainMemoryInSearchScope(memory, input.circleId, scope)
+        : memory.circle_id === input.circleId
+          && memory.is_active === true
+          && (
+            isCircleShareableSecondBrainMemory(memory)
+            || isPersonalSecondBrainMemory(memory, input.userId as string)
+          );
+      if (!inScope) return false;
+      seen.add(memory.id);
+      return true;
+    });
+    return { memories };
+  } catch {
+    return { memories: [], error: 'Knowledge memory could not be loaded.' };
+  }
+}
+
 export async function loadSecondBrainNotes(
   circleId: string,
   opts: {
@@ -240,7 +398,7 @@ export async function loadSecondBrainNotes(
   try {
     let query = supabase
       .from('circle_second_brain_notes')
-      .select('*')
+      .select(SECOND_BRAIN_NOTE_READ_COLUMNS)
       .eq('circle_id', circleId)
       .order('updated_at', { ascending: false })
       .limit(opts.limit || 80);
@@ -476,36 +634,56 @@ export async function promoteSecondBrainNoteToMemory(
   input: { userId: string; scope?: Extract<MemoryScope, 'circle' | 'user'> },
 ): Promise<{ memory: MemoryEntry | null; error?: string }> {
   const scope = input.scope || (note.visibility === 'private' ? 'user' : 'circle');
+  let sourceNote = note;
+  if (scope === 'circle') {
+    // A circle-memory write is a distinct publication boundary. Never trust a
+    // possibly stale client note here: the note must still be explicitly
+    // circle-shared immediately before it is promoted.
+    if (!isCircleShareableSecondBrainNote(note)) {
+      return { memory: null, error: 'Share this note with the circle first, then promote it to circle memory.' };
+    }
+    const { data, error } = await supabase
+      .from('circle_second_brain_notes')
+      .select(SECOND_BRAIN_NOTE_READ_COLUMNS)
+      .eq('id', note.id)
+      .eq('circle_id', note.circle_id)
+      .eq('visibility', 'circle_shared')
+      .maybeSingle();
+    if (error || !data) {
+      return { memory: null, error: 'The note is no longer circle-shared. Share it again before promoting it.' };
+    }
+    sourceNote = normalizeRow(data);
+  }
   const memory = await saveMemory({
     scope,
-    circleId: note.circle_id,
+    circleId: sourceNote.circle_id,
     userId: scope === 'user' ? input.userId : undefined,
-    memoryKind: note.note_kind === 'question' ? 'context' : note.note_kind === 'agent_summary' ? 'finding' : 'fact',
-    title: note.title,
-    content: note.content,
+    memoryKind: sourceNote.note_kind === 'question' ? 'context' : sourceNote.note_kind === 'agent_summary' ? 'finding' : 'fact',
+    title: sourceNote.title,
+    content: sourceNote.content,
     visibility: scope === 'user' ? 'private' : 'circle_shared',
-    importance: Math.max(0.6, Math.min(1, note.importance || 0.7)),
-    retrievalMode: note.status === 'evergreen' ? 'startup' : 'on_demand',
+    importance: Math.max(0.6, Math.min(1, sourceNote.importance || 0.7)),
+    retrievalMode: sourceNote.status === 'evergreen' ? 'startup' : 'on_demand',
     sourceSurface: 'backpack_digital_brain',
     metadata: {
       source: 'second_brain_note',
-      secondBrainNoteId: note.id,
-      secondBrainTags: note.tags,
-      sourceUrl: note.metadata?.sourceUrl || null,
+      secondBrainNoteId: sourceNote.id,
+      secondBrainTags: sourceNote.tags,
+      sourceUrl: sourceNote.metadata?.sourceUrl || null,
     },
   });
   if (!memory) return { memory: null, error: 'Could not save note to memory.' };
-  await updateSecondBrainNote(note.id, {
+  await updateSecondBrainNote(sourceNote.id, {
     status: 'evergreen',
     metadata: {
-      ...note.metadata,
+      ...sourceNote.metadata,
       promotedMemoryId: memory.id,
       promotedAt: new Date().toISOString(),
     },
   });
   await createSecondBrainLink({
-    circleId: note.circle_id,
-    fromNoteId: note.id,
+    circleId: sourceNote.circle_id,
+    fromNoteId: sourceNote.id,
     toMemoryId: memory.id,
     linkType: 'source',
     strength: 1,
@@ -534,31 +712,78 @@ export async function reviewSecondBrainNote(
   return updateSecondBrainNote(note.id, { status, metadata });
 }
 
-async function keywordSearchNotes(circleId: string, queryText: string, limit: number): Promise<SecondBrainNote[]> {
+async function keywordSearchNotes(
+  circleId: string,
+  queryText: string,
+  limit: number,
+  scope: SecondBrainSearchScope,
+): Promise<{ notes: SecondBrainNote[]; error?: string }> {
   const escaped = queryText.replace(/[%*,()]/g, ' ').replace(/\s+/g, ' ').trim();
-  if (!escaped) return [];
-  const { data, error } = await supabase
+  if (!escaped) return { notes: [] };
+  let query = supabase
     .from('circle_second_brain_notes')
-    .select('*')
+    .select(SECOND_BRAIN_NOTE_READ_COLUMNS)
     .eq('circle_id', circleId)
-    .neq('status', 'archived')
+    .neq('status', 'archived');
+  query = scope.mode === 'circle'
+    ? query.eq('visibility', 'circle_shared')
+    : query.eq('created_by', scope.userId);
+  const { data, error } = await query
     .or(`title.ilike.%${escaped}%,content.ilike.%${escaped}%,summary.ilike.%${escaped}%`)
     .order('updated_at', { ascending: false })
     .limit(limit);
-  if (error || !data) return [];
-  return data.map(normalizeRow);
+  if (error || !data) return { notes: [], error: error?.message || 'Knowledge note search failed.' };
+  return {
+    notes: data
+      .map(normalizeRow)
+      .filter(note => isSecondBrainNoteInSearchScope(note, circleId, scope)),
+  };
+}
+
+async function keywordSearchMemories(
+  circleId: string,
+  queryText: string,
+  limit: number,
+  scope: SecondBrainSearchScope,
+): Promise<{ memories: MemoryEntry[]; error?: string }> {
+  const escaped = queryText.replace(/[%*,()]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!escaped) return { memories: [] };
+  let query = supabase
+    .from('memory_entries')
+    .select(SECOND_BRAIN_MEMORY_READ_COLUMNS)
+    .eq('circle_id', circleId)
+    .eq('is_active', true);
+  query = scope.mode === 'circle'
+    ? query.eq('visibility', 'circle_shared')
+    : query.eq('user_id', scope.userId).eq('visibility', 'private');
+  const { data, error } = await query
+    .or(`title.ilike.%${escaped}%,content.ilike.%${escaped}%`)
+    .order('updated_at', { ascending: false })
+    .limit(limit);
+  if (error || !data) return { memories: [], error: error?.message || 'Knowledge memory search failed.' };
+  return {
+    memories: (data as unknown as MemoryEntry[])
+      .filter(memory => isSecondBrainMemoryInSearchScope(memory, circleId, scope)),
+  };
 }
 
 export async function searchSecondBrain(
   circleId: string,
   queryText: string,
-  opts: { limit?: number; includeMemories?: boolean } = {},
+  opts: SecondBrainSearchOptions,
 ): Promise<{ results: SecondBrainSearchResult[]; error?: string }> {
   const limit = opts.limit || 12;
   const query = queryText.trim();
   if (!query) return { results: [] };
+  if (opts.mode === 'mine' && !opts.userId.trim()) {
+    return { results: [], error: 'A signed-in user is required for personal Knowledge search.' };
+  }
+  const scope: SecondBrainSearchScope = opts.mode === 'circle'
+    ? { mode: 'circle' }
+    : { mode: 'mine', userId: opts.userId };
 
   const results: SecondBrainSearchResult[] = [];
+  let noteSearchError = '';
   const embedding = await embedText(query);
   if (embedding) {
     const { data, error } = await supabase.rpc('match_second_brain_notes', {
@@ -570,6 +795,7 @@ export async function searchSecondBrain(
     if (!error && Array.isArray(data)) {
       for (const row of data) {
         const note = normalizeRow(row);
+        if (!isSecondBrainNoteInSearchScope(note, circleId, scope)) continue;
         results.push({
           kind: 'note',
           id: note.id,
@@ -582,12 +808,16 @@ export async function searchSecondBrain(
           raw: note,
         });
       }
+    } else if (error) {
+      noteSearchError = error.message || 'Semantic note search failed.';
     }
   }
 
   if (results.length === 0) {
-    const notes = await keywordSearchNotes(circleId, query, limit);
-    results.push(...notes.map((note) => ({
+    const keywordResult = await keywordSearchNotes(circleId, query, limit, scope);
+    if (keywordResult.error) noteSearchError = keywordResult.error;
+    else noteSearchError = '';
+    results.push(...keywordResult.notes.map((note) => ({
       kind: 'note' as const,
       id: note.id,
       title: note.title,
@@ -599,26 +829,34 @@ export async function searchSecondBrain(
     })));
   }
 
+  let memorySearchError = '';
   if (opts.includeMemories !== false) {
-    const memoryMatches = await semanticSearchMemories({
-      queryText: query,
+    // The legacy semantic-memory RPC does not return user_id or visibility, so
+    // it cannot prove Personal vs Circle authority. Use an exactly filtered
+    // memory query until that RPC has a scope-aware contract.
+    const memoryResult = await keywordSearchMemories(
       circleId,
-      limit: Math.max(4, Math.floor(limit / 2)),
-    }).catch(() => []);
-    for (const mem of memoryMatches) {
+      query,
+      Math.max(4, Math.floor(limit / 2)),
+      scope,
+    );
+    memorySearchError = memoryResult.error || '';
+    for (const mem of memoryResult.memories) {
       results.push({
         kind: 'memory',
         id: mem.id,
         title: mem.title,
         content: mem.content,
-        similarity: mem.similarity,
         source: `agent memory · ${mem.scope}/${mem.memory_kind}`,
-        raw: mem as any,
+        raw: mem,
       });
     }
   }
 
   const seen = new Set<string>();
+  const error = noteSearchError || memorySearchError
+    ? 'Knowledge search could not verify every requested source.'
+    : undefined;
   return {
     results: results
       .filter((item) => {
@@ -628,7 +866,55 @@ export async function searchSecondBrain(
         return true;
       })
       .slice(0, limit + 4),
+    error,
   };
+}
+
+export async function loadSecondBrainAgentBriefInputs(input: {
+  circleId: string;
+  userId: string;
+  mode: 'mine' | 'circle';
+}): Promise<{ notes: SecondBrainNote[]; memories: MemoryEntry[]; error?: string }> {
+  if (!input.circleId || !input.userId) {
+    return { notes: [], memories: [], error: 'A signed-in Knowledge scope is required.' };
+  }
+  const noteOptions: Parameters<typeof loadSecondBrainNotes>[1] = {
+    status: 'active',
+    limit: 120,
+    ...(input.mode === 'circle'
+      ? { visibilityFilter: 'circle_shared' as const }
+      : { createdBy: input.userId }),
+  };
+  const [noteResult, memoryResult] = await Promise.all([
+    loadSecondBrainNotes(input.circleId, noteOptions),
+    (async () => {
+      let query = supabase
+        .from('memory_entries')
+        .select(SECOND_BRAIN_MEMORY_READ_COLUMNS)
+        .eq('circle_id', input.circleId)
+        .eq('is_active', true);
+      query = input.mode === 'circle'
+        ? query.eq('visibility', 'circle_shared')
+        : query.eq('user_id', input.userId).eq('visibility', 'private');
+      return query.order('updated_at', { ascending: false }).limit(200);
+    })(),
+  ]);
+  if (noteResult.error || memoryResult.error || !Array.isArray(memoryResult.data)) {
+    return { notes: [], memories: [], error: 'Brief inputs could not be revalidated.' };
+  }
+  const scope: SecondBrainSearchScope = input.mode === 'circle'
+    ? { mode: 'circle' }
+    : { mode: 'mine', userId: input.userId };
+  const notes = noteResult.notes.filter(note => isSecondBrainNoteInSearchScope(note, input.circleId, scope));
+  const memories = (memoryResult.data as unknown as MemoryEntry[])
+    .filter(memory => isSecondBrainMemoryInSearchScope(memory, input.circleId, scope));
+  if (input.mode === 'circle' && (
+    notes.some(note => !isCircleShareableSecondBrainNote(note))
+    || memories.some(memory => !isCircleShareableSecondBrainMemory(memory))
+  )) {
+    return { notes: [], memories: [], error: 'Circle brief inputs failed visibility validation.' };
+  }
+  return { notes, memories };
 }
 
 export async function buildSecondBrainGraph(
@@ -636,7 +922,13 @@ export async function buildSecondBrainGraph(
   opts?: { userId?: string; mode?: 'mine' | 'circle' },
 ): Promise<{ graph: SecondBrainGraph; error?: string; missing?: boolean; unavailable?: boolean }> {
   const notesFilter: Parameters<typeof loadSecondBrainNotes>[1] = { status: 'active', limit: 120 };
-  if (opts?.mode === 'mine' && opts.userId) {
+  if (opts?.mode === 'mine') {
+    if (!opts.userId?.trim()) {
+      return {
+        graph: { notes: [], links: [], clusters: [] },
+        error: 'A signed-in user is required for personal Knowledge.',
+      };
+    }
     notesFilter.createdBy = opts.userId;
   } else if (opts?.mode === 'circle') {
     notesFilter.visibilityFilter = 'circle_shared';

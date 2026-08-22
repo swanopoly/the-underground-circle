@@ -10,6 +10,7 @@ export interface OfficeFloor {
   id: string;
   name: string;
   themeId: string;
+  agentAssignmentMode?: 'auto' | 'manual';
   agentIds: string[]; // which agents are assigned to this floor
   furniture: FurnitureItem[];
   order: number; // for sorting floors
@@ -20,6 +21,7 @@ export function createDefaultFloor(id: string, name: string, themeId: string, or
     id,
     name,
     themeId,
+    agentAssignmentMode: 'auto',
     agentIds: [],
     furniture: [],
     order,
@@ -260,7 +262,7 @@ export const OFFICE_THEMES: Record<string, OfficeTheme> = {
     gridColor: '#0891b2' + '10',
     wallColor: '#021018',
     wallBorder: '#0e7490',
-    accentGlow: '#22d3ee',
+    accentGlow: '#6366f1',
     rugColor: '#011018',
     rugBorder: '#0e749040',
     deskColor: '#0a1e28',
@@ -459,33 +461,35 @@ export function generateRandomAppearance(): AgentAppearance {
 
 // ─── Office Layout ───────────────────────────────────────────────────────────
 
-export type FurnitureType =
-  | 'desk' | 'plant' | 'couch' | 'lamp' | 'bookshelf' | 'whiteboard'
-  | 'server' | 'coffee' | 'watercooler' | 'arcade'
-  | 'tv' | 'pingtable' | 'snackbar' | 'neonsign' | 'rug'
-  | 'safe' | 'trophy' | 'standingdesk' | 'beanbag' | 'printer' | 'clock' | 'window'
-  | 'nft_frame' | 'stickynote'
-  | 'enter_key' | 'button_panel' | 'alarm_bell' | 'launch_pad'
-  | 'jukebox' | 'dice_roller' | 'gong' | 'confetti_cannon'
-  | 'timer_display' | 'scoreboard' | 'status_board' | 'command_console'
-  | 'slot_machine' | 'crystal_ball' | 'mood_ring' | 'boom_box' | 'lava_lamp' | 'whack_a_mole'
-  // New items
-  | 'fireplace' | 'aquarium' | 'vinyl_player' | 'rain_window' | 'galaxy_orb'
-  | 'zen_garden' | 'quote_board' | 'progress_bar' | 'terrarium' | 'hologram'
-  | 'focus_candle' | 'pixel_display'
-  // Integration items
-  | 'spotify_jukebox' | 'discord_hub' | 'video_call' | 'message_board'
-  | 'smart_tv' | 'weather_station' | 'twitch_stream' | 'pomodoro_room'
-  | 'crypto_ticker' | 'github_feed' | 'calendar_widget' | 'world_clock'
-  | 'music_visualizer' | 'figma_board' | 'email_hub'
-  // Games
-  | 'poker_table' | 'chess_board' | 'coin_flip' | 'connect_four' | 'trivia_screen' | 'roulette_wheel'
-  | 'retro_console'
-  | 'scrabble_board'
-  // Farm & Pet
-  | 'farm_plot' | 'office_pet'
-  // AI / ML
-  | 'hf_explorer' | 'hf_runner';
+/**
+ * Canonical runtime list for every placeable Office item. Keep this as the
+ * single source for the FurnitureType union and catalog exhaustiveness checks.
+ */
+export const OFFICE_ADDON_TYPES = [
+  'desk', 'plant', 'couch', 'lamp', 'bookshelf', 'whiteboard',
+  'server', 'coffee', 'watercooler', 'arcade',
+  'tv', 'pingtable', 'snackbar', 'neonsign', 'rug',
+  'safe', 'trophy', 'standingdesk', 'beanbag', 'printer', 'clock', 'window',
+  'nft_frame', 'stickynote',
+  'enter_key', 'button_panel', 'alarm_bell', 'launch_pad',
+  'jukebox', 'dice_roller', 'gong', 'confetti_cannon',
+  'timer_display', 'scoreboard', 'status_board', 'command_console',
+  'slot_machine', 'crystal_ball', 'mood_ring', 'boom_box', 'lava_lamp', 'whack_a_mole',
+  'fireplace', 'aquarium', 'vinyl_player', 'rain_window', 'galaxy_orb',
+  'zen_garden', 'quote_board', 'progress_bar', 'terrarium', 'hologram',
+  'focus_candle', 'pixel_display',
+  'spotify_jukebox', 'discord_hub', 'video_call', 'message_board',
+  'smart_tv', 'weather_station', 'twitch_stream', 'pomodoro_room',
+  'crypto_ticker', 'github_feed', 'calendar_widget', 'world_clock',
+  'music_visualizer', 'figma_board', 'email_hub',
+  'poker_table', 'chess_board', 'coin_flip', 'connect_four', 'trivia_screen', 'roulette_wheel',
+  'retro_console', 'scrabble_board', 'farm_plot', 'office_pet',
+  'hf_explorer', 'hf_runner',
+] as const;
+
+export type FurnitureType = (typeof OFFICE_ADDON_TYPES)[number];
+
+export type OfficeAddonDataState = 'local' | 'demo' | 'setup' | 'live' | 'stale' | 'error';
 
 export interface FurnitureItem {
   id: string;
@@ -496,6 +500,10 @@ export interface FurnitureItem {
   itemHeight?: number;  // user-resized height (defaults to catalog height)
   rotation?: number;
   label?: string; // custom label (e.g. neon sign text)
+  /** Truthful runtime status for widgets that may show connected or demo data. */
+  dataState?: OfficeAddonDataState;
+  /** Epoch milliseconds for the last successful data refresh. */
+  dataUpdatedAt?: number;
   // NFT frame data
   nftMint?: string;
   nftImageUrl?: string;
@@ -536,10 +544,12 @@ export interface FurnitureItem {
   spotifyArtist?: string;          // spotify_jukebox: current artist
   spotifyPlaying?: boolean;        // spotify_jukebox: playback state
   spotifyProgress?: number;        // spotify_jukebox: 0-100 playback progress
+  spotifyUrl?: string;             // spotify_jukebox: user-provided playlist/track link
   discordConnected?: boolean;      // discord_hub: webhook connected
   discordChannel?: string;         // discord_hub: channel name
   discordStatus?: string;          // discord_hub: online/idle/dnd/offline
   discordMemberCount?: number;     // discord_hub: server member count
+  discordUrl?: string;             // discord_hub: user-provided invite/app link
   videoCallActive?: boolean;       // video_call: in-call state
   videoCallProvider?: string;      // video_call: zoom/meet/teams
   videoCallLink?: string;          // video_call: meeting URL
@@ -579,7 +589,7 @@ export interface FurnitureItem {
   musicVisualizerStyle?: number;    // music_visualizer: 0=bars, 1=wave, 2=circle
   figmaBoardUrl?: string;           // figma_board: Figma file URL
   // Email hub state
-  emailProvider?: string;            // email_hub: outlook/gmail/yahoo
+  emailProvider?: string;            // email_hub: outlook/gmail
   emailConnected?: boolean;          // email_hub: connection status
   emailUnread?: number;              // email_hub: unread count
   emailSender?: string;              // email_hub: latest sender name
@@ -668,6 +678,9 @@ export interface FurnitureItem {
   farmLastWatered?: number;         // farm_plot: timestamp
   farmHarvested?: number;           // farm_plot: total harvests
   farmGold?: number;                // farm_plot: earned gold
+  farmUpgrades?: string;            // farm_plot: JSON array of purchased upgrade ids
+  farmFertilizerUses?: number;      // farm_plot: remaining fertilizer harvest bonuses
+  farmCropsGrown?: string;          // farm_plot: JSON array of crop ids harvested at least once
   // Office pet state
   petType?: string;                 // office_pet: cat|dog|dragon|blob|fox
   petName?: string;                 // office_pet: custom name
@@ -695,7 +708,28 @@ export interface FurnitureItem {
 
 export type FurnitureCategory = 'games' | 'connected' | 'vibe' | 'productivity' | 'fun' | 'furniture';
 
-export interface FurnitureCatalogEntry {
+export type OfficeAddonKind = 'integration' | 'game' | 'ambient' | 'tool' | 'toy' | 'decor';
+export type OfficeAddonDataProvenance = 'connected' | 'computed' | 'user-provided' | 'local' | 'demo' | 'decorative';
+export type OfficeAddonPrimaryAction = 'none' | 'activate' | 'configure' | 'cycle' | 'feed' | 'open' | 'play' | 'refresh' | 'send' | 'toggle';
+export type OfficeAddonConfiguration = 'none' | 'inline' | 'modal' | 'connection';
+export type OfficeAddonReadiness = 'ready' | 'setup-required' | 'partial' | 'decorative';
+export type OfficeAddonMotion = 'none' | 'ambient' | 'interaction';
+export type OfficeAddonAudio = 'none' | 'visual-only' | 'external' | 'in-app';
+
+export interface OfficeAddonMetadata {
+  kind: OfficeAddonKind;
+  dataProvenance: OfficeAddonDataProvenance;
+  defaultDataState: OfficeAddonDataState;
+  primaryAction: OfficeAddonPrimaryAction;
+  interactive: boolean;
+  configuration: OfficeAddonConfiguration;
+  readiness: OfficeAddonReadiness;
+  motion: OfficeAddonMotion;
+  audio: OfficeAddonAudio;
+  tags: readonly string[];
+}
+
+export interface FurnitureCatalogEntry extends OfficeAddonMetadata {
   type: FurnitureType;
   name: string;
   icon: string;
@@ -705,29 +739,138 @@ export interface FurnitureCatalogEntry {
   description: string;
 }
 
-export const FURNITURE_CATALOG: FurnitureCatalogEntry[] = [
+type FurnitureCatalogSourceEntry = Omit<FurnitureCatalogEntry, keyof OfficeAddonMetadata>;
+
+const CATEGORY_KIND: Record<FurnitureCategory, OfficeAddonKind> = {
+  connected: 'integration',
+  games: 'game',
+  vibe: 'ambient',
+  productivity: 'tool',
+  fun: 'toy',
+  furniture: 'decor',
+};
+
+const OFFICE_ADDON_ACTIONS: Partial<Record<FurnitureType, OfficeAddonPrimaryAction>> = {
+  enter_key: 'send', button_panel: 'send', alarm_bell: 'activate', launch_pad: 'send',
+  jukebox: 'cycle', dice_roller: 'play', gong: 'activate', confetti_cannon: 'activate',
+  timer_display: 'toggle', command_console: 'send', slot_machine: 'play', crystal_ball: 'play',
+  mood_ring: 'activate', boom_box: 'toggle', lava_lamp: 'cycle', whack_a_mole: 'play',
+  fireplace: 'cycle', aquarium: 'feed', vinyl_player: 'toggle', galaxy_orb: 'activate',
+  zen_garden: 'cycle', quote_board: 'cycle', progress_bar: 'cycle', terrarium: 'feed',
+  hologram: 'cycle', focus_candle: 'toggle', pixel_display: 'cycle',
+  spotify_jukebox: 'open', discord_hub: 'open', video_call: 'open', message_board: 'open',
+  smart_tv: 'open', weather_station: 'refresh', twitch_stream: 'open', pomodoro_room: 'toggle',
+  crypto_ticker: 'refresh', github_feed: 'refresh', calendar_widget: 'refresh', world_clock: 'cycle',
+  music_visualizer: 'toggle', figma_board: 'open', email_hub: 'refresh',
+  poker_table: 'open', chess_board: 'play', coin_flip: 'play', connect_four: 'play',
+  trivia_screen: 'play', roulette_wheel: 'play', retro_console: 'open', scrabble_board: 'open',
+  farm_plot: 'play', office_pet: 'play', hf_explorer: 'open', hf_runner: 'open',
+};
+
+const OFFICE_ADDON_PROVENANCE: Partial<Record<FurnitureType, OfficeAddonDataProvenance>> = {
+  crypto_ticker: 'demo', github_feed: 'demo', weather_station: 'demo',
+  calendar_widget: 'connected', email_hub: 'connected', message_board: 'connected',
+  hf_explorer: 'connected', hf_runner: 'connected',
+  world_clock: 'computed', scoreboard: 'computed', status_board: 'computed', mood_ring: 'computed',
+  figma_board: 'user-provided', smart_tv: 'user-provided', spotify_jukebox: 'user-provided',
+  discord_hub: 'user-provided', twitch_stream: 'user-provided', video_call: 'user-provided',
+  nft_frame: 'user-provided', stickynote: 'user-provided', neonsign: 'user-provided',
+  tv: 'decorative', server: 'decorative', printer: 'decorative', safe: 'decorative', clock: 'decorative',
+};
+
+const OFFICE_ADDON_CONFIGURATION: Partial<Record<FurnitureType, OfficeAddonConfiguration>> = {
+  calendar_widget: 'connection', email_hub: 'connection', message_board: 'connection',
+  hf_runner: 'modal', hf_explorer: 'modal', smart_tv: 'modal', spotify_jukebox: 'modal',
+  discord_hub: 'modal', twitch_stream: 'modal', video_call: 'modal', figma_board: 'modal',
+  poker_table: 'modal', retro_console: 'modal', scrabble_board: 'modal', command_console: 'inline',
+  nft_frame: 'modal', stickynote: 'modal', neonsign: 'inline', button_panel: 'inline',
+};
+
+const OFFICE_ADDON_READINESS: Partial<Record<FurnitureType, OfficeAddonReadiness>> = {
+  crypto_ticker: 'partial', github_feed: 'partial', weather_station: 'partial',
+  calendar_widget: 'setup-required', email_hub: 'setup-required', message_board: 'setup-required',
+  hf_runner: 'setup-required', smart_tv: 'setup-required', spotify_jukebox: 'setup-required',
+  discord_hub: 'setup-required', twitch_stream: 'setup-required', video_call: 'setup-required',
+  figma_board: 'setup-required', tv: 'decorative', server: 'decorative', printer: 'decorative',
+  safe: 'decorative', clock: 'decorative', desk: 'decorative', standingdesk: 'decorative',
+  couch: 'decorative', beanbag: 'decorative', coffee: 'decorative', watercooler: 'decorative',
+  snackbar: 'decorative', plant: 'decorative', lamp: 'decorative', bookshelf: 'decorative',
+  rug: 'decorative', trophy: 'decorative', window: 'decorative', pingtable: 'decorative',
+  arcade: 'decorative', rain_window: 'decorative', neonsign: 'partial',
+};
+
+const OFFICE_ADDON_AUDIO: Partial<Record<FurnitureType, OfficeAddonAudio>> = {
+  music_visualizer: 'visual-only', jukebox: 'visual-only', boom_box: 'visual-only',
+  vinyl_player: 'visual-only', fireplace: 'visual-only', rain_window: 'visual-only',
+  gong: 'visual-only', alarm_bell: 'visual-only', spotify_jukebox: 'external',
+  smart_tv: 'external', twitch_stream: 'external', video_call: 'external', retro_console: 'in-app',
+};
+
+function defaultProvenance(category: FurnitureCategory): OfficeAddonDataProvenance {
+  if (category === 'furniture') return 'decorative';
+  if (category === 'connected') return 'demo';
+  return 'local';
+}
+
+function defaultDataState(provenance: OfficeAddonDataProvenance): OfficeAddonDataState {
+  if (provenance === 'demo') return 'demo';
+  if (provenance === 'connected' || provenance === 'user-provided') return 'setup';
+  return 'local';
+}
+
+function defineOfficeAddonCatalog(entries: readonly FurnitureCatalogSourceEntry[]): FurnitureCatalogEntry[] {
+  return entries.map((entry) => {
+    const kind = CATEGORY_KIND[entry.category];
+    const dataProvenance = OFFICE_ADDON_PROVENANCE[entry.type] || defaultProvenance(entry.category);
+    const primaryAction = OFFICE_ADDON_ACTIONS[entry.type] || 'none';
+    const readiness = OFFICE_ADDON_READINESS[entry.type]
+      || (entry.category === 'connected' ? 'partial' : entry.category === 'furniture' ? 'decorative' : 'ready');
+    const configuration = OFFICE_ADDON_CONFIGURATION[entry.type] || 'none';
+    const motion: OfficeAddonMotion = entry.category === 'vibe'
+      ? 'ambient'
+      : entry.category === 'games' || entry.category === 'fun'
+        ? 'interaction'
+        : 'none';
+
+    return Object.freeze({
+      ...entry,
+      kind,
+      dataProvenance,
+      defaultDataState: defaultDataState(dataProvenance),
+      primaryAction,
+      interactive: primaryAction !== 'none',
+      configuration,
+      readiness,
+      motion,
+      audio: OFFICE_ADDON_AUDIO[entry.type] || 'none',
+      tags: Object.freeze([...new Set([entry.category, kind, dataProvenance, readiness, primaryAction])]),
+    });
+  });
+}
+
+export const FURNITURE_CATALOG: FurnitureCatalogEntry[] = defineOfficeAddonCatalog([
   // ── Connected (apps, services & integrations) — first ──────────────────
-  { type: 'crypto_ticker',    name: 'Crypto Ticker',    icon: '📈', width: 100, height: 50,  category: 'connected', description: 'Live SOL, ETH, BTC prices' },
-  { type: 'github_feed',      name: 'GitHub Feed',      icon: '🐙', width: 90,  height: 70,  category: 'connected', description: 'Repo commits, PRs & activity' },
-  { type: 'calendar_widget',  name: 'Calendar',         icon: '📅', width: 80,  height: 70,  category: 'connected', description: 'Google / Outlook next events' },
-  { type: 'world_clock',      name: 'World Clock',      icon: '🌍', width: 100, height: 50,  category: 'connected', description: 'Multi-timezone display' },
-  { type: 'music_visualizer', name: 'Music Visualizer', icon: '🎶', width: 90,  height: 60,  category: 'connected', description: 'Audio spectrum visualizer' },
-  { type: 'figma_board',      name: 'Figma Board',      icon: '🎨', width: 100, height: 80,  category: 'connected', description: 'Preview your Figma designs' },
-  { type: 'email_hub',        name: 'Email Hub',        icon: '📧', width: 85,  height: 70,  category: 'connected', description: 'Outlook / Gmail inbox at a glance' },
-  { type: 'hf_explorer',      name: 'HF Explorer',      icon: 'HF', width: 90,  height: 70,  category: 'connected', description: 'Browse & add Hugging Face models and tools' },
-  { type: 'hf_runner',        name: 'HF Runner',        icon: 'AI', width: 90,  height: 70,  category: 'connected', description: 'Run AI inference — images, text, translation & more' },
-  { type: 'smart_tv',        name: 'Smart TV',        icon: '📺', width: 120, height: 80,  category: 'connected', description: 'Stream YouTube, Netflix, Hulu & more' },
-  { type: 'spotify_jukebox', name: 'Spotify Jukebox', icon: '🎧', width: 70,  height: 90,  category: 'connected', description: 'Connect Spotify — control playback' },
-  { type: 'discord_hub',     name: 'Discord Hub',     icon: '💬', width: 80,  height: 70,  category: 'connected', description: 'Connect Discord server widget' },
-  { type: 'twitch_stream',   name: 'Twitch Stream',   icon: '🟣', width: 90,  height: 60,  category: 'connected', description: 'Watch or show a Twitch stream' },
-  { type: 'video_call',      name: 'Video Call',      icon: '📹', width: 90,  height: 70,  category: 'connected', description: 'Start Zoom / Meet / Teams call' },
-  { type: 'message_board',   name: 'Message Board',   icon: '📱', width: 60,  height: 90,  category: 'connected', description: 'View text messages & notifications' },
-  { type: 'weather_station', name: 'Weather Station', icon: '🌤️', width: 60,  height: 50,  category: 'connected', description: 'Live local weather display' },
-  { type: 'tv',              name: 'Dashboard TV',    icon: '🖥',  width: 80,  height: 50,  category: 'connected', description: 'Static dashboard display' },
-  // ── Games (bet SOL, compete with circle) ───────────────────────────────
-  { type: 'poker_table',    name: 'Poker Table',    icon: '🃏', width: 130, height: 100, category: 'games', description: '2K chips · Texas Hold\'em · bet crypto' },
-  { type: 'coin_flip',      name: 'Coin Flip',      icon: '🪙', width: 60,  height: 60,  category: 'games', description: 'Flip a coin · wager SOL' },
-  { type: 'roulette_wheel', name: 'Roulette',       icon: '🎡', width: 90,  height: 90,  category: 'games', description: 'Spin the wheel · bet SOL' },
+  { type: 'crypto_ticker',    name: 'Crypto Ticker',    icon: '📈', width: 100, height: 50,  category: 'connected', description: 'Sample price board until a market feed is connected' },
+  { type: 'github_feed',      name: 'GitHub Feed',      icon: '🐙', width: 90,  height: 70,  category: 'connected', description: 'Sample repo activity board; live data needs a GitHub source' },
+  { type: 'calendar_widget',  name: 'Calendar',         icon: '📅', width: 80,  height: 70,  category: 'connected', description: 'Next events after calendar connection' },
+  { type: 'world_clock',      name: 'World Clock',      icon: '🌍', width: 100, height: 50,  category: 'connected', description: 'Local multi-timezone display' },
+  { type: 'music_visualizer', name: 'Music Visualizer', icon: '🎶', width: 90,  height: 60,  category: 'connected', description: 'Animated spectrum display; not live audio' },
+  { type: 'figma_board',      name: 'Figma Board',      icon: '🎨', width: 100, height: 80,  category: 'connected', description: 'Open a configured Figma design link' },
+  { type: 'email_hub',        name: 'Email Hub',        icon: '📧', width: 85,  height: 70,  category: 'connected', description: 'Inbox summary after email connection' },
+  { type: 'hf_explorer',      name: 'HF Explorer',      icon: 'HF', width: 90,  height: 70,  category: 'connected', description: 'Browse public Hugging Face models and tools' },
+  { type: 'hf_runner',        name: 'HF Runner',        icon: 'AI', width: 90,  height: 70,  category: 'connected', description: 'Run configured Hugging Face inference tools' },
+  { type: 'smart_tv',        name: 'Smart TV',        icon: '📺', width: 120, height: 80,  category: 'connected', description: 'Open or embed a configured video URL' },
+  { type: 'spotify_jukebox', name: 'Spotify Jukebox', icon: '🎧', width: 70,  height: 90,  category: 'connected', description: 'Open Spotify; in-office playback control is not connected' },
+  { type: 'discord_hub',     name: 'Discord Hub',     icon: '💬', width: 80,  height: 70,  category: 'connected', description: 'Configure a Discord link or webhook' },
+  { type: 'twitch_stream',   name: 'Twitch Stream',   icon: '🟣', width: 90,  height: 60,  category: 'connected', description: 'Open or embed a configured Twitch channel' },
+  { type: 'video_call',      name: 'Video Call',      icon: '📹', width: 90,  height: 70,  category: 'connected', description: 'Open a configured Zoom, Meet, or Teams link' },
+  { type: 'message_board',   name: 'Message Board',   icon: '📱', width: 60,  height: 90,  category: 'connected', description: 'Messages after local bridge connection' },
+  { type: 'weather_station', name: 'Weather Station', icon: '🌤️', width: 60,  height: 50,  category: 'connected', description: 'Sample weather board until a weather feed is connected' },
+  { type: 'tv',              name: 'Dashboard TV',    icon: '🖥',  width: 80,  height: 50,  category: 'connected', description: 'Decorative dashboard display' },
+  // ── Games (local play unless a verified settlement path is added) ─────
+  { type: 'poker_table',    name: 'Poker Table',    icon: '🃏', width: 130, height: 100, category: 'games', description: 'Local Texas Hold\'em with play chips' },
+  { type: 'coin_flip',      name: 'Coin Flip',      icon: '🪙', width: 60,  height: 60,  category: 'games', description: 'Local coin flip with play-money stats' },
+  { type: 'roulette_wheel', name: 'Roulette',       icon: '🎡', width: 90,  height: 90,  category: 'games', description: 'Local simulated roulette wheel' },
   { type: 'chess_board',    name: 'Chess',           icon: '♟️', width: 90,  height: 90,  category: 'games', description: 'Classic chess match' },
   { type: 'connect_four',   name: 'Connect Four',   icon: '🔴', width: 80,  height: 80,  category: 'games', description: 'Drop chips · 4 in a row' },
   { type: 'trivia_screen',  name: 'Trivia',         icon: '🧠', width: 90,  height: 60,  category: 'games', description: 'Quick trivia rounds · streak score' },
@@ -736,9 +879,9 @@ export const FURNITURE_CATALOG: FurnitureCatalogEntry[] = [
   { type: 'farm_plot',     name: 'Galaxy Farm',    icon: '🌌', width: 200, height: 180, category: 'games', description: 'Grow data crops on your planet · harvest stardust' },
   { type: 'office_pet',    name: 'AI Companion',   icon: '🛸', width: 140, height: 130, category: 'games', description: 'Raise a cosmic companion · feed · play · evolve' },
   // ── Vibe (aesthetic & ambient) ──────────────────────────────────────────
-  { type: 'fireplace',     name: 'Fireplace',       icon: '🔥', width: 80,  height: 70,  category: 'vibe', description: 'Crackling fire with embers' },
+  { type: 'fireplace',     name: 'Fireplace',       icon: '🔥', width: 80,  height: 70,  category: 'vibe', description: 'Animated fire and embers' },
   { type: 'aquarium',      name: 'Aquarium',        icon: '🐠', width: 90,  height: 60,  category: 'vibe', description: 'Fish tank with swimming fish' },
-  { type: 'rain_window',   name: 'Rain Window',     icon: '🌧️', width: 70,  height: 50,  category: 'vibe', description: 'Rainy window — lo-fi vibes' },
+  { type: 'rain_window',   name: 'Rain Window',     icon: '🌧️', width: 70,  height: 50,  category: 'vibe', description: 'Animated rainy window' },
   { type: 'galaxy_orb',    name: 'Galaxy Orb',      icon: '🌌', width: 50,  height: 50,  category: 'vibe', description: 'Floating galaxy sphere' },
   { type: 'terrarium',     name: 'Terrarium',       icon: '🦋', width: 60,  height: 50,  category: 'vibe', description: 'Mini garden with butterflies' },
   { type: 'zen_garden',    name: 'Zen Garden',      icon: '🪨', width: 80,  height: 50,  category: 'vibe', description: 'Rake new sand patterns' },
@@ -746,13 +889,13 @@ export const FURNITURE_CATALOG: FurnitureCatalogEntry[] = [
   { type: 'pixel_display', name: 'Pixel Display',   icon: '👾', width: 70,  height: 50,  category: 'vibe', description: 'Animated pixel art scenes' },
   { type: 'lava_lamp',     name: 'Lava Lamp',       icon: '🫧', width: 30,  height: 60,  category: 'vibe', description: 'Mesmerizing blobs' },
   { type: 'vinyl_player',  name: 'Vinyl Player',    icon: '💿', width: 60,  height: 60,  category: 'vibe', description: 'Spinning record player' },
-  { type: 'focus_candle',  name: 'Focus Candle',    icon: '🕯️', width: 30,  height: 50,  category: 'vibe', description: 'Light to enter focus mode' },
+  { type: 'focus_candle',  name: 'Focus Candle',    icon: '🕯️', width: 30,  height: 50,  category: 'vibe', description: 'Toggle an ambient focus candle' },
   { type: 'nft_frame',     name: 'Image / NFT',     icon: '🖼',  width: 80,  height: 80,  category: 'vibe', description: 'Upload image or display NFT' },
   { type: 'neonsign',      name: 'Neon Sign',       icon: '✦',   width: 60,  height: 25,  category: 'vibe', description: 'Custom neon text' },
   // ── Productivity (work tools & tracking) ────────────────────────────────
   { type: 'pomodoro_room',   name: 'Pomodoro Room',   icon: '🍅', width: 70,  height: 60,  category: 'productivity', description: 'Focus timer with break tracking' },
   { type: 'quote_board',    name: 'Quote Board',     icon: '💬', width: 100, height: 50,  category: 'productivity', description: 'Rotating inspiration quotes' },
-  { type: 'progress_bar',   name: 'Progress Bar',    icon: '📶', width: 100, height: 40,  category: 'productivity', description: 'Team task completion tracker' },
+  { type: 'progress_bar',   name: 'Progress Bar',    icon: '📶', width: 100, height: 40,  category: 'productivity', description: 'Manual progress tracker' },
   { type: 'scoreboard',     name: 'Scoreboard',      icon: '📊', width: 100, height: 60,  category: 'productivity', description: 'Tasks completed today' },
   { type: 'status_board',   name: 'Status Board',    icon: '📋', width: 110, height: 70,  category: 'productivity', description: 'Agent status at a glance' },
   { type: 'timer_display',  name: 'Timer',           icon: '⏱',  width: 70,  height: 50,  category: 'productivity', description: '25-min pomodoro countdown' },
@@ -762,15 +905,15 @@ export const FURNITURE_CATALOG: FurnitureCatalogEntry[] = [
   { type: 'whiteboard',     name: 'Whiteboard',      icon: '📋', width: 120, height: 60,  category: 'productivity', description: 'Planning board' },
   { type: 'stickynote',     name: 'Sticky Note',     icon: '📝', width: 100, height: 100, category: 'productivity', description: 'Write, draw, or add GIFs' },
   // ── Fun (games & toys) ──────────────────────────────────────────────────
-  { type: 'jukebox',        name: 'Jukebox',         icon: '🎵', width: 60,  height: 80,  category: 'fun', description: 'Cycle through tracks' },
-  { type: 'boom_box',       name: 'Boom Box',        icon: '📻', width: 70,  height: 50,  category: 'fun', description: 'Animated equalizer' },
+  { type: 'jukebox',        name: 'Jukebox',         icon: '🎵', width: 60,  height: 80,  category: 'fun', description: 'Cycle visual track labels; no audio playback' },
+  { type: 'boom_box',       name: 'Boom Box',        icon: '📻', width: 70,  height: 50,  category: 'fun', description: 'Animated equalizer; no audio playback' },
   { type: 'dice_roller',    name: 'Dice Roller',     icon: '🎲', width: 50,  height: 50,  category: 'fun', description: 'Roll a random number' },
   { type: 'slot_machine',   name: 'Slot Machine',    icon: '🎰', width: 60,  height: 80,  category: 'fun', description: 'Spin for a jackpot!' },
   { type: 'crystal_ball',   name: 'Crystal Ball',    icon: '🔮', width: 50,  height: 50,  category: 'fun', description: 'Reveal your fortune' },
   { type: 'whack_a_mole',   name: 'Whack-a-Mole',   icon: '🔨', width: 80,  height: 60,  category: 'fun', description: 'Mini whack game' },
   { type: 'confetti_cannon',name: 'Confetti Cannon', icon: '🎉', width: 50,  height: 60,  category: 'fun', description: 'Burst confetti on the floor' },
-  { type: 'gong',           name: 'Gong',            icon: '🔊', width: 60,  height: 70,  category: 'fun', description: 'Strike for a ripple effect' },
-  { type: 'alarm_bell',     name: 'Alarm Bell',      icon: '🔔', width: 50,  height: 50,  category: 'fun', description: 'Ring to get attention' },
+  { type: 'gong',           name: 'Gong',            icon: '🔊', width: 60,  height: 70,  category: 'fun', description: 'Trigger a visual ripple effect' },
+  { type: 'alarm_bell',     name: 'Alarm Bell',      icon: '🔔', width: 50,  height: 50,  category: 'fun', description: 'Trigger an animated desk bell' },
   { type: 'launch_pad',     name: 'Launch Pad',      icon: '🚀', width: 70,  height: 70,  category: 'fun', description: 'Launch tasks to all agents' },
   { type: 'mood_ring',      name: 'Mood Ring',       icon: '💍', width: 50,  height: 50,  category: 'fun', description: 'Team vibe check' },
   { type: 'arcade',         name: 'Arcade',          icon: '🕹',  width: 30,  height: 50,  category: 'fun', description: 'Retro arcade machine' },
@@ -780,8 +923,8 @@ export const FURNITURE_CATALOG: FurnitureCatalogEntry[] = [
   { type: 'standingdesk', name: 'Standing Desk',  icon: '📐',  width: 90,  height: 55,  category: 'furniture', description: 'Ergonomic standing desk' },
   { type: 'couch',        name: 'Couch',          icon: '🛋',  width: 80,  height: 40,  category: 'furniture', description: 'Chill zone seating' },
   { type: 'beanbag',      name: 'Bean Bag',       icon: '⬡',   width: 35,  height: 35,  category: 'furniture', description: 'Low-key seating' },
-  { type: 'server',       name: 'Server Rack',    icon: '🗄',  width: 50,  height: 60,  category: 'furniture', description: 'Hosts all the agents' },
-  { type: 'printer',      name: 'Printer',        icon: '🖨',  width: 40,  height: 30,  category: 'furniture', description: 'Network printer' },
+  { type: 'server',       name: 'Server Rack',    icon: '🗄',  width: 50,  height: 60,  category: 'furniture', description: 'Decorative server rack' },
+  { type: 'printer',      name: 'Printer',        icon: '🖨',  width: 40,  height: 30,  category: 'furniture', description: 'Decorative office printer' },
   { type: 'coffee',       name: 'Coffee Machine', icon: '☕',  width: 30,  height: 30,  category: 'furniture', description: 'Fuel for the grind' },
   { type: 'watercooler',  name: 'Water Cooler',   icon: '💧',  width: 20,  height: 35,  category: 'furniture', description: 'Hydration station' },
   { type: 'snackbar',     name: 'Snack Bar',      icon: '🍕',  width: 70,  height: 40,  category: 'furniture', description: 'Keep the team fueled' },
@@ -790,28 +933,127 @@ export const FURNITURE_CATALOG: FurnitureCatalogEntry[] = [
   { type: 'bookshelf',    name: 'Bookshelf',      icon: '📚',  width: 60,  height: 40,  category: 'furniture', description: 'Knowledge hub' },
   { type: 'rug',          name: 'Rug',            icon: '⬜',  width: 80,  height: 50,  category: 'furniture', description: 'Defines a space' },
   { type: 'trophy',       name: 'Trophy Shelf',   icon: '🏆',  width: 50,  height: 40,  category: 'furniture', description: 'Show your wins' },
-  { type: 'safe',         name: 'Safe',           icon: '🔒',  width: 30,  height: 35,  category: 'furniture', description: 'Secure vault' },
-  { type: 'clock',        name: 'Wall Clock',     icon: '🕐',  width: 25,  height: 25,  category: 'furniture', description: 'Always be on time' },
+  { type: 'safe',         name: 'Safe',           icon: '🔒',  width: 30,  height: 35,  category: 'furniture', description: 'Decorative office safe' },
+  { type: 'clock',        name: 'Wall Clock',     icon: '🕐',  width: 25,  height: 25,  category: 'furniture', description: 'Decorative wall clock' },
   { type: 'window',       name: 'Window',         icon: '🪟',  width: 60,  height: 40,  category: 'furniture', description: 'Let the light in' },
-];
+]);
 
-export function isInteractiveFurniture(type: FurnitureType): boolean {
-  return [
-    'enter_key', 'button_panel', 'alarm_bell', 'launch_pad',
-    'jukebox', 'dice_roller', 'gong', 'confetti_cannon',
-    'timer_display', 'scoreboard', 'status_board', 'command_console',
-    'slot_machine', 'crystal_ball', 'mood_ring', 'boom_box', 'lava_lamp', 'whack_a_mole',
-    'vinyl_player', 'galaxy_orb', 'zen_garden', 'focus_candle',
-    'quote_board', 'progress_bar', 'hologram', 'pixel_display',
-    'spotify_jukebox', 'discord_hub', 'video_call', 'message_board',
-    'smart_tv', 'weather_station', 'twitch_stream', 'pomodoro_room',
-    'crypto_ticker', 'github_feed', 'calendar_widget', 'world_clock',
-    'music_visualizer', 'figma_board', 'email_hub',
-    'poker_table', 'chess_board', 'coin_flip', 'connect_four', 'trivia_screen', 'roulette_wheel',
-    'retro_console', 'scrabble_board',
-    'farm_plot', 'office_pet',
-    'hf_explorer', 'hf_runner',
-  ].includes(type);
+export const OFFICE_ADDON_BY_TYPE = Object.freeze(Object.fromEntries(
+  FURNITURE_CATALOG.map((entry) => [entry.type, entry]),
+)) as Readonly<Record<FurnitureType, FurnitureCatalogEntry>>;
+
+export function getOfficeAddonDefinition(type: FurnitureType): FurnitureCatalogEntry;
+export function getOfficeAddonDefinition(type: unknown): FurnitureCatalogEntry | undefined;
+export function getOfficeAddonDefinition(type: unknown): FurnitureCatalogEntry | undefined {
+  return typeof type === 'string'
+    ? OFFICE_ADDON_BY_TYPE[type as FurnitureType]
+    : undefined;
+}
+
+export function isOfficeAddonType(type: unknown): type is FurnitureType {
+  return typeof type === 'string'
+    && Object.prototype.hasOwnProperty.call(OFFICE_ADDON_BY_TYPE, type);
+}
+
+export function isInteractiveFurniture(type: unknown): boolean {
+  return getOfficeAddonDefinition(type)?.interactive === true;
+}
+
+/**
+ * Convert a small allowlist of canonical YouTube URL shapes into an embed URL.
+ * Caller-controlled hosts, credentials, ports, paths, and query parameters are
+ * never passed through to an iframe.
+ */
+export function getOfficeYouTubeEmbedUrl(rawUrl: string): string | null {
+  try {
+    const candidate = String(rawUrl || '').trim();
+    const rawPath = candidate.split(/[?#]/, 1)[0];
+    if (
+      !candidate
+      || /[\u0000-\u0020\u007f]/.test(candidate)
+      || rawPath.includes('\\')
+      || /%(?:2e|2f|5c)/i.test(rawPath)
+      || /\/(?:\.{1,2})(?:\/|$)/.test(rawPath)
+    ) return null;
+
+    const parsed = new URL(candidate);
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || (parsed.port && parsed.port !== '443')) {
+      return null;
+    }
+
+    const host = parsed.hostname.toLowerCase();
+    if (host !== 'youtube.com' && host !== 'www.youtube.com' && host !== 'youtu.be') return null;
+
+    let videoId: string | null = null;
+    if (host === 'youtu.be') {
+      videoId = parsed.pathname.match(/^\/([A-Za-z0-9_-]{11})\/?$/)?.[1] || null;
+    } else if (parsed.pathname === '/watch') {
+      videoId = parsed.searchParams.get('v');
+    } else {
+      videoId = parsed.pathname.match(/^\/(?:embed|shorts|live)\/([A-Za-z0-9_-]{11})\/?$/)?.[1] || null;
+    }
+
+    if (!videoId || !/^[A-Za-z0-9_-]{11}$/.test(videoId)) return null;
+    return `https://www.youtube.com/embed/${videoId}?autoplay=1&mute=1`;
+  } catch {
+    return null;
+  }
+}
+
+const OFFICE_ADDON_DATA_STATE_LABELS: Record<OfficeAddonDataState, string> = {
+  local: 'Local',
+  demo: 'Demo data',
+  setup: 'Setup needed',
+  live: 'Live',
+  stale: 'Update needed',
+  error: 'Unavailable',
+};
+
+export interface OfficeAddonRuntimeState {
+  state: OfficeAddonDataState;
+  label: string;
+  dataUpdatedAt?: number;
+  provenance: OfficeAddonDataProvenance;
+}
+
+export function getOfficeAddonRuntimeStateLabel(state: OfficeAddonDataState): string {
+  return OFFICE_ADDON_DATA_STATE_LABELS[state];
+}
+
+/**
+ * Resolve user-facing widget truth without probing a network or mutating the
+ * item. Callers may pass nowMs to downgrade old explicitly-live data to stale.
+ */
+export function getOfficeAddonRuntimeState(
+  item: Pick<FurnitureItem, 'type' | 'dataState' | 'dataUpdatedAt'>,
+  options: { nowMs?: number; staleAfterMs?: number } = {},
+): OfficeAddonRuntimeState {
+  const definition = getOfficeAddonDefinition(item.type);
+  if (!definition) {
+    return {
+      state: 'error',
+      label: getOfficeAddonRuntimeStateLabel('error'),
+      dataUpdatedAt: item.dataUpdatedAt,
+      provenance: 'local',
+    };
+  }
+  let state = item.dataState || definition.defaultDataState;
+  const { nowMs, staleAfterMs = 15 * 60 * 1000 } = options;
+
+  if (
+    state === 'live'
+    && typeof nowMs === 'number'
+    && (typeof item.dataUpdatedAt !== 'number' || nowMs - item.dataUpdatedAt > staleAfterMs)
+  ) {
+    state = 'stale';
+  }
+
+  return {
+    state,
+    label: getOfficeAddonRuntimeStateLabel(state),
+    dataUpdatedAt: item.dataUpdatedAt,
+    provenance: definition.dataProvenance,
+  };
 }
 
 // ─── OpenSwan Connection ─────────────────────────────────────────────────────

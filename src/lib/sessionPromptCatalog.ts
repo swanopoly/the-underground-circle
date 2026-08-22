@@ -9,7 +9,7 @@ export type SessionPromptAction = {
 
 const MAIN_CHAT_ACTIONS: Record<SessionCodingProfile, SessionPromptAction[]> = {
   auto: [
-    { id: 'auto-best-path', label: 'Best Path', prompt: 'Choose the right mode for this request automatically, then do the work in that mode.', color: '#22d3ee' },
+    { id: 'auto-best-path', label: 'Best Path', prompt: 'Choose the right mode for this request automatically, then do the work in that mode.', color: '#6366f1' },
     { id: 'auto-direct', label: 'Direct Answer', prompt: 'If this is a simple question, answer directly. If it needs building, debugging, review, or architecture work, choose that mode yourself and proceed.', color: '#06b6d4' },
     { id: 'auto-build-when-needed', label: 'Build If Needed', prompt: 'Decide whether this request needs implementation. If yes, build it cleanly. If not, keep the answer concise and direct.', color: '#14b8a6' },
     { id: 'auto-risk-first', label: 'Risk First', prompt: 'Auto-detect the right mode and lead with the most important risks or next actions for this request.', color: '#0ea5e9' },
@@ -36,7 +36,7 @@ const MAIN_CHAT_ACTIONS: Record<SessionCodingProfile, SessionPromptAction[]> = {
     { id: 'system-design', label: 'System Design', prompt: 'Design the cleanest architecture for this and explain the boundaries and contracts.', color: '#38bdf8' },
     { id: 'extract-service', label: 'Extract Service', prompt: 'Refactor this toward shared services and cleaner boundaries, then implement it.', color: '#0ea5e9' },
     { id: 'integration-plan', label: 'Integration', prompt: 'Make sure this integrates the best way possible with the current architecture.', color: '#60a5fa' },
-    { id: 'control-plane', label: 'Control Plane', prompt: 'Turn this into a more session-first, artifact-first control surface instead of generic chat.', color: '#22d3ee' },
+    { id: 'control-plane', label: 'Control Plane', prompt: 'Turn this into a more session-first, artifact-first control surface instead of generic chat.', color: '#6366f1' },
   ],
   research: [
     { id: 'research-landscape', label: 'Landscape', prompt: 'Map the landscape, compare the strongest options, and recommend the best path with reasons.', color: '#a855f7' },
@@ -60,7 +60,7 @@ const MAIN_CHAT_ACTIONS: Record<SessionCodingProfile, SessionPromptAction[]> = {
 
 const ROOM_CHAT_ACTIONS: Record<SessionCodingProfile, SessionPromptAction[]> = {
   auto: [
-    { id: 'auto-room-best-path', label: 'Best Path', prompt: 'Choose the right room mode automatically: review, debug, architect, or implement, based on the request and room context.', color: '#22d3ee' },
+    { id: 'auto-room-best-path', label: 'Best Path', prompt: 'Choose the right room mode automatically: review, debug, architect, or implement, based on the request and room context.', color: '#6366f1' },
     { id: 'auto-room-fix', label: 'Fix If Needed', prompt: 'If this room request is a bug or failure, debug and fix it. If it is architectural, review structure first. Otherwise implement directly.', color: '#06b6d4' },
     { id: 'auto-room-review', label: 'Review If Risky', prompt: 'If the room changes look risky, review first. If the path is clear, implement directly.', color: '#14b8a6' },
     { id: 'auto-room-ship', label: 'Ship Smart', prompt: 'Auto-select the right mode for this room task and produce the strongest result with the least unnecessary process.', color: '#0ea5e9' },
@@ -87,7 +87,7 @@ const ROOM_CHAT_ACTIONS: Record<SessionCodingProfile, SessionPromptAction[]> = {
     { id: 'design-room', label: 'Design', prompt: '[ARCHITECTURE REVIEW MODE] Review this room like an architect and propose the cleanest structure.', color: '#38bdf8' },
     { id: 'refactor-room', label: 'Refactor', prompt: '[REFACTOR MODE] Suggest and implement the highest-leverage structural refactor in this room.', color: '#0ea5e9' },
     { id: 'split-room', label: 'Split Files', prompt: '[ARCHITECTURE REVIEW MODE] Decompose this room into better modules and create the new files.', color: '#60a5fa' },
-    { id: 'integrate-room', label: 'Integrate', prompt: '[ARCHITECTURE REVIEW MODE] Tighten the integration boundaries and state/data flow in this room.', color: '#22d3ee' },
+    { id: 'integrate-room', label: 'Integrate', prompt: '[ARCHITECTURE REVIEW MODE] Tighten the integration boundaries and state/data flow in this room.', color: '#6366f1' },
   ],
   research: [
     { id: 'research-room', label: 'Investigate', prompt: '[DEEP RESEARCH MODE] Investigate this room deeply and compare the strongest solution paths.', color: '#a855f7' },

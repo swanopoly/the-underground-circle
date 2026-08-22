@@ -21,7 +21,11 @@
  */
 
 import { supabase } from './supabase';
-import type { MemoryDocKind } from './memoryBankKinds';
+import {
+  claimApprovalExecution,
+  type ApprovalExecutionClaimResult,
+} from './approvalExecutionClaim';
+import { parseMemoryDocKind, type MemoryDocKind } from './memoryBankKinds';
 import { updateMemoryDoc } from '../services/sharedMemory';
 
 const DEFAULT_MAX_CHARS = 4000;
@@ -220,7 +224,7 @@ export async function applyApprovedMemoryCompaction(
 ): Promise<{ ok: true; applied: boolean; reason?: string } | { ok: false; error: string }> {
   const { data: approval, error: loadError } = await supabase
     .from('agent_approvals')
-    .select('id, status, payload, applied_at, circle_id, resolved_by')
+    .select('id, action_type, status, payload, applied_at, circle_id, resolved_by')
     .eq('id', approvalId)
     .maybeSingle();
 
@@ -231,13 +235,23 @@ export async function applyApprovedMemoryCompaction(
   }
   if (approval.applied_at) return { ok: true, applied: false, reason: 'already applied' };
 
+  if (approval.action_type !== 'memory.compact') {
+    return { ok: false, error: 'approval action_type is not memory.compact' };
+  }
+
   const payload = approval.payload || {};
-  const proposedSummary = String(payload.proposedSummary || '');
-  const circleId = approval.circle_id;
+  const proposedSummary = typeof payload.proposedSummary === 'string'
+    ? payload.proposedSummary
+    : '';
+  const circleId = typeof approval.circle_id === 'string'
+    ? approval.circle_id.trim()
+    : '';
   // circle_memory is keyed (circle_id, doc_kind); the doc to compact is
   // recorded in the proposal payload (default 'brief' for legacy rows).
-  const docKind: MemoryDocKind = (payload.docKind as MemoryDocKind) || 'brief';
-  if (!circleId || proposedSummary.length === 0) {
+  const docKind: MemoryDocKind | null = payload.docKind == null
+    ? 'brief'
+    : parseMemoryDocKind(typeof payload.docKind === 'string' ? payload.docKind : null);
+  if (!circleId || proposedSummary.length === 0 || !docKind) {
     return { ok: false, error: 'invalid payload' };
   }
 
@@ -259,13 +273,36 @@ export async function applyApprovedMemoryCompaction(
   const guardBaseContent = typeof payload.originalContent === 'string'
     ? payload.originalContent
     : null;
+  const claimState: { outcome: ApprovalExecutionClaimResult | null } = { outcome: null };
+  const claimBeforeMutation = async (): Promise<
+    { ok: true } | { ok: false; error: string }
+  > => {
+    const outcome = await claimApprovalExecution(approvalId, 'memory.compact');
+    claimState.outcome = outcome;
+    if (!outcome.ok) return { ok: false, error: outcome.error };
+    if (!outcome.claimed) {
+      return { ok: false, error: 'Approval was already claimed or is no longer executable.' };
+    }
+    return { ok: true };
+  };
+
   const writeResult = await updateMemoryDoc(
     circleId,
     proposedSummary,
     approval.resolved_by ?? '',
     docKind,
-    { guardBaseContent },
+    {
+      guardBaseContent,
+      beforeMutation: claimBeforeMutation,
+    },
   );
+  const claimOutcome = claimState.outcome as ApprovalExecutionClaimResult | null;
+  if (claimOutcome?.ok && !claimOutcome.claimed) {
+    return { ok: true, applied: false, reason: 'already applied' };
+  }
+  if (claimOutcome && !claimOutcome.ok) {
+    return { ok: false, error: claimOutcome.error };
+  }
   if (!writeResult.ok) {
     return {
       ok: false,
@@ -275,12 +312,18 @@ export async function applyApprovedMemoryCompaction(
     };
   }
 
-  try {
-    await supabase
-      .from('agent_approvals')
-      .update({ applied_at: new Date().toISOString() })
-      .eq('id', approvalId);
-  } catch {}
+  // A no-op is a fully preflighted terminal outcome, but updateMemoryDoc quite
+  // correctly did not invoke the mutation gate. Consume the approval now so a
+  // sweep cannot repeatedly re-plan the same already-matching summary.
+  if (writeResult.status === 'unchanged') {
+    const noOpClaim = await claimApprovalExecution(approvalId, 'memory.compact');
+    if (!noOpClaim.ok) return { ok: false, error: noOpClaim.error };
+    if (!noOpClaim.claimed) return { ok: true, applied: false, reason: 'already applied' };
+    return { ok: true, applied: false, reason: 'memory already matched the approved summary' };
+  }
+  if (!claimOutcome || !claimOutcome.ok || !claimOutcome.claimed) {
+    return { ok: false, error: 'memory mutation ran without a durable approval claim' };
+  }
 
   return { ok: true, applied: true };
 }

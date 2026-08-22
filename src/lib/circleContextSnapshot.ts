@@ -624,18 +624,23 @@ export type CircleContextSnapshotDeps = {
  */
 async function createDefaultDeps(): Promise<CircleContextSnapshotDeps> {
   const { supabase } = await import('./supabase');
+  const { indexSafeProfiles, loadSafeCircleProfiles } = await import('./safeProfiles');
   return {
     // Same shape as the `list_circle_members` tool, plus role for the index.
     fetchMembers: async (circleId) => {
       const { data, error } = await supabase
         .from('circle_members')
-        .select('user_id, role, user:profiles(display_name, username)')
+        .select('user_id, role')
         .eq('circle_id', circleId)
         .limit(50);
       if (error) throw new Error(error.message);
+      const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+        circleId,
+        userIds: (data || []).map((row: any) => row.user_id),
+      }));
       return (data || []).map((row: any) => ({
         userId: String(row.user_id || ''),
-        name: row.user?.display_name || row.user?.username || 'Unknown',
+        name: profileById.get(row.user_id)?.display_name || profileById.get(row.user_id)?.username || 'Unknown',
         role: row.role || null,
       }));
     },

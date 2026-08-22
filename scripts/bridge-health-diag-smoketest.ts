@@ -77,12 +77,22 @@ async function main() {
     assert(authed.detail.includes('2 sessions'), 'gemini: session count surfaced');
   }
 
-  // ─── Gemini missing email is treated as auth missing ──────────
+  // ─── Current Gemini health shape omits private auth/email fields ────────
   {
     const gem = entry('gemini-cli');
-    const noEmail = parseBridgeHealth(gem, { ok: true, sessions: 0, auth: 'oauth' });
-    assert(noEmail.status === 'degraded', 'gemini: auth=oauth but no email → still degraded');
-    assert(noEmail.authMissing === true, 'gemini: authMissing when no email');
+    const currentHealth = parseBridgeHealth(gem, {
+      ok: true,
+      agent: 'gemini-cli',
+      bridge: 'gemini-cli',
+      version: '1.1.0',
+      sessions: 0,
+      capabilities: ['sessions', 'send', 'launch', 'terminal-send'],
+    });
+    assert(currentHealth.status === 'healthy', 'gemini: omitted private auth/email fields → healthy');
+    assert(currentHealth.authMissing !== true, 'gemini: missing optional fields never invent auth failure');
+
+    const oauthWithoutEmail = parseBridgeHealth(gem, { ok: true, sessions: 0, auth: 'oauth' });
+    assert(oauthWithoutEmail.status === 'healthy', 'gemini: explicit oauth without optional email → healthy');
   }
 
   // ─── Codex parser ──────────────────────────────────────────────
@@ -124,6 +134,9 @@ async function main() {
       ['ok=false', { ok: false }],
       ['empty object', {}],
       ['number', 42],
+      ['negative sessions', { ok: true, sessions: -1 }],
+      ['fractional sessions', { ok: true, sessions: 1.5 }],
+      ['string sessions', { ok: true, sessions: '2' }],
     ];
     for (const [label, raw] of cases) {
       const r = parseBridgeHealth(cc, raw);
@@ -139,7 +152,7 @@ async function main() {
       // Emulate each bridge by URL.
       if (url.includes(':7778')) return jsonResp({ ok: true, sessions: 4 });
       if (url.includes(':7779')) return jsonResp({ ok: true, bridge: 'codex' });
-      if (url.includes(':7780')) return jsonResp({ ok: true, sessions: 0, auth: 'none', email: '' });
+      if (url.includes(':7780')) return jsonResp({ ok: true, bridge: 'gemini-cli', sessions: 0, capabilities: ['sessions'] });
       if (url.includes(':7781')) throw new Error('ECONNREFUSED'); // simulate offline
       if (url.includes(':18790')) return jsonResp({ ok: true, status: 'live' });
       throw new Error(`unexpected url: ${url}`);
@@ -151,7 +164,7 @@ async function main() {
     assert(byName['claude-code'].status === 'healthy', 'probe: claude-code healthy');
     assert(byName['claude-code'].sessionCount === 4, 'probe: claude-code 4 sessions');
     assert(byName['codex'].status === 'healthy', 'probe: codex healthy');
-    assert(byName['gemini-cli'].status === 'degraded', 'probe: gemini-cli degraded (auth missing)');
+    assert(byName['gemini-cli'].status === 'healthy', 'probe: current gemini-cli health shape is healthy');
     assert(byName['cursor'].status === 'offline', 'probe: cursor offline (ECONNREFUSED)');
     assert(byName['cursor'].detail.includes('connection failed'), 'probe: cursor detail mentions connection failed');
     assert(byName['openswan-proxy'].status === 'healthy', 'probe: proxy healthy');
@@ -161,8 +174,8 @@ async function main() {
     assert(summary.includes('Cursor'), 'summary: includes Cursor');
     assert(summary.includes('Restart with:'), 'summary: surfaces restart hint for offline');
     assert(summary.includes('1 offline'), 'summary: counts include 1 offline');
-    assert(summary.includes('1 degraded'), 'summary: counts include 1 degraded');
-    assert(summary.includes('3 healthy'), 'summary: counts include 3 healthy');
+    assert(summary.includes('0 degraded'), 'summary: counts include 0 degraded');
+    assert(summary.includes('4 healthy'), 'summary: counts include 4 healthy');
   }
 
   // ─── HTTP non-2xx → offline ────────────────────────────────────

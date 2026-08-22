@@ -38,6 +38,25 @@
 --   §30 Memory security convergence, RLS fixes, and hot-path indexes
 --   §31 Thread-scoped Chat authority and atomic reactions
 --   §32 OpenSwan production readiness contract
+--   §33 Chat v2 approval auto-approve category repair
+--   §34 Universal computer-task roots
+--   §35 Office terminal nonterminal-handoff sweeper
+--   §36 Owner-private Office agent to OpenSwan session bindings
+--   §37 Office dashboard state and complete per-floor presets
+--   §38 Agent-run immutable parent authority and artifact RLS
+--   §39 Exact message-attachment linkage
+--   §40 Message-attachment visibility and private Storage integrity
+--   §41 Device-private OpenSwan run-approval privacy and authority
+--   §42 Office Google/Microsoft OAuth credential control plane
+--   §43 Personal Figma OAuth credential and callback control plane
+--   §44 Transactional OpenSwan Chat approval-resume authority
+--   §45 Owner-private, circle-scoped Office user preferences
+--   §46 Circle-global idle-behavior claims
+--   §47 Transactional primary-agent identity selection
+--   §48 Atomic published-agent Spirit projection
+--   §49 Exact Office-agent session binding compare-and-set
+--   §50 Tenant isolation convergence for credentials, Circle/GitHub secrets, private threads, reports, schedules, and Storage
+--   §51 Owner-private Office agent lifetime usage
 -- ═════════════════════════════════════════════════════════════════════════════
 
 -- ─── §1. Custom themes ──────────────────────────────────────────────────────
@@ -2717,6 +2736,24 @@ AS $$
       OR p_payload->>'threadId'
         ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
     )
+    AND (
+      NOT (p_payload ? 'autoApproveCategory')
+      OR p_payload->'autoApproveCategory' = 'null'::jsonb
+      OR (
+        jsonb_typeof(p_payload->'autoApproveCategory') = 'string'
+        AND p_payload->>'autoApproveCategory' IN (
+          'memory_read',
+          'memory_write',
+          'skill_run',
+          'skill_write',
+          'automation_create',
+          'automation_run',
+          'browser_click',
+          'external_publish',
+          'desktop_action'
+        )
+      )
+    )
     AND NOT EXISTS (
       SELECT 1
       FROM jsonb_object_keys(p_payload) AS payload_keys(payload_key)
@@ -2730,6 +2767,7 @@ AS $$
         'userId',
         'roomId',
         'threadId',
+        'autoApproveCategory',
         'redacted'
       ])
     )
@@ -6108,4 +6146,16924 @@ COMMIT;
 
 NOTIFY pgrst, 'reload schema';
 
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- §33. Chat v2 approval auto-approve category repair (2026-08-06)
+-- Source: 20260806_chat_v2_approval_auto_approve_category.sql
+-- Keep the migration body below byte-aligned with the source migration.
+-- ════════════════════════════════════════════════════════════════════════════════
+
+-- Repair the protected Chat approval validator for databases where the
+-- 20260726 authority migration was already applied. Chat always emits the
+-- bounded autoApproveCategory key (JSON null when no category applies), so the
+-- database allowlist must accept that shape without accepting arbitrary labels.
+
+CREATE OR REPLACE FUNCTION public.is_valid_chat_v2_approval_payload(
+  p_payload jsonb
+)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog, public
+AS $$
+  SELECT COALESCE((
+    jsonb_typeof(p_payload) = 'object'
+    AND p_payload->>'approvalSchemaVersion' = '2'
+    AND p_payload->>'approvalIntentFingerprint'
+      ~ '^args-v2:sha256:[0-9a-f]{64}$'
+    AND p_payload->>'userId'
+      ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    AND p_payload->>'redacted' = 'true'
+    AND length(COALESCE(p_payload->>'source', '')) BETWEEN 1 AND 80
+    AND length(COALESCE(p_payload->>'intentKind', '')) BETWEEN 1 AND 80
+    AND length(COALESCE(p_payload->>'executionKind', '')) BETWEEN 1 AND 120
+    AND length(COALESCE(p_payload->>'risk', '')) BETWEEN 1 AND 40
+    AND (
+      NOT (p_payload ? 'roomId')
+      OR p_payload->'roomId' = 'null'::jsonb
+      OR p_payload->>'roomId'
+        ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    )
+    AND (
+      NOT (p_payload ? 'threadId')
+      OR p_payload->'threadId' = 'null'::jsonb
+      OR p_payload->>'threadId'
+        ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    )
+    AND (
+      NOT (p_payload ? 'autoApproveCategory')
+      OR p_payload->'autoApproveCategory' = 'null'::jsonb
+      OR (
+        jsonb_typeof(p_payload->'autoApproveCategory') = 'string'
+        AND p_payload->>'autoApproveCategory' IN (
+          'memory_read',
+          'memory_write',
+          'skill_run',
+          'skill_write',
+          'automation_create',
+          'automation_run',
+          'browser_click',
+          'external_publish',
+          'desktop_action'
+        )
+      )
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM jsonb_object_keys(p_payload) AS payload_keys(payload_key)
+      WHERE payload_key <> ALL (ARRAY[
+        'approvalSchemaVersion',
+        'approvalIntentFingerprint',
+        'source',
+        'intentKind',
+        'executionKind',
+        'risk',
+        'userId',
+        'roomId',
+        'threadId',
+        'autoApproveCategory',
+        'redacted'
+      ])
+    )
+  ), false);
+$$;
+
+REVOKE ALL ON FUNCTION public.is_valid_chat_v2_approval_payload(jsonb)
+  FROM PUBLIC, anon, authenticated;
+
+NOTIFY pgrst, 'reload schema';
+
 -- ═════════════════════════════════════════════════════════════════════════════
+
+-- §34. Universal computer-task roots (2026-08-06)
+-- Source: 20260806_universal_computer_task_roots.sql
+-- Keep the migration body below byte-aligned with its source file.
+
+-- Universal Computer Task Roots (V1)
+--
+-- One authenticated, request-bound root is admitted before planning,
+-- approval, bridge preparation, or provider execution. The row is
+-- coordination state only: it never authorizes a mutation. Every actual
+-- side effect still needs its exact tool policy plus agent_action_calls (or a
+-- provider idempotency contract), and every task completion still needs an
+-- independently validated acceptance receipt.
+
+BEGIN;
+
+DO $dependency$
+BEGIN
+  IF to_regprocedure('extensions.digest(bytea,text)') IS NULL THEN
+    RAISE EXCEPTION USING
+      ERRCODE = 'undefined_function',
+      MESSAGE = 'Universal computer-task roots require pgcrypto digest(bytea,text) in the extensions schema.';
+  END IF;
+END;
+$dependency$;
+
+CREATE TABLE IF NOT EXISTS public.computer_task_roots (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  run_id uuid NOT NULL UNIQUE
+    REFERENCES public.agent_runs(id) ON DELETE CASCADE,
+  circle_id uuid NOT NULL
+    REFERENCES public.circles(id) ON DELETE CASCADE,
+  user_id uuid NOT NULL
+    REFERENCES auth.users(id) ON DELETE CASCADE,
+  thread_id uuid
+    REFERENCES public.circle_chat_threads(id) ON DELETE RESTRICT,
+  schema_version integer NOT NULL DEFAULT 1
+    CHECK (schema_version = 1),
+  root_fingerprint text NOT NULL
+    CHECK (root_fingerprint ~ '^args-v2:sha256:[0-9a-f]{64}$'),
+  request_identity_fingerprint text NOT NULL
+    CHECK (request_identity_fingerprint ~ '^args-v2:sha256:[0-9a-f]{64}$'),
+  task_fingerprint text NOT NULL
+    CHECK (task_fingerprint ~ '^args-v2:sha256:[0-9a-f]{64}$'),
+  state text NOT NULL DEFAULT 'admitted'
+    CHECK (state IN (
+      'admitted',
+      'running',
+      'waiting_approval',
+      'waiting_input',
+      'paused',
+      'verification_only',
+      'completed',
+      'failed',
+      'cancelled'
+    )),
+  replay_policy text NOT NULL DEFAULT 'normal'
+    CHECK (replay_policy IN ('normal', 'verification_only', 'terminal')),
+  revision integer NOT NULL DEFAULT 0
+    CHECK (revision BETWEEN 0 AND 2147483647),
+  root_snapshot jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  terminal_at timestamptz,
+  UNIQUE (user_id, circle_id, request_identity_fingerprint)
+);
+
+CREATE INDEX IF NOT EXISTS idx_computer_task_roots_circle_updated
+  ON public.computer_task_roots(circle_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_computer_task_roots_active
+  ON public.computer_task_roots(user_id, circle_id, updated_at DESC)
+  WHERE state NOT IN ('completed', 'failed', 'cancelled');
+
+ALTER TABLE public.computer_task_roots ENABLE ROW LEVEL SECURITY;
+
+-- The request fingerprint includes the exact Chat thread. Letting PostgreSQL
+-- null that binding would leave an apparently readable root whose immutable
+-- snapshot no longer matches its row. Preserve the audit scope instead.
+ALTER TABLE public.computer_task_roots
+  DROP CONSTRAINT IF EXISTS computer_task_roots_thread_id_fkey;
+ALTER TABLE public.computer_task_roots
+  ADD CONSTRAINT computer_task_roots_thread_id_fkey
+  FOREIGN KEY (thread_id)
+  REFERENCES public.circle_chat_threads(id)
+  ON DELETE RESTRICT;
+
+DROP POLICY IF EXISTS computer_task_roots_select_exact_actor
+  ON public.computer_task_roots;
+
+CREATE POLICY computer_task_roots_select_exact_actor
+  ON public.computer_task_roots
+  FOR SELECT
+  TO authenticated
+  USING (
+    user_id = auth.uid()
+    AND EXISTS (
+      SELECT 1
+      FROM public.circle_members AS member
+      WHERE member.circle_id = computer_task_roots.circle_id
+        AND member.user_id = auth.uid()
+    )
+    AND (
+      thread_id IS NULL
+      OR EXISTS (
+        SELECT 1
+        FROM public.circle_chat_threads AS thread
+        WHERE thread.id = computer_task_roots.thread_id
+          AND thread.circle_id = computer_task_roots.circle_id
+          AND (
+            thread.visibility = 'circle'
+            OR thread.created_by = auth.uid()
+            OR EXISTS (
+              SELECT 1
+              FROM public.circle_chat_thread_members AS thread_member
+              WHERE thread_member.thread_id = thread.id
+                AND thread_member.user_id = auth.uid()
+            )
+          )
+      )
+    )
+  );
+
+REVOKE ALL ON TABLE public.computer_task_roots FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON TABLE public.computer_task_roots TO authenticated;
+
+-- agent_runs historically allows every circle member to update/delete every
+-- wrapper row. A computer-task wrapper is coordination state owned by the
+-- exact authenticated actor and must only be changed by the SECURITY DEFINER
+-- root RPCs. Restrictive policies compose with the legacy permissive policy.
+CREATE OR REPLACE FUNCTION public.is_computer_task_root_run_v1(
+  p_run_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.computer_task_roots AS root
+    WHERE root.run_id = p_run_id
+  );
+$function$;
+
+REVOKE ALL ON FUNCTION public.is_computer_task_root_run_v1(uuid)
+  FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.is_computer_task_root_run_v1(uuid)
+  TO authenticated;
+
+DROP POLICY IF EXISTS agent_runs_computer_task_root_update_guard
+  ON public.agent_runs;
+CREATE POLICY agent_runs_computer_task_root_update_guard
+  ON public.agent_runs
+  AS RESTRICTIVE
+  FOR UPDATE
+  TO authenticated
+  USING (NOT public.is_computer_task_root_run_v1(id))
+  WITH CHECK (NOT public.is_computer_task_root_run_v1(id));
+
+DROP POLICY IF EXISTS agent_runs_computer_task_root_delete_guard
+  ON public.agent_runs;
+CREATE POLICY agent_runs_computer_task_root_delete_guard
+  ON public.agent_runs
+  AS RESTRICTIVE
+  FOR DELETE
+  TO authenticated
+  USING (NOT public.is_computer_task_root_run_v1(id));
+
+CREATE OR REPLACE FUNCTION public.is_valid_computer_task_root_timestamp_v1(
+  p_value text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  IF p_value IS NULL OR p_value !~
+    '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$'
+  THEN
+    RETURN false;
+  END IF;
+
+  PERFORM p_value::timestamptz;
+  RETURN true;
+EXCEPTION
+  WHEN OTHERS THEN
+    RETURN false;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.is_valid_computer_task_root_timestamp_v1(text)
+  FROM PUBLIC, anon, authenticated;
+
+-- Match the key-sorted JSON serialization used by
+-- buildComputerAppToolArgsFingerprintAsync. Root identity payloads contain
+-- only bounded ASCII keys/values, booleans, integers, arrays, and JSON null.
+CREATE OR REPLACE FUNCTION public.computer_task_root_canonical_json_v1(
+  p_value jsonb
+)
+RETURNS text
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_type text := jsonb_typeof(p_value);
+  v_result text;
+BEGIN
+  IF v_type = 'object' THEN
+    SELECT '{' || COALESCE(string_agg(
+      to_jsonb(entry.key)::text || ':' ||
+        public.computer_task_root_canonical_json_v1(entry.value),
+      ',' ORDER BY entry.key COLLATE "C"
+    ), '') || '}'
+    INTO v_result
+    FROM jsonb_each(p_value) AS entry(key, value);
+    RETURN v_result;
+  END IF;
+
+  IF v_type = 'array' THEN
+    SELECT '[' || COALESCE(string_agg(
+      public.computer_task_root_canonical_json_v1(entry.value),
+      ',' ORDER BY entry.ordinal
+    ), '') || ']'
+    INTO v_result
+    FROM jsonb_array_elements(p_value)
+      WITH ORDINALITY AS entry(value, ordinal);
+    RETURN v_result;
+  END IF;
+
+  RETURN p_value::text;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.computer_task_root_fingerprint_v1(
+  p_value jsonb
+)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+STRICT
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT 'args-v2:sha256:' || encode(
+    extensions.digest(
+      convert_to(
+        public.computer_task_root_canonical_json_v1(p_value),
+        'UTF8'
+      ),
+      'sha256'
+    ),
+    'hex'
+  );
+$function$;
+
+REVOKE ALL ON FUNCTION public.computer_task_root_canonical_json_v1(jsonb)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.computer_task_root_fingerprint_v1(jsonb)
+  FROM PUBLIC, anon, authenticated;
+
+CREATE OR REPLACE FUNCTION public.is_valid_computer_task_root_nested_v1(
+  p_snapshot jsonb
+)
+RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_created_at text := p_snapshot->>'createdAt';
+  v_updated_at text := p_snapshot->>'updatedAt';
+  v_entry jsonb;
+  v_index integer;
+  v_length integer;
+  v_attempt_ids text[] := ARRAY[]::text[];
+  v_active_attempt_count integer := 0;
+  v_checkpoint_ids text[] := ARRAY[]::text[];
+  v_last_checkpoint_at text := NULL;
+  v_acceptance jsonb := p_snapshot->'acceptance';
+  v_acceptance_attempt_id text := NULL;
+  v_acceptance_bound_at text := NULL;
+  v_predicate_ids text[] := ARRAY[]::text[];
+  v_action_ids text[] := ARRAY[]::text[];
+  v_action_state text;
+  v_action_id text;
+  v_action_frontier_seen boolean := false;
+  v_action_manifest jsonb;
+  v_action_manifests jsonb := '[]'::jsonb;
+  v_dispatch_binding jsonb;
+  v_lease jsonb := p_snapshot->'foregroundLease';
+  v_latch jsonb := p_snapshot->'interruptLatch';
+BEGIN
+  IF jsonb_typeof(p_snapshot) <> 'object'
+    OR NOT public.is_valid_computer_task_root_timestamp_v1(v_created_at)
+    OR NOT public.is_valid_computer_task_root_timestamp_v1(v_updated_at)
+    OR jsonb_typeof(p_snapshot->'attempts') <> 'array'
+    OR jsonb_typeof(p_snapshot->'checkpoints') <> 'array'
+  THEN
+    RETURN false;
+  END IF;
+
+  v_length := jsonb_array_length(p_snapshot->'attempts');
+  IF v_length > 64 THEN
+    RETURN false;
+  END IF;
+  IF v_length > 0 THEN
+    FOR v_index IN 0..v_length - 1 LOOP
+      v_entry := p_snapshot->'attempts'->v_index;
+      IF jsonb_typeof(v_entry) <> 'object'
+        OR (SELECT count(*) FROM jsonb_object_keys(v_entry)) <> 7
+        OR (v_entry - ARRAY[
+          'attemptId', 'index', 'kind', 'parentAttemptId', 'state',
+          'startedAt', 'finishedAt'
+        ]) <> '{}'::jsonb
+        OR COALESCE(v_entry->>'attemptId', '')
+          !~ '^computer_attempt_[0-9a-f]{64}$'
+        OR v_entry->>'attemptId' <> 'computer_attempt_' || substring(
+          public.computer_task_root_fingerprint_v1(jsonb_build_object(
+            'schemaVersion', 1,
+            'namespace', 'computer_task_attempt',
+            'rootFingerprint', p_snapshot->>'rootFingerprint',
+            'index', v_index,
+            'kind', v_entry->>'kind',
+            'parentAttemptId', v_entry->'parentAttemptId'
+          )) FROM 16
+        )
+        OR v_entry->>'attemptId' = ANY(v_attempt_ids)
+        OR jsonb_typeof(v_entry->'index') <> 'number'
+        OR COALESCE(v_entry->>'index', '') !~ '^[0-9]{1,10}$'
+        OR COALESCE(v_entry->>'kind', '') NOT IN (
+          'deterministic', 'provider', 'compiler', 'connected_agent',
+          'capability_buildout', 'recovery'
+        )
+        OR COALESCE(v_entry->>'state', '') NOT IN (
+          'active', 'completed', 'failed', 'cancelled'
+        )
+        OR NOT public.is_valid_computer_task_root_timestamp_v1(
+          v_entry->>'startedAt'
+        )
+        OR v_entry->>'startedAt' < v_created_at
+        OR v_entry->>'startedAt' > v_updated_at
+      THEN
+        RETURN false;
+      END IF;
+      IF (v_entry->>'index')::bigint <> v_index THEN
+        RETURN false;
+      END IF;
+      IF v_entry->'parentAttemptId' <> 'null'::jsonb
+        AND (
+          COALESCE(v_entry->>'parentAttemptId', '')
+            !~ '^computer_attempt_[0-9a-f]{64}$'
+          OR NOT (v_entry->>'parentAttemptId' = ANY(v_attempt_ids))
+        )
+      THEN
+        RETURN false;
+      END IF;
+      IF v_entry->>'state' = 'active' THEN
+        IF v_entry->'finishedAt' <> 'null'::jsonb THEN
+          RETURN false;
+        END IF;
+        v_active_attempt_count := v_active_attempt_count + 1;
+        IF v_active_attempt_count > 1 THEN
+          RETURN false;
+        END IF;
+      ELSE
+        IF NOT public.is_valid_computer_task_root_timestamp_v1(
+            v_entry->>'finishedAt'
+          )
+          OR v_entry->>'finishedAt' < v_entry->>'startedAt'
+          OR v_entry->>'finishedAt' > v_updated_at
+        THEN
+          RETURN false;
+        END IF;
+      END IF;
+      v_attempt_ids := array_append(v_attempt_ids, v_entry->>'attemptId');
+    END LOOP;
+  END IF;
+
+  v_length := jsonb_array_length(p_snapshot->'checkpoints');
+  IF v_length > 256 THEN
+    RETURN false;
+  END IF;
+  IF v_length > 0 THEN
+    FOR v_index IN 0..v_length - 1 LOOP
+      v_entry := p_snapshot->'checkpoints'->v_index;
+      IF jsonb_typeof(v_entry) <> 'object'
+        OR (SELECT count(*) FROM jsonb_object_keys(v_entry)) <> 7
+        OR (v_entry - ARRAY[
+          'checkpointId', 'sequence', 'attemptId', 'kind', 'rootState',
+          'recordedAt', 'evidenceFingerprint'
+        ]) <> '{}'::jsonb
+        OR COALESCE(v_entry->>'checkpointId', '')
+          !~ '^[A-Za-z0-9][A-Za-z0-9._:@-]{0,239}$'
+        OR v_entry->>'checkpointId' = ANY(v_checkpoint_ids)
+        OR jsonb_typeof(v_entry->'sequence') <> 'number'
+        OR COALESCE(v_entry->>'sequence', '') !~ '^[0-9]{1,10}$'
+        OR COALESCE(v_entry->>'kind', '') NOT IN (
+          'plan', 'observation', 'approval', 'action', 'verification',
+          'recovery', 'terminal'
+        )
+        OR COALESCE(v_entry->>'rootState', '') NOT IN (
+          'admitted', 'running', 'waiting_approval', 'waiting_input',
+          'paused', 'verification_only', 'completed', 'failed', 'cancelled'
+        )
+        OR NOT public.is_valid_computer_task_root_timestamp_v1(
+          v_entry->>'recordedAt'
+        )
+        OR v_entry->>'recordedAt' < v_created_at
+        OR v_entry->>'recordedAt' > v_updated_at
+        OR (
+          v_last_checkpoint_at IS NOT NULL
+          AND v_entry->>'recordedAt' < v_last_checkpoint_at
+        )
+      THEN
+        RETURN false;
+      END IF;
+      IF (v_entry->>'sequence')::bigint <> v_index + 1 THEN
+        RETURN false;
+      END IF;
+      IF v_entry->'attemptId' <> 'null'::jsonb
+        AND (
+          COALESCE(v_entry->>'attemptId', '')
+            !~ '^computer_attempt_[0-9a-f]{64}$'
+          OR NOT (v_entry->>'attemptId' = ANY(v_attempt_ids))
+        )
+      THEN
+        RETURN false;
+      END IF;
+      IF v_entry->'evidenceFingerprint' <> 'null'::jsonb
+        AND COALESCE(v_entry->>'evidenceFingerprint', '')
+          !~ '^args-v2:sha256:[0-9a-f]{64}$'
+      THEN
+        RETURN false;
+      END IF;
+      v_checkpoint_ids := array_append(
+        v_checkpoint_ids,
+        v_entry->>'checkpointId'
+      );
+      v_last_checkpoint_at := v_entry->>'recordedAt';
+    END LOOP;
+  END IF;
+
+  IF v_acceptance <> 'null'::jsonb THEN
+    IF jsonb_typeof(v_acceptance) <> 'object'
+      OR (SELECT count(*) FROM jsonb_object_keys(v_acceptance)) <> 6
+      OR (v_acceptance - ARRAY[
+        'schemaVersion', 'acceptanceFingerprint', 'attemptId', 'boundAt',
+        'predicateFingerprints', 'actions'
+      ]) <> '{}'::jsonb
+      OR jsonb_typeof(v_acceptance->'schemaVersion') <> 'number'
+      OR v_acceptance->>'schemaVersion' <> '1'
+      OR COALESCE(v_acceptance->>'acceptanceFingerprint', '')
+        !~ '^args-v2:sha256:[0-9a-f]{64}$'
+      OR COALESCE(v_acceptance->>'attemptId', '')
+        !~ '^computer_attempt_[0-9a-f]{64}$'
+      OR NOT (v_acceptance->>'attemptId' = ANY(v_attempt_ids))
+      OR NOT public.is_valid_computer_task_root_timestamp_v1(
+        v_acceptance->>'boundAt'
+      )
+      OR v_acceptance->>'boundAt' < v_created_at
+      OR v_acceptance->>'boundAt' > v_updated_at
+      OR jsonb_typeof(v_acceptance->'predicateFingerprints') <> 'array'
+      OR jsonb_array_length(v_acceptance->'predicateFingerprints') NOT BETWEEN 1 AND 64
+      OR jsonb_typeof(v_acceptance->'actions') <> 'array'
+      OR jsonb_array_length(v_acceptance->'actions') NOT BETWEEN 1 AND 128
+    THEN
+      RETURN false;
+    END IF;
+    v_acceptance_attempt_id := v_acceptance->>'attemptId';
+    v_acceptance_bound_at := v_acceptance->>'boundAt';
+
+    v_length := jsonb_array_length(v_acceptance->'predicateFingerprints');
+    FOR v_index IN 0..v_length - 1 LOOP
+      v_entry := v_acceptance->'predicateFingerprints'->v_index;
+      IF jsonb_typeof(v_entry) <> 'string'
+        OR trim(BOTH '"' FROM v_entry::text)
+          !~ '^args-v2:sha256:[0-9a-f]{64}$'
+        OR trim(BOTH '"' FROM v_entry::text) = ANY(v_predicate_ids)
+      THEN
+        RETURN false;
+      END IF;
+      v_predicate_ids := array_append(
+        v_predicate_ids,
+        trim(BOTH '"' FROM v_entry::text)
+      );
+    END LOOP;
+
+    v_length := jsonb_array_length(v_acceptance->'actions');
+    FOR v_index IN 0..v_length - 1 LOOP
+      v_entry := v_acceptance->'actions'->v_index;
+      v_action_manifest := jsonb_build_object(
+        'actionId', v_entry->>'actionId',
+        'index', v_index,
+        'attemptId', v_acceptance_attempt_id,
+        'tool', v_entry->>'tool',
+        'toolArgsFingerprint', v_entry->>'toolArgsFingerprint',
+        'authorizationFingerprint', v_entry->>'authorizationFingerprint',
+        'idempotencyKey', v_entry->>'idempotencyKey',
+        'mutatesState', v_entry->'mutatesState',
+        'requiresForegroundLease', v_entry->'requiresForegroundLease'
+      );
+      IF jsonb_typeof(v_entry) <> 'object'
+        OR (SELECT count(*) FROM jsonb_object_keys(v_entry)) <> 14
+        OR (v_entry - ARRAY[
+          'actionId', 'index', 'attemptId', 'tool', 'toolArgsFingerprint',
+          'authorizationFingerprint', 'idempotencyKey', 'mutatesState',
+          'requiresForegroundLease', 'acceptanceBindingFingerprint', 'state',
+          'proofFingerprint', 'dispatchBinding', 'updatedAt'
+        ]) <> '{}'::jsonb
+        OR COALESCE(v_entry->>'actionId', '')
+          !~ '^computer_action_[0-9a-f]{64}$'
+        OR v_entry->>'actionId' <> 'computer_action_' || substring(
+          public.computer_task_root_fingerprint_v1(jsonb_build_object(
+            'schemaVersion', 1,
+            'namespace', 'computer_task_child_action',
+            'rootFingerprint', p_snapshot->>'rootFingerprint',
+            'attemptId', v_acceptance_attempt_id,
+            'index', v_index,
+            'tool', v_entry->>'tool',
+            'toolArgsFingerprint', v_entry->>'toolArgsFingerprint',
+            'authorizationFingerprint',
+              v_entry->>'authorizationFingerprint'
+          )) FROM 16
+        )
+        OR v_entry->>'actionId' = ANY(v_action_ids)
+        OR jsonb_typeof(v_entry->'index') <> 'number'
+        OR COALESCE(v_entry->>'index', '') !~ '^[0-9]{1,10}$'
+        OR v_entry->>'attemptId' <> v_acceptance_attempt_id
+        OR COALESCE(v_entry->>'tool', '')
+          !~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$'
+        OR COALESCE(v_entry->>'toolArgsFingerprint', '')
+          !~ '^args-v2:sha256:[0-9a-f]{64}$'
+        OR COALESCE(v_entry->>'authorizationFingerprint', '')
+          !~ '^args-v2:sha256:[0-9a-f]{64}$'
+        OR COALESCE(v_entry->>'idempotencyKey', '')
+          !~ '^computer-task\.[0-9a-f]{64}$'
+        OR v_entry->>'idempotencyKey' <> 'computer-task.' || substring(
+          public.computer_task_root_fingerprint_v1(jsonb_build_object(
+            'schemaVersion', 1,
+            'namespace', 'computer_task_action_idempotency',
+            'rootFingerprint', p_snapshot->>'rootFingerprint',
+            'actionId', v_entry->>'actionId'
+          )) FROM 16
+        )
+        OR jsonb_typeof(v_entry->'mutatesState') <> 'boolean'
+        OR jsonb_typeof(v_entry->'requiresForegroundLease') <> 'boolean'
+        OR COALESCE(v_entry->>'acceptanceBindingFingerprint', '')
+          !~ '^args-v2:sha256:[0-9a-f]{64}$'
+        OR v_entry->>'acceptanceBindingFingerprint' <>
+          public.computer_task_root_fingerprint_v1(jsonb_build_object(
+            'schemaVersion', 1,
+            'namespace', 'computer_task_action_acceptance_binding',
+            'rootFingerprint', p_snapshot->>'rootFingerprint',
+            'acceptanceFingerprint',
+              v_acceptance->>'acceptanceFingerprint',
+            'action', v_action_manifest
+          ))
+        OR COALESCE(v_entry->>'state', '') NOT IN (
+          'planned', 'claimed', 'dispatched', 'verified', 'failed',
+          'outcome_unknown'
+        )
+        OR NOT public.is_valid_computer_task_root_timestamp_v1(
+          v_entry->>'updatedAt'
+        )
+        OR v_entry->>'updatedAt' < v_acceptance_bound_at
+        OR v_entry->>'updatedAt' > v_updated_at
+      THEN
+        RETURN false;
+      END IF;
+      v_action_manifests := v_action_manifests ||
+        jsonb_build_array(v_action_manifest);
+      v_dispatch_binding := v_entry->'dispatchBinding';
+      IF v_dispatch_binding <> 'null'::jsonb THEN
+        IF jsonb_typeof(v_dispatch_binding) <> 'object'
+          OR (
+            SELECT count(*)
+            FROM jsonb_object_keys(v_dispatch_binding)
+          ) <> 9
+          OR (v_dispatch_binding - ARRAY[
+            'schemaVersion', 'source', 'callIdentityFingerprint',
+            'authorizationCategory', 'mutationAuthority',
+            'policyBindingFingerprint', 'verifierBindingFingerprint',
+            'replayBindingFingerprint', 'boundAt'
+          ]) <> '{}'::jsonb
+          OR jsonb_typeof(v_dispatch_binding->'schemaVersion') <> 'number'
+          OR v_dispatch_binding->>'schemaVersion' <> '1'
+          OR COALESCE(v_dispatch_binding->>'source', '') NOT IN (
+            'compiler', 'provider', 'deterministic', 'connected_agent',
+            'capability_buildout', 'recovery'
+          )
+          OR NOT EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(p_snapshot->'attempts') AS owner(value)
+            WHERE owner.value->>'attemptId' = v_acceptance_attempt_id
+              AND owner.value->>'kind' = v_dispatch_binding->>'source'
+          )
+          OR COALESCE(
+            v_dispatch_binding->>'callIdentityFingerprint',
+            ''
+          ) !~ '^args-v2:sha256:[0-9a-f]{64}$'
+          OR COALESCE(v_dispatch_binding->>'authorizationCategory', '')
+            NOT IN (
+              'read_only', 'direct_request', 'plan_approval',
+              'per_action_approval', 'provider_native', 'proposal_only',
+              'unsupported'
+            )
+          OR COALESCE(v_dispatch_binding->>'mutationAuthority', '')
+            NOT IN (
+              'read_only', 'action_ledger', 'provider_idempotency',
+              'proposal_only', 'unsupported'
+            )
+          OR COALESCE(
+            v_dispatch_binding->>'policyBindingFingerprint',
+            ''
+          ) !~ '^args-v2:sha256:[0-9a-f]{64}$'
+          OR COALESCE(
+            v_dispatch_binding->>'verifierBindingFingerprint',
+            ''
+          ) !~ '^args-v2:sha256:[0-9a-f]{64}$'
+          OR COALESCE(
+            v_dispatch_binding->>'replayBindingFingerprint',
+            ''
+          ) !~ '^args-v2:sha256:[0-9a-f]{64}$'
+          OR NOT public.is_valid_computer_task_root_timestamp_v1(
+            v_dispatch_binding->>'boundAt'
+          )
+          OR v_dispatch_binding->>'boundAt' < v_acceptance_bound_at
+          OR v_dispatch_binding->>'boundAt' > v_entry->>'updatedAt'
+          OR (
+            (v_entry->>'mutatesState')::boolean
+            AND (
+              v_dispatch_binding->>'authorizationCategory' = 'read_only'
+              OR v_dispatch_binding->>'mutationAuthority' = 'read_only'
+            )
+          )
+          OR (
+            NOT (v_entry->>'mutatesState')::boolean
+            AND (
+              v_dispatch_binding->>'authorizationCategory' <> 'read_only'
+              OR v_dispatch_binding->>'mutationAuthority' <> 'read_only'
+            )
+          )
+        THEN
+          RETURN false;
+        END IF;
+      END IF;
+      IF (v_entry->>'index')::bigint <> v_index
+        OR (
+          (v_entry->>'requiresForegroundLease')::boolean
+          AND NOT (v_entry->>'mutatesState')::boolean
+        )
+      THEN
+        RETURN false;
+      END IF;
+      v_action_state := v_entry->>'state';
+      IF v_action_state <> 'planned'
+        AND (
+          v_dispatch_binding = 'null'::jsonb
+          OR v_dispatch_binding->>'authorizationCategory' IN (
+            'proposal_only', 'unsupported'
+          )
+          OR v_dispatch_binding->>'mutationAuthority' IN (
+            'proposal_only', 'unsupported'
+          )
+          OR (
+            (v_entry->>'mutatesState')::boolean
+            AND v_dispatch_binding->>'mutationAuthority' NOT IN (
+              'action_ledger', 'provider_idempotency'
+            )
+          )
+          OR (
+            NOT (v_entry->>'mutatesState')::boolean
+            AND (
+              v_dispatch_binding->>'authorizationCategory' <> 'read_only'
+              OR v_dispatch_binding->>'mutationAuthority' <> 'read_only'
+            )
+          )
+        )
+      THEN
+        RETURN false;
+      END IF;
+      IF NOT v_action_frontier_seen THEN
+        IF v_action_state <> 'verified' THEN
+          v_action_frontier_seen := true;
+        END IF;
+      ELSIF v_action_state <> 'planned' THEN
+        RETURN false;
+      END IF;
+      IF v_action_state = 'verified' THEN
+        IF COALESCE(v_entry->>'proofFingerprint', '')
+          !~ '^args-v2:sha256:[0-9a-f]{64}$'
+        THEN
+          RETURN false;
+        END IF;
+      ELSIF v_action_state = 'outcome_unknown' THEN
+        IF v_entry->'proofFingerprint' <> 'null'::jsonb
+          AND COALESCE(v_entry->>'proofFingerprint', '')
+            !~ '^args-v2:sha256:[0-9a-f]{64}$'
+        THEN
+          RETURN false;
+        END IF;
+      ELSIF v_entry->'proofFingerprint' <> 'null'::jsonb THEN
+        RETURN false;
+      END IF;
+      v_action_ids := array_append(v_action_ids, v_entry->>'actionId');
+    END LOOP;
+    IF v_acceptance->>'acceptanceFingerprint' <>
+      public.computer_task_root_fingerprint_v1(jsonb_build_object(
+        'schemaVersion', 1,
+        'namespace', 'computer_task_acceptance',
+        'rootFingerprint', p_snapshot->>'rootFingerprint',
+        'attemptId', v_acceptance_attempt_id,
+        'predicateFingerprints', v_acceptance->'predicateFingerprints',
+        'actions', v_action_manifests
+      ))
+    THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF v_lease <> 'null'::jsonb THEN
+    IF jsonb_typeof(v_lease) <> 'object'
+      OR (SELECT count(*) FROM jsonb_object_keys(v_lease)) <> 7
+      OR (v_lease - ARRAY[
+        'leaseId', 'actionId', 'targetFingerprint', 'acquiredAt',
+        'expiresAt', 'status', 'releasedAt'
+      ]) <> '{}'::jsonb
+      OR COALESCE(v_lease->>'leaseId', '')
+        !~ '^[A-Za-z0-9][A-Za-z0-9._:@-]{0,239}$'
+      OR COALESCE(v_lease->>'actionId', '')
+        !~ '^computer_action_[0-9a-f]{64}$'
+      OR NOT (v_lease->>'actionId' = ANY(v_action_ids))
+      OR COALESCE(v_lease->>'targetFingerprint', '')
+        !~ '^args-v2:sha256:[0-9a-f]{64}$'
+      OR NOT public.is_valid_computer_task_root_timestamp_v1(
+        v_lease->>'acquiredAt'
+      )
+      OR NOT public.is_valid_computer_task_root_timestamp_v1(
+        v_lease->>'expiresAt'
+      )
+      OR v_lease->>'acquiredAt' < v_created_at
+      OR v_lease->>'acquiredAt' > v_updated_at
+      OR (v_lease->>'expiresAt')::timestamptz
+        <= (v_lease->>'acquiredAt')::timestamptz
+      OR (v_lease->>'expiresAt')::timestamptz
+        - (v_lease->>'acquiredAt')::timestamptz > interval '15 minutes'
+      OR COALESCE(v_lease->>'status', '') NOT IN (
+        'active', 'released', 'revoked'
+      )
+    THEN
+      RETURN false;
+    END IF;
+    IF v_lease->>'status' = 'active' THEN
+      IF v_lease->'releasedAt' <> 'null'::jsonb
+        OR (v_lease->>'expiresAt')::timestamptz
+          <= v_updated_at::timestamptz
+        OR v_latch <> 'null'::jsonb
+        OR p_snapshot->>'replayPolicy' = 'terminal'
+        OR NOT EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(v_acceptance->'actions') AS action(value)
+          WHERE action.value->>'actionId' = v_lease->>'actionId'
+            AND (action.value->>'mutatesState')::boolean
+            AND (action.value->>'requiresForegroundLease')::boolean
+            AND action.value->>'state' IN (
+              'planned', 'claimed', 'dispatched'
+            )
+            AND (
+              action.value->>'state' = 'dispatched'
+              AND p_snapshot->>'state' = 'verification_only'
+              OR action.value->>'state' IN ('planned', 'claimed')
+              AND p_snapshot->>'state' = 'running'
+            )
+            AND EXISTS (
+              SELECT 1
+              FROM jsonb_array_elements(p_snapshot->'attempts') AS owner(value)
+              WHERE owner.value->>'attemptId' = action.value->>'attemptId'
+                AND owner.value->>'state' = 'active'
+            )
+        )
+      THEN
+        RETURN false;
+      END IF;
+      IF p_snapshot->>'replayPolicy' = 'verification_only' THEN
+        SELECT action.value->>'state'
+        INTO v_action_state
+        FROM jsonb_array_elements(v_acceptance->'actions') AS action(value)
+        WHERE action.value->>'actionId' = v_lease->>'actionId';
+        IF v_action_state <> 'dispatched' THEN
+          RETURN false;
+        END IF;
+      END IF;
+    ELSE
+      IF NOT public.is_valid_computer_task_root_timestamp_v1(
+          v_lease->>'releasedAt'
+        )
+        OR v_lease->>'releasedAt' < v_lease->>'acquiredAt'
+        OR v_lease->>'releasedAt' > v_updated_at
+      THEN
+        RETURN false;
+      END IF;
+    END IF;
+  END IF;
+
+  IF v_latch <> 'null'::jsonb THEN
+    IF jsonb_typeof(v_latch) <> 'object'
+      OR (SELECT count(*) FROM jsonb_object_keys(v_latch)) <> 3
+      OR (v_latch - ARRAY['kind', 'latchedAt', 'revision']) <> '{}'::jsonb
+      OR COALESCE(v_latch->>'kind', '') NOT IN (
+        'stop_requested', 'human_foreground_override'
+      )
+      OR NOT public.is_valid_computer_task_root_timestamp_v1(
+        v_latch->>'latchedAt'
+      )
+      OR v_latch->>'latchedAt' < v_created_at
+      OR v_latch->>'latchedAt' > v_updated_at
+      OR jsonb_typeof(v_latch->'revision') <> 'number'
+      OR COALESCE(v_latch->>'revision', '') !~ '^[0-9]{1,10}$'
+    THEN
+      RETURN false;
+    END IF;
+    IF (v_latch->>'revision')::bigint NOT BETWEEN 1
+      AND (p_snapshot->>'revision')::bigint
+      OR v_active_attempt_count <> 0
+    THEN
+      RETURN false;
+    END IF;
+    IF v_latch->>'kind' = 'stop_requested'
+      AND (
+        p_snapshot->>'state' <> 'cancelled'
+        OR p_snapshot->>'replayPolicy' <> 'terminal'
+      )
+    THEN
+      RETURN false;
+    END IF;
+    IF v_latch->>'kind' = 'human_foreground_override'
+      AND (
+        p_snapshot->>'state' <> 'verification_only'
+        OR p_snapshot->>'replayPolicy' <> 'verification_only'
+        OR p_snapshot->'terminalAt' <> 'null'::jsonb
+      )
+    THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  IF p_snapshot->>'state' IN ('completed', 'failed', 'cancelled')
+    AND v_active_attempt_count <> 0
+  THEN
+    RETURN false;
+  END IF;
+  IF v_acceptance <> 'null'::jsonb
+    AND p_snapshot->>'state' NOT IN ('completed', 'failed', 'cancelled')
+    AND p_snapshot#>>'{interruptLatch,kind}'
+      IS DISTINCT FROM 'human_foreground_override'
+    AND NOT EXISTS (
+      SELECT 1
+      FROM jsonb_array_elements(p_snapshot->'attempts') AS owner(value)
+      WHERE owner.value->>'attemptId' = v_acceptance_attempt_id
+        AND owner.value->>'state' = 'active'
+    )
+  THEN
+    RETURN false;
+  END IF;
+  RETURN true;
+EXCEPTION
+  WHEN OTHERS THEN
+    RETURN false;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.is_valid_computer_task_root_nested_v1(jsonb)
+  FROM PUBLIC, anon, authenticated;
+
+CREATE OR REPLACE FUNCTION public.is_valid_computer_task_root_snapshot_v1(
+  p_snapshot jsonb
+)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT COALESCE((
+    jsonb_typeof(p_snapshot) = 'object'
+    AND octet_length(p_snapshot::text) BETWEEN 64 AND 256000
+    AND jsonb_typeof(p_snapshot->'schemaVersion') = 'number'
+    AND p_snapshot->>'schemaVersion' = '1'
+    AND COALESCE(p_snapshot->>'rootId', '')
+      ~ '^computer_task_[0-9a-f]{64}$'
+    AND COALESCE(p_snapshot->>'rootFingerprint', '')
+      ~ '^args-v2:sha256:[0-9a-f]{64}$'
+    AND COALESCE(p_snapshot->>'requestIdentityFingerprint', '')
+      ~ '^args-v2:sha256:[0-9a-f]{64}$'
+    AND COALESCE(p_snapshot->>'taskFingerprint', '')
+      ~ '^args-v2:sha256:[0-9a-f]{64}$'
+    AND jsonb_typeof(p_snapshot->'request') = 'object'
+    AND jsonb_typeof(p_snapshot#>'{request,schemaVersion}') = 'number'
+    AND p_snapshot#>>'{request,schemaVersion}' = '1'
+    AND COALESCE(p_snapshot#>>'{request,requestIdentity}', '')
+      ~ '^[A-Za-z0-9][A-Za-z0-9._:@-]{0,239}$'
+    AND COALESCE(p_snapshot#>>'{request,userId}', '')
+      ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    AND COALESCE(p_snapshot#>>'{request,circleId}', '')
+      ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    AND (
+      p_snapshot#>'{request,threadId}' = 'null'::jsonb
+      OR COALESCE(p_snapshot#>>'{request,threadId}', '')
+        ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    )
+    AND p_snapshot#>>'{request,source}' IN (
+      'chat', 'office', 'automation', 'api', 'connected_agent', 'system'
+    )
+    AND public.is_valid_computer_task_root_timestamp_v1(
+      p_snapshot#>>'{request,admittedAt}'
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM jsonb_object_keys(p_snapshot->'request') AS request_keys(request_key)
+      WHERE request_key <> ALL (ARRAY[
+        'schemaVersion',
+        'requestIdentity',
+        'userId',
+        'circleId',
+        'threadId',
+        'source',
+        'admittedAt'
+      ])
+    )
+    AND jsonb_typeof(p_snapshot->'revision') = 'number'
+    AND COALESCE(p_snapshot->>'revision', '') ~ '^[0-9]{1,10}$'
+    AND (p_snapshot->>'revision')::bigint BETWEEN 0 AND 2147483647
+    AND p_snapshot->>'state' IN (
+      'admitted',
+      'running',
+      'waiting_approval',
+      'waiting_input',
+      'paused',
+      'verification_only',
+      'completed',
+      'failed',
+      'cancelled'
+    )
+    AND p_snapshot->>'replayPolicy' IN ('normal', 'verification_only', 'terminal')
+    AND (
+      p_snapshot->'interruptLatch' = 'null'::jsonb
+      OR jsonb_typeof(p_snapshot->'interruptLatch') = 'object'
+    )
+    AND jsonb_typeof(p_snapshot->'attempts') = 'array'
+    AND jsonb_array_length(p_snapshot->'attempts') <= 64
+    AND jsonb_typeof(p_snapshot->'checkpoints') = 'array'
+    AND jsonb_array_length(p_snapshot->'checkpoints') <= 256
+    AND public.is_valid_computer_task_root_nested_v1(p_snapshot)
+    AND (
+      p_snapshot->'foregroundLease' = 'null'::jsonb
+      OR jsonb_typeof(p_snapshot->'foregroundLease') = 'object'
+    )
+    AND (
+      p_snapshot->'acceptance' = 'null'::jsonb
+      OR jsonb_typeof(p_snapshot->'acceptance') = 'object'
+    )
+    AND (
+      p_snapshot->'completionProofFingerprint' = 'null'::jsonb
+      OR COALESCE(p_snapshot->>'completionProofFingerprint', '')
+        ~ '^args-v2:sha256:[0-9a-f]{64}$'
+    )
+    AND public.is_valid_computer_task_root_timestamp_v1(
+      p_snapshot->>'createdAt'
+    )
+    AND public.is_valid_computer_task_root_timestamp_v1(
+      p_snapshot->>'updatedAt'
+    )
+    AND p_snapshot->>'createdAt' = p_snapshot#>>'{request,admittedAt}'
+    AND p_snapshot->>'requestIdentityFingerprint' =
+      public.computer_task_root_fingerprint_v1(jsonb_build_object(
+        'schemaVersion', 1,
+        'namespace', 'computer_task_request_identity',
+        'requestIdentity', p_snapshot#>>'{request,requestIdentity}',
+        'userId', p_snapshot#>>'{request,userId}',
+        'circleId', p_snapshot#>>'{request,circleId}',
+        'threadId', p_snapshot#>'{request,threadId}',
+        'source', p_snapshot#>>'{request,source}'
+      ))
+    AND p_snapshot->>'rootFingerprint' =
+      public.computer_task_root_fingerprint_v1(jsonb_build_object(
+        'schemaVersion', 1,
+        'namespace', 'computer_task_root',
+        'requestIdentityFingerprint',
+          p_snapshot->>'requestIdentityFingerprint',
+        'taskFingerprint', p_snapshot->>'taskFingerprint',
+        'source', p_snapshot#>>'{request,source}'
+      ))
+    AND p_snapshot->>'rootId' =
+      'computer_task_' || substring(p_snapshot->>'rootFingerprint' FROM 16)
+    AND p_snapshot->>'updatedAt' >= p_snapshot->>'createdAt'
+    AND (
+      p_snapshot->'terminalAt' = 'null'::jsonb
+      OR public.is_valid_computer_task_root_timestamp_v1(
+        p_snapshot->>'terminalAt'
+      )
+    )
+    AND (
+      p_snapshot->>'state' IN ('completed', 'failed', 'cancelled')
+    ) = (p_snapshot->'terminalAt' <> 'null'::jsonb)
+    AND (
+      p_snapshot->>'state' = 'completed'
+      OR p_snapshot->'completionProofFingerprint' = 'null'::jsonb
+    )
+    AND (
+      p_snapshot->>'state' <> 'completed'
+      OR (
+        p_snapshot->>'replayPolicy' = 'terminal'
+        AND p_snapshot->'completionProofFingerprint' <> 'null'::jsonb
+        AND jsonb_typeof(p_snapshot->'acceptance') = 'object'
+        AND jsonb_typeof(p_snapshot#>'{acceptance,actions}') = 'array'
+        AND jsonb_array_length(p_snapshot#>'{acceptance,actions}') BETWEEN 1 AND 128
+        AND NOT EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(p_snapshot#>'{acceptance,actions}') AS action(value)
+          WHERE action.value->>'state' <> 'verified'
+        )
+      )
+    )
+    AND (
+      p_snapshot->>'state' NOT IN ('failed', 'cancelled')
+      OR p_snapshot->>'replayPolicy' = 'terminal'
+    )
+    AND (
+      p_snapshot->>'state' <> 'verification_only'
+      OR (
+        p_snapshot->>'replayPolicy' = 'verification_only'
+        AND (
+          p_snapshot#>>'{interruptLatch,kind}' = 'human_foreground_override'
+          OR (
+            jsonb_typeof(p_snapshot->'acceptance') = 'object'
+            AND jsonb_typeof(p_snapshot#>'{acceptance,actions}') = 'array'
+            AND EXISTS (
+              SELECT 1
+              FROM jsonb_array_elements(p_snapshot#>'{acceptance,actions}') AS action(value)
+              WHERE action.value->>'state' IN ('dispatched', 'outcome_unknown')
+            )
+          )
+        )
+      )
+    )
+    AND (
+      p_snapshot->>'state' IN ('completed', 'failed', 'cancelled')
+      OR NOT (
+        jsonb_typeof(p_snapshot#>'{acceptance,actions}') = 'array'
+        AND EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(p_snapshot#>'{acceptance,actions}') AS action(value)
+          WHERE action.value->>'state' IN ('dispatched', 'outcome_unknown')
+        )
+      )
+      OR (
+        p_snapshot->>'state' = 'verification_only'
+        AND p_snapshot->>'replayPolicy' = 'verification_only'
+      )
+    )
+    AND (
+      p_snapshot->>'state' <> 'cancelled'
+      OR p_snapshot#>>'{interruptLatch,kind}' = 'stop_requested'
+    )
+    AND (
+      p_snapshot->>'state' IN ('completed', 'failed', 'cancelled', 'verification_only')
+      OR (
+        p_snapshot->>'replayPolicy' = 'normal'
+        AND p_snapshot->'interruptLatch' = 'null'::jsonb
+      )
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM jsonb_object_keys(p_snapshot) AS snapshot_keys(snapshot_key)
+      WHERE snapshot_key <> ALL (ARRAY[
+        'schemaVersion',
+        'rootId',
+        'rootFingerprint',
+        'requestIdentityFingerprint',
+        'taskFingerprint',
+        'request',
+        'revision',
+        'state',
+        'replayPolicy',
+        'interruptLatch',
+        'attempts',
+        'checkpoints',
+        'foregroundLease',
+        'acceptance',
+        'completionProofFingerprint',
+        'createdAt',
+        'updatedAt',
+        'terminalAt'
+      ])
+    )
+  ), false);
+$function$;
+
+REVOKE ALL ON FUNCTION public.is_valid_computer_task_root_snapshot_v1(jsonb)
+  FROM PUBLIC, anon, authenticated;
+
+CREATE OR REPLACE FUNCTION public.admit_computer_task_root_v1(
+  p_circle_id uuid,
+  p_thread_id uuid,
+  p_request_identity_fingerprint text,
+  p_task_fingerprint text,
+  p_root_fingerprint text,
+  p_root_snapshot jsonb
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_actor uuid := auth.uid();
+  v_existing public.computer_task_roots%ROWTYPE;
+  v_created public.computer_task_roots%ROWTYPE;
+  v_run_id uuid;
+BEGIN
+  IF v_actor IS NULL THEN
+    RETURN jsonb_build_object(
+      'schemaVersion', 1,
+      'ok', false,
+      'code', 'not_authenticated',
+      'message', 'Authenticated computer-task admission is required.'
+    );
+  END IF;
+
+  IF (
+    p_circle_id IS NULL
+    OR COALESCE(p_request_identity_fingerprint, '')
+      !~ '^args-v2:sha256:[0-9a-f]{64}$'
+    OR COALESCE(p_task_fingerprint, '')
+      !~ '^args-v2:sha256:[0-9a-f]{64}$'
+    OR COALESCE(p_root_fingerprint, '')
+      !~ '^args-v2:sha256:[0-9a-f]{64}$'
+  ) THEN
+    RETURN jsonb_build_object(
+      'schemaVersion', 1,
+      'ok', false,
+      'code', 'invalid_input',
+      'message', 'Computer-task root admission did not match its exact request snapshot.'
+    );
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.circle_members AS member
+    WHERE member.circle_id = p_circle_id
+      AND member.user_id = v_actor
+  ) THEN
+    RETURN jsonb_build_object(
+      'schemaVersion', 1,
+      'ok', false,
+      'code', 'scope_denied',
+      'message', 'Computer-task root admission is outside the authenticated circle.'
+    );
+  END IF;
+
+  IF p_thread_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1
+    FROM public.circle_chat_threads AS thread
+    WHERE thread.id = p_thread_id
+      AND thread.circle_id = p_circle_id
+      AND (
+        thread.visibility = 'circle'
+        OR thread.created_by = v_actor
+        OR EXISTS (
+          SELECT 1
+          FROM public.circle_chat_thread_members AS thread_member
+          WHERE thread_member.thread_id = thread.id
+            AND thread_member.user_id = v_actor
+        )
+      )
+  ) THEN
+    RETURN jsonb_build_object(
+      'schemaVersion', 1,
+      'ok', false,
+      'code', 'scope_denied',
+      'message', 'Computer-task root admission is outside the authenticated chat thread.'
+    );
+  END IF;
+
+  -- Serialize competing clients before either can create the wrapper run.
+  PERFORM pg_advisory_xact_lock(hashtextextended(
+    v_actor::text || ':' || p_circle_id::text || ':' || p_request_identity_fingerprint,
+    0
+  ));
+
+  SELECT *
+  INTO v_existing
+  FROM public.computer_task_roots AS root
+  WHERE root.user_id = v_actor
+    AND root.circle_id = p_circle_id
+    AND root.request_identity_fingerprint = p_request_identity_fingerprint
+  ORDER BY root.created_at ASC
+  LIMIT 1
+  FOR UPDATE;
+
+  IF FOUND THEN
+    IF (
+      v_existing.thread_id IS NOT DISTINCT FROM p_thread_id
+      AND v_existing.root_fingerprint = p_root_fingerprint
+      AND v_existing.task_fingerprint = p_task_fingerprint
+    ) THEN
+      RETURN jsonb_build_object(
+        'schemaVersion', 1,
+        'ok', true,
+        'disposition', 'duplicate',
+        'rootRowId', v_existing.id,
+        'runId', v_existing.run_id,
+        'revision', v_existing.revision,
+        'state', v_existing.state,
+        'rootSnapshot', v_existing.root_snapshot
+      );
+    END IF;
+    RETURN jsonb_build_object(
+      'schemaVersion', 1,
+      'ok', false,
+      'code', 'identity_conflict',
+      'message', 'The admitted request identity is already bound to a different root or task.'
+    );
+  END IF;
+
+  -- Only a genuinely new admission pays the bounded snapshot-validation and
+  -- identity-derivation cost. Exact duplicates return the already-authorized
+  -- canonical row, so refresh does not depend on the client's old timestamp.
+  IF (
+    NOT public.is_valid_computer_task_root_snapshot_v1(p_root_snapshot)
+    OR p_root_snapshot->>'rootFingerprint' <> p_root_fingerprint
+    OR p_root_snapshot->>'requestIdentityFingerprint' <> p_request_identity_fingerprint
+    OR p_root_snapshot->>'taskFingerprint' <> p_task_fingerprint
+    OR p_root_snapshot->>'revision' <> '0'
+    OR p_root_snapshot->>'state' <> 'admitted'
+    OR p_root_snapshot->>'replayPolicy' <> 'normal'
+    OR p_root_snapshot->>'rootId'
+      <> 'computer_task_' || substring(p_root_fingerprint FROM 16)
+    OR p_root_snapshot->'interruptLatch' <> 'null'::jsonb
+    OR p_root_snapshot->'attempts' <> '[]'::jsonb
+    OR p_root_snapshot->'checkpoints' <> '[]'::jsonb
+    OR p_root_snapshot->'foregroundLease' <> 'null'::jsonb
+    OR p_root_snapshot->'acceptance' <> 'null'::jsonb
+    OR p_root_snapshot->'completionProofFingerprint' <> 'null'::jsonb
+    OR p_root_snapshot->'terminalAt' <> 'null'::jsonb
+    OR p_root_snapshot->>'createdAt' <> p_root_snapshot->>'updatedAt'
+    OR (p_root_snapshot->>'createdAt')::timestamptz
+      NOT BETWEEN now() - interval '5 minutes' AND now() + interval '1 minute'
+    OR p_root_snapshot#>>'{request,userId}' <> v_actor::text
+    OR p_root_snapshot#>>'{request,circleId}' <> p_circle_id::text
+    OR (
+      p_thread_id IS NULL
+      AND p_root_snapshot#>'{request,threadId}' <> 'null'::jsonb
+    )
+    OR (
+      p_thread_id IS NOT NULL
+      AND p_root_snapshot#>>'{request,threadId}' <> p_thread_id::text
+    )
+  ) THEN
+    RETURN jsonb_build_object(
+      'schemaVersion', 1,
+      'ok', false,
+      'code', 'invalid_input',
+      'message', 'Computer-task root admission did not match its exact request snapshot.'
+    );
+  END IF;
+
+  INSERT INTO public.agent_runs (
+    circle_id,
+    user_id,
+    surface,
+    title,
+    goal,
+    mode,
+    provider,
+    status,
+    metadata
+  ) VALUES (
+    p_circle_id,
+    v_actor,
+    'main_chat',
+    'Computer task',
+    NULL,
+    'act',
+    'openswan',
+    'planning',
+    jsonb_build_object(
+      'schemaVersion', 3,
+      'executionKind', 'run_computer_task',
+      'universalComputerTaskRoot', true,
+      'computerTaskRootId', p_root_snapshot->>'rootId',
+      'computerTaskRootFingerprint', p_root_fingerprint,
+      'requestIdentityFingerprint', p_request_identity_fingerprint,
+      'taskFingerprint', p_task_fingerprint,
+      'circleChatThreadId', p_thread_id,
+      'computerTaskRootState', 'admitted',
+      'computerTaskRootRevision', 0,
+      'taskCompletionVerified', false,
+      'rootCoordinationOnly', true,
+      'redacted', true
+    )
+  )
+  RETURNING id INTO v_run_id;
+
+  INSERT INTO public.computer_task_roots (
+    run_id,
+    circle_id,
+    user_id,
+    thread_id,
+    schema_version,
+    root_fingerprint,
+    request_identity_fingerprint,
+    task_fingerprint,
+    state,
+    replay_policy,
+    revision,
+    root_snapshot,
+    created_at,
+    updated_at,
+    terminal_at
+  ) VALUES (
+    v_run_id,
+    p_circle_id,
+    v_actor,
+    p_thread_id,
+    1,
+    p_root_fingerprint,
+    p_request_identity_fingerprint,
+    p_task_fingerprint,
+    'admitted',
+    'normal',
+    0,
+    p_root_snapshot,
+    (p_root_snapshot->>'createdAt')::timestamptz,
+    (p_root_snapshot->>'updatedAt')::timestamptz,
+    NULL
+  )
+  RETURNING * INTO v_created;
+
+  RETURN jsonb_build_object(
+    'schemaVersion', 1,
+    'ok', true,
+    'disposition', 'created',
+    'rootRowId', v_created.id,
+    'runId', v_created.run_id,
+    'revision', v_created.revision,
+    'state', v_created.state,
+    'rootSnapshot', v_created.root_snapshot
+  );
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.read_computer_task_root_v1(
+  p_root_row_id uuid
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_actor uuid := auth.uid();
+  v_root public.computer_task_roots%ROWTYPE;
+BEGIN
+  IF v_actor IS NULL THEN
+    RETURN jsonb_build_object(
+      'schemaVersion', 1,
+      'ok', false,
+      'code', 'not_authenticated',
+      'message', 'Authenticated computer-task root access is required.'
+    );
+  END IF;
+
+  IF p_root_row_id IS NULL THEN
+    RETURN jsonb_build_object(
+      'schemaVersion', 1,
+      'ok', false,
+      'code', 'invalid_input',
+      'message', 'A computer-task root identifier is required.'
+    );
+  END IF;
+
+  SELECT *
+  INTO v_root
+  FROM public.computer_task_roots AS root
+  WHERE root.id = p_root_row_id
+    AND root.user_id = v_actor
+    AND EXISTS (
+      SELECT 1
+      FROM public.circle_members AS member
+      WHERE member.circle_id = root.circle_id
+        AND member.user_id = v_actor
+    )
+    AND (
+      root.thread_id IS NULL
+      OR EXISTS (
+        SELECT 1
+        FROM public.circle_chat_threads AS thread
+        WHERE thread.id = root.thread_id
+          AND thread.circle_id = root.circle_id
+          AND (
+            thread.visibility = 'circle'
+            OR thread.created_by = v_actor
+            OR EXISTS (
+              SELECT 1
+              FROM public.circle_chat_thread_members AS thread_member
+              WHERE thread_member.thread_id = thread.id
+                AND thread_member.user_id = v_actor
+            )
+          )
+      )
+    )
+  LIMIT 1;
+
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object(
+      'schemaVersion', 1,
+      'ok', false,
+      'code', 'not_found',
+      'message', 'The authenticated computer-task root was not found.'
+    );
+  END IF;
+
+  RETURN jsonb_build_object(
+    'schemaVersion', 1,
+    'ok', true,
+    'disposition', 'read',
+    'rootRowId', v_root.id,
+    'runId', v_root.run_id,
+    'revision', v_root.revision,
+    'state', v_root.state,
+    'rootSnapshot', v_root.root_snapshot
+  );
+END;
+$function$;
+
+DROP FUNCTION IF EXISTS public.transition_computer_task_root_v1(
+  uuid, integer, jsonb
+);
+
+CREATE OR REPLACE FUNCTION public.transition_computer_task_root_v1(
+  p_root_row_id uuid,
+  p_expected_revision integer,
+  p_transition_type text,
+  p_root_snapshot jsonb
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_actor uuid := auth.uid();
+  v_root public.computer_task_roots%ROWTYPE;
+  v_next_revision integer;
+  v_next_state text;
+  v_next_replay_policy text;
+  v_next_terminal_at timestamptz;
+  v_run_status text;
+BEGIN
+  IF v_actor IS NULL THEN
+    RETURN jsonb_build_object(
+      'schemaVersion', 1,
+      'ok', false,
+      'code', 'not_authenticated',
+      'message', 'Authenticated computer-task transition is required.'
+    );
+  END IF;
+  IF (
+    p_root_row_id IS NULL
+    OR p_expected_revision IS NULL
+    OR p_expected_revision < 0
+    OR p_transition_type IS NULL
+    OR p_transition_type NOT IN (
+      'begin_attempt',
+      'finish_attempt',
+      'bind_acceptance',
+      'bind_action_dispatch',
+      'record_action_state',
+      'append_checkpoint',
+      'bind_foreground_lease',
+      'release_foreground_lease',
+      'set_waiting',
+      'stop_requested',
+      'human_foreground_override',
+      'complete',
+      'fail'
+    )
+  ) THEN
+    RETURN jsonb_build_object(
+      'schemaVersion', 1,
+      'ok', false,
+      'code', 'invalid_input',
+      'message', 'Computer-task transition snapshot was invalid.'
+    );
+  END IF;
+
+  SELECT *
+  INTO v_root
+  FROM public.computer_task_roots AS root
+  WHERE root.id = p_root_row_id
+    AND root.user_id = v_actor
+    AND EXISTS (
+      SELECT 1
+      FROM public.circle_members AS member
+      WHERE member.circle_id = root.circle_id
+        AND member.user_id = v_actor
+    )
+    AND (
+      root.thread_id IS NULL
+      OR EXISTS (
+        SELECT 1
+        FROM public.circle_chat_threads AS thread
+        WHERE thread.id = root.thread_id
+          AND thread.circle_id = root.circle_id
+          AND (
+            thread.visibility = 'circle'
+            OR thread.created_by = v_actor
+            OR EXISTS (
+              SELECT 1
+              FROM public.circle_chat_thread_members AS thread_member
+              WHERE thread_member.thread_id = thread.id
+                AND thread_member.user_id = v_actor
+            )
+          )
+      )
+    )
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object(
+      'schemaVersion', 1,
+      'ok', false,
+      'code', 'not_found',
+      'message', 'The authenticated computer-task root was not found.'
+    );
+  END IF;
+
+  IF v_root.revision <> p_expected_revision THEN
+    RETURN jsonb_build_object(
+      'schemaVersion', 1,
+      'ok', false,
+      'code', 'state_conflict',
+      'message', 'The computer-task root revision changed before this transition.',
+      'currentRevision', v_root.revision,
+      'rootSnapshot', v_root.root_snapshot
+    );
+  END IF;
+
+  IF NOT public.is_valid_computer_task_root_snapshot_v1(p_root_snapshot) THEN
+    RETURN jsonb_build_object(
+      'schemaVersion', 1,
+      'ok', false,
+      'code', 'invalid_input',
+      'message', 'Computer-task transition snapshot was invalid.'
+    );
+  END IF;
+
+  v_next_revision := (p_root_snapshot->>'revision')::integer;
+  v_next_state := p_root_snapshot->>'state';
+  v_next_replay_policy := p_root_snapshot->>'replayPolicy';
+
+  IF (
+    v_next_revision <> v_root.revision + 1
+    OR p_root_snapshot->>'rootFingerprint' <> v_root.root_fingerprint
+    OR p_root_snapshot->>'requestIdentityFingerprint' <> v_root.request_identity_fingerprint
+    OR p_root_snapshot->>'taskFingerprint' <> v_root.task_fingerprint
+    OR p_root_snapshot->>'rootId' <> v_root.root_snapshot->>'rootId'
+    OR p_root_snapshot->'request' IS DISTINCT FROM v_root.root_snapshot->'request'
+    OR p_root_snapshot->>'createdAt' <> v_root.root_snapshot->>'createdAt'
+    OR p_root_snapshot->>'updatedAt' < v_root.root_snapshot->>'updatedAt'
+    OR (p_root_snapshot->>'updatedAt')::timestamptz > now() + interval '1 minute'
+    OR p_root_snapshot#>>'{request,userId}' <> v_root.user_id::text
+    OR p_root_snapshot#>>'{request,circleId}' <> v_root.circle_id::text
+    OR (
+      v_root.thread_id IS NULL
+      AND p_root_snapshot#>'{request,threadId}' <> 'null'::jsonb
+    )
+    OR (
+      v_root.thread_id IS NOT NULL
+      AND p_root_snapshot#>>'{request,threadId}' <> v_root.thread_id::text
+    )
+    OR v_root.state IN ('completed', 'failed', 'cancelled')
+    OR (
+      v_root.state = 'verification_only'
+      AND v_next_state NOT IN (
+        'running', 'verification_only', 'completed', 'failed', 'cancelled'
+      )
+    )
+    OR (
+      v_root.state = 'admitted'
+      AND v_next_state NOT IN (
+        'admitted', 'running', 'waiting_approval', 'waiting_input', 'paused',
+        'verification_only', 'failed', 'cancelled'
+      )
+    )
+    OR (
+      v_root.state = 'running'
+      AND v_next_state NOT IN (
+        'running', 'waiting_approval', 'waiting_input', 'paused',
+        'verification_only', 'completed', 'failed', 'cancelled'
+      )
+    )
+    OR (
+      v_root.state IN ('waiting_approval', 'waiting_input', 'paused')
+      AND v_next_state NOT IN (
+        v_root.state, 'running', 'waiting_approval', 'waiting_input', 'paused',
+        'verification_only', 'completed', 'failed', 'cancelled'
+      )
+    )
+    OR (
+      v_root.replay_policy = 'terminal'
+      AND v_next_replay_policy <> 'terminal'
+    )
+    OR (
+      v_root.replay_policy = 'verification_only'
+      AND v_next_replay_policy = 'normal'
+      AND p_transition_type <> 'record_action_state'
+    )
+    OR (
+      v_root.replay_policy = 'verification_only'
+      AND p_transition_type NOT IN (
+        'append_checkpoint', 'record_action_state',
+        'release_foreground_lease', 'stop_requested',
+        'human_foreground_override'
+      )
+    )
+    OR (
+      v_root.root_snapshot->'interruptLatch' <> 'null'::jsonb
+      AND p_root_snapshot->'interruptLatch' IS DISTINCT FROM v_root.root_snapshot->'interruptLatch'
+      AND p_transition_type <> 'stop_requested'
+    )
+    OR (
+      v_root.root_snapshot->'acceptance' <> 'null'::jsonb
+      AND p_root_snapshot->'acceptance' IS DISTINCT FROM v_root.root_snapshot->'acceptance'
+      AND p_transition_type NOT IN (
+        'bind_action_dispatch', 'record_action_state'
+      )
+    )
+    OR CASE p_transition_type
+      WHEN 'append_checkpoint' THEN
+        (p_root_snapshot - ARRAY['revision', 'updatedAt', 'checkpoints'])
+          IS DISTINCT FROM
+        (v_root.root_snapshot - ARRAY['revision', 'updatedAt', 'checkpoints'])
+      WHEN 'begin_attempt' THEN
+        (p_root_snapshot - ARRAY['revision', 'state', 'updatedAt', 'attempts'])
+          IS DISTINCT FROM
+        (v_root.root_snapshot - ARRAY['revision', 'state', 'updatedAt', 'attempts'])
+      WHEN 'finish_attempt' THEN
+        (p_root_snapshot - ARRAY['revision', 'state', 'updatedAt', 'attempts'])
+          IS DISTINCT FROM
+        (v_root.root_snapshot - ARRAY['revision', 'state', 'updatedAt', 'attempts'])
+      WHEN 'bind_acceptance' THEN
+        (p_root_snapshot - ARRAY['revision', 'state', 'updatedAt', 'acceptance'])
+          IS DISTINCT FROM
+        (v_root.root_snapshot - ARRAY['revision', 'state', 'updatedAt', 'acceptance'])
+      WHEN 'bind_action_dispatch' THEN
+        (p_root_snapshot - ARRAY[
+          'revision', 'state', 'updatedAt', 'acceptance'
+        ])
+          IS DISTINCT FROM
+        (v_root.root_snapshot - ARRAY[
+          'revision', 'state', 'updatedAt', 'acceptance'
+        ])
+      WHEN 'record_action_state' THEN
+        (p_root_snapshot - ARRAY[
+          'revision', 'state', 'replayPolicy', 'updatedAt',
+          'acceptance', 'foregroundLease'
+        ]) IS DISTINCT FROM
+        (v_root.root_snapshot - ARRAY[
+          'revision', 'state', 'replayPolicy', 'updatedAt',
+          'acceptance', 'foregroundLease'
+        ])
+      WHEN 'bind_foreground_lease' THEN
+        (p_root_snapshot - ARRAY[
+          'revision', 'state', 'updatedAt', 'foregroundLease'
+        ]) IS DISTINCT FROM
+        (v_root.root_snapshot - ARRAY[
+          'revision', 'state', 'updatedAt', 'foregroundLease'
+        ])
+      WHEN 'release_foreground_lease' THEN
+        (p_root_snapshot - ARRAY['revision', 'updatedAt', 'foregroundLease'])
+          IS DISTINCT FROM
+        (v_root.root_snapshot - ARRAY['revision', 'updatedAt', 'foregroundLease'])
+      WHEN 'set_waiting' THEN
+        (p_root_snapshot - ARRAY['revision', 'state', 'updatedAt'])
+          IS DISTINCT FROM
+        (v_root.root_snapshot - ARRAY['revision', 'state', 'updatedAt'])
+      WHEN 'stop_requested' THEN
+        (p_root_snapshot - ARRAY[
+          'revision', 'state', 'replayPolicy', 'interruptLatch', 'attempts',
+          'foregroundLease', 'updatedAt', 'terminalAt'
+        ]) IS DISTINCT FROM
+        (v_root.root_snapshot - ARRAY[
+          'revision', 'state', 'replayPolicy', 'interruptLatch', 'attempts',
+          'foregroundLease', 'updatedAt', 'terminalAt'
+        ])
+      WHEN 'human_foreground_override' THEN
+        (p_root_snapshot - ARRAY[
+          'revision', 'state', 'replayPolicy', 'interruptLatch', 'attempts',
+          'foregroundLease', 'updatedAt'
+        ]) IS DISTINCT FROM
+        (v_root.root_snapshot - ARRAY[
+          'revision', 'state', 'replayPolicy', 'interruptLatch', 'attempts',
+          'foregroundLease', 'updatedAt'
+        ])
+      WHEN 'complete' THEN
+        (p_root_snapshot - ARRAY[
+          'revision', 'state', 'replayPolicy', 'attempts',
+          'completionProofFingerprint', 'updatedAt', 'terminalAt'
+        ]) IS DISTINCT FROM
+        (v_root.root_snapshot - ARRAY[
+          'revision', 'state', 'replayPolicy', 'attempts',
+          'completionProofFingerprint', 'updatedAt', 'terminalAt'
+        ])
+      WHEN 'fail' THEN
+        (p_root_snapshot - ARRAY[
+          'revision', 'state', 'replayPolicy', 'attempts', 'updatedAt', 'terminalAt'
+        ]) IS DISTINCT FROM
+        (v_root.root_snapshot - ARRAY[
+          'revision', 'state', 'replayPolicy', 'attempts', 'updatedAt', 'terminalAt'
+        ])
+      ELSE true
+    END
+    OR (
+      p_transition_type = 'append_checkpoint'
+      AND (
+        v_next_state <> v_root.state
+        OR p_root_snapshot->'attempts' IS DISTINCT FROM v_root.root_snapshot->'attempts'
+        OR p_root_snapshot->'foregroundLease' IS DISTINCT FROM v_root.root_snapshot->'foregroundLease'
+        OR p_root_snapshot->'acceptance' IS DISTINCT FROM v_root.root_snapshot->'acceptance'
+        OR jsonb_array_length(p_root_snapshot->'checkpoints')
+          <> jsonb_array_length(v_root.root_snapshot->'checkpoints') + 1
+        OR ((p_root_snapshot->'checkpoints')
+          - (jsonb_array_length(p_root_snapshot->'checkpoints') - 1))
+          IS DISTINCT FROM v_root.root_snapshot->'checkpoints'
+        OR jsonb_typeof(
+          p_root_snapshot->'checkpoints'
+            ->(jsonb_array_length(p_root_snapshot->'checkpoints') - 1)
+        ) <> 'object'
+        OR (
+          SELECT count(*)
+          FROM jsonb_object_keys(
+            p_root_snapshot->'checkpoints'
+              ->(jsonb_array_length(p_root_snapshot->'checkpoints') - 1)
+          ) AS checkpoint_key(key)
+        ) <> 7
+        OR (
+          (p_root_snapshot->'checkpoints'
+            ->(jsonb_array_length(p_root_snapshot->'checkpoints') - 1))
+          - ARRAY[
+            'checkpointId', 'sequence', 'attemptId', 'kind', 'rootState',
+            'recordedAt', 'evidenceFingerprint'
+          ]
+        ) <> '{}'::jsonb
+        OR COALESCE(
+          p_root_snapshot->'checkpoints'
+            ->(jsonb_array_length(p_root_snapshot->'checkpoints') - 1)
+            ->>'checkpointId',
+          ''
+        ) !~ '^[A-Za-z0-9][A-Za-z0-9._:@-]{0,239}$'
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(v_root.root_snapshot->'checkpoints') AS prior(value)
+          WHERE prior.value->>'checkpointId' =
+            p_root_snapshot->'checkpoints'
+              ->(jsonb_array_length(p_root_snapshot->'checkpoints') - 1)
+              ->>'checkpointId'
+        )
+        OR COALESCE(
+          p_root_snapshot->'checkpoints'
+            ->(jsonb_array_length(p_root_snapshot->'checkpoints') - 1)
+            ->>'sequence',
+          ''
+        ) !~ '^[0-9]{1,10}$'
+        OR (
+          p_root_snapshot->'checkpoints'
+            ->(jsonb_array_length(p_root_snapshot->'checkpoints') - 1)
+            ->>'sequence'
+        )::bigint <> jsonb_array_length(p_root_snapshot->'checkpoints')
+        OR COALESCE(
+          p_root_snapshot->'checkpoints'
+            ->(jsonb_array_length(p_root_snapshot->'checkpoints') - 1)
+            ->>'kind',
+          ''
+        ) NOT IN (
+          'plan', 'observation', 'approval', 'action', 'verification',
+          'recovery', 'terminal'
+        )
+        OR COALESCE(
+          p_root_snapshot->'checkpoints'
+            ->(jsonb_array_length(p_root_snapshot->'checkpoints') - 1)
+            ->>'rootState',
+          ''
+        ) <> v_root.state
+        OR p_root_snapshot->'checkpoints'
+            ->(jsonb_array_length(p_root_snapshot->'checkpoints') - 1)
+            ->>'recordedAt' <> p_root_snapshot->>'updatedAt'
+        OR (
+          p_root_snapshot->'checkpoints'
+            ->(jsonb_array_length(p_root_snapshot->'checkpoints') - 1)
+            ->'attemptId' <> 'null'::jsonb
+          AND NOT EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(v_root.root_snapshot->'attempts') AS attempt(value)
+            WHERE attempt.value->>'attemptId' =
+              p_root_snapshot->'checkpoints'
+                ->(jsonb_array_length(p_root_snapshot->'checkpoints') - 1)
+                ->>'attemptId'
+          )
+        )
+        OR (
+          p_root_snapshot->'checkpoints'
+            ->(jsonb_array_length(p_root_snapshot->'checkpoints') - 1)
+            ->'evidenceFingerprint' <> 'null'::jsonb
+          AND COALESCE(
+            p_root_snapshot->'checkpoints'
+              ->(jsonb_array_length(p_root_snapshot->'checkpoints') - 1)
+              ->>'evidenceFingerprint',
+            ''
+          ) !~ '^args-v2:sha256:[0-9a-f]{64}$'
+        )
+      )
+    )
+    OR (
+      p_transition_type = 'begin_attempt'
+      AND (
+        v_next_state <> 'running'
+        OR jsonb_array_length(p_root_snapshot->'attempts')
+          <> jsonb_array_length(v_root.root_snapshot->'attempts') + 1
+        OR ((p_root_snapshot->'attempts')
+          - (jsonb_array_length(p_root_snapshot->'attempts') - 1))
+          IS DISTINCT FROM v_root.root_snapshot->'attempts'
+        OR jsonb_typeof(
+          p_root_snapshot->'attempts'
+            ->(jsonb_array_length(p_root_snapshot->'attempts') - 1)
+        ) <> 'object'
+        OR (
+          SELECT count(*)
+          FROM jsonb_object_keys(
+            p_root_snapshot->'attempts'
+              ->(jsonb_array_length(p_root_snapshot->'attempts') - 1)
+          ) AS attempt_key(key)
+        ) <> 7
+        OR (
+          (p_root_snapshot->'attempts'
+            ->(jsonb_array_length(p_root_snapshot->'attempts') - 1))
+          - ARRAY[
+            'attemptId', 'index', 'kind', 'parentAttemptId', 'state',
+            'startedAt', 'finishedAt'
+          ]
+        ) <> '{}'::jsonb
+        OR COALESCE(
+          p_root_snapshot->'attempts'
+            ->(jsonb_array_length(p_root_snapshot->'attempts') - 1)
+            ->>'attemptId',
+          ''
+        ) !~ '^computer_attempt_[0-9a-f]{64}$'
+        OR COALESCE(
+          p_root_snapshot->'attempts'
+            ->(jsonb_array_length(p_root_snapshot->'attempts') - 1)
+            ->>'index',
+          ''
+        ) !~ '^[0-9]{1,10}$'
+        OR (
+          p_root_snapshot->'attempts'
+            ->(jsonb_array_length(p_root_snapshot->'attempts') - 1)
+            ->>'index'
+        )::bigint <> jsonb_array_length(p_root_snapshot->'attempts') - 1
+        OR COALESCE(
+          p_root_snapshot->'attempts'
+            ->(jsonb_array_length(p_root_snapshot->'attempts') - 1)
+            ->>'kind',
+          ''
+        ) NOT IN (
+          'deterministic', 'provider', 'compiler', 'connected_agent',
+          'capability_buildout', 'recovery'
+        )
+        OR p_root_snapshot->'attempts'
+            ->(jsonb_array_length(p_root_snapshot->'attempts') - 1)
+            ->>'state' <> 'active'
+        OR p_root_snapshot->'attempts'
+            ->(jsonb_array_length(p_root_snapshot->'attempts') - 1)
+            ->>'startedAt' <> p_root_snapshot->>'updatedAt'
+        OR p_root_snapshot->'attempts'
+            ->(jsonb_array_length(p_root_snapshot->'attempts') - 1)
+            ->'finishedAt' <> 'null'::jsonb
+        OR (
+          p_root_snapshot->'attempts'
+            ->(jsonb_array_length(p_root_snapshot->'attempts') - 1)
+            ->'parentAttemptId' <> 'null'::jsonb
+          AND NOT EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(v_root.root_snapshot->'attempts') AS parent(value)
+            WHERE parent.value->>'attemptId' =
+              p_root_snapshot->'attempts'
+                ->(jsonb_array_length(p_root_snapshot->'attempts') - 1)
+                ->>'parentAttemptId'
+          )
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(v_root.root_snapshot->'attempts') AS attempt(value)
+          WHERE attempt.value->>'state' = 'active'
+        )
+      )
+    )
+    OR (
+      p_transition_type = 'finish_attempt'
+      AND (
+        v_next_state <> 'paused'
+        OR v_root.root_snapshot#>>'{foregroundLease,status}' = 'active'
+        OR jsonb_array_length(p_root_snapshot->'attempts')
+          <> jsonb_array_length(v_root.root_snapshot->'attempts')
+        OR (
+          SELECT count(*)
+          FROM jsonb_array_elements(v_root.root_snapshot->'attempts')
+            WITH ORDINALITY AS prior(value, ordinal)
+          JOIN jsonb_array_elements(p_root_snapshot->'attempts')
+            WITH ORDINALITY AS next(value, ordinal)
+            USING (ordinal)
+          WHERE prior.value IS DISTINCT FROM next.value
+        ) <> 1
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(v_root.root_snapshot->'attempts')
+            WITH ORDINALITY AS prior(value, ordinal)
+          JOIN jsonb_array_elements(p_root_snapshot->'attempts')
+            WITH ORDINALITY AS next(value, ordinal)
+            USING (ordinal)
+          WHERE prior.value IS DISTINCT FROM next.value
+            AND (
+              prior.value->>'state' <> 'active'
+              OR prior.value->>'attemptId' =
+                v_root.root_snapshot#>>'{acceptance,attemptId}'
+              OR prior.value->'finishedAt' <> 'null'::jsonb
+              OR next.value->>'state' NOT IN (
+                'completed', 'failed', 'cancelled'
+              )
+              OR next.value->>'finishedAt' <> p_root_snapshot->>'updatedAt'
+              OR (next.value - ARRAY['state', 'finishedAt'])
+                IS DISTINCT FROM
+                (prior.value - ARRAY['state', 'finishedAt'])
+            )
+        )
+      )
+    )
+    OR (
+      p_transition_type = 'bind_acceptance'
+      AND (
+        v_next_state <> 'running'
+        OR v_root.root_snapshot->'acceptance' <> 'null'::jsonb
+        OR jsonb_typeof(p_root_snapshot->'acceptance') <> 'object'
+        OR p_root_snapshot#>>'{acceptance,boundAt}'
+          <> p_root_snapshot->>'updatedAt'
+        OR NOT EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(v_root.root_snapshot->'attempts')
+            AS attempt(value)
+          WHERE attempt.value->>'attemptId' =
+              p_root_snapshot#>>'{acceptance,attemptId}'
+            AND attempt.value->>'state' = 'active'
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(p_root_snapshot#>'{acceptance,actions}')
+            AS action(value)
+          WHERE action.value->>'state' <> 'planned'
+            OR action.value->'proofFingerprint' <> 'null'::jsonb
+            OR action.value->'dispatchBinding' <> 'null'::jsonb
+            OR action.value->>'updatedAt' <>
+              p_root_snapshot#>>'{acceptance,boundAt}'
+        )
+      )
+    )
+    OR (
+      p_transition_type = 'bind_action_dispatch'
+      AND (
+        v_next_state <> 'running'
+        OR v_root.replay_policy <> 'normal'
+        OR jsonb_typeof(v_root.root_snapshot->'acceptance')
+          IS DISTINCT FROM 'object'
+        OR NOT EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(v_root.root_snapshot->'attempts')
+            AS attempt(value)
+          WHERE attempt.value->>'attemptId' =
+              v_root.root_snapshot#>>'{acceptance,attemptId}'
+            AND attempt.value->>'state' = 'active'
+        )
+        OR jsonb_array_length(p_root_snapshot#>'{acceptance,actions}')
+          <> jsonb_array_length(v_root.root_snapshot#>'{acceptance,actions}')
+        OR ((p_root_snapshot->'acceptance') - (ARRAY['actions']::text[]))
+          IS DISTINCT FROM
+          ((v_root.root_snapshot->'acceptance') - (ARRAY['actions']::text[]))
+        OR (
+          SELECT count(*)
+          FROM jsonb_array_elements(v_root.root_snapshot#>'{acceptance,actions}')
+            WITH ORDINALITY AS prior(value, ordinal)
+          JOIN jsonb_array_elements(p_root_snapshot#>'{acceptance,actions}')
+            WITH ORDINALITY AS next(value, ordinal)
+            USING (ordinal)
+          WHERE prior.value IS DISTINCT FROM next.value
+        ) <> 1
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(v_root.root_snapshot#>'{acceptance,actions}')
+            WITH ORDINALITY AS prior(value, ordinal)
+          JOIN jsonb_array_elements(p_root_snapshot#>'{acceptance,actions}')
+            WITH ORDINALITY AS next(value, ordinal)
+            USING (ordinal)
+          WHERE prior.value IS DISTINCT FROM next.value
+            AND (
+              prior.value->>'state' <> 'planned'
+              OR next.value->>'state' <> 'planned'
+              OR prior.value->'dispatchBinding' <> 'null'::jsonb
+              OR jsonb_typeof(next.value->'dispatchBinding') <> 'object'
+              OR (next.value - ARRAY['dispatchBinding', 'updatedAt'])
+                IS DISTINCT FROM
+                (prior.value - ARRAY['dispatchBinding', 'updatedAt'])
+              OR next.value->>'updatedAt' <> p_root_snapshot->>'updatedAt'
+              OR next.value#>>'{dispatchBinding,boundAt}' <>
+                p_root_snapshot->>'updatedAt'
+            )
+        )
+      )
+    )
+    OR (
+      p_transition_type = 'record_action_state'
+      AND (
+        v_next_state NOT IN ('running', 'verification_only')
+        OR jsonb_typeof(v_root.root_snapshot#>'{acceptance,actions}')
+          IS DISTINCT FROM 'array'
+        OR jsonb_array_length(p_root_snapshot#>'{acceptance,actions}')
+          <> jsonb_array_length(v_root.root_snapshot#>'{acceptance,actions}')
+        OR ((p_root_snapshot->'acceptance') - (ARRAY['actions']::text[]))
+          IS DISTINCT FROM
+          ((v_root.root_snapshot->'acceptance') - (ARRAY['actions']::text[]))
+        OR (
+          SELECT count(*)
+          FROM jsonb_array_elements(v_root.root_snapshot#>'{acceptance,actions}')
+            WITH ORDINALITY AS prior(value, ordinal)
+          JOIN jsonb_array_elements(p_root_snapshot#>'{acceptance,actions}')
+            WITH ORDINALITY AS next(value, ordinal)
+            USING (ordinal)
+          WHERE prior.value IS DISTINCT FROM next.value
+        ) <> 1
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(v_root.root_snapshot#>'{acceptance,actions}')
+            WITH ORDINALITY AS prior(value, ordinal)
+          JOIN jsonb_array_elements(p_root_snapshot#>'{acceptance,actions}')
+            WITH ORDINALITY AS next(value, ordinal)
+            USING (ordinal)
+          WHERE prior.value IS DISTINCT FROM next.value
+            AND (
+              (next.value - ARRAY['state', 'proofFingerprint', 'updatedAt'])
+                IS DISTINCT FROM
+                (prior.value - ARRAY['state', 'proofFingerprint', 'updatedAt'])
+              OR NOT (
+                prior.value->>'state' = 'planned'
+                  AND next.value->>'state' = 'claimed'
+                OR prior.value->>'state' = 'claimed'
+                  AND next.value->>'state' IN ('dispatched', 'failed')
+                OR prior.value->>'state' = 'dispatched'
+                  AND next.value->>'state' IN ('verified', 'outcome_unknown')
+                OR prior.value->>'state' = 'outcome_unknown'
+                  AND next.value->>'state' = 'verified'
+              )
+              OR (
+                prior.value->>'state' = 'planned'
+                AND next.value->>'state' = 'claimed'
+                AND (
+                  jsonb_typeof(next.value->'dispatchBinding')
+                    IS DISTINCT FROM 'object'
+                  OR next.value#>>'{dispatchBinding,authorizationCategory}'
+                    IN ('proposal_only', 'unsupported')
+                  OR (
+                    (next.value->>'mutatesState')::boolean
+                    AND next.value#>>'{dispatchBinding,mutationAuthority}'
+                      NOT IN ('action_ledger', 'provider_idempotency')
+                  )
+                  OR (
+                    NOT (next.value->>'mutatesState')::boolean
+                    AND next.value#>>'{dispatchBinding,mutationAuthority}'
+                      <> 'read_only'
+                  )
+                )
+              )
+              OR (
+                next.value->>'state' IN ('claimed', 'dispatched')
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM jsonb_array_elements(
+                    v_root.root_snapshot->'attempts'
+                  ) AS owner(value)
+                  WHERE owner.value->>'attemptId' = next.value->>'attemptId'
+                    AND owner.value->>'state' = 'active'
+                )
+              )
+              OR next.value->>'updatedAt' <> p_root_snapshot->>'updatedAt'
+            )
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(v_root.root_snapshot#>'{acceptance,actions}')
+            WITH ORDINALITY AS prior(value, ordinal)
+          JOIN jsonb_array_elements(p_root_snapshot#>'{acceptance,actions}')
+            WITH ORDINALITY AS next(value, ordinal)
+            USING (ordinal)
+          WHERE prior.value IS DISTINCT FROM next.value
+            AND next.value->>'state' = 'claimed'
+            AND (
+              EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements(
+                  v_root.root_snapshot#>'{acceptance,actions}'
+                ) AS other(value)
+                WHERE (
+                  (other.value->>'index')::integer
+                    < (next.value->>'index')::integer
+                  AND other.value->>'state' <> 'verified'
+                )
+                OR (
+                  other.value->>'actionId' <> next.value->>'actionId'
+                  AND other.value->>'state' IN ('claimed', 'dispatched')
+                )
+              )
+            )
+        )
+        OR (
+          v_root.replay_policy = 'verification_only'
+          AND EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(
+              v_root.root_snapshot#>'{acceptance,actions}'
+            ) WITH ORDINALITY AS prior(value, ordinal)
+            JOIN jsonb_array_elements(
+              p_root_snapshot#>'{acceptance,actions}'
+            ) WITH ORDINALITY AS next(value, ordinal)
+              USING (ordinal)
+            WHERE prior.value IS DISTINCT FROM next.value
+              AND NOT (
+                prior.value->>'state' = 'dispatched'
+                AND next.value->>'state' IN ('verified', 'outcome_unknown')
+                OR prior.value->>'state' = 'outcome_unknown'
+                AND next.value->>'state' = 'verified'
+              )
+          )
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(v_root.root_snapshot#>'{acceptance,actions}')
+            WITH ORDINALITY AS prior(value, ordinal)
+          JOIN jsonb_array_elements(p_root_snapshot#>'{acceptance,actions}')
+            WITH ORDINALITY AS next(value, ordinal)
+            USING (ordinal)
+          WHERE prior.value IS DISTINCT FROM next.value
+            AND next.value->>'state' = 'dispatched'
+            AND (next.value->>'requiresForegroundLease')::boolean
+            AND (
+              p_root_snapshot#>>'{foregroundLease,status}'
+                IS DISTINCT FROM 'active'
+              OR p_root_snapshot#>>'{foregroundLease,actionId}'
+                IS DISTINCT FROM
+                next.value->>'actionId'
+              OR p_root_snapshot#>>'{foregroundLease,expiresAt}' IS NULL
+              OR (p_root_snapshot#>>'{foregroundLease,expiresAt}')::timestamptz
+                <= (p_root_snapshot->>'updatedAt')::timestamptz
+            )
+        )
+        OR (
+          EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(p_root_snapshot#>'{acceptance,actions}')
+              AS action(value)
+            WHERE action.value->>'state' IN ('dispatched', 'outcome_unknown')
+          )
+          AND (
+            v_next_state <> 'verification_only'
+            OR v_next_replay_policy <> 'verification_only'
+          )
+        )
+        OR (
+          NOT EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(p_root_snapshot#>'{acceptance,actions}')
+              AS action(value)
+            WHERE action.value->>'state' IN ('dispatched', 'outcome_unknown')
+          )
+          AND v_root.root_snapshot#>>'{interruptLatch,kind}'
+            IS DISTINCT FROM 'human_foreground_override'
+          AND (
+            v_next_state <> 'running'
+            OR v_next_replay_policy <> 'normal'
+          )
+        )
+        OR p_root_snapshot->'foregroundLease' IS DISTINCT FROM (
+          CASE
+            WHEN v_root.root_snapshot#>>'{foregroundLease,status}' = 'active'
+              AND EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements(
+                  v_root.root_snapshot#>'{acceptance,actions}'
+                ) WITH ORDINALITY AS prior(value, ordinal)
+                JOIN jsonb_array_elements(
+                  p_root_snapshot#>'{acceptance,actions}'
+                ) WITH ORDINALITY AS next(value, ordinal)
+                  USING (ordinal)
+                WHERE prior.value IS DISTINCT FROM next.value
+                  AND next.value->>'actionId' =
+                    v_root.root_snapshot#>>'{foregroundLease,actionId}'
+                  AND next.value->>'state' IN (
+                    'verified', 'failed', 'outcome_unknown'
+                  )
+              )
+            THEN jsonb_set(
+              jsonb_set(
+                COALESCE(
+                  NULLIF(
+                    v_root.root_snapshot->'foregroundLease',
+                    'null'::jsonb
+                  ),
+                  '{}'::jsonb
+                ),
+                '{status}',
+                '"released"'::jsonb
+              ),
+              '{releasedAt}',
+              to_jsonb(p_root_snapshot->>'updatedAt')
+            )
+            ELSE v_root.root_snapshot->'foregroundLease'
+          END
+        )
+      )
+    )
+    OR (
+      p_transition_type = 'bind_foreground_lease'
+      AND (
+        v_next_state <> 'running'
+        OR v_root.root_snapshot#>>'{foregroundLease,status}' = 'active'
+        OR p_root_snapshot#>>'{foregroundLease,status}' <> 'active'
+        OR p_root_snapshot#>'{foregroundLease,releasedAt}' <> 'null'::jsonb
+        OR p_root_snapshot#>>'{foregroundLease,acquiredAt}'
+          <> p_root_snapshot->>'updatedAt'
+        OR NOT EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(v_root.root_snapshot#>'{acceptance,actions}')
+            AS action(value)
+          WHERE action.value->>'actionId' =
+              p_root_snapshot#>>'{foregroundLease,actionId}'
+            AND (action.value->>'requiresForegroundLease')::boolean
+            AND action.value->>'state' IN ('planned', 'claimed')
+            AND EXISTS (
+              SELECT 1
+              FROM jsonb_array_elements(
+                v_root.root_snapshot->'attempts'
+              ) AS owner(value)
+              WHERE owner.value->>'attemptId' = action.value->>'attemptId'
+                AND owner.value->>'state' = 'active'
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM jsonb_array_elements(
+                v_root.root_snapshot#>'{acceptance,actions}'
+              ) AS other(value)
+              WHERE (
+                (other.value->>'index')::integer <
+                  (action.value->>'index')::integer
+                AND other.value->>'state' <> 'verified'
+              )
+              OR (
+                other.value->>'actionId' <> action.value->>'actionId'
+                AND other.value->>'state' IN ('claimed', 'dispatched')
+              )
+            )
+        )
+      )
+    )
+    OR (
+      p_transition_type = 'release_foreground_lease'
+      AND (
+        v_next_state <> v_root.state
+        OR v_root.root_snapshot#>>'{foregroundLease,status}'
+          IS DISTINCT FROM 'active'
+        OR p_root_snapshot#>>'{foregroundLease,status}'
+          IS DISTINCT FROM 'released'
+        OR p_root_snapshot#>>'{foregroundLease,releasedAt}'
+          <> p_root_snapshot->>'updatedAt'
+        OR ((p_root_snapshot->'foregroundLease') - ARRAY['status', 'releasedAt'])
+          IS DISTINCT FROM
+          ((v_root.root_snapshot->'foregroundLease') - ARRAY['status', 'releasedAt'])
+      )
+    )
+    OR (
+      p_transition_type = 'set_waiting'
+      AND (
+        v_next_state NOT IN ('waiting_approval', 'waiting_input', 'paused')
+        OR v_root.root_snapshot#>>'{foregroundLease,status}' = 'active'
+        OR (
+          v_next_state = 'paused'
+          AND EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(v_root.root_snapshot->'attempts') AS attempt(value)
+            WHERE attempt.value->>'state' = 'active'
+          )
+        )
+      )
+    )
+    OR (
+      p_transition_type = 'stop_requested'
+      AND (
+        v_next_state <> 'cancelled'
+        OR v_next_replay_policy <> 'terminal'
+        OR p_root_snapshot->>'terminalAt' <> p_root_snapshot->>'updatedAt'
+        OR p_root_snapshot->'completionProofFingerprint' <> 'null'::jsonb
+        OR p_root_snapshot#>>'{interruptLatch,kind}' <> 'stop_requested'
+        OR p_root_snapshot#>>'{interruptLatch,latchedAt}'
+          <> p_root_snapshot->>'updatedAt'
+        OR (p_root_snapshot#>>'{interruptLatch,revision}')::integer
+          <> v_next_revision
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(
+            COALESCE(
+              v_root.root_snapshot#>'{acceptance,actions}',
+              '[]'::jsonb
+            )
+          ) AS action(value)
+          WHERE action.value->>'state' IN (
+            'claimed', 'dispatched', 'outcome_unknown'
+          )
+        )
+        OR jsonb_array_length(p_root_snapshot->'attempts')
+          <> jsonb_array_length(v_root.root_snapshot->'attempts')
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(v_root.root_snapshot->'attempts')
+            WITH ORDINALITY AS prior(value, ordinal)
+          JOIN jsonb_array_elements(p_root_snapshot->'attempts')
+            WITH ORDINALITY AS next(value, ordinal)
+            USING (ordinal)
+          WHERE next.value IS DISTINCT FROM (
+            CASE
+              WHEN prior.value->>'state' = 'active'
+              THEN jsonb_set(
+                jsonb_set(prior.value, '{state}', '"cancelled"'::jsonb),
+                '{finishedAt}',
+                to_jsonb(p_root_snapshot->>'updatedAt')
+              )
+              ELSE prior.value
+            END
+          )
+        )
+        OR p_root_snapshot->'foregroundLease' IS DISTINCT FROM (
+          CASE
+            WHEN v_root.root_snapshot#>>'{foregroundLease,status}' = 'active'
+            THEN jsonb_set(
+              jsonb_set(
+                COALESCE(
+                  NULLIF(
+                    v_root.root_snapshot->'foregroundLease',
+                    'null'::jsonb
+                  ),
+                  '{}'::jsonb
+                ),
+                '{status}',
+                '"revoked"'::jsonb
+              ),
+              '{releasedAt}',
+              to_jsonb(p_root_snapshot->>'updatedAt')
+            )
+            ELSE v_root.root_snapshot->'foregroundLease'
+          END
+        )
+      )
+    )
+    OR (
+      p_transition_type = 'human_foreground_override'
+      AND (
+        v_next_state <> 'verification_only'
+        OR v_next_replay_policy <> 'verification_only'
+        OR v_root.root_snapshot->'interruptLatch' <> 'null'::jsonb
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(
+            COALESCE(
+              v_root.root_snapshot#>'{acceptance,actions}',
+              '[]'::jsonb
+            )
+          ) AS action(value)
+          WHERE action.value->>'state' = 'claimed'
+        )
+        OR p_root_snapshot#>>'{interruptLatch,kind}' <>
+          'human_foreground_override'
+        OR p_root_snapshot#>>'{interruptLatch,latchedAt}'
+          <> p_root_snapshot->>'updatedAt'
+        OR (p_root_snapshot#>>'{interruptLatch,revision}')::integer
+          <> v_next_revision
+        OR jsonb_array_length(p_root_snapshot->'attempts')
+          <> jsonb_array_length(v_root.root_snapshot->'attempts')
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(v_root.root_snapshot->'attempts')
+            WITH ORDINALITY AS prior(value, ordinal)
+          JOIN jsonb_array_elements(p_root_snapshot->'attempts')
+            WITH ORDINALITY AS next(value, ordinal)
+            USING (ordinal)
+          WHERE next.value IS DISTINCT FROM (
+            CASE
+              WHEN prior.value->>'state' = 'active'
+              THEN jsonb_set(
+                jsonb_set(prior.value, '{state}', '"cancelled"'::jsonb),
+                '{finishedAt}',
+                to_jsonb(p_root_snapshot->>'updatedAt')
+              )
+              ELSE prior.value
+            END
+          )
+        )
+        OR p_root_snapshot->'foregroundLease' IS DISTINCT FROM (
+          CASE
+            WHEN v_root.root_snapshot#>>'{foregroundLease,status}' = 'active'
+            THEN jsonb_set(
+              jsonb_set(
+                COALESCE(
+                  NULLIF(
+                    v_root.root_snapshot->'foregroundLease',
+                    'null'::jsonb
+                  ),
+                  '{}'::jsonb
+                ),
+                '{status}',
+                '"revoked"'::jsonb
+              ),
+              '{releasedAt}',
+              to_jsonb(p_root_snapshot->>'updatedAt')
+            )
+            ELSE v_root.root_snapshot->'foregroundLease'
+          END
+        )
+      )
+    )
+    OR (
+      p_transition_type = 'complete'
+      AND (
+        v_next_state <> 'completed'
+        OR v_next_replay_policy <> 'terminal'
+        OR p_root_snapshot->>'terminalAt' <> p_root_snapshot->>'updatedAt'
+        OR p_root_snapshot->'completionProofFingerprint' = 'null'::jsonb
+        OR v_root.root_snapshot->'acceptance' = 'null'::jsonb
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(
+            v_root.root_snapshot#>'{acceptance,actions}'
+          ) AS action(value)
+          WHERE action.value->>'state' <> 'verified'
+        )
+        OR v_root.root_snapshot#>>'{foregroundLease,status}' = 'active'
+        OR jsonb_array_length(p_root_snapshot->'attempts')
+          <> jsonb_array_length(v_root.root_snapshot->'attempts')
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(v_root.root_snapshot->'attempts')
+            WITH ORDINALITY AS prior(value, ordinal)
+          JOIN jsonb_array_elements(p_root_snapshot->'attempts')
+            WITH ORDINALITY AS next(value, ordinal)
+            USING (ordinal)
+          WHERE next.value IS DISTINCT FROM (
+            CASE
+              WHEN prior.value->>'state' = 'active'
+              THEN jsonb_set(
+                jsonb_set(prior.value, '{state}', '"completed"'::jsonb),
+                '{finishedAt}',
+                to_jsonb(p_root_snapshot->>'updatedAt')
+              )
+              ELSE prior.value
+            END
+          )
+        )
+      )
+    )
+    OR (
+      p_transition_type = 'fail'
+      AND (
+        v_next_state <> 'failed'
+        OR v_next_replay_policy <> 'terminal'
+        OR p_root_snapshot->>'terminalAt' <> p_root_snapshot->>'updatedAt'
+        OR v_root.root_snapshot#>>'{foregroundLease,status}' = 'active'
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(
+            COALESCE(v_root.root_snapshot#>'{acceptance,actions}', '[]'::jsonb)
+          ) AS action(value)
+          WHERE action.value->>'state' IN ('dispatched', 'outcome_unknown')
+        )
+        OR jsonb_array_length(p_root_snapshot->'attempts')
+          <> jsonb_array_length(v_root.root_snapshot->'attempts')
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(v_root.root_snapshot->'attempts')
+            WITH ORDINALITY AS prior(value, ordinal)
+          JOIN jsonb_array_elements(p_root_snapshot->'attempts')
+            WITH ORDINALITY AS next(value, ordinal)
+            USING (ordinal)
+          WHERE next.value IS DISTINCT FROM (
+            CASE
+              WHEN prior.value->>'state' = 'active'
+              THEN jsonb_set(
+                jsonb_set(prior.value, '{state}', '"cancelled"'::jsonb),
+                '{finishedAt}',
+                to_jsonb(p_root_snapshot->>'updatedAt')
+              )
+              ELSE prior.value
+            END
+          )
+        )
+      )
+    )
+    OR (
+      p_transition_type NOT IN ('append_checkpoint', 'stop_requested', 'human_foreground_override')
+      AND p_root_snapshot->'checkpoints' IS DISTINCT FROM v_root.root_snapshot->'checkpoints'
+    )
+  ) THEN
+    RETURN jsonb_build_object(
+      'schemaVersion', 1,
+      'ok', false,
+      'code', 'invalid_transition',
+      'message', 'The computer-task root transition violated immutable identity, CAS, replay, interrupt, acceptance, or terminal-state rules.'
+    );
+  END IF;
+
+  IF v_next_state IN ('completed', 'failed', 'cancelled') THEN
+    IF p_root_snapshot->'terminalAt' = 'null'::jsonb THEN
+      RETURN jsonb_build_object(
+        'schemaVersion', 1,
+        'ok', false,
+        'code', 'invalid_transition',
+        'message', 'A terminal computer-task transition requires a terminal timestamp.'
+      );
+    END IF;
+    v_next_terminal_at := (p_root_snapshot->>'terminalAt')::timestamptz;
+  ELSE
+    IF p_root_snapshot->'terminalAt' <> 'null'::jsonb THEN
+      RETURN jsonb_build_object(
+        'schemaVersion', 1,
+        'ok', false,
+        'code', 'invalid_transition',
+        'message', 'A non-terminal computer-task transition cannot carry a terminal timestamp.'
+      );
+    END IF;
+    v_next_terminal_at := NULL;
+  END IF;
+
+  UPDATE public.computer_task_roots
+  SET state = v_next_state,
+      replay_policy = v_next_replay_policy,
+      revision = v_next_revision,
+      root_snapshot = p_root_snapshot,
+      updated_at = (p_root_snapshot->>'updatedAt')::timestamptz,
+      terminal_at = v_next_terminal_at
+  WHERE id = v_root.id;
+
+  v_run_status := CASE v_next_state
+    WHEN 'admitted' THEN 'planning'
+    WHEN 'running' THEN 'running'
+    WHEN 'waiting_approval' THEN 'waiting_approval'
+    WHEN 'waiting_input' THEN 'paused'
+    WHEN 'paused' THEN 'paused'
+    WHEN 'verification_only' THEN 'paused'
+    -- Root completion is coordination state, not task proof. A separate
+    -- request-acceptance publisher must promote the wrapper run to completed.
+    WHEN 'completed' THEN 'paused'
+    WHEN 'failed' THEN 'failed'
+    WHEN 'cancelled' THEN 'cancelled'
+    ELSE 'failed'
+  END;
+
+  UPDATE public.agent_runs
+  SET status = v_run_status,
+      metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+        'computerTaskRootState', v_next_state,
+        'computerTaskRootRevision', v_next_revision,
+        'taskCompletionVerified', false,
+        'rootCoordinationOnly', true
+      ),
+      updated_at = now(),
+      completed_at = CASE
+        WHEN v_run_status IN ('failed', 'cancelled')
+          THEN COALESCE(v_next_terminal_at, now())
+        ELSE NULL
+      END
+  WHERE id = v_root.run_id
+    AND user_id = v_root.user_id
+    AND circle_id = v_root.circle_id;
+
+  RETURN jsonb_build_object(
+    'schemaVersion', 1,
+    'ok', true,
+    'disposition', 'transitioned',
+    'rootRowId', v_root.id,
+    'runId', v_root.run_id,
+    'revision', v_next_revision,
+    'state', v_next_state,
+    'rootSnapshot', p_root_snapshot
+  );
+END;
+$function$;
+
+-- Root-bound action calls are deliberately separate from the generic section
+-- 26 RPCs.  The generic ledger remains the authority for existing callers,
+-- while these wrappers close the root/action split-brain window for the
+-- feature-off universal-task canary.  Every wrapper locks the canonical root
+-- first, derives the complete action-call identity from that locked row, then
+-- locks or creates the matching action row.  The wrapper-run projection is
+-- updated last by transition_computer_task_root_v1.
+
+CREATE OR REPLACE FUNCTION public._computer_task_root_action_error_v1(
+  p_code text,
+  p_message text
+)
+RETURNS jsonb
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT jsonb_build_object(
+    'schemaVersion', 1,
+    'ok', false,
+    'code', left(
+      regexp_replace(
+        COALESCE(p_code, 'invalid_input'),
+        '[[:cntrl:]]+',
+        ' ',
+        'g'
+      ),
+      80
+    ),
+    'message', left(
+      regexp_replace(
+        COALESCE(
+          p_message,
+          'The root-bound durable action transition was refused.'
+        ),
+        '[[:cntrl:]]+',
+        ' ',
+        'g'
+      ),
+      240
+    )
+  )
+$function$;
+
+CREATE OR REPLACE FUNCTION public._computer_task_root_action_identity_matches_v1(
+  p_root public.computer_task_roots,
+  p_action jsonb,
+  p_call public.agent_action_calls
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT COALESCE(
+    p_call.schema_version = 1
+    AND p_call.user_id = p_root.user_id
+    AND p_call.circle_id = p_root.circle_id
+    AND p_call.run_id = p_root.run_id
+    AND p_call.tool_name = p_action->>'tool'
+    -- The deterministic root action is the call identity.  A provider-backed
+    -- gateway may introduce a separately attested provider-call identity in a
+    -- later schema; callers cannot supply one to this V1 canary.
+    AND p_call.tool_use_id = p_action->>'actionId'
+    AND p_call.action_id = p_action->>'actionId'
+    AND p_call.tool_args_fingerprint = p_action->>'toolArgsFingerprint'
+    -- The per-action acceptance binding covers the canonical root,
+    -- acceptance manifest, ordered action identity, and idempotency key.
+    AND p_call.contract_fingerprint =
+      p_action->>'acceptanceBindingFingerprint'
+    AND p_call.idempotency_key = p_action->>'idempotencyKey',
+    false
+  )
+$function$;
+
+CREATE OR REPLACE FUNCTION public._computer_task_root_action_payload_v1(
+  p_root_result jsonb,
+  p_call public.agent_action_calls,
+  p_disposition text,
+  p_include_claim_token boolean DEFAULT false
+)
+RETURNS jsonb
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT jsonb_build_object(
+    'schemaVersion', 1,
+    'ok', true,
+    'disposition', p_disposition,
+    'rootRowId', p_root_result->'rootRowId',
+    'runId', p_root_result->'runId',
+    'revision', p_root_result->'revision',
+    'state', p_root_result->'state',
+    'rootSnapshot', p_root_result->'rootSnapshot',
+    'actionCall', public._agent_action_call_payload(
+      p_call,
+      CASE
+        WHEN p_disposition IN (
+          'settled', 'completed', 'failed', 'reconciled'
+        ) THEN 'finished'
+        ELSE p_disposition
+      END,
+      p_include_claim_token
+    )
+  )
+$function$;
+
+REVOKE ALL ON FUNCTION public._computer_task_root_action_error_v1(text, text)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public._computer_task_root_action_identity_matches_v1(
+  public.computer_task_roots, jsonb, public.agent_action_calls
+) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public._computer_task_root_action_payload_v1(
+  jsonb, public.agent_action_calls, text, boolean
+) FROM PUBLIC, anon, authenticated;
+
+CREATE OR REPLACE FUNCTION public.claim_computer_task_root_action_v1(
+  p_root_row_id uuid,
+  p_expected_revision integer,
+  p_action_id text,
+  p_root_snapshot jsonb,
+  p_metadata jsonb DEFAULT '{}'::jsonb,
+  p_ttl_seconds integer DEFAULT 120
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_actor uuid := auth.uid();
+  v_root public.computer_task_roots%ROWTYPE;
+  v_action jsonb;
+  v_call public.agent_action_calls%ROWTYPE;
+  v_now timestamptz;
+  v_ttl_seconds integer := LEAST(
+    GREATEST(COALESCE(p_ttl_seconds, 120), 15),
+    900
+  );
+  v_metadata jsonb := public._sanitize_agent_action_call_metadata(p_metadata);
+  v_root_result jsonb;
+  v_failure jsonb := NULL;
+  v_disposition text := 'claimed';
+BEGIN
+  IF v_actor IS NULL THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'not_authenticated',
+      'Authenticated root-bound action claim is required.'
+    );
+  END IF;
+  IF p_root_row_id IS NULL
+    OR p_expected_revision IS NULL
+    OR p_expected_revision < 0
+    OR COALESCE(p_action_id, '') !~ '^computer_action_[0-9a-f]{64}$'
+  THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'invalid_input',
+      'The root-bound action claim identity or revision was invalid.'
+    );
+  END IF;
+
+  -- Global lock order: computer_task_roots -> agent_action_calls ->
+  -- agent_runs (the latter is updated by the nested root transition).
+  SELECT *
+  INTO v_root
+  FROM public.computer_task_roots AS root
+  WHERE root.id = p_root_row_id
+    AND root.user_id = v_actor
+    AND EXISTS (
+      SELECT 1
+      FROM public.circle_members AS member
+      WHERE member.circle_id = root.circle_id
+        AND member.user_id = v_actor
+    )
+    AND (
+      root.thread_id IS NULL
+      OR EXISTS (
+        SELECT 1
+        FROM public.circle_chat_threads AS thread
+        WHERE thread.id = root.thread_id
+          AND thread.circle_id = root.circle_id
+          AND (
+            thread.visibility = 'circle'
+            OR thread.created_by = v_actor
+            OR EXISTS (
+              SELECT 1
+              FROM public.circle_chat_thread_members AS thread_member
+              WHERE thread_member.thread_id = thread.id
+                AND thread_member.user_id = v_actor
+            )
+          )
+      )
+    )
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'not_found',
+      'The authenticated computer-task root was not found.'
+    );
+  END IF;
+  IF v_root.revision <> p_expected_revision THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'state_conflict',
+      'The computer-task root revision changed before the action claim.'
+    ) || jsonb_build_object(
+      'currentRevision', v_root.revision,
+      'rootSnapshot', v_root.root_snapshot
+    );
+  END IF;
+  IF v_root.state IN ('completed', 'failed', 'cancelled') THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'invalid_transition',
+      'A terminal computer-task root cannot claim or recover an action lease.'
+    );
+  END IF;
+
+  SELECT entry.value
+  INTO v_action
+  FROM jsonb_array_elements(
+    COALESCE(v_root.root_snapshot#>'{acceptance,actions}', '[]'::jsonb)
+  ) AS entry(value)
+  WHERE entry.value->>'actionId' = p_action_id
+  LIMIT 1;
+
+  IF NOT FOUND
+    OR jsonb_typeof(v_action) <> 'object'
+    OR v_action->>'actionId' <> p_action_id
+    OR (v_action->>'mutatesState')::boolean IS DISTINCT FROM true
+    OR v_action#>>'{dispatchBinding,mutationAuthority}'
+      IS DISTINCT FROM 'action_ledger'
+    OR v_action#>>'{dispatchBinding,authorizationCategory}' IN (
+      'read_only', 'proposal_only', 'unsupported'
+    )
+  THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'invalid_transition',
+      'Only an exact bound mutating root action may enter the action ledger.'
+    );
+  END IF;
+
+  -- Resolve every unique identity under the already-held root lock.  Honest
+  -- V1 roots derive all three keys from the root fingerprint, so a row found
+  -- by a different key is necessarily an identity conflict.
+  SELECT action_call.*
+  INTO v_call
+  FROM public.agent_action_calls AS action_call
+  WHERE (
+      action_call.run_id = v_root.run_id
+      AND action_call.action_id = p_action_id
+    )
+    OR (
+      action_call.user_id = v_root.user_id
+      AND action_call.circle_id = v_root.circle_id
+      AND action_call.idempotency_key = v_action->>'idempotencyKey'
+    )
+    OR (
+      action_call.run_id = v_root.run_id
+      AND action_call.tool_use_id = p_action_id
+    )
+  ORDER BY
+    CASE
+      WHEN action_call.run_id = v_root.run_id
+        AND action_call.action_id = p_action_id
+      THEN 0
+      ELSE 1
+    END,
+    action_call.claimed_at
+  LIMIT 1
+  FOR UPDATE;
+
+  -- Lock waits must never consume a lease while time stands still.  All
+  -- claim and renewal timestamps are derived only after the root/action lock
+  -- boundary has been acquired.
+  v_now := clock_timestamp();
+
+  IF FOUND THEN
+    IF NOT public._computer_task_root_action_identity_matches_v1(
+      v_root,
+      v_action,
+      v_call
+    ) THEN
+      RETURN public._computer_task_root_action_error_v1(
+        'identity_conflict',
+        'The root action identity is already bound to a different durable call.'
+      );
+    END IF;
+    IF v_action->>'state' IS DISTINCT FROM v_call.state THEN
+      RETURN public._computer_task_root_action_error_v1(
+        'state_conflict',
+        'The root action and durable action ledger disagree; no claim was issued.'
+      );
+    END IF;
+    IF v_call.state = 'claimed' THEN
+      IF p_root_snapshot IS DISTINCT FROM v_root.root_snapshot
+        OR v_root.state <> 'running'
+        OR v_root.replay_policy <> 'normal'
+        OR v_root.root_snapshot->'interruptLatch' <> 'null'::jsonb
+        OR NOT EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(
+            v_root.root_snapshot->'attempts'
+          ) AS owner(value)
+          WHERE owner.value->>'attemptId' = v_action->>'attemptId'
+            AND owner.value->>'state' = 'active'
+        )
+      THEN
+        RETURN public._computer_task_root_action_error_v1(
+          'invalid_transition',
+          'The claimed action lease cannot be recovered from a non-executable root.'
+        );
+      END IF;
+      IF v_call.expires_at <= v_now THEN
+        UPDATE public.agent_action_calls
+        SET claim_token = gen_random_uuid(),
+            metadata = metadata || v_metadata,
+            state_version = state_version + 1,
+            attempt_count = attempt_count + 1,
+            claimed_at = v_now,
+            expires_at = v_now + make_interval(secs => v_ttl_seconds),
+            updated_at = v_now
+        WHERE id = v_call.id
+          AND state = 'claimed'
+          AND state_version = v_call.state_version
+        RETURNING * INTO v_call;
+        IF NOT FOUND THEN
+          RETURN public._computer_task_root_action_error_v1(
+            'state_conflict',
+            'Another worker changed the expired action claim.'
+          );
+        END IF;
+        v_disposition := 'claimed';
+      ELSE
+        v_disposition := 'already_claimed';
+      END IF;
+      v_root_result := jsonb_build_object(
+        'rootRowId', v_root.id,
+        'runId', v_root.run_id,
+        'revision', v_root.revision,
+        'state', v_root.state,
+        'rootSnapshot', v_root.root_snapshot
+      );
+      RETURN public._computer_task_root_action_payload_v1(
+        v_root_result,
+        v_call,
+        v_disposition,
+        true
+      );
+    END IF;
+
+    v_root_result := jsonb_build_object(
+      'rootRowId', v_root.id,
+      'runId', v_root.run_id,
+      'revision', v_root.revision,
+      'state', v_root.state,
+      'rootSnapshot', v_root.root_snapshot
+    );
+    RETURN public._computer_task_root_action_payload_v1(
+      v_root_result,
+      v_call,
+      'duplicate',
+      false
+    );
+  END IF;
+
+  IF v_action->>'state' <> 'planned' OR p_root_snapshot IS NULL THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'state_conflict',
+      'A missing ledger row can be created only for the exact planned root action.'
+    );
+  END IF;
+
+  -- An exception block is a PostgreSQL subtransaction.  Any returned JSON
+  -- error from the existing root transition is promoted to an exception so
+  -- the action insert cannot survive without its matching root transition.
+  BEGIN
+    INSERT INTO public.agent_action_calls (
+      user_id,
+      circle_id,
+      run_id,
+      tool_name,
+      tool_use_id,
+      action_id,
+      tool_args_fingerprint,
+      contract_fingerprint,
+      idempotency_key,
+      metadata,
+      claimed_at,
+      expires_at,
+      updated_at
+    ) VALUES (
+      v_root.user_id,
+      v_root.circle_id,
+      v_root.run_id,
+      v_action->>'tool',
+      p_action_id,
+      p_action_id,
+      v_action->>'toolArgsFingerprint',
+      v_action->>'acceptanceBindingFingerprint',
+      v_action->>'idempotencyKey',
+      v_metadata,
+      v_now,
+      v_now + make_interval(secs => v_ttl_seconds),
+      v_now
+    )
+    RETURNING * INTO v_call;
+
+    v_root_result := public.transition_computer_task_root_v1(
+      v_root.id,
+      p_expected_revision,
+      'record_action_state',
+      p_root_snapshot
+    );
+    IF COALESCE((v_root_result->>'ok')::boolean, false) IS DISTINCT FROM true THEN
+      v_failure := v_root_result;
+      RAISE EXCEPTION USING
+        ERRCODE = 'P0001',
+        MESSAGE = 'root_bound_action_claim_rollback';
+    END IF;
+  EXCEPTION
+    WHEN unique_violation THEN
+      v_failure := public._computer_task_root_action_error_v1(
+        'identity_conflict',
+        'A competing root-bound action identity already owns this durable call.'
+      );
+    WHEN SQLSTATE 'P0001' THEN
+      NULL;
+    WHEN OTHERS THEN
+      v_failure := public._computer_task_root_action_error_v1(
+        'rpc_error',
+        'Root-bound action storage failed closed before claim completion.'
+      );
+  END;
+
+  IF v_failure IS NOT NULL THEN
+    RETURN v_failure;
+  END IF;
+  RETURN public._computer_task_root_action_payload_v1(
+    v_root_result,
+    v_call,
+    'claimed',
+    true
+  );
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.start_computer_task_root_action_v1(
+  p_root_row_id uuid,
+  p_expected_revision integer,
+  p_action_id text,
+  p_claim_token uuid,
+  p_root_snapshot jsonb
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_actor uuid := auth.uid();
+  v_root public.computer_task_roots%ROWTYPE;
+  v_action jsonb;
+  v_call public.agent_action_calls%ROWTYPE;
+  v_now timestamptz;
+  v_root_result jsonb;
+  v_failure jsonb := NULL;
+BEGIN
+  IF v_actor IS NULL THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'not_authenticated',
+      'Authenticated root-bound action start is required.'
+    );
+  END IF;
+  IF p_root_row_id IS NULL
+    OR p_expected_revision IS NULL
+    OR p_expected_revision < 0
+    OR COALESCE(p_action_id, '') !~ '^computer_action_[0-9a-f]{64}$'
+    OR p_claim_token IS NULL
+    OR p_root_snapshot IS NULL
+  THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'invalid_input',
+      'The root-bound action start identity, token, revision, or snapshot was invalid.'
+    );
+  END IF;
+
+  SELECT *
+  INTO v_root
+  FROM public.computer_task_roots AS root
+  WHERE root.id = p_root_row_id
+    AND root.user_id = v_actor
+    AND EXISTS (
+      SELECT 1
+      FROM public.circle_members AS member
+      WHERE member.circle_id = root.circle_id
+        AND member.user_id = v_actor
+    )
+    AND (
+      root.thread_id IS NULL
+      OR EXISTS (
+        SELECT 1
+        FROM public.circle_chat_threads AS thread
+        WHERE thread.id = root.thread_id
+          AND thread.circle_id = root.circle_id
+          AND (
+            thread.visibility = 'circle'
+            OR thread.created_by = v_actor
+            OR EXISTS (
+              SELECT 1
+              FROM public.circle_chat_thread_members AS thread_member
+              WHERE thread_member.thread_id = thread.id
+                AND thread_member.user_id = v_actor
+            )
+          )
+      )
+    )
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'not_found',
+      'The authenticated computer-task root was not found.'
+    );
+  END IF;
+  IF v_root.revision <> p_expected_revision THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'state_conflict',
+      'The computer-task root revision changed before handler entry.'
+    ) || jsonb_build_object(
+      'currentRevision', v_root.revision,
+      'rootSnapshot', v_root.root_snapshot
+    );
+  END IF;
+  IF v_root.state IN ('completed', 'failed', 'cancelled') THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'invalid_transition',
+      'A terminal computer-task root cannot authorize handler entry.'
+    );
+  END IF;
+
+  SELECT entry.value
+  INTO v_action
+  FROM jsonb_array_elements(
+    COALESCE(v_root.root_snapshot#>'{acceptance,actions}', '[]'::jsonb)
+  ) AS entry(value)
+  WHERE entry.value->>'actionId' = p_action_id
+  LIMIT 1;
+  IF NOT FOUND THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'claim_not_found',
+      'The root action was not found at handler entry.'
+    );
+  END IF;
+
+  SELECT action_call.*
+  INTO v_call
+  FROM public.agent_action_calls AS action_call
+  WHERE action_call.run_id = v_root.run_id
+    AND action_call.action_id = p_action_id
+  FOR UPDATE;
+
+  -- Refresh after both row locks.  A queued start cannot inherit the time at
+  -- function entry and thereby outlive its durable claim or foreground lease.
+  v_now := clock_timestamp();
+
+  IF NOT FOUND THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'claim_not_found',
+      'No durable call exists for this exact root action.'
+    );
+  END IF;
+  IF NOT public._computer_task_root_action_identity_matches_v1(
+    v_root,
+    v_action,
+    v_call
+  ) THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'identity_conflict',
+      'The durable call no longer matches its locked root action.'
+    );
+  END IF;
+  IF v_action->>'state' IS DISTINCT FROM v_call.state THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'state_conflict',
+      'The root action and durable action ledger disagree at handler entry.'
+    );
+  END IF;
+  IF v_call.state <> 'claimed' THEN
+    v_root_result := jsonb_build_object(
+      'rootRowId', v_root.id,
+      'runId', v_root.run_id,
+      'revision', v_root.revision,
+      'state', v_root.state,
+      'rootSnapshot', v_root.root_snapshot
+    );
+    RETURN public._computer_task_root_action_payload_v1(
+      v_root_result,
+      v_call,
+      'duplicate',
+      false
+    );
+  END IF;
+  IF v_call.claim_token <> p_claim_token THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'claim_token_mismatch',
+      'The durable root-action claim token does not match.'
+    );
+  END IF;
+  IF v_call.expires_at <= v_now THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'claim_expired',
+      'The durable root-action claim expired before handler entry.'
+    );
+  END IF;
+  IF COALESCE((v_action->>'requiresForegroundLease')::boolean, false)
+    AND (
+      v_root.root_snapshot#>>'{foregroundLease,status}'
+        IS DISTINCT FROM 'active'
+      OR v_root.root_snapshot#>>'{foregroundLease,actionId}'
+        IS DISTINCT FROM p_action_id
+      OR v_root.root_snapshot#>>'{foregroundLease,expiresAt}' IS NULL
+      OR (v_root.root_snapshot#>>'{foregroundLease,expiresAt}')::timestamptz
+        <= v_now
+    )
+  THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'invalid_transition',
+      'The required foreground lease expired or changed while handler entry was queued.'
+    );
+  END IF;
+
+  BEGIN
+    UPDATE public.agent_action_calls
+    SET state = 'dispatched',
+        state_version = state_version + 1,
+        dispatched_at = v_now,
+        expires_at = GREATEST(expires_at, v_now + interval '24 hours'),
+        updated_at = v_now
+    WHERE id = v_call.id
+      AND state = 'claimed'
+      AND state_version = v_call.state_version
+      AND claim_token = p_claim_token
+    RETURNING * INTO v_call;
+    IF NOT FOUND THEN
+      v_failure := public._computer_task_root_action_error_v1(
+        'state_conflict',
+        'Another worker changed the durable action before handler entry.'
+      );
+      RAISE EXCEPTION USING
+        ERRCODE = 'P0001',
+        MESSAGE = 'root_bound_action_start_rollback';
+    END IF;
+
+    v_root_result := public.transition_computer_task_root_v1(
+      v_root.id,
+      p_expected_revision,
+      'record_action_state',
+      p_root_snapshot
+    );
+    IF COALESCE((v_root_result->>'ok')::boolean, false) IS DISTINCT FROM true THEN
+      v_failure := v_root_result;
+      RAISE EXCEPTION USING
+        ERRCODE = 'P0001',
+        MESSAGE = 'root_bound_action_start_rollback';
+    END IF;
+  EXCEPTION
+    WHEN SQLSTATE 'P0001' THEN
+      NULL;
+    WHEN OTHERS THEN
+      v_failure := public._computer_task_root_action_error_v1(
+        'rpc_error',
+        'Root-bound action storage failed closed before handler entry.'
+      );
+  END;
+
+  IF v_failure IS NOT NULL THEN
+    RETURN v_failure;
+  END IF;
+  RETURN public._computer_task_root_action_payload_v1(
+    v_root_result,
+    v_call,
+    'started',
+    false
+  );
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.settle_computer_task_root_action_v1(
+  p_root_row_id uuid,
+  p_expected_revision integer,
+  p_action_id text,
+  p_claim_token uuid,
+  p_final_state text,
+  p_proof_fingerprint text,
+  p_root_snapshot jsonb,
+  p_terminal_transition text DEFAULT NULL,
+  p_terminal_root_snapshot jsonb DEFAULT NULL,
+  p_metadata jsonb DEFAULT '{}'::jsonb
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_actor uuid := auth.uid();
+  v_root public.computer_task_roots%ROWTYPE;
+  v_action jsonb;
+  v_next_action jsonb;
+  v_call public.agent_action_calls%ROWTYPE;
+  v_prior_state text;
+  v_now timestamptz;
+  v_metadata jsonb := public._sanitize_agent_action_call_metadata(p_metadata);
+  v_root_result jsonb;
+  v_failure jsonb := NULL;
+BEGIN
+  IF v_actor IS NULL THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'not_authenticated',
+      'Authenticated root-bound action settlement is required.'
+    );
+  END IF;
+  IF p_root_row_id IS NULL
+    OR p_expected_revision IS NULL
+    OR p_expected_revision < 0
+    OR COALESCE(p_action_id, '') !~ '^computer_action_[0-9a-f]{64}$'
+    OR p_final_state NOT IN ('verified', 'failed', 'outcome_unknown')
+    OR p_root_snapshot IS NULL
+    OR (
+      p_proof_fingerprint IS NOT NULL
+      AND p_proof_fingerprint !~ '^args-v2:sha256:[0-9a-f]{64}$'
+    )
+    OR (
+      p_terminal_transition IS NULL
+      AND p_terminal_root_snapshot IS NOT NULL
+    )
+    OR (
+      p_terminal_transition IS NOT NULL
+      AND p_terminal_root_snapshot IS NULL
+    )
+    OR p_terminal_transition IS NOT NULL
+      AND p_terminal_transition NOT IN ('complete', 'fail')
+    OR p_final_state = 'outcome_unknown'
+      AND p_terminal_transition IS NOT NULL
+    OR p_final_state = 'verified'
+      AND p_terminal_transition IS NOT NULL
+      AND p_terminal_transition <> 'complete'
+    OR p_final_state = 'failed'
+      AND p_terminal_transition IS NOT NULL
+      AND p_terminal_transition <> 'fail'
+  THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'invalid_input',
+      'The root-bound settlement state, proof, or terminal snapshot was invalid.'
+    );
+  END IF;
+
+  SELECT *
+  INTO v_root
+  FROM public.computer_task_roots AS root
+  WHERE root.id = p_root_row_id
+    AND root.user_id = v_actor
+    AND EXISTS (
+      SELECT 1
+      FROM public.circle_members AS member
+      WHERE member.circle_id = root.circle_id
+        AND member.user_id = v_actor
+    )
+    AND (
+      root.thread_id IS NULL
+      OR EXISTS (
+        SELECT 1
+        FROM public.circle_chat_threads AS thread
+        WHERE thread.id = root.thread_id
+          AND thread.circle_id = root.circle_id
+          AND (
+            thread.visibility = 'circle'
+            OR thread.created_by = v_actor
+            OR EXISTS (
+              SELECT 1
+              FROM public.circle_chat_thread_members AS thread_member
+              WHERE thread_member.thread_id = thread.id
+                AND thread_member.user_id = v_actor
+            )
+          )
+      )
+    )
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'not_found',
+      'The authenticated computer-task root was not found.'
+    );
+  END IF;
+  IF v_root.revision <> p_expected_revision THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'state_conflict',
+      'The computer-task root revision changed before action settlement.'
+    ) || jsonb_build_object(
+      'currentRevision', v_root.revision,
+      'rootSnapshot', v_root.root_snapshot
+    );
+  END IF;
+  IF v_root.state IN ('completed', 'failed', 'cancelled') THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'invalid_transition',
+      'A terminal computer-task root cannot mutate its action settlement.'
+    );
+  END IF;
+
+  SELECT entry.value
+  INTO v_action
+  FROM jsonb_array_elements(
+    COALESCE(v_root.root_snapshot#>'{acceptance,actions}', '[]'::jsonb)
+  ) AS entry(value)
+  WHERE entry.value->>'actionId' = p_action_id
+  LIMIT 1;
+  IF NOT FOUND THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'claim_not_found',
+      'The root action was not found during settlement.'
+    );
+  END IF;
+
+  SELECT action_call.*
+  INTO v_call
+  FROM public.agent_action_calls AS action_call
+  WHERE action_call.run_id = v_root.run_id
+    AND action_call.action_id = p_action_id
+  FOR UPDATE;
+
+  -- Settlement chronology is database-owned after lock acquisition, never
+  -- the stale timestamp from a request that waited behind another worker.
+  v_now := clock_timestamp();
+
+  IF NOT FOUND THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'claim_not_found',
+      'No durable call exists for this exact root action.'
+    );
+  END IF;
+  IF NOT public._computer_task_root_action_identity_matches_v1(
+    v_root,
+    v_action,
+    v_call
+  ) THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'identity_conflict',
+      'The durable call no longer matches its locked root action.'
+    );
+  END IF;
+  IF v_action->>'state' IS DISTINCT FROM v_call.state THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'state_conflict',
+      'The root action and durable action ledger disagree during settlement.'
+    );
+  END IF;
+
+  -- Reconciliation intentionally carries no claim token.  Every other
+  -- settlement must present the exact token, including idempotent terminal
+  -- reads, so a mismatched lease is never disguised as a state transition.
+  IF v_call.state = 'outcome_unknown' AND p_final_state = 'verified' THEN
+    IF p_claim_token IS NOT NULL THEN
+      RETURN public._computer_task_root_action_error_v1(
+        'claim_token_mismatch',
+        'Outcome-unknown reconciliation must not replay a mutation claim token.'
+      );
+    END IF;
+  ELSIF p_claim_token IS NULL OR v_call.claim_token <> p_claim_token THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'claim_token_mismatch',
+      'The durable root-action settlement claim token does not match.'
+    );
+  END IF;
+
+  IF v_call.state IN ('verified', 'failed', 'outcome_unknown')
+    AND v_call.state = p_final_state
+  THEN
+    v_root_result := jsonb_build_object(
+      'rootRowId', v_root.id,
+      'runId', v_root.run_id,
+      'revision', v_root.revision,
+      'state', v_root.state,
+      'rootSnapshot', v_root.root_snapshot
+    );
+    RETURN public._computer_task_root_action_payload_v1(
+      v_root_result,
+      v_call,
+      'already_finished',
+      false
+    );
+  END IF;
+
+  v_prior_state := v_call.state;
+  IF NOT (
+      v_prior_state = 'claimed'
+        AND p_final_state = 'failed'
+        AND p_claim_token IS NOT NULL
+        AND v_call.claim_token = p_claim_token
+      OR v_prior_state = 'dispatched'
+        AND p_final_state IN ('verified', 'outcome_unknown')
+        AND p_claim_token IS NOT NULL
+        AND v_call.claim_token = p_claim_token
+      OR v_prior_state = 'outcome_unknown'
+        AND p_final_state = 'verified'
+        AND p_claim_token IS NULL
+    )
+  THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'invalid_transition',
+      'The root-bound action cannot enter the requested terminal state.'
+    );
+  END IF;
+
+  IF p_final_state = 'verified' AND (
+      p_proof_fingerprint IS NULL
+      OR COALESCE((v_metadata->>'evidenceCount')::integer, 0) < 1
+      OR COALESCE((v_metadata->>'blockerCount')::integer, 0) <> 0
+    )
+  THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'proof_required',
+      'Verified settlement requires a proof fingerprint and positive blocker-free evidence.'
+    );
+  END IF;
+  IF p_final_state = 'failed' AND p_proof_fingerprint IS NOT NULL THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'invalid_transition',
+      'A known pre-dispatch failure cannot carry post-dispatch proof.'
+    );
+  END IF;
+
+  SELECT entry.value
+  INTO v_next_action
+  FROM jsonb_array_elements(
+    COALESCE(p_root_snapshot#>'{acceptance,actions}', '[]'::jsonb)
+  ) AS entry(value)
+  WHERE entry.value->>'actionId' = p_action_id
+  LIMIT 1;
+  IF NOT FOUND
+    OR v_next_action->>'state' IS DISTINCT FROM p_final_state
+    OR (
+      p_proof_fingerprint IS NULL
+      AND v_next_action->'proofFingerprint' <> 'null'::jsonb
+    )
+    OR (
+      p_proof_fingerprint IS NOT NULL
+      AND v_next_action->>'proofFingerprint'
+        IS DISTINCT FROM p_proof_fingerprint
+    )
+  THEN
+    RETURN public._computer_task_root_action_error_v1(
+      'proof_mismatch',
+      'The settlement proof did not match the exact next root action snapshot.'
+    );
+  END IF;
+
+  v_metadata := v_metadata || jsonb_build_object(
+    'completionVerified', p_final_state = 'verified',
+    'outcomeUnknown', p_final_state = 'outcome_unknown'
+  );
+
+  BEGIN
+    IF v_prior_state = 'outcome_unknown' THEN
+      -- This is the only section-26 terminal reconciliation path.  It is
+      -- intentionally unavailable through generic finish_agent_action_call
+      -- and requires the exact locked root, exact ledger version, and a fresh
+      -- proof fingerprint reflected in the next root snapshot.  The feature
+      -- remains off until the trusted gateway attests that proof leaf.
+      UPDATE public.agent_action_calls
+      SET state = 'verified',
+          metadata = metadata || v_metadata,
+          state_version = state_version + 1,
+          expires_at = GREATEST(expires_at, v_now + interval '24 hours'),
+          updated_at = v_now
+      WHERE id = v_call.id
+        AND state = 'outcome_unknown'
+        AND state_version = v_call.state_version
+      RETURNING * INTO v_call;
+    ELSE
+      UPDATE public.agent_action_calls
+      SET state = p_final_state,
+          metadata = metadata || v_metadata,
+          state_version = state_version + 1,
+          finished_at = v_now,
+          expires_at = GREATEST(expires_at, v_now + interval '24 hours'),
+          updated_at = v_now
+      WHERE id = v_call.id
+        AND state = v_prior_state
+        AND state_version = v_call.state_version
+        AND claim_token = p_claim_token
+      RETURNING * INTO v_call;
+    END IF;
+    IF NOT FOUND THEN
+      v_failure := public._computer_task_root_action_error_v1(
+        'state_conflict',
+        'Another worker changed the durable action before settlement.'
+      );
+      RAISE EXCEPTION USING
+        ERRCODE = 'P0001',
+        MESSAGE = 'root_bound_action_settle_rollback';
+    END IF;
+
+    v_root_result := public.transition_computer_task_root_v1(
+      v_root.id,
+      p_expected_revision,
+      'record_action_state',
+      p_root_snapshot
+    );
+    IF COALESCE((v_root_result->>'ok')::boolean, false) IS DISTINCT FROM true THEN
+      v_failure := v_root_result;
+      RAISE EXCEPTION USING
+        ERRCODE = 'P0001',
+        MESSAGE = 'root_bound_action_settle_rollback';
+    END IF;
+
+    IF p_terminal_transition IS NOT NULL THEN
+      v_root_result := public.transition_computer_task_root_v1(
+        v_root.id,
+        p_expected_revision + 1,
+        p_terminal_transition,
+        p_terminal_root_snapshot
+      );
+      IF COALESCE((v_root_result->>'ok')::boolean, false) IS DISTINCT FROM true THEN
+        v_failure := v_root_result;
+        RAISE EXCEPTION USING
+          ERRCODE = 'P0001',
+          MESSAGE = 'root_bound_action_terminal_rollback';
+      END IF;
+    END IF;
+  EXCEPTION
+    WHEN SQLSTATE 'P0001' THEN
+      NULL;
+    WHEN OTHERS THEN
+      v_failure := public._computer_task_root_action_error_v1(
+        'rpc_error',
+        'Root-bound action storage failed closed during settlement.'
+      );
+  END;
+
+  IF v_failure IS NOT NULL THEN
+    RETURN v_failure;
+  END IF;
+  RETURN public._computer_task_root_action_payload_v1(
+    v_root_result,
+    v_call,
+    CASE
+      WHEN v_prior_state = 'outcome_unknown' THEN 'reconciled'
+      WHEN p_terminal_transition = 'complete' THEN 'completed'
+      WHEN p_terminal_transition = 'fail' THEN 'failed'
+      ELSE 'settled'
+    END,
+    false
+  );
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.admit_computer_task_root_v1(
+  uuid, uuid, text, text, text, jsonb
+) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.read_computer_task_root_v1(uuid)
+  FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.transition_computer_task_root_v1(
+  uuid, integer, text, jsonb
+) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.claim_computer_task_root_action_v1(
+  uuid, integer, text, jsonb, jsonb, integer
+) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.start_computer_task_root_action_v1(
+  uuid, integer, text, uuid, jsonb
+) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.settle_computer_task_root_action_v1(
+  uuid, integer, text, uuid, text, text, jsonb, text, jsonb, jsonb
+) FROM PUBLIC, anon;
+
+GRANT EXECUTE ON FUNCTION public.admit_computer_task_root_v1(
+  uuid, uuid, text, text, text, jsonb
+) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.read_computer_task_root_v1(uuid)
+  TO authenticated;
+GRANT EXECUTE ON FUNCTION public.transition_computer_task_root_v1(
+  uuid, integer, text, jsonb
+) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.claim_computer_task_root_action_v1(
+  uuid, integer, text, jsonb, jsonb, integer
+) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.start_computer_task_root_action_v1(
+  uuid, integer, text, uuid, jsonb
+) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.settle_computer_task_root_action_v1(
+  uuid, integer, text, uuid, text, text, jsonb, text, jsonb, jsonb
+) TO authenticated;
+
+COMMENT ON TABLE public.computer_task_roots IS
+  'Authenticated request-bound coordination roots. Rows and snapshots are inert until revalidated by the runtime; mutation authority remains in exact tool policy and agent_action_calls.';
+
+COMMENT ON FUNCTION public.admit_computer_task_root_v1(
+  uuid, uuid, text, text, text, jsonb
+) IS
+  'Atomically create or recover one exact computer-task root and wrapper agent run for the authenticated Chat request.';
+
+COMMENT ON FUNCTION public.read_computer_task_root_v1(uuid) IS
+  'Rehydrate one authenticated root pointer after refresh; returned JSON remains inert until strict client hydration.';
+
+COMMENT ON FUNCTION public.transition_computer_task_root_v1(
+  uuid, integer, text, jsonb
+) IS
+  'Apply one exact revision-CAS computer-task transition while preserving immutable request, replay, interrupt, acceptance, and terminal boundaries.';
+
+COMMENT ON FUNCTION public.claim_computer_task_root_action_v1(
+  uuid, integer, text, jsonb, jsonb, integer
+) IS
+  'Root-row-first atomic planned-to-claimed transition or claimed-lease recovery. Derives one exact section-26 call from the locked root action and reuses the canonical root run.';
+
+COMMENT ON FUNCTION public.start_computer_task_root_action_v1(
+  uuid, integer, text, uuid, jsonb
+) IS
+  'Root-row-first atomic claimed-to-dispatched transition. Only a started disposition authorizes one handler entry.';
+
+COMMENT ON FUNCTION public.settle_computer_task_root_action_v1(
+  uuid, integer, text, uuid, text, text, jsonb, text, jsonb, jsonb
+) IS
+  'Root-row-first atomic action settlement, including narrow proof-bound outcome_unknown-to-verified reconciliation and optional same-transaction root completion or failure.';
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- §35. Office terminal nonterminal-handoff sweeper (2026-08-07)
+-- Source: supabase/migrations/20260807160000_office_terminal_handoff_sweeper.sql
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+BEGIN;
+
+CREATE OR REPLACE FUNCTION public.sweep_stale_terminal_messages()
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  UPDATE public.office_terminal_messages AS message_row
+  SET status = 'error',
+      updated_at = clock_timestamp()
+  WHERE message_row.status IN ('pending', 'invoked')
+    AND message_row.created_at < clock_timestamp() - interval '2 minutes'
+    AND NOT EXISTS (
+      SELECT 1
+      FROM public.office_terminal_responses AS response_row
+      WHERE response_row.message_id = message_row.id
+        AND response_row.status = 'streaming'
+    );
+
+  UPDATE public.office_terminal_responses AS response_row
+  SET status = 'error',
+      error_message = 'Agent did not respond within 2 minutes',
+      updated_at = clock_timestamp()
+  WHERE response_row.status = 'pending'
+    AND response_row.created_at < clock_timestamp() - interval '2 minutes';
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.sweep_stale_terminal_messages()
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.sweep_stale_terminal_messages()
+  TO postgres, service_role;
+
+COMMENT ON FUNCTION public.sweep_stale_terminal_messages() IS
+  'Expires unclaimed Office terminal work while preserving parent messages that have a deliberately nonterminal streaming handoff response.';
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- §36. Owner-private Office agent → OpenSwan session bindings (2026-08-07)
+-- Source: supabase/migrations/20260807170000_office_agent_session_bindings.sql
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+-- Owner-private linkage from one published Office agent to one exact OpenSwan
+-- connection/session configuration. This migration intentionally performs no
+-- backfill: pre-existing Office agents remain unbound until their owner makes
+-- an explicit selection through the manager RPC.
+
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS public.office_agent_session_bindings (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  office_agent_id uuid NOT NULL
+    REFERENCES public.circle_office_agents(id) ON DELETE CASCADE,
+  owner_id uuid NOT NULL
+    REFERENCES auth.users(id) ON DELETE CASCADE,
+  agent_bot_id uuid NOT NULL
+    REFERENCES public.agents_bots(id) ON DELETE CASCADE,
+  session_key text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+  CONSTRAINT office_agent_session_bindings_office_agent_key
+    UNIQUE (office_agent_id),
+  CONSTRAINT office_agent_session_bindings_bot_session_key
+    UNIQUE (agent_bot_id, session_key),
+  CONSTRAINT office_agent_session_bindings_session_key_length
+    CHECK (pg_catalog.char_length(session_key) BETWEEN 1 AND 160),
+  CONSTRAINT office_agent_session_bindings_session_key_grammar
+    CHECK (session_key ~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$')
+);
+
+COMMENT ON TABLE public.office_agent_session_bindings IS
+  'Owner-private, explicit binding from one published Office agent to one exact OpenSwan connection/session configuration. No implicit or name-based fallback.';
+COMMENT ON COLUMN public.office_agent_session_bindings.agent_bot_id IS
+  'Exact public.agents_bots row for the owner-managed OpenSwan connection configuration.';
+COMMENT ON COLUMN public.office_agent_session_bindings.session_key IS
+  'Exact 1-160 character OpenSwan session key; never inferred from Office names, URLs, history, or response prose.';
+
+ALTER TABLE public.office_agent_session_bindings ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS office_agent_session_bindings_owner_select
+  ON public.office_agent_session_bindings;
+CREATE POLICY office_agent_session_bindings_owner_select
+  ON public.office_agent_session_bindings
+  FOR SELECT
+  TO authenticated
+  USING (owner_id = (SELECT auth.uid()));
+
+-- Browser clients may read only their RLS-filtered bindings. Every mutation is
+-- forced through the authenticated owner-checking manager RPCs below.
+REVOKE ALL ON TABLE public.office_agent_session_bindings
+  FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON TABLE public.office_agent_session_bindings
+  TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.set_office_agent_session_binding(
+  p_office_agent_id uuid,
+  p_agent_bot_id uuid,
+  p_session_key text
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_uid uuid := auth.uid();
+  v_office_provider text;
+  v_office_is_published boolean;
+  v_bot_provider text;
+  v_binding_id uuid;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42501',
+      MESSAGE = 'office_agent_session_binding_auth_required';
+  END IF;
+
+  IF p_office_agent_id IS NULL
+    OR p_agent_bot_id IS NULL
+    OR p_session_key IS NULL
+    OR pg_catalog.char_length(p_session_key) NOT BETWEEN 1 AND 160
+    OR p_session_key !~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
+  THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '22023',
+      MESSAGE = 'office_agent_session_binding_invalid_identity';
+  END IF;
+
+  SELECT office_agent.provider, office_agent.is_published
+  INTO v_office_provider, v_office_is_published
+  FROM public.circle_office_agents AS office_agent
+  WHERE office_agent.id = p_office_agent_id
+    AND office_agent.owner_id = v_uid
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42501',
+      MESSAGE = 'office_agent_session_binding_agent_ownership_required';
+  END IF;
+  IF v_office_is_published IS DISTINCT FROM true THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '22023',
+      MESSAGE = 'office_agent_session_binding_published_agent_required';
+  END IF;
+  IF v_office_provider IS DISTINCT FROM 'openswan' THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '22023',
+      MESSAGE = 'office_agent_session_binding_office_provider_required';
+  END IF;
+
+  SELECT agent_bot.metadata ->> 'provider'
+  INTO v_bot_provider
+  FROM public.agents_bots AS agent_bot
+  WHERE agent_bot.id = p_agent_bot_id
+    AND agent_bot.owner_id = v_uid
+  FOR SHARE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42501',
+      MESSAGE = 'office_agent_session_binding_bot_ownership_required';
+  END IF;
+  IF v_bot_provider IS DISTINCT FROM 'openswan' THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '22023',
+      MESSAGE = 'office_agent_session_binding_bot_provider_required';
+  END IF;
+
+  INSERT INTO public.office_agent_session_bindings AS binding (
+    office_agent_id,
+    owner_id,
+    agent_bot_id,
+    session_key
+  )
+  VALUES (
+    p_office_agent_id,
+    v_uid,
+    p_agent_bot_id,
+    p_session_key
+  )
+  ON CONFLICT (office_agent_id) DO UPDATE
+  SET owner_id = EXCLUDED.owner_id,
+      agent_bot_id = EXCLUDED.agent_bot_id,
+      session_key = EXCLUDED.session_key,
+      updated_at = pg_catalog.clock_timestamp()
+  WHERE binding.owner_id = v_uid
+  RETURNING binding.id INTO v_binding_id;
+
+  IF v_binding_id IS NULL THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42501',
+      MESSAGE = 'office_agent_session_binding_ownership_conflict';
+  END IF;
+
+  RETURN v_binding_id;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.clear_office_agent_session_binding(
+  p_office_agent_id uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_uid uuid := auth.uid();
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42501',
+      MESSAGE = 'office_agent_session_binding_auth_required';
+  END IF;
+  IF p_office_agent_id IS NULL THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '22023',
+      MESSAGE = 'office_agent_session_binding_invalid_identity';
+  END IF;
+
+  PERFORM 1
+  FROM public.circle_office_agents AS office_agent
+  WHERE office_agent.id = p_office_agent_id
+    AND office_agent.owner_id = v_uid
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42501',
+      MESSAGE = 'office_agent_session_binding_agent_ownership_required';
+  END IF;
+  DELETE FROM public.office_agent_session_bindings AS binding
+  WHERE binding.office_agent_id = p_office_agent_id
+    AND binding.owner_id = v_uid;
+
+  RETURN FOUND;
+END;
+$function$;
+
+-- Version 2 composes the current canonical claim exactly once, then adds a
+-- snapshot of an exact owner-valid OpenSwan binding. A missing binding does not
+-- roll back or erase the claim: the caller receives a durable response_id and
+-- can persist the fixed pre-dispatch error against that response.
+CREATE OR REPLACE FUNCTION public.invoke_agent_v2(
+  p_message_id uuid,
+  p_circle_id uuid,
+  p_expected_command_text text,
+  p_agent_id uuid
+)
+RETURNS TABLE (
+  response_id uuid,
+  claim_disposition text,
+  canonical_message_id uuid,
+  canonical_circle_id uuid,
+  canonical_sender_id uuid,
+  canonical_command_text text,
+  canonical_target_agent_id uuid,
+  canonical_target_agent_ids uuid[],
+  canonical_target_agent_name text,
+  canonical_model text,
+  canonical_agent_id uuid,
+  canonical_agent_subject_key text,
+  canonical_agent_name text,
+  binding_contract_version integer,
+  binding_id uuid,
+  binding_agent_bot_id uuid,
+  binding_session_key text,
+  binding_status text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_uid uuid := auth.uid();
+BEGIN
+  RETURN QUERY
+  WITH canonical_claim AS MATERIALIZED (
+    SELECT claim.*
+    FROM public.invoke_agent(
+      p_message_id,
+      p_circle_id,
+      p_expected_command_text,
+      p_agent_id
+    ) AS claim
+  ),
+  valid_binding AS MATERIALIZED (
+    SELECT
+      binding.id,
+      binding.office_agent_id,
+      binding.agent_bot_id,
+      binding.session_key
+    FROM public.office_agent_session_bindings AS binding
+    JOIN public.circle_office_agents AS office_agent
+      ON office_agent.id = binding.office_agent_id
+     AND office_agent.owner_id = v_uid
+     AND office_agent.provider = 'openswan'
+     AND office_agent.is_published = true
+    JOIN public.agents_bots AS agent_bot
+      ON agent_bot.id = binding.agent_bot_id
+     AND agent_bot.owner_id = v_uid
+     AND agent_bot.metadata ->> 'provider' = 'openswan'
+    WHERE binding.owner_id = v_uid
+  )
+  SELECT
+    claim.response_id,
+    claim.claim_disposition,
+    claim.canonical_message_id,
+    claim.canonical_circle_id,
+    claim.canonical_sender_id,
+    claim.canonical_command_text,
+    claim.canonical_target_agent_id,
+    claim.canonical_target_agent_ids,
+    claim.canonical_target_agent_name,
+    claim.canonical_model,
+    claim.canonical_agent_id,
+    claim.canonical_agent_subject_key,
+    claim.canonical_agent_name,
+    1::integer,
+    binding.id,
+    binding.agent_bot_id,
+    binding.session_key,
+    CASE WHEN binding.id IS NULL THEN 'missing'::text ELSE 'bound'::text END
+  FROM canonical_claim AS claim
+  LEFT JOIN valid_binding AS binding
+    ON binding.office_agent_id = claim.canonical_agent_id;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.set_office_agent_session_binding(uuid, uuid, text)
+  FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.clear_office_agent_session_binding(uuid)
+  FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.invoke_agent_v2(uuid, uuid, text, uuid)
+  FROM PUBLIC, anon;
+
+GRANT EXECUTE ON FUNCTION public.set_office_agent_session_binding(uuid, uuid, text)
+  TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.clear_office_agent_session_binding(uuid)
+  TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.invoke_agent_v2(uuid, uuid, text, uuid)
+  TO authenticated, service_role;
+
+COMMENT ON FUNCTION public.set_office_agent_session_binding(uuid, uuid, text) IS
+  'Owner-only upsert of one exact published Office-agent to OpenSwan connection/session binding.';
+COMMENT ON FUNCTION public.clear_office_agent_session_binding(uuid) IS
+  'Owner-only removal of one exact Office-agent OpenSwan session binding.';
+COMMENT ON FUNCTION public.invoke_agent_v2(uuid, uuid, text, uuid) IS
+  'Canonical Office invocation claim plus versioned owner-valid OpenSwan binding snapshot; missing bindings still retain the canonical response claim.';
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+
+-- §37 — truthful Office dashboard state and complete per-floor presets.
+--
+-- 1. Replaces the global profiles.office_layout write target with one
+--    user+circle row and an RPC-only monotonic exact-receipt version gate
+--    (legacy blob remains readable; unsafe/far-future versions are rejected).
+-- 2. Persists Office attention dismissals across remounts/devices, binds an
+--    optional run to the same circle, and stamps acknowledgement expiry server-side.
+-- 3. Saves private complete-floor presets (theme, agents, furniture/tools/state).
+
+BEGIN;
+
+CREATE OR REPLACE FUNCTION public.validate_office_layout_document(p_layout jsonb)
+RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  floor_row jsonb;
+BEGIN
+  IF p_layout IS NULL OR jsonb_typeof(p_layout) <> 'object' THEN
+    RETURN false;
+  END IF;
+  IF octet_length(p_layout::text) > 512000 THEN
+    RETURN false;
+  END IF;
+  IF jsonb_typeof(p_layout -> 'floors') <> 'array'
+     OR jsonb_array_length(p_layout -> 'floors') < 1
+     OR jsonb_array_length(p_layout -> 'floors') > 10 THEN
+    RETURN false;
+  END IF;
+  IF jsonb_typeof(p_layout -> 'currentFloorId') <> 'string'
+     OR length(p_layout ->> 'currentFloorId') > 200 THEN
+    RETURN false;
+  END IF;
+
+  FOR floor_row IN SELECT value FROM jsonb_array_elements(p_layout -> 'floors')
+  LOOP
+    IF jsonb_typeof(floor_row) <> 'object' THEN RETURN false; END IF;
+    IF jsonb_typeof(floor_row -> 'furniture') <> 'array'
+       OR jsonb_array_length(floor_row -> 'furniture') > 100 THEN
+      RETURN false;
+    END IF;
+    IF jsonb_typeof(floor_row -> 'agentIds') <> 'array'
+       OR jsonb_array_length(floor_row -> 'agentIds') > 30 THEN
+      RETURN false;
+    END IF;
+  END LOOP;
+  RETURN true;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.validate_office_layout_document(jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.validate_office_layout_document(jsonb) TO authenticated, service_role;
+
+CREATE TABLE IF NOT EXISTS public.office_layouts (
+  user_id uuid NOT NULL DEFAULT auth.uid() REFERENCES auth.users(id) ON DELETE CASCADE,
+  circle_id uuid NOT NULL REFERENCES public.circles(id) ON DELETE CASCADE,
+  layout jsonb NOT NULL,
+  layout_version bigint NOT NULL CHECK (layout_version > 0),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (user_id, circle_id),
+  CONSTRAINT office_layouts_document_valid CHECK (public.validate_office_layout_document(layout)),
+  CONSTRAINT office_layouts_version_matches_document CHECK (
+    (layout ->> 'updatedAt') ~ '^[0-9]{1,18}$'
+    AND (layout ->> 'updatedAt')::bigint = layout_version
+  )
+);
+
+-- Older revisions allowed a client clock arbitrarily far in the future. Repair
+-- those rows before raw mutation authority is removed, preserving the payload
+-- while bringing its exact version field back to the migration's server clock.
+LOCK TABLE public.office_layouts IN SHARE ROW EXCLUSIVE MODE;
+WITH repair_clock AS (
+  SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS repair_version
+)
+UPDATE public.office_layouts AS ol
+SET layout = jsonb_set(ol.layout, '{updatedAt}', to_jsonb(repair_clock.repair_version), true),
+    layout_version = repair_clock.repair_version,
+    updated_at = clock_timestamp()
+FROM repair_clock
+WHERE ol.layout_version > 9007199254740991
+   OR ol.layout_version > repair_clock.repair_version + 300000;
+ALTER TABLE public.office_layouts
+  DROP CONSTRAINT IF EXISTS office_layouts_version_javascript_safe;
+ALTER TABLE public.office_layouts
+  ADD CONSTRAINT office_layouts_version_javascript_safe
+  CHECK (layout_version <= 9007199254740991);
+
+ALTER TABLE public.office_layouts ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS office_layouts_select_own ON public.office_layouts;
+DROP POLICY IF EXISTS office_layouts_insert_own ON public.office_layouts;
+DROP POLICY IF EXISTS office_layouts_update_own ON public.office_layouts;
+DROP POLICY IF EXISTS office_layouts_delete_own ON public.office_layouts;
+CREATE POLICY office_layouts_select_own ON public.office_layouts FOR SELECT TO authenticated
+USING (
+  user_id = auth.uid()
+  AND EXISTS (SELECT 1 FROM public.circle_members cm WHERE cm.circle_id = office_layouts.circle_id AND cm.user_id = auth.uid())
+);
+REVOKE ALL ON TABLE public.office_layouts FROM PUBLIC, anon;
+REVOKE INSERT, UPDATE, DELETE ON TABLE public.office_layouts FROM authenticated;
+GRANT SELECT ON TABLE public.office_layouts TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.save_office_layout_v2(
+  p_circle_id uuid,
+  p_layout jsonb,
+  p_layout_version bigint
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  actor_id uuid := auth.uid();
+  stored_version bigint;
+  stored_layout jsonb;
+  server_now_ms bigint := floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint;
+BEGIN
+  IF actor_id IS NULL THEN RAISE EXCEPTION 'authentication_required' USING ERRCODE = '42501'; END IF;
+  IF p_circle_id IS NULL
+     OR p_layout_version IS NULL
+     OR p_layout_version <= 0
+     OR p_layout_version > 9007199254740991
+     OR p_layout_version > server_now_ms + 300000 THEN
+    RAISE EXCEPTION 'invalid_office_layout_version' USING ERRCODE = '22023';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM public.circle_members cm
+    WHERE cm.circle_id = p_circle_id AND cm.user_id = actor_id
+  ) THEN
+    RAISE EXCEPTION 'office_circle_membership_required' USING ERRCODE = '42501';
+  END IF;
+  IF NOT public.validate_office_layout_document(p_layout)
+     OR (p_layout ->> 'updatedAt') !~ '^[0-9]{1,18}$'
+     OR (p_layout ->> 'updatedAt')::bigint <> p_layout_version THEN
+    RAISE EXCEPTION 'invalid_office_layout_document' USING ERRCODE = '22023';
+  END IF;
+
+  INSERT INTO public.office_layouts (user_id, circle_id, layout, layout_version)
+  VALUES (actor_id, p_circle_id, p_layout, p_layout_version)
+  ON CONFLICT (user_id, circle_id) DO UPDATE
+    SET layout = EXCLUDED.layout,
+        layout_version = EXCLUDED.layout_version,
+        updated_at = clock_timestamp()
+    WHERE public.office_layouts.layout_version < EXCLUDED.layout_version;
+
+  SELECT layout_version, layout INTO stored_version, stored_layout
+  FROM public.office_layouts
+  WHERE user_id = actor_id AND circle_id = p_circle_id;
+
+  IF stored_version IS NULL THEN
+    RAISE EXCEPTION 'office_layout_not_saved' USING ERRCODE = '42501';
+  END IF;
+  RETURN jsonb_build_object(
+    'layoutVersion', stored_version,
+    -- A same-version retry is successful only when it is idempotent. Without
+    -- the payload check, two tabs could submit different layouts at the same
+    -- millisecond and the losing tab would receive a false accepted receipt.
+    'accepted', stored_version = p_layout_version AND stored_layout = p_layout
+  );
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.save_office_layout_v2(uuid, jsonb, bigint) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.save_office_layout_v2(uuid, jsonb, bigint) TO authenticated;
+
+CREATE TABLE IF NOT EXISTS public.office_attention_acknowledgements (
+  user_id uuid NOT NULL DEFAULT auth.uid() REFERENCES auth.users(id) ON DELETE CASCADE,
+  circle_id uuid NOT NULL REFERENCES public.circles(id) ON DELETE CASCADE,
+  attention_id text NOT NULL CHECK (length(attention_id) BETWEEN 1 AND 240),
+  run_id uuid REFERENCES public.agent_runs(id) ON DELETE CASCADE,
+  acknowledged_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  expires_at timestamptz NOT NULL DEFAULT (clock_timestamp() + interval '30 days'),
+  PRIMARY KEY (user_id, circle_id, attention_id),
+  CONSTRAINT office_attention_expiry_after_ack CHECK (expires_at > acknowledged_at)
+);
+-- Lock parent before child so no concurrent run move or acknowledgement write
+-- can race cleanup and composite-FK validation. Keep this order in follow-ups.
+LOCK TABLE public.agent_runs IN SHARE ROW EXCLUSIVE MODE;
+LOCK TABLE public.office_attention_acknowledgements IN SHARE ROW EXCLUSIVE MODE;
+-- Remove impossible legacy dismissals before replacing the run-only FK with a
+-- durable run+circle relationship. Acknowledgements are ephemeral UI state;
+-- retaining a cross-circle row would be less safe than surfacing the item again.
+DELETE FROM public.office_attention_acknowledgements AS acknowledgement
+WHERE acknowledgement.run_id IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1
+    FROM public.agent_runs AS run
+    WHERE run.id = acknowledgement.run_id
+      AND run.circle_id = acknowledgement.circle_id
+  );
+CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_id_circle_id_unique
+  ON public.agent_runs (id, circle_id);
+ALTER TABLE public.office_attention_acknowledgements
+  DROP CONSTRAINT IF EXISTS office_attention_acknowledgements_run_id_fkey;
+ALTER TABLE public.office_attention_acknowledgements
+  DROP CONSTRAINT IF EXISTS office_attention_acknowledgements_run_circle_fkey;
+ALTER TABLE public.office_attention_acknowledgements
+  ADD CONSTRAINT office_attention_acknowledgements_run_circle_fkey
+  FOREIGN KEY (run_id, circle_id)
+  REFERENCES public.agent_runs (id, circle_id)
+  ON UPDATE RESTRICT
+  ON DELETE CASCADE;
+CREATE INDEX IF NOT EXISTS office_attention_ack_expiry_idx
+  ON public.office_attention_acknowledgements (user_id, circle_id, expires_at);
+ALTER TABLE public.office_attention_acknowledgements ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS office_attention_ack_select_own ON public.office_attention_acknowledgements;
+DROP POLICY IF EXISTS office_attention_ack_insert_own ON public.office_attention_acknowledgements;
+DROP POLICY IF EXISTS office_attention_ack_update_own ON public.office_attention_acknowledgements;
+DROP POLICY IF EXISTS office_attention_ack_delete_own ON public.office_attention_acknowledgements;
+CREATE POLICY office_attention_ack_select_own ON public.office_attention_acknowledgements FOR SELECT TO authenticated
+USING (user_id = auth.uid());
+CREATE POLICY office_attention_ack_insert_own ON public.office_attention_acknowledgements FOR INSERT TO authenticated
+WITH CHECK (
+  user_id = auth.uid()
+  AND EXISTS (SELECT 1 FROM public.circle_members cm WHERE cm.circle_id = office_attention_acknowledgements.circle_id AND cm.user_id = auth.uid())
+);
+CREATE POLICY office_attention_ack_update_own ON public.office_attention_acknowledgements FOR UPDATE TO authenticated
+USING (user_id = auth.uid())
+WITH CHECK (
+  user_id = auth.uid()
+  AND EXISTS (
+    SELECT 1 FROM public.circle_members cm
+    WHERE cm.circle_id = office_attention_acknowledgements.circle_id
+      AND cm.user_id = auth.uid()
+  )
+);
+CREATE POLICY office_attention_ack_delete_own ON public.office_attention_acknowledgements FOR DELETE TO authenticated
+USING (user_id = auth.uid());
+REVOKE ALL ON TABLE public.office_attention_acknowledgements FROM PUBLIC, anon;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.office_attention_acknowledgements TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.enforce_office_attention_ack_scope()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  run_circle_id uuid;
+BEGIN
+  IF NEW.run_id IS NOT NULL THEN
+    SELECT ar.circle_id INTO run_circle_id
+    FROM public.agent_runs ar
+    WHERE ar.id = NEW.run_id;
+    IF run_circle_id IS NULL OR run_circle_id <> NEW.circle_id THEN
+      RAISE EXCEPTION 'attention_run_scope_mismatch' USING ERRCODE = '23514';
+    END IF;
+  END IF;
+  NEW.acknowledged_at := clock_timestamp();
+  NEW.expires_at := NEW.acknowledged_at + interval '30 days';
+  RETURN NEW;
+END;
+$function$;
+REVOKE ALL ON FUNCTION public.enforce_office_attention_ack_scope() FROM PUBLIC, anon, authenticated;
+DROP TRIGGER IF EXISTS office_attention_ack_scope_guard ON public.office_attention_acknowledgements;
+CREATE TRIGGER office_attention_ack_scope_guard
+BEFORE INSERT OR UPDATE ON public.office_attention_acknowledgements
+FOR EACH ROW EXECUTE FUNCTION public.enforce_office_attention_ack_scope();
+
+CREATE OR REPLACE FUNCTION public.list_active_office_attention_acknowledgements(p_circle_id uuid)
+RETURNS TABLE(attention_id text)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT acknowledgement.attention_id
+  FROM public.office_attention_acknowledgements AS acknowledgement
+  WHERE auth.uid() IS NOT NULL
+    AND acknowledgement.user_id = auth.uid()
+    AND acknowledgement.circle_id = p_circle_id
+    AND acknowledgement.expires_at > statement_timestamp()
+    AND EXISTS (
+      SELECT 1
+      FROM public.circle_members AS membership
+      WHERE membership.circle_id = p_circle_id
+        AND membership.user_id = auth.uid()
+    )
+  ORDER BY acknowledgement.attention_id
+  LIMIT 500;
+$function$;
+REVOKE ALL ON FUNCTION public.list_active_office_attention_acknowledgements(uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.list_active_office_attention_acknowledgements(uuid) TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.validate_office_floor_preset_snapshot(p_snapshot jsonb)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT p_snapshot IS NOT NULL
+    AND jsonb_typeof(p_snapshot) = 'object'
+    AND p_snapshot ->> 'schemaVersion' = '1'
+    AND jsonb_typeof(p_snapshot -> 'floor') = 'object'
+    AND octet_length(p_snapshot::text) <= 256000
+    AND jsonb_typeof(p_snapshot -> 'floor' -> 'furniture') = 'array'
+    AND jsonb_array_length(p_snapshot -> 'floor' -> 'furniture') <= 100
+    AND jsonb_typeof(p_snapshot -> 'floor' -> 'agentIds') = 'array'
+    AND jsonb_array_length(p_snapshot -> 'floor' -> 'agentIds') <= 30;
+$function$;
+REVOKE ALL ON FUNCTION public.validate_office_floor_preset_snapshot(jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.validate_office_floor_preset_snapshot(jsonb) TO authenticated, service_role;
+
+CREATE TABLE IF NOT EXISTS public.office_floor_presets (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL DEFAULT auth.uid() REFERENCES auth.users(id) ON DELETE CASCADE,
+  circle_id uuid NOT NULL REFERENCES public.circles(id) ON DELETE CASCADE,
+  name text NOT NULL CHECK (length(name) BETWEEN 1 AND 80),
+  description text CHECK (description IS NULL OR length(description) <= 240),
+  snapshot jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT office_floor_presets_owner_circle_name UNIQUE (user_id, circle_id, name),
+  CONSTRAINT office_floor_presets_snapshot_valid CHECK (public.validate_office_floor_preset_snapshot(snapshot))
+);
+
+CREATE OR REPLACE FUNCTION public.touch_office_dashboard_updated_at()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  NEW.updated_at := clock_timestamp();
+  RETURN NEW;
+END;
+$function$;
+REVOKE ALL ON FUNCTION public.touch_office_dashboard_updated_at() FROM PUBLIC;
+DROP TRIGGER IF EXISTS office_floor_presets_touch_updated_at ON public.office_floor_presets;
+CREATE TRIGGER office_floor_presets_touch_updated_at
+BEFORE UPDATE ON public.office_floor_presets
+FOR EACH ROW EXECUTE FUNCTION public.touch_office_dashboard_updated_at();
+
+ALTER TABLE public.office_floor_presets ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS office_floor_presets_select_own ON public.office_floor_presets;
+DROP POLICY IF EXISTS office_floor_presets_insert_own ON public.office_floor_presets;
+DROP POLICY IF EXISTS office_floor_presets_update_own ON public.office_floor_presets;
+DROP POLICY IF EXISTS office_floor_presets_delete_own ON public.office_floor_presets;
+CREATE POLICY office_floor_presets_select_own ON public.office_floor_presets FOR SELECT TO authenticated
+USING (user_id = auth.uid());
+CREATE POLICY office_floor_presets_insert_own ON public.office_floor_presets FOR INSERT TO authenticated
+WITH CHECK (
+  user_id = auth.uid()
+  AND EXISTS (SELECT 1 FROM public.circle_members cm WHERE cm.circle_id = office_floor_presets.circle_id AND cm.user_id = auth.uid())
+);
+CREATE POLICY office_floor_presets_update_own ON public.office_floor_presets FOR UPDATE TO authenticated
+USING (user_id = auth.uid())
+WITH CHECK (
+  user_id = auth.uid()
+  AND EXISTS (
+    SELECT 1 FROM public.circle_members cm
+    WHERE cm.circle_id = office_floor_presets.circle_id
+      AND cm.user_id = auth.uid()
+  )
+);
+CREATE POLICY office_floor_presets_delete_own ON public.office_floor_presets FOR DELETE TO authenticated
+USING (user_id = auth.uid());
+REVOKE ALL ON TABLE public.office_floor_presets FROM PUBLIC, anon;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.office_floor_presets TO authenticated;
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+
+-- §37 readiness (catalog presence only; this does not prove authenticated
+-- cross-device behavior or a live Office interaction).
+SELECT
+  to_regclass('public.office_layouts') IS NOT NULL AS office_layouts_ready,
+  to_regprocedure('public.save_office_layout_v2(uuid,jsonb,bigint)') IS NOT NULL AS office_layout_save_ready,
+  to_regclass('public.office_attention_acknowledgements') IS NOT NULL AS office_attention_ack_ready,
+  to_regclass('public.office_floor_presets') IS NOT NULL AS office_floor_presets_ready;
+
+-- =============================================================================
+-- §38. Agent-run artifact integrity (2026-08-12)
+-- Source: supabase/migrations/20260812_agent_run_artifact_integrity.sql
+-- =============================================================================
+-- Agent-run artifact integrity: immutable parent authority and artifacts.
+--
+-- The 20260408 base policy granted every current circle member FOR ALL access
+-- to every artifact in that circle. That made canonical Chat artifact content
+-- mutable/deletable by unrelated members. Converge to exactly two authenticated
+-- policies: circle-member SELECT and exact run-owner INSERT. The parent run's
+-- owner/circle/id becomes immutable to authenticated clients first, and new
+-- runs must belong to the authenticated creator. Authenticated artifact
+-- UPDATE/DELETE has neither a policy nor a table grant; service_role retains
+-- its normal RLS bypass for trusted maintenance/recovery.
+
+BEGIN;
+
+ALTER TABLE public.agent_runs ENABLE ROW LEVEL SECURITY;
+
+-- `agent_runs.user_id` is the artifact INSERT authority below. The historical
+-- circle-member FOR ALL policy makes that column forgeable unless the parent
+-- identity is independently locked first. Restrictive policies compose with
+-- that legacy permissive policy: authenticated clients may create only their
+-- own rows, mutate only their own rows, and directly delete only their own
+-- rows. Service-role/Postgres maintenance keeps its normal RLS bypass.
+DROP POLICY IF EXISTS agent_runs_owner_insert_guard_v1 ON public.agent_runs;
+CREATE POLICY agent_runs_owner_insert_guard_v1
+ON public.agent_runs
+AS RESTRICTIVE
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+);
+
+DROP POLICY IF EXISTS agent_runs_owner_update_guard_v1 ON public.agent_runs;
+CREATE POLICY agent_runs_owner_update_guard_v1
+ON public.agent_runs
+AS RESTRICTIVE
+FOR UPDATE
+TO authenticated
+USING (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+)
+WITH CHECK (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+);
+
+-- This also closes the indirect artifact-delete path where a member deletes
+-- another member's run and relies on ON DELETE CASCADE. PostgreSQL executes a
+-- legitimate parent-circle FK cascade outside child RLS, so Circle deletion is
+-- not stranded by this direct-delete guard.
+DROP POLICY IF EXISTS agent_runs_owner_delete_guard_v1 ON public.agent_runs;
+CREATE POLICY agent_runs_owner_delete_guard_v1
+ON public.agent_runs
+AS RESTRICTIVE
+FOR DELETE
+TO authenticated
+USING (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+);
+
+CREATE OR REPLACE FUNCTION public.guard_authenticated_agent_run_identity_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  actor_id uuid := auth.uid();
+  trusted_writer boolean :=
+    COALESCE(auth.role(), '') = 'service_role'
+    OR current_user IN ('postgres', 'supabase_admin', 'service_role');
+BEGIN
+  IF trusted_writer THEN
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'INSERT' THEN
+    IF actor_id IS NULL OR NEW.user_id IS DISTINCT FROM actor_id THEN
+      RAISE EXCEPTION 'agent_run_owner_required'
+        USING ERRCODE = '42501';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF TG_OP = 'UPDATE' THEN
+    IF actor_id IS NULL OR OLD.user_id IS DISTINCT FROM actor_id THEN
+      RAISE EXCEPTION 'agent_run_owner_required'
+        USING ERRCODE = '42501';
+    END IF;
+    IF NEW.id IS DISTINCT FROM OLD.id
+       OR NEW.circle_id IS DISTINCT FROM OLD.circle_id
+       OR NEW.user_id IS DISTINCT FROM OLD.user_id THEN
+      RAISE EXCEPTION 'agent_run_identity_immutable'
+        USING ERRCODE = '42501';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  RAISE EXCEPTION 'agent_run_identity_guard_invalid_operation'
+    USING ERRCODE = '42501';
+END;
+$function$;
+
+DROP TRIGGER IF EXISTS trg_guard_authenticated_agent_run_identity_v1
+ON public.agent_runs;
+CREATE TRIGGER trg_guard_authenticated_agent_run_identity_v1
+BEFORE INSERT OR UPDATE ON public.agent_runs
+FOR EACH ROW EXECUTE FUNCTION public.guard_authenticated_agent_run_identity_v1();
+
+REVOKE ALL ON FUNCTION public.guard_authenticated_agent_run_identity_v1()
+FROM PUBLIC, anon, authenticated;
+
+ALTER TABLE public.agent_run_artifacts ENABLE ROW LEVEL SECURITY;
+
+-- Remove known and unknown policy drift. PostgreSQL ORs permissive policies,
+-- so leaving one historical FOR ALL policy would reopen mutation authority.
+DO $block$
+DECLARE
+  policy_row record;
+BEGIN
+  FOR policy_row IN
+    SELECT policyname
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'agent_run_artifacts'
+  LOOP
+    EXECUTE pg_catalog.format(
+      'DROP POLICY %I ON public.agent_run_artifacts',
+      policy_row.policyname
+    );
+  END LOOP;
+END;
+$block$;
+
+CREATE POLICY agent_run_artifacts_select_circle_member
+ON public.agent_run_artifacts
+FOR SELECT
+TO authenticated
+USING (
+  auth.uid() IS NOT NULL
+  AND public.user_is_circle_member(circle_id)
+);
+
+CREATE POLICY agent_run_artifacts_insert_run_owner
+ON public.agent_run_artifacts
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  auth.uid() IS NOT NULL
+  AND public.user_is_circle_member(circle_id)
+  AND EXISTS (
+    SELECT 1
+    FROM public.agent_runs AS owning_run
+    WHERE owning_run.id = agent_run_artifacts.run_id
+      AND owning_run.circle_id = agent_run_artifacts.circle_id
+      AND owning_run.user_id = auth.uid()
+  )
+  AND (
+    step_id IS NULL
+    OR EXISTS (
+      SELECT 1
+      FROM public.agent_run_steps AS owning_step
+      WHERE owning_step.id = agent_run_artifacts.step_id
+        AND owning_step.run_id = agent_run_artifacts.run_id
+        AND owning_step.circle_id = agent_run_artifacts.circle_id
+    )
+  )
+);
+
+REVOKE ALL ON TABLE public.agent_run_artifacts FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT ON TABLE public.agent_run_artifacts TO authenticated;
+GRANT ALL ON TABLE public.agent_run_artifacts TO service_role;
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+
+-- Catalog readiness only. This does not prove two-user behavioral RLS or that
+-- the migration has been applied to a target project.
+SELECT
+  to_regclass('public.agent_run_artifacts') IS NOT NULL AS agent_run_artifacts_ready,
+  to_regprocedure('public.guard_authenticated_agent_run_identity_v1()') IS NOT NULL
+    AND EXISTS (
+      SELECT 1
+      FROM pg_catalog.pg_trigger AS trigger_row
+      WHERE trigger_row.tgrelid = 'public.agent_runs'::regclass
+        AND trigger_row.tgname = 'trg_guard_authenticated_agent_run_identity_v1'
+        AND trigger_row.tgenabled <> 'D'
+        AND NOT trigger_row.tgisinternal
+    ) AS agent_run_identity_guard_ready,
+  (
+    SELECT count(*) = 3
+      AND bool_and(permissive = 'RESTRICTIVE')
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'agent_runs'
+      AND policyname IN (
+        'agent_runs_owner_insert_guard_v1',
+        'agent_runs_owner_update_guard_v1',
+        'agent_runs_owner_delete_guard_v1'
+      )
+  ) AS agent_run_owner_policies_ready,
+  (
+    SELECT count(*) = 2
+      AND bool_and(cmd IN ('SELECT', 'INSERT'))
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'agent_run_artifacts'
+  ) AS artifact_policies_converged,
+  has_table_privilege('authenticated', 'public.agent_run_artifacts', 'SELECT')
+    AND has_table_privilege('authenticated', 'public.agent_run_artifacts', 'INSERT')
+    AND NOT has_table_privilege('authenticated', 'public.agent_run_artifacts', 'UPDATE')
+    AND NOT has_table_privilege('authenticated', 'public.agent_run_artifacts', 'DELETE')
+    AS authenticated_artifact_grants_ready;
+
+
+-- =============================================================================
+-- §39. Message-attachment link integrity (2026-08-13)
+-- Source: supabase/migrations/20260813160000_message_attachment_link_integrity.sql
+-- =============================================================================
+-- Canonical message-attachment linkage integrity.
+--
+-- The original message_attachments UPDATE policy checked only the attachment
+-- owner. That allowed an authenticated owner to rewrite attachment identity or
+-- attach a staged row to any guessed message UUID. Keep the existing direct
+-- Chat UPDATE API, but make it a database-enforced compare-and-set:
+--
+--   * only the owner, while still a circle member, may update;
+--   * authenticated INSERT always creates an unlinked staged row;
+--   * durable attachment identity/content fields are immutable;
+--   * message_id may move only from NULL to one exact, owner-authored,
+--     non-bot message in the same circle and thread (or remain unchanged for a
+--     safe retry);
+--   * ocr_text remains mutable for the owner-side OCR path;
+--   * trusted service-role/Postgres maintenance remains available.
+
+BEGIN;
+
+ALTER TABLE public.message_attachments ENABLE ROW LEVEL SECURITY;
+
+-- Deterministically quarantine legacy links that cannot prove the exact
+-- attachment/message scope. There is no safe message target to infer for such
+-- a row, so returning it to the staged (NULL) state is the only non-forging
+-- repair. Valid same-owner, same-circle, same-thread user-message links remain.
+UPDATE public.message_attachments AS attachment
+SET message_id = NULL
+WHERE attachment.message_id IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1
+    FROM public.messages AS target_message
+    WHERE target_message.id = attachment.message_id
+      AND target_message.circle_id = attachment.circle_id
+      AND target_message.thread_id IS NOT DISTINCT FROM attachment.thread_id
+      AND target_message.user_id = attachment.user_id
+      AND COALESCE(target_message.is_bot, false) = false
+  );
+
+-- This predicate intentionally runs with caller privileges. Its messages query
+-- therefore preserves canonical message/thread RLS instead of becoming a
+-- SECURITY DEFINER existence oracle. The explicit owner equality also keeps a
+-- caller from probing another user's message identity through this function.
+CREATE OR REPLACE FUNCTION public.message_attachment_link_target_is_valid_v1(
+  p_message_id uuid,
+  p_circle_id uuid,
+  p_thread_id uuid,
+  p_user_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    p_message_id IS NULL
+    OR (
+      auth.uid() IS NOT NULL
+      AND p_user_id = auth.uid()
+      AND EXISTS (
+        SELECT 1
+        FROM public.messages AS target_message
+        WHERE target_message.id = p_message_id
+          AND target_message.circle_id = p_circle_id
+          AND target_message.thread_id IS NOT DISTINCT FROM p_thread_id
+          AND target_message.user_id = p_user_id
+          AND COALESCE(target_message.is_bot, false) = false
+      )
+    );
+$function$;
+
+REVOKE ALL ON FUNCTION public.message_attachment_link_target_is_valid_v1(uuid, uuid, uuid, uuid)
+FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.message_attachment_link_target_is_valid_v1(uuid, uuid, uuid, uuid)
+TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.guard_authenticated_message_attachment_update_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  actor_id uuid := auth.uid();
+  trusted_writer boolean :=
+    COALESCE(auth.role(), '') = 'service_role'
+    OR current_user IN ('postgres', 'supabase_admin', 'service_role');
+BEGIN
+  IF trusted_writer THEN
+    RETURN NEW;
+  END IF;
+
+  IF actor_id IS NULL OR OLD.user_id IS DISTINCT FROM actor_id THEN
+    RAISE EXCEPTION 'message_attachment_owner_required'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- message_id and ocr_text are the only authenticated-client mutable fields.
+  -- Comparing the remaining row as jsonb also fails closed if a future column
+  -- is added without an explicit decision here.
+  IF (to_jsonb(NEW) - ARRAY['message_id', 'ocr_text'])
+       IS DISTINCT FROM
+     (to_jsonb(OLD) - ARRAY['message_id', 'ocr_text']) THEN
+    RAISE EXCEPTION 'message_attachment_identity_immutable'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- A linked attachment is immutable. Repeating the same message_id is an
+  -- idempotent retry; changing it or returning it to NULL is rejected.
+  IF OLD.message_id IS NOT NULL
+     AND NEW.message_id IS DISTINCT FROM OLD.message_id THEN
+    RAISE EXCEPTION 'message_attachment_relink_forbidden'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF NOT public.message_attachment_link_target_is_valid_v1(
+    NEW.message_id,
+    NEW.circle_id,
+    NEW.thread_id,
+    NEW.user_id
+  ) THEN
+    RAISE EXCEPTION 'message_attachment_target_mismatch'
+      USING ERRCODE = '42501';
+  END IF;
+
+  RETURN NEW;
+END;
+$function$;
+
+DROP TRIGGER IF EXISTS trg_guard_authenticated_message_attachment_update_v1
+ON public.message_attachments;
+CREATE TRIGGER trg_guard_authenticated_message_attachment_update_v1
+BEFORE UPDATE ON public.message_attachments
+FOR EACH ROW EXECUTE FUNCTION public.guard_authenticated_message_attachment_update_v1();
+
+REVOKE ALL ON FUNCTION public.guard_authenticated_message_attachment_update_v1()
+FROM PUBLIC, anon, authenticated;
+
+-- Permissive policies are ORed, so every historical INSERT, UPDATE, or FOR ALL
+-- policy must be removed before installing the canonical staged-insert and
+-- owner/scope-update policies. SELECT and DELETE policies are intentionally
+-- left unchanged in this focused migration.
+DO $policy_convergence$
+DECLARE
+  policy_row record;
+BEGIN
+  FOR policy_row IN
+    SELECT policyname
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'message_attachments'
+      AND cmd IN ('INSERT', 'UPDATE', 'ALL')
+  LOOP
+    EXECUTE pg_catalog.format(
+      'DROP POLICY %I ON public.message_attachments',
+      policy_row.policyname
+    );
+  END LOOP;
+END;
+$policy_convergence$;
+
+CREATE POLICY message_attachments_insert_owner_staged_v1
+ON public.message_attachments
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+  AND message_id IS NULL
+  AND EXISTS (
+    SELECT 1
+    FROM public.circle_members AS membership
+    WHERE membership.circle_id = message_attachments.circle_id
+      AND membership.user_id = auth.uid()
+  )
+);
+
+CREATE POLICY message_attachments_update_owner_exact_link_v1
+ON public.message_attachments
+FOR UPDATE
+TO authenticated
+USING (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+  AND EXISTS (
+    SELECT 1
+    FROM public.circle_members AS membership
+    WHERE membership.circle_id = message_attachments.circle_id
+      AND membership.user_id = auth.uid()
+  )
+  AND public.message_attachment_link_target_is_valid_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+)
+WITH CHECK (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+  AND EXISTS (
+    SELECT 1
+    FROM public.circle_members AS membership
+    WHERE membership.circle_id = message_attachments.circle_id
+      AND membership.user_id = auth.uid()
+  )
+  AND public.message_attachment_link_target_is_valid_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+);
+
+-- Keep the current PostgREST `.update({ message_id })` and owner OCR paths
+-- compatible. RLS plus the BEFORE trigger narrow this table-level grant to the
+-- two explicitly mutable fields above.
+REVOKE ALL ON TABLE public.message_attachments FROM PUBLIC, anon;
+GRANT INSERT, UPDATE ON TABLE public.message_attachments TO authenticated;
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+
+-- §39 readiness (catalog and stored-row integrity only; this does not prove a
+-- live authenticated Chat upload/link round trip).
+SELECT
+  to_regclass('public.message_attachments') IS NOT NULL
+    AS message_attachments_ready,
+  to_regprocedure('public.message_attachment_link_target_is_valid_v1(uuid,uuid,uuid,uuid)') IS NOT NULL
+    AS attachment_link_validator_ready,
+  to_regprocedure('public.guard_authenticated_message_attachment_update_v1()') IS NOT NULL
+    AND EXISTS (
+      SELECT 1
+      FROM pg_catalog.pg_trigger AS trigger_row
+      WHERE trigger_row.tgrelid = 'public.message_attachments'::regclass
+        AND trigger_row.tgname = 'trg_guard_authenticated_message_attachment_update_v1'
+        AND trigger_row.tgenabled <> 'D'
+        AND NOT trigger_row.tgisinternal
+    ) AS attachment_update_guard_ready,
+  (
+    SELECT count(*) = 1
+      AND bool_and(policyname = 'message_attachments_insert_owner_staged_v1')
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'message_attachments'
+      AND cmd = 'INSERT'
+  ) AS attachment_insert_policy_converged,
+  (
+    SELECT count(*) = 1
+      AND bool_and(policyname = 'message_attachments_update_owner_exact_link_v1')
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'message_attachments'
+      AND cmd IN ('UPDATE', 'ALL')
+  ) AS attachment_update_policy_converged,
+  NOT EXISTS (
+    SELECT 1
+    FROM public.message_attachments AS attachment
+    WHERE attachment.message_id IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public.messages AS target_message
+        WHERE target_message.id = attachment.message_id
+          AND target_message.circle_id = attachment.circle_id
+          AND target_message.thread_id IS NOT DISTINCT FROM attachment.thread_id
+          AND target_message.user_id = attachment.user_id
+          AND COALESCE(target_message.is_bot, false) = false
+      )
+  ) AS stored_attachment_links_valid,
+  has_table_privilege('authenticated', 'public.message_attachments', 'UPDATE')
+    AND has_table_privilege('authenticated', 'public.message_attachments', 'INSERT')
+    AS authenticated_attachment_write_grants_ready;
+
+
+-- =============================================================================
+-- §40. Message-attachment visibility and Storage integrity (2026-08-13)
+-- Source: supabase/migrations/20260813170000_message_attachment_visibility_integrity.sql
+-- =============================================================================
+-- Canonical message-attachment visibility and Storage integrity.
+--
+-- A message attachment contains more than a filename: its row may carry the
+-- private Storage path, extracted text, and OCR. Circle membership alone is
+-- therefore not sufficient read authority. Converge the full table policy set
+-- so staged rows are owner-only and linked rows follow the exact message-thread
+-- visibility contract. Apply the same rule to the private Storage object.
+
+BEGIN;
+
+-- §40 deliberately extends §39 rather than replacing its immutable-link
+-- trigger. Abort intact if an operator tries to install visibility before the
+-- canonical compare-and-set boundary is present.
+DO $attachment_visibility_dependency_preflight$
+BEGIN
+  IF to_regprocedure('public.message_attachment_link_target_is_valid_v1(uuid,uuid,uuid,uuid)') IS NULL
+     OR to_regprocedure('public.guard_authenticated_message_attachment_update_v1()') IS NULL
+     OR NOT EXISTS (
+       SELECT 1
+       FROM pg_catalog.pg_trigger AS trigger_row
+       WHERE trigger_row.tgrelid = 'public.message_attachments'::regclass
+         AND trigger_row.tgname = 'trg_guard_authenticated_message_attachment_update_v1'
+         AND trigger_row.tgenabled <> 'D'
+         AND NOT trigger_row.tgisinternal
+     )
+     OR to_regprocedure('public.message_thread_visible_to_current_user(uuid,uuid)') IS NULL THEN
+    RAISE EXCEPTION 'message_attachment_visibility_integrity: apply SQL section 39 and canonical message-thread RLS first'
+      USING ERRCODE = '23514';
+  END IF;
+END
+$attachment_visibility_dependency_preflight$;
+
+ALTER TABLE public.message_attachments ENABLE ROW LEVEL SECURITY;
+
+CREATE OR REPLACE FUNCTION public.message_attachment_storage_path_matches_row_v1(
+  p_name text,
+  p_circle_id uuid,
+  p_thread_id uuid,
+  p_user_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+SECURITY INVOKER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    p_name IS NOT NULL
+    AND p_circle_id IS NOT NULL
+    AND p_user_id IS NOT NULL
+    AND array_length(pg_catalog.string_to_array(p_name, '/'), 1) = 4
+    AND split_part(p_name, '/', 1) = p_circle_id::text
+    AND split_part(p_name, '/', 2) = COALESCE(p_thread_id::text, '_direct')
+    AND split_part(p_name, '/', 3) = p_user_id::text
+    AND split_part(p_name, '/', 4) ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}-[A-Za-z0-9._-]{1,120}$';
+$function$;
+
+REVOKE ALL ON FUNCTION public.message_attachment_storage_path_matches_row_v1(text, uuid, uuid, uuid)
+FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.message_attachment_storage_path_matches_row_v1(text, uuid, uuid, uuid)
+TO authenticated;
+
+-- Never delete or silently rewrite a user's attachment while installing an
+-- authority boundary. Legacy drift must be inspected by an operator. Abort the
+-- transaction intact if a row cannot satisfy the canonical path identity.
+DO $attachment_path_preflight$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM public.message_attachments AS attachment
+    WHERE NOT public.message_attachment_storage_path_matches_row_v1(
+      attachment.storage_path,
+      attachment.circle_id,
+      attachment.thread_id,
+      attachment.user_id
+    )
+  ) THEN
+    RAISE EXCEPTION 'message_attachment_visibility_integrity: invalid legacy storage path; inspect before applying'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM public.message_attachments AS attachment
+    GROUP BY attachment.storage_path
+    HAVING count(*) > 1
+  ) THEN
+    RAISE EXCEPTION 'message_attachment_visibility_integrity: duplicate legacy storage path; inspect before applying'
+      USING ERRCODE = '23505';
+  END IF;
+END
+$attachment_path_preflight$;
+
+ALTER TABLE public.message_attachments
+  DROP CONSTRAINT IF EXISTS message_attachments_storage_path_matches_scope_v1;
+ALTER TABLE public.message_attachments
+  ADD CONSTRAINT message_attachments_storage_path_matches_scope_v1
+  CHECK (
+    public.message_attachment_storage_path_matches_row_v1(
+      storage_path,
+      circle_id,
+      thread_id,
+      user_id
+    )
+  );
+
+DROP INDEX IF EXISTS public.message_attachments_storage_path_unique_v1;
+CREATE UNIQUE INDEX message_attachments_storage_path_unique_v1
+ON public.message_attachments(storage_path);
+
+-- Converge the named private bucket without deleting or replacing it. A
+-- mismatched id/name is ambiguous operator state and aborts intact.
+DO $private_bucket_identity_preflight$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM storage.buckets AS bucket
+    WHERE (bucket.id = 'chat-attachments' AND bucket.name <> 'chat-attachments')
+       OR (bucket.name = 'chat-attachments' AND bucket.id <> 'chat-attachments')
+  ) THEN
+    RAISE EXCEPTION 'message_attachment_visibility_integrity: chat-attachments bucket identity mismatch; inspect before applying'
+      USING ERRCODE = '23514';
+  END IF;
+END
+$private_bucket_identity_preflight$;
+
+INSERT INTO storage.buckets (id, name, public, file_size_limit)
+VALUES ('chat-attachments', 'chat-attachments', false, 52428800)
+ON CONFLICT (id) DO UPDATE
+SET
+  name = EXCLUDED.name,
+  public = false,
+  file_size_limit = 52428800;
+
+UPDATE storage.buckets
+SET
+  public = false,
+  file_size_limit = 52428800
+WHERE id = 'chat-attachments'
+  AND name = 'chat-attachments';
+
+-- Metadata is admitted only after the exact private Storage object exists and
+-- its immutable owner matches the row/path owner. The authenticated-only
+-- owner equality prevents this SECURITY DEFINER predicate from becoming a
+-- cross-user object-existence oracle.
+CREATE OR REPLACE FUNCTION public.message_attachment_storage_object_matches_row_v1(
+  p_name text,
+  p_circle_id uuid,
+  p_thread_id uuid,
+  p_user_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    auth.uid() IS NOT NULL
+    AND p_user_id = auth.uid()
+    AND public.message_attachment_storage_path_matches_row_v1(
+      p_name,
+      p_circle_id,
+      p_thread_id,
+      p_user_id
+    )
+    AND EXISTS (
+      SELECT 1
+      FROM storage.objects AS object_row
+      WHERE object_row.bucket_id = 'chat-attachments'
+        AND object_row.name = p_name
+        AND object_row.owner_id::text = p_user_id::text
+    );
+$function$;
+
+REVOKE ALL ON FUNCTION public.message_attachment_storage_object_matches_row_v1(text, uuid, uuid, uuid)
+FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.message_attachment_storage_object_matches_row_v1(text, uuid, uuid, uuid)
+TO authenticated;
+
+-- A missing or differently owned legacy object is not repaired by guessing.
+-- Keep every row/object intact and stop the transaction for operator review.
+DO $attachment_object_binding_preflight$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM public.message_attachments AS attachment
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM storage.objects AS object_row
+      WHERE object_row.bucket_id = 'chat-attachments'
+        AND object_row.name = attachment.storage_path
+        AND object_row.owner_id::text = attachment.user_id::text
+    )
+  ) THEN
+    RAISE EXCEPTION 'message_attachment_visibility_integrity: missing or owner-mismatched legacy storage object; inspect before applying'
+      USING ERRCODE = '23514';
+  END IF;
+END
+$attachment_object_binding_preflight$;
+
+CREATE OR REPLACE FUNCTION public.message_attachment_row_visible_v1(
+  p_message_id uuid,
+  p_circle_id uuid,
+  p_thread_id uuid,
+  p_user_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    auth.uid() IS NOT NULL
+    AND p_circle_id IS NOT NULL
+    AND p_user_id IS NOT NULL
+    AND (
+      (
+        p_message_id IS NULL
+        AND p_user_id = auth.uid()
+        AND EXISTS (
+          SELECT 1
+          FROM public.circle_members AS membership
+          WHERE membership.circle_id = p_circle_id
+            AND membership.user_id = auth.uid()
+        )
+      )
+      OR (
+        p_message_id IS NOT NULL
+        AND p_thread_id IS NOT NULL
+        AND public.message_thread_visible_to_current_user(p_circle_id, p_thread_id)
+        AND EXISTS (
+          SELECT 1
+          FROM public.messages AS target_message
+          WHERE target_message.id = p_message_id
+            AND target_message.circle_id = p_circle_id
+            AND target_message.thread_id = p_thread_id
+            AND target_message.user_id = p_user_id
+            AND COALESCE(target_message.is_bot, false) = false
+        )
+      )
+    );
+$function$;
+
+REVOKE ALL ON FUNCTION public.message_attachment_row_visible_v1(uuid, uuid, uuid, uuid)
+FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.message_attachment_row_visible_v1(uuid, uuid, uuid, uuid)
+TO authenticated;
+
+-- Permissive policies are ORed. Remove every historical table policy before
+-- installing the one canonical policy for each operation.
+DO $attachment_policy_convergence$
+DECLARE
+  policy_row record;
+BEGIN
+  FOR policy_row IN
+    SELECT policyname
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'message_attachments'
+  LOOP
+    EXECUTE pg_catalog.format(
+      'DROP POLICY %I ON public.message_attachments',
+      policy_row.policyname
+    );
+  END LOOP;
+END
+$attachment_policy_convergence$;
+
+CREATE POLICY message_attachments_select_exact_visibility_v1
+ON public.message_attachments
+FOR SELECT
+TO authenticated
+USING (
+  public.message_attachment_row_visible_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+);
+
+CREATE POLICY message_attachments_insert_owner_staged_v1
+ON public.message_attachments
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+  AND message_id IS NULL
+  AND EXISTS (
+    SELECT 1
+    FROM public.circle_members AS membership
+    WHERE membership.circle_id = message_attachments.circle_id
+      AND membership.user_id = auth.uid()
+  )
+  AND (
+    thread_id IS NULL
+    OR public.message_thread_visible_to_current_user(circle_id, thread_id)
+  )
+  AND public.message_attachment_storage_path_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_storage_object_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+);
+
+CREATE POLICY message_attachments_update_owner_exact_link_v1
+ON public.message_attachments
+FOR UPDATE
+TO authenticated
+USING (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+  AND public.message_attachment_row_visible_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_link_target_is_valid_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_storage_path_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+)
+WITH CHECK (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+  AND EXISTS (
+    SELECT 1
+    FROM public.circle_members AS membership
+    WHERE membership.circle_id = message_attachments.circle_id
+      AND membership.user_id = auth.uid()
+  )
+  AND (
+    thread_id IS NULL
+    OR public.message_thread_visible_to_current_user(circle_id, thread_id)
+  )
+  AND public.message_attachment_link_target_is_valid_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_storage_path_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_storage_object_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+);
+
+CREATE POLICY message_attachments_delete_owner_visible_v1
+ON public.message_attachments
+FOR DELETE
+TO authenticated
+USING (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+  AND public.message_attachment_row_visible_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_storage_path_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+);
+
+-- Restrictive companions are defense in depth against a future or
+-- environment-specific permissive TO PUBLIC/FOR ALL policy. PostgreSQL ANDs
+-- every applicable restrictive policy with the permissive result.
+CREATE POLICY message_attachments_select_exact_visibility_guard_v1
+ON public.message_attachments
+AS RESTRICTIVE
+FOR SELECT
+TO authenticated
+USING (
+  public.message_attachment_row_visible_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_storage_path_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+);
+
+CREATE POLICY message_attachments_insert_owner_staged_guard_v1
+ON public.message_attachments
+AS RESTRICTIVE
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+  AND message_id IS NULL
+  AND EXISTS (
+    SELECT 1
+    FROM public.circle_members AS membership
+    WHERE membership.circle_id = message_attachments.circle_id
+      AND membership.user_id = auth.uid()
+  )
+  AND (
+    thread_id IS NULL
+    OR public.message_thread_visible_to_current_user(circle_id, thread_id)
+  )
+  AND public.message_attachment_storage_path_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_storage_object_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+);
+
+CREATE POLICY message_attachments_update_owner_exact_link_guard_v1
+ON public.message_attachments
+AS RESTRICTIVE
+FOR UPDATE
+TO authenticated
+USING (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+  AND public.message_attachment_row_visible_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_link_target_is_valid_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_storage_path_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+)
+WITH CHECK (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+  AND EXISTS (
+    SELECT 1
+    FROM public.circle_members AS membership
+    WHERE membership.circle_id = message_attachments.circle_id
+      AND membership.user_id = auth.uid()
+  )
+  AND (
+    thread_id IS NULL
+    OR public.message_thread_visible_to_current_user(circle_id, thread_id)
+  )
+  AND public.message_attachment_link_target_is_valid_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_storage_path_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_storage_object_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+);
+
+CREATE POLICY message_attachments_delete_owner_visible_guard_v1
+ON public.message_attachments
+AS RESTRICTIVE
+FOR DELETE
+TO authenticated
+USING (
+  auth.uid() IS NOT NULL
+  AND user_id = auth.uid()
+  AND public.message_attachment_row_visible_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+  AND public.message_attachment_storage_path_matches_row_v1(
+    storage_path,
+    circle_id,
+    thread_id,
+    user_id
+  )
+);
+
+-- Explicit anon denials ensure a hostile permissive TO PUBLIC policy cannot
+-- expose attachment metadata or content-bearing OCR/extraction columns.
+CREATE POLICY message_attachments_anon_select_deny_v1
+ON public.message_attachments
+AS RESTRICTIVE
+FOR SELECT
+TO anon
+USING (false);
+
+CREATE POLICY message_attachments_anon_insert_deny_v1
+ON public.message_attachments
+AS RESTRICTIVE
+FOR INSERT
+TO anon
+WITH CHECK (false);
+
+CREATE POLICY message_attachments_anon_update_deny_v1
+ON public.message_attachments
+AS RESTRICTIVE
+FOR UPDATE
+TO anon
+USING (false)
+WITH CHECK (false);
+
+CREATE POLICY message_attachments_anon_delete_deny_v1
+ON public.message_attachments
+AS RESTRICTIVE
+FOR DELETE
+TO anon
+USING (false);
+
+REVOKE ALL ON TABLE public.message_attachments FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.message_attachments TO authenticated;
+GRANT ALL ON TABLE public.message_attachments TO service_role;
+
+-- Storage INSERT happens before the metadata row exists, so authority comes
+-- from the exact path shape emitted by chatAttachments.ts:
+--   <circle_uuid>/<thread_uuid|_direct>/<user_uuid>/<uuid>-<safe_name>
+CREATE OR REPLACE FUNCTION public.message_attachment_storage_insert_authorized_v1(
+  p_name text
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    auth.uid() IS NOT NULL
+    AND p_name IS NOT NULL
+    AND array_length(pg_catalog.string_to_array(p_name, '/'), 1) = 4
+    AND split_part(p_name, '/', 1) ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    AND (
+      split_part(p_name, '/', 2) = '_direct'
+      OR split_part(p_name, '/', 2) ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    )
+    AND split_part(p_name, '/', 3) = auth.uid()::text
+    AND split_part(p_name, '/', 4) ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}-[A-Za-z0-9._-]{1,120}$'
+    AND EXISTS (
+      SELECT 1
+      FROM public.circle_members AS membership
+      WHERE membership.circle_id = split_part(p_name, '/', 1)::uuid
+        AND membership.user_id = auth.uid()
+    )
+    AND (
+      split_part(p_name, '/', 2) = '_direct'
+      OR public.message_thread_visible_to_current_user(
+        split_part(p_name, '/', 1)::uuid,
+        split_part(p_name, '/', 2)::uuid
+      )
+    );
+$function$;
+
+CREATE OR REPLACE FUNCTION public.message_attachment_storage_object_visible_v1(
+  p_name text,
+  p_owner_id text
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    auth.uid() IS NOT NULL
+    AND p_owner_id IS NOT NULL
+    AND EXISTS (
+      SELECT 1
+      FROM public.message_attachments AS attachment
+      WHERE attachment.storage_path = p_name
+        AND attachment.user_id::text = p_owner_id
+        AND public.message_attachment_storage_path_matches_row_v1(
+          attachment.storage_path,
+          attachment.circle_id,
+          attachment.thread_id,
+          attachment.user_id
+        )
+        AND public.message_attachment_row_visible_v1(
+          attachment.message_id,
+          attachment.circle_id,
+          attachment.thread_id,
+          attachment.user_id
+        )
+    );
+$function$;
+
+CREATE OR REPLACE FUNCTION public.message_attachment_storage_object_owned_v1(
+  p_name text,
+  p_owner_id text
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    auth.uid() IS NOT NULL
+    AND p_owner_id = auth.uid()::text
+    AND EXISTS (
+      SELECT 1
+      FROM public.message_attachments AS attachment
+      WHERE attachment.storage_path = p_name
+        AND attachment.user_id = auth.uid()
+        AND attachment.user_id::text = p_owner_id
+        AND public.message_attachment_storage_path_matches_row_v1(
+          attachment.storage_path,
+          attachment.circle_id,
+          attachment.thread_id,
+          attachment.user_id
+        )
+        AND public.message_attachment_row_visible_v1(
+          attachment.message_id,
+          attachment.circle_id,
+          attachment.thread_id,
+          attachment.user_id
+        )
+    );
+$function$;
+
+REVOKE ALL ON FUNCTION public.message_attachment_storage_insert_authorized_v1(text)
+FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.message_attachment_storage_object_visible_v1(text, text)
+FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.message_attachment_storage_object_owned_v1(text, text)
+FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.message_attachment_storage_insert_authorized_v1(text)
+TO authenticated;
+GRANT EXECUTE ON FUNCTION public.message_attachment_storage_object_visible_v1(text, text)
+TO authenticated;
+GRANT EXECUTE ON FUNCTION public.message_attachment_storage_object_owned_v1(text, text)
+TO authenticated;
+
+-- Hosted Supabase owns storage.objects through supabase_storage_admin and
+-- keeps RLS enabled. The postgres migration role may manage policies but must
+-- not ALTER the platform-owned table.
+
+DROP POLICY IF EXISTS chat_attachments_select_visible_v1 ON storage.objects;
+DROP POLICY IF EXISTS chat_attachments_select_guard_v1 ON storage.objects;
+DROP POLICY IF EXISTS chat_attachments_insert_owned_scope_v1 ON storage.objects;
+DROP POLICY IF EXISTS chat_attachments_insert_guard_v1 ON storage.objects;
+DROP POLICY IF EXISTS chat_attachments_update_guard_v1 ON storage.objects;
+DROP POLICY IF EXISTS chat_attachments_delete_owner_v1 ON storage.objects;
+DROP POLICY IF EXISTS chat_attachments_delete_guard_v1 ON storage.objects;
+DROP POLICY IF EXISTS chat_attachments_anon_select_deny_v1 ON storage.objects;
+DROP POLICY IF EXISTS chat_attachments_anon_insert_deny_v1 ON storage.objects;
+DROP POLICY IF EXISTS chat_attachments_anon_update_deny_v1 ON storage.objects;
+DROP POLICY IF EXISTS chat_attachments_anon_delete_deny_v1 ON storage.objects;
+
+-- Remove the pre-release one-argument helper overloads only after their known
+-- policies are gone. An unknown dependency fails the transaction rather than
+-- cascading into another feature.
+DROP FUNCTION IF EXISTS public.message_attachment_storage_object_visible_v1(text);
+DROP FUNCTION IF EXISTS public.message_attachment_storage_object_owned_v1(text);
+
+-- Canonical permissive policies keep this bucket functional. Restrictive
+-- companion policies ensure an environment-specific broad Storage policy
+-- cannot OR around the exact Chat attachment authority.
+CREATE POLICY chat_attachments_select_visible_v1
+ON storage.objects
+FOR SELECT
+TO authenticated
+USING (
+  bucket_id = 'chat-attachments'
+  AND public.message_attachment_storage_object_visible_v1(name, owner_id::text)
+);
+
+CREATE POLICY chat_attachments_select_guard_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR SELECT
+TO authenticated
+USING (
+  bucket_id <> 'chat-attachments'
+  OR public.message_attachment_storage_object_visible_v1(name, owner_id::text)
+);
+
+CREATE POLICY chat_attachments_insert_owned_scope_v1
+ON storage.objects
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  bucket_id = 'chat-attachments'
+  AND owner_id::text = auth.uid()::text
+  AND public.message_attachment_storage_insert_authorized_v1(name)
+);
+
+CREATE POLICY chat_attachments_insert_guard_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  bucket_id <> 'chat-attachments'
+  OR (
+    owner_id::text = auth.uid()::text
+    AND public.message_attachment_storage_insert_authorized_v1(name)
+  )
+);
+
+CREATE POLICY chat_attachments_update_guard_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR UPDATE
+TO authenticated
+USING (bucket_id <> 'chat-attachments')
+WITH CHECK (bucket_id <> 'chat-attachments');
+
+CREATE POLICY chat_attachments_delete_owner_v1
+ON storage.objects
+FOR DELETE
+TO authenticated
+USING (
+  bucket_id = 'chat-attachments'
+  AND owner_id::text = auth.uid()::text
+  AND public.message_attachment_storage_object_owned_v1(name, owner_id::text)
+);
+
+CREATE POLICY chat_attachments_delete_guard_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR DELETE
+TO authenticated
+USING (
+  bucket_id <> 'chat-attachments'
+  OR (
+    owner_id::text = auth.uid()::text
+    AND public.message_attachment_storage_object_owned_v1(name, owner_id::text)
+  )
+);
+
+-- A hostile or legacy permissive policy declared TO PUBLIC also applies to
+-- anon. Operation-specific restrictive anon policies make the private bucket
+-- unreachable even in that environment; other buckets remain unaffected.
+CREATE POLICY chat_attachments_anon_select_deny_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR SELECT
+TO anon
+USING (bucket_id <> 'chat-attachments');
+
+CREATE POLICY chat_attachments_anon_insert_deny_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR INSERT
+TO anon
+WITH CHECK (bucket_id <> 'chat-attachments');
+
+CREATE POLICY chat_attachments_anon_update_deny_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR UPDATE
+TO anon
+USING (bucket_id <> 'chat-attachments')
+WITH CHECK (bucket_id <> 'chat-attachments');
+
+CREATE POLICY chat_attachments_anon_delete_deny_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR DELETE
+TO anon
+USING (bucket_id <> 'chat-attachments');
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+
+-- §40 readiness (catalog and policy convergence only; follow with an
+-- authenticated two-user private/shared/circle-thread and Storage test).
+SELECT
+  EXISTS (
+    SELECT 1
+    FROM storage.buckets AS bucket
+    WHERE bucket.id = 'chat-attachments'
+      AND bucket.name = 'chat-attachments'
+      AND bucket.public = false
+      AND bucket.file_size_limit = 52428800
+  ) AS attachment_bucket_private_ready,
+  to_regprocedure('public.message_attachment_link_target_is_valid_v1(uuid,uuid,uuid,uuid)') IS NOT NULL
+    AND to_regprocedure('public.guard_authenticated_message_attachment_update_v1()') IS NOT NULL
+    AND EXISTS (
+      SELECT 1
+      FROM pg_catalog.pg_trigger AS trigger_row
+      WHERE trigger_row.tgrelid = 'public.message_attachments'::regclass
+        AND trigger_row.tgname = 'trg_guard_authenticated_message_attachment_update_v1'
+        AND trigger_row.tgenabled <> 'D'
+        AND NOT trigger_row.tgisinternal
+    ) AS attachment_link_integrity_compatible,
+  to_regprocedure('public.message_attachment_storage_path_matches_row_v1(text,uuid,uuid,uuid)') IS NOT NULL
+    AND to_regprocedure('public.message_attachment_storage_object_matches_row_v1(text,uuid,uuid,uuid)') IS NOT NULL
+    AND EXISTS (
+      SELECT 1
+      FROM pg_catalog.pg_constraint AS constraint_row
+      WHERE constraint_row.conrelid = 'public.message_attachments'::regclass
+        AND constraint_row.conname = 'message_attachments_storage_path_matches_scope_v1'
+        AND constraint_row.convalidated
+    )
+    AND to_regclass('public.message_attachments_storage_path_unique_v1') IS NOT NULL
+    AND NOT EXISTS (
+      SELECT 1
+      FROM public.message_attachments AS attachment
+      WHERE NOT public.message_attachment_storage_path_matches_row_v1(
+        attachment.storage_path,
+        attachment.circle_id,
+        attachment.thread_id,
+        attachment.user_id
+      )
+        OR NOT EXISTS (
+          SELECT 1
+          FROM storage.objects AS object_row
+          WHERE object_row.bucket_id = 'chat-attachments'
+            AND object_row.name = attachment.storage_path
+            AND object_row.owner_id::text = attachment.user_id::text
+        )
+    ) AS attachment_storage_path_identity_ready,
+  to_regprocedure('public.message_attachment_row_visible_v1(uuid,uuid,uuid,uuid)') IS NOT NULL
+    AND to_regprocedure('public.message_attachment_storage_insert_authorized_v1(text)') IS NOT NULL
+    AND to_regprocedure('public.message_attachment_storage_object_visible_v1(text,text)') IS NOT NULL
+    AND to_regprocedure('public.message_attachment_storage_object_owned_v1(text,text)') IS NOT NULL
+    AS attachment_visibility_helpers_ready,
+  (
+    SELECT count(*) = 12
+      AND count(*) FILTER (WHERE permissive = 'PERMISSIVE') = 4
+      AND count(*) FILTER (WHERE permissive = 'RESTRICTIVE') = 8
+      AND count(*) FILTER (WHERE roles = ARRAY['authenticated']::name[]) = 8
+      AND count(*) FILTER (WHERE roles = ARRAY['anon']::name[]) = 4
+      AND count(*) FILTER (WHERE cmd = 'SELECT' AND qual IS NOT NULL) = 3
+      AND count(*) FILTER (WHERE cmd = 'INSERT' AND with_check IS NOT NULL) = 3
+      AND count(*) FILTER (WHERE cmd = 'UPDATE' AND qual IS NOT NULL AND with_check IS NOT NULL) = 3
+      AND count(*) FILTER (WHERE cmd = 'DELETE' AND qual IS NOT NULL) = 3
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'message_attachments'
+      AND policyname IN (
+        'message_attachments_select_exact_visibility_v1',
+        'message_attachments_insert_owner_staged_v1',
+        'message_attachments_update_owner_exact_link_v1',
+        'message_attachments_delete_owner_visible_v1',
+        'message_attachments_select_exact_visibility_guard_v1',
+        'message_attachments_insert_owner_staged_guard_v1',
+        'message_attachments_update_owner_exact_link_guard_v1',
+        'message_attachments_delete_owner_visible_guard_v1',
+        'message_attachments_anon_select_deny_v1',
+        'message_attachments_anon_insert_deny_v1',
+        'message_attachments_anon_update_deny_v1',
+        'message_attachments_anon_delete_deny_v1'
+      )
+  ) AS attachment_table_policies_converged,
+  (
+    SELECT count(*) = 11
+      AND count(*) FILTER (WHERE permissive = 'PERMISSIVE') = 3
+      AND count(*) FILTER (WHERE permissive = 'RESTRICTIVE') = 8
+      AND count(*) FILTER (WHERE roles = ARRAY['authenticated']::name[]) = 7
+      AND count(*) FILTER (WHERE roles = ARRAY['anon']::name[]) = 4
+      AND count(*) FILTER (WHERE cmd = 'SELECT' AND qual IS NOT NULL) = 3
+      AND count(*) FILTER (WHERE cmd = 'INSERT' AND with_check IS NOT NULL) = 3
+      AND count(*) FILTER (WHERE cmd = 'UPDATE' AND qual IS NOT NULL AND with_check IS NOT NULL) = 2
+      AND count(*) FILTER (WHERE cmd = 'DELETE' AND qual IS NOT NULL) = 3
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'storage'
+      AND tablename = 'objects'
+      AND policyname IN (
+        'chat_attachments_select_visible_v1',
+        'chat_attachments_select_guard_v1',
+        'chat_attachments_insert_owned_scope_v1',
+        'chat_attachments_insert_guard_v1',
+        'chat_attachments_update_guard_v1',
+        'chat_attachments_delete_owner_v1',
+        'chat_attachments_delete_guard_v1',
+        'chat_attachments_anon_select_deny_v1',
+        'chat_attachments_anon_insert_deny_v1',
+        'chat_attachments_anon_update_deny_v1',
+        'chat_attachments_anon_delete_deny_v1'
+      )
+  ) AS attachment_storage_policies_converged,
+  has_table_privilege('authenticated', 'public.message_attachments', 'SELECT')
+    AND has_table_privilege('authenticated', 'public.message_attachments', 'INSERT')
+    AND has_table_privilege('authenticated', 'public.message_attachments', 'UPDATE')
+    AND has_table_privilege('authenticated', 'public.message_attachments', 'DELETE')
+    AND NOT has_table_privilege('anon', 'public.message_attachments', 'SELECT')
+    AND NOT has_table_privilege('anon', 'public.message_attachments', 'INSERT')
+    AND NOT has_table_privilege('anon', 'public.message_attachments', 'UPDATE')
+    AND NOT has_table_privilege('anon', 'public.message_attachments', 'DELETE')
+    AND has_table_privilege('service_role', 'public.message_attachments', 'SELECT')
+    AND has_table_privilege('service_role', 'public.message_attachments', 'INSERT')
+    AND has_table_privilege('service_role', 'public.message_attachments', 'UPDATE')
+    AND has_table_privilege('service_role', 'public.message_attachments', 'DELETE')
+    AS attachment_table_grants_ready;
+
+-- =============================================================================
+-- §41. Device-private run-approval privacy and authority (2026-08-13)
+-- Source: supabase/migrations/20260813180000_device_private_run_approval_authority.sql
+-- =============================================================================
+
+-- Device-private OpenSwan approval privacy and resolver authority.
+--
+-- SQL section 28 validates schema-v2 approval state transitions, but the
+-- historical circle-wide agent_run_approvals policy lets any current circle
+-- member read the payload and attempt those transitions. The
+-- desktop.open_attachment approval is device-private authority: only the user
+-- who requested the canonical row may read, resolve, or consume it. Restrictive
+-- SELECT and UPDATE policies compose with every permissive policy, including
+-- future FOR ALL drift, without replacing the existing approval state machine.
+-- PostgreSQL and service_role maintenance retain their normal RLS bypass.
+
+BEGIN;
+
+-- §41 deliberately extends the §28 schema-v2 state machine. Abort intact if
+-- the canonical transition function is absent instead of installing a privacy
+-- boundary around otherwise unguarded approval mutations.
+DO $device_private_approval_dependency_preflight$
+BEGIN
+  IF to_regprocedure('public.guard_tool_v2_run_approval()') IS NULL THEN
+    RAISE EXCEPTION 'device_private_run_approval_authority: apply SQL section 28 first'
+      USING ERRCODE = '23514';
+  END IF;
+END
+$device_private_approval_dependency_preflight$;
+
+ALTER TABLE public.agent_run_approvals ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS agent_run_approvals_device_private_select_guard_v1
+ON public.agent_run_approvals;
+
+CREATE POLICY agent_run_approvals_device_private_select_guard_v1
+ON public.agent_run_approvals
+AS RESTRICTIVE
+FOR SELECT
+TO authenticated
+USING (
+  NOT COALESCE(
+    payload->>'approvalSchemaVersion' = '2'
+      AND payload->>'toolName' = 'desktop.open_attachment',
+    false
+  )
+  OR (
+    auth.uid() IS NOT NULL
+    AND requested_by = auth.uid()::text
+  )
+);
+
+DROP POLICY IF EXISTS agent_run_approvals_device_private_update_guard_v1
+ON public.agent_run_approvals;
+
+CREATE POLICY agent_run_approvals_device_private_update_guard_v1
+ON public.agent_run_approvals
+AS RESTRICTIVE
+FOR UPDATE
+TO authenticated
+USING (
+  NOT COALESCE(
+    payload->>'approvalSchemaVersion' = '2'
+      AND payload->>'toolName' = 'desktop.open_attachment',
+    false
+  )
+  OR (
+    auth.uid() IS NOT NULL
+    AND requested_by = auth.uid()::text
+  )
+)
+WITH CHECK (
+  NOT COALESCE(
+    payload->>'approvalSchemaVersion' = '2'
+      AND payload->>'toolName' = 'desktop.open_attachment',
+    false
+  )
+  OR (
+    auth.uid() IS NOT NULL
+    AND requested_by = auth.uid()::text
+  )
+);
+
+-- §28's SECURITY DEFINER transition function requires auth.uid(), including
+-- when invoked by maintenance roles. Recreate only its UPDATE trigger so the
+-- state machine remains mandatory for authenticated callers while actual
+-- trusted database roles retain maintenance authority. Request/JWT fields
+-- cannot manufacture current_user membership in these roles.
+DROP TRIGGER IF EXISTS trg_guard_tool_v2_run_approval_update
+ON public.agent_run_approvals;
+
+CREATE TRIGGER trg_guard_tool_v2_run_approval_update
+BEFORE UPDATE ON public.agent_run_approvals
+FOR EACH ROW
+WHEN (
+  current_user NOT IN ('postgres', 'supabase_admin', 'service_role')
+  AND (
+    (
+      OLD.payload->>'approvalSchemaVersion' = '2'
+      AND (
+        OLD.payload ? 'toolName'
+        OR OLD.payload ? 'toolApprovalDigest'
+      )
+    )
+    OR (
+      NEW.payload->>'approvalSchemaVersion' = '2'
+      AND (
+        NEW.payload ? 'toolName'
+        OR NEW.payload ? 'toolApprovalDigest'
+      )
+    )
+  )
+)
+EXECUTE FUNCTION public.guard_tool_v2_run_approval();
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+
+-- §41 readiness (catalog convergence only; follow with an authenticated
+-- two-member privacy/approve/reject/consume test plus trusted-writer
+-- maintenance).
+SELECT
+  (
+    SELECT count(*) = 1
+      AND bool_and(permissive = 'RESTRICTIVE')
+      AND bool_and(cmd = 'SELECT')
+      AND bool_and(roles = ARRAY['authenticated']::name[])
+      AND bool_and(qual IS NOT NULL)
+      AND bool_and(with_check IS NULL)
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'agent_run_approvals'
+      AND policyname = 'agent_run_approvals_device_private_select_guard_v1'
+  ) AS device_private_approval_select_guard_ready,
+  (
+    SELECT count(*) = 1
+      AND bool_and(permissive = 'RESTRICTIVE')
+      AND bool_and(cmd = 'UPDATE')
+      AND bool_and(roles = ARRAY['authenticated']::name[])
+      AND bool_and(qual IS NOT NULL)
+      AND bool_and(with_check IS NOT NULL)
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'agent_run_approvals'
+      AND policyname = 'agent_run_approvals_device_private_update_guard_v1'
+  ) AS device_private_approval_update_guard_ready,
+  EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_trigger AS trigger_row
+    WHERE trigger_row.tgrelid = 'public.agent_run_approvals'::regclass
+      AND trigger_row.tgname = 'trg_guard_tool_v2_run_approval_update'
+      AND trigger_row.tgfoid = 'public.guard_tool_v2_run_approval()'::regprocedure
+      AND trigger_row.tgenabled <> 'D'
+      AND NOT trigger_row.tgisinternal
+  ) AS device_private_approval_state_machine_ready;
+
+-- BEGIN SECTION 42: Office OAuth credential control plane
+-- OAuth provider credential control plane for the Office Calendar and Email
+-- integrations.
+--
+-- A provider network request cannot participate in a PostgreSQL transaction.
+-- This migration therefore uses durable intent epochs, credential revisions,
+-- and bounded refresh claims so a stale callback/refresh cannot overwrite a
+-- disconnect, a newer authorization, or another worker's rotating token.
+-- Google/Microsoft OAuth secrets leave the generic user_api_keys surface and
+-- both access and refresh tokens are encrypted at rest.
+
+BEGIN;
+
+CREATE SCHEMA IF NOT EXISTS extensions;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
+
+CREATE TABLE IF NOT EXISTS public.oauth_provider_credentials (
+  user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  provider text NOT NULL,
+  status text NOT NULL DEFAULT 'disconnected',
+  revision bigint NOT NULL DEFAULT 0,
+  intent_epoch bigint NOT NULL DEFAULT 0,
+  authorization_operation_id uuid,
+  authorization_scopes text[] NOT NULL DEFAULT ARRAY[]::text[],
+  access_token_enc bytea,
+  refresh_token_enc bytea,
+  expires_at timestamptz,
+  account_email text NOT NULL DEFAULT '',
+  provider_subject text,
+  granted_scopes text[] NOT NULL DEFAULT ARRAY[]::text[],
+  refresh_claim_id uuid,
+  refresh_claim_expires_at timestamptz,
+  last_operation_id uuid,
+  last_operation_kind text,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (user_id, provider),
+  CONSTRAINT oauth_provider_credentials_provider_check
+    CHECK (provider IN ('google', 'microsoft')),
+  CONSTRAINT oauth_provider_credentials_status_check
+    CHECK (status IN ('connected', 'disconnected')),
+  CONSTRAINT oauth_provider_credentials_revision_check
+    CHECK (revision >= 0 AND intent_epoch >= 0),
+  CONSTRAINT oauth_provider_credentials_scope_check
+    CHECK (
+      authorization_scopes <@ ARRAY['calendar', 'email']::text[]
+      AND granted_scopes <@ ARRAY['calendar', 'email']::text[]
+    ),
+  CONSTRAINT oauth_provider_credentials_secret_shape_check
+    CHECK (
+      (status = 'connected'
+        AND access_token_enc IS NOT NULL
+        AND refresh_token_enc IS NOT NULL
+        AND expires_at IS NOT NULL
+        AND cardinality(granted_scopes) > 0)
+      OR
+      (status = 'disconnected'
+        AND access_token_enc IS NULL
+        AND refresh_token_enc IS NULL
+        AND expires_at IS NULL
+        AND cardinality(granted_scopes) = 0)
+    ),
+  CONSTRAINT oauth_provider_credentials_refresh_claim_check
+    CHECK (
+      (refresh_claim_id IS NULL AND refresh_claim_expires_at IS NULL)
+      OR
+      (status = 'connected'
+        AND refresh_claim_id IS NOT NULL
+        AND refresh_claim_expires_at IS NOT NULL)
+    )
+);
+
+ALTER TABLE public.oauth_provider_credentials ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.oauth_provider_credentials FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.oauth_provider_credentials FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.oauth_provider_credentials TO service_role;
+
+COMMENT ON TABLE public.oauth_provider_credentials IS
+  'Service-only encrypted Google/Microsoft OAuth credentials with revision, intent, and refresh-lease fencing.';
+
+ALTER TABLE public.email_calendar_oauth_states
+  ADD COLUMN IF NOT EXISTS credential_revision bigint,
+  ADD COLUMN IF NOT EXISTS intent_epoch bigint,
+  ADD COLUMN IF NOT EXISTS operation_id uuid;
+
+CREATE OR REPLACE FUNCTION public.normalize_office_oauth_scopes_v1(p_scopes text)
+RETURNS text[]
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT ARRAY(
+    SELECT allowed.scope
+    FROM unnest(ARRAY['calendar', 'email']::text[]) WITH ORDINALITY AS allowed(scope, ordinal)
+    WHERE allowed.scope = ANY (
+      regexp_split_to_array(lower(coalesce(p_scopes, '')), E'\\s*,\\s*')
+    )
+    ORDER BY allowed.ordinal
+  );
+$function$;
+
+REVOKE ALL ON FUNCTION public.normalize_office_oauth_scopes_v1(text)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.normalize_office_oauth_scopes_v1(text)
+  TO service_role;
+
+CREATE OR REPLACE FUNCTION public.reserve_office_oauth_authorization_v1(
+  p_user_id uuid,
+  p_provider text,
+  p_requested_scopes text,
+  p_operation_id uuid
+)
+RETURNS TABLE(
+  intent_epoch bigint,
+  credential_revision bigint,
+  required_scopes text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_provider text := lower(trim(coalesce(p_provider, '')));
+  v_requested text[] := public.normalize_office_oauth_scopes_v1(p_requested_scopes);
+  v_row public.oauth_provider_credentials%ROWTYPE;
+  v_required text[];
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR v_provider NOT IN ('google', 'microsoft')
+     OR p_operation_id IS NULL OR cardinality(v_requested) = 0 THEN
+    RAISE EXCEPTION 'invalid_oauth_authorization_reservation' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text || ':' || v_provider || ':oauth', 0));
+  INSERT INTO public.oauth_provider_credentials(user_id, provider)
+  VALUES (p_user_id, v_provider)
+  ON CONFLICT (user_id, provider) DO NOTHING;
+
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = v_provider
+  FOR UPDATE;
+
+  IF v_row.authorization_operation_id = p_operation_id THEN
+    RETURN QUERY SELECT
+      v_row.intent_epoch,
+      v_row.revision,
+      array_to_string(v_row.authorization_scopes, ',');
+    RETURN;
+  END IF;
+
+  SELECT ARRAY(
+    SELECT allowed.scope
+    FROM unnest(ARRAY['calendar', 'email']::text[]) WITH ORDINALITY AS allowed(scope, ordinal)
+    WHERE allowed.scope = ANY (
+      v_requested
+      || v_row.authorization_scopes
+      || CASE WHEN v_row.status = 'connected'
+        THEN v_row.granted_scopes
+        ELSE ARRAY[]::text[]
+      END
+    )
+    ORDER BY allowed.ordinal
+  ) INTO v_required;
+
+  UPDATE public.oauth_provider_credentials AS credential
+  SET intent_epoch = credential.intent_epoch + 1,
+      authorization_operation_id = p_operation_id,
+      authorization_scopes = v_required,
+      refresh_claim_id = NULL,
+      refresh_claim_expires_at = NULL,
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id AND credential.provider = v_provider
+  RETURNING credential.intent_epoch, credential.revision
+    INTO intent_epoch, credential_revision;
+
+  required_scopes := array_to_string(v_required, ',');
+  RETURN NEXT;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.commit_office_oauth_authorization_v1(
+  p_user_id uuid,
+  p_provider text,
+  p_expected_intent_epoch bigint,
+  p_expected_revision bigint,
+  p_operation_id uuid,
+  p_access_token text,
+  p_refresh_token text,
+  p_expires_at timestamptz,
+  p_account_email text,
+  p_provider_subject text,
+  p_granted_scopes text,
+  p_required_scopes text
+)
+RETURNS TABLE(applied boolean, credential_revision bigint, granted_scopes text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_provider text := lower(trim(coalesce(p_provider, '')));
+  v_granted text[] := public.normalize_office_oauth_scopes_v1(p_granted_scopes);
+  v_required text[] := public.normalize_office_oauth_scopes_v1(p_required_scopes);
+  v_row public.oauth_provider_credentials%ROWTYPE;
+  v_refresh_token text;
+  v_passphrase text;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR v_provider NOT IN ('google', 'microsoft')
+     OR p_operation_id IS NULL OR p_expected_intent_epoch IS NULL
+     OR p_expected_revision IS NULL
+     OR nullif(trim(coalesce(p_access_token, '')), '') IS NULL
+     OR p_expires_at IS NULL OR p_expires_at <= clock_timestamp()
+     OR nullif(trim(coalesce(p_provider_subject, '')), '') IS NULL
+     OR cardinality(v_required) = 0 THEN
+    RAISE EXCEPTION 'invalid_oauth_authorization_commit' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text || ':' || v_provider || ':oauth', 0));
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = v_provider
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'oauth_authorization_stale' USING ERRCODE = '40001';
+  END IF;
+  IF v_row.last_operation_kind = 'authorization'
+     AND v_row.last_operation_id = p_operation_id THEN
+    RETURN QUERY SELECT true, v_row.revision, array_to_string(v_row.granted_scopes, ',');
+    RETURN;
+  END IF;
+  IF v_row.intent_epoch <> p_expected_intent_epoch
+     OR v_row.revision <> p_expected_revision
+     OR v_row.authorization_operation_id IS DISTINCT FROM p_operation_id
+     OR v_row.authorization_scopes IS DISTINCT FROM v_required THEN
+    RAISE EXCEPTION 'oauth_authorization_stale' USING ERRCODE = '40001';
+  END IF;
+  IF NOT (v_required <@ v_granted) THEN
+    RAISE EXCEPTION 'oauth_scope_union_not_granted' USING ERRCODE = '22023';
+  END IF;
+
+  v_passphrase := public.app_encryption_key();
+  v_refresh_token := nullif(trim(coalesce(p_refresh_token, '')), '');
+  IF v_refresh_token IS NULL
+     AND v_row.status = 'connected'
+     AND v_row.provider_subject = trim(p_provider_subject)
+     AND v_row.refresh_token_enc IS NOT NULL THEN
+    v_refresh_token := extensions.pgp_sym_decrypt(v_row.refresh_token_enc, v_passphrase)::text;
+  END IF;
+  IF v_refresh_token IS NULL THEN
+    RAISE EXCEPTION 'oauth_refresh_token_required' USING ERRCODE = '22023';
+  END IF;
+
+  UPDATE public.oauth_provider_credentials AS credential
+  SET status = 'connected',
+      revision = credential.revision + 1,
+      authorization_operation_id = NULL,
+      authorization_scopes = ARRAY[]::text[],
+      access_token_enc = extensions.pgp_sym_encrypt(trim(p_access_token), v_passphrase),
+      refresh_token_enc = extensions.pgp_sym_encrypt(v_refresh_token, v_passphrase),
+      expires_at = p_expires_at,
+      account_email = left(trim(coalesce(p_account_email, '')), 320),
+      provider_subject = left(trim(p_provider_subject), 512),
+      granted_scopes = v_granted,
+      refresh_claim_id = NULL,
+      refresh_claim_expires_at = NULL,
+      last_operation_id = p_operation_id,
+      last_operation_kind = 'authorization',
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id AND credential.provider = v_provider
+  RETURNING true, credential.revision, array_to_string(credential.granted_scopes, ',')
+    INTO applied, credential_revision, granted_scopes;
+  RETURN NEXT;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.claim_office_oauth_refresh_v1(
+  p_user_id uuid,
+  p_provider text,
+  p_claim_id uuid,
+  p_lease_seconds integer DEFAULT 45
+)
+RETURNS TABLE(
+  outcome text,
+  access_token text,
+  refresh_token text,
+  expires_at timestamptz,
+  account_email text,
+  provider_subject text,
+  granted_scopes text,
+  credential_revision bigint,
+  intent_epoch bigint,
+  refresh_claim_id uuid
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_provider text := lower(trim(coalesce(p_provider, '')));
+  v_row public.oauth_provider_credentials%ROWTYPE;
+  v_passphrase text;
+  v_lease_seconds integer := greatest(15, least(coalesce(p_lease_seconds, 45), 120));
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR v_provider NOT IN ('google', 'microsoft') OR p_claim_id IS NULL THEN
+    RAISE EXCEPTION 'invalid_oauth_refresh_claim' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text || ':' || v_provider || ':oauth', 0));
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = v_provider
+  FOR UPDATE;
+
+  IF NOT FOUND OR v_row.status <> 'connected' THEN
+    RETURN QUERY SELECT 'missing'::text, NULL::text, NULL::text, NULL::timestamptz,
+      ''::text, NULL::text, ''::text, NULL::bigint, NULL::bigint, NULL::uuid;
+    RETURN;
+  END IF;
+
+  v_passphrase := public.app_encryption_key();
+  IF v_row.access_token_enc IS NOT NULL
+     AND v_row.expires_at > clock_timestamp() + interval '5 minutes' THEN
+    RETURN QUERY SELECT
+      'fresh'::text,
+      extensions.pgp_sym_decrypt(v_row.access_token_enc, v_passphrase)::text,
+      NULL::text,
+      v_row.expires_at,
+      v_row.account_email,
+      v_row.provider_subject,
+      array_to_string(v_row.granted_scopes, ','),
+      v_row.revision,
+      v_row.intent_epoch,
+      NULL::uuid;
+    RETURN;
+  END IF;
+
+  IF v_row.refresh_claim_id IS NOT NULL
+     AND v_row.refresh_claim_id <> p_claim_id
+     AND v_row.refresh_claim_expires_at > clock_timestamp() THEN
+    RETURN QUERY SELECT 'busy'::text, NULL::text, NULL::text, v_row.expires_at,
+      v_row.account_email, v_row.provider_subject, array_to_string(v_row.granted_scopes, ','),
+      v_row.revision, v_row.intent_epoch, v_row.refresh_claim_id;
+    RETURN;
+  END IF;
+
+  UPDATE public.oauth_provider_credentials AS credential
+  SET refresh_claim_id = p_claim_id,
+      refresh_claim_expires_at = clock_timestamp() + make_interval(secs => v_lease_seconds),
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id AND credential.provider = v_provider;
+
+  RETURN QUERY SELECT
+    'claimed'::text,
+    extensions.pgp_sym_decrypt(v_row.access_token_enc, v_passphrase)::text,
+    extensions.pgp_sym_decrypt(v_row.refresh_token_enc, v_passphrase)::text,
+    v_row.expires_at,
+    v_row.account_email,
+    v_row.provider_subject,
+    array_to_string(v_row.granted_scopes, ','),
+    v_row.revision,
+    v_row.intent_epoch,
+    p_claim_id;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.commit_office_oauth_refresh_v1(
+  p_user_id uuid,
+  p_provider text,
+  p_expected_intent_epoch bigint,
+  p_expected_revision bigint,
+  p_claim_id uuid,
+  p_operation_id uuid,
+  p_access_token text,
+  p_refresh_token text,
+  p_expires_at timestamptz,
+  p_provider_subject text,
+  p_granted_scopes text
+)
+RETURNS TABLE(applied boolean, credential_revision bigint, granted_scopes text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_provider text := lower(trim(coalesce(p_provider, '')));
+  v_granted text[] := public.normalize_office_oauth_scopes_v1(p_granted_scopes);
+  v_row public.oauth_provider_credentials%ROWTYPE;
+  v_refresh_token text;
+  v_passphrase text;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR v_provider NOT IN ('google', 'microsoft')
+     OR p_claim_id IS NULL OR p_operation_id IS NULL
+     OR p_expected_intent_epoch IS NULL OR p_expected_revision IS NULL
+     OR nullif(trim(coalesce(p_access_token, '')), '') IS NULL
+     OR p_expires_at IS NULL OR p_expires_at <= clock_timestamp() THEN
+    RAISE EXCEPTION 'invalid_oauth_refresh_commit' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text || ':' || v_provider || ':oauth', 0));
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = v_provider
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'oauth_refresh_stale' USING ERRCODE = '40001';
+  END IF;
+  IF v_row.last_operation_kind = 'refresh' AND v_row.last_operation_id = p_operation_id THEN
+    RETURN QUERY SELECT true, v_row.revision, array_to_string(v_row.granted_scopes, ',');
+    RETURN;
+  END IF;
+  IF v_row.status <> 'connected'
+     OR v_row.intent_epoch <> p_expected_intent_epoch
+     OR v_row.revision <> p_expected_revision
+     OR v_row.refresh_claim_id IS DISTINCT FROM p_claim_id
+     OR v_row.refresh_claim_expires_at <= clock_timestamp() THEN
+    RAISE EXCEPTION 'oauth_refresh_stale' USING ERRCODE = '40001';
+  END IF;
+  IF NOT (v_row.granted_scopes <@ v_granted) THEN
+    RAISE EXCEPTION 'oauth_scope_narrowed' USING ERRCODE = '22023';
+  END IF;
+  IF v_row.provider_subject IS NOT NULL
+     AND v_row.provider_subject IS DISTINCT FROM nullif(trim(coalesce(p_provider_subject, '')), '') THEN
+    RAISE EXCEPTION 'oauth_account_mismatch' USING ERRCODE = '22023';
+  END IF;
+
+  v_passphrase := public.app_encryption_key();
+  v_refresh_token := nullif(trim(coalesce(p_refresh_token, '')), '');
+  IF v_refresh_token IS NULL THEN
+    v_refresh_token := extensions.pgp_sym_decrypt(v_row.refresh_token_enc, v_passphrase)::text;
+  END IF;
+
+  UPDATE public.oauth_provider_credentials AS credential
+  SET revision = credential.revision + 1,
+      access_token_enc = extensions.pgp_sym_encrypt(trim(p_access_token), v_passphrase),
+      refresh_token_enc = extensions.pgp_sym_encrypt(v_refresh_token, v_passphrase),
+      expires_at = p_expires_at,
+      provider_subject = coalesce(credential.provider_subject, nullif(trim(coalesce(p_provider_subject, '')), '')),
+      granted_scopes = v_granted,
+      refresh_claim_id = NULL,
+      refresh_claim_expires_at = NULL,
+      last_operation_id = p_operation_id,
+      last_operation_kind = 'refresh',
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id AND credential.provider = v_provider
+  RETURNING true, credential.revision, array_to_string(credential.granted_scopes, ',')
+    INTO applied, credential_revision, granted_scopes;
+  RETURN NEXT;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.release_office_oauth_refresh_v1(
+  p_user_id uuid,
+  p_provider text,
+  p_expected_intent_epoch bigint,
+  p_expected_revision bigint,
+  p_claim_id uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_provider text := lower(trim(coalesce(p_provider, '')));
+  v_released boolean := false;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  UPDATE public.oauth_provider_credentials AS credential
+  SET refresh_claim_id = NULL,
+      refresh_claim_expires_at = NULL,
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id
+    AND credential.provider = v_provider
+    AND credential.status = 'connected'
+    AND credential.intent_epoch = p_expected_intent_epoch
+    AND credential.revision = p_expected_revision
+    AND credential.refresh_claim_id = p_claim_id;
+  v_released := FOUND;
+  RETURN v_released;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.disconnect_office_oauth_provider_v1(
+  p_user_id uuid,
+  p_provider text,
+  p_operation_id uuid
+)
+RETURNS TABLE(disconnected boolean, credential_revision bigint, intent_epoch bigint)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_provider text := lower(trim(coalesce(p_provider, '')));
+  v_row public.oauth_provider_credentials%ROWTYPE;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR v_provider NOT IN ('google', 'microsoft') OR p_operation_id IS NULL THEN
+    RAISE EXCEPTION 'invalid_oauth_disconnect' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text || ':' || v_provider || ':oauth', 0));
+  INSERT INTO public.oauth_provider_credentials(user_id, provider)
+  VALUES (p_user_id, v_provider)
+  ON CONFLICT (user_id, provider) DO NOTHING;
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = v_provider
+  FOR UPDATE;
+
+  IF v_row.last_operation_kind = 'disconnect' AND v_row.last_operation_id = p_operation_id THEN
+    RETURN QUERY SELECT true, v_row.revision, v_row.intent_epoch;
+    RETURN;
+  END IF;
+
+  UPDATE public.oauth_provider_credentials AS credential
+  SET status = 'disconnected',
+      revision = credential.revision + 1,
+      intent_epoch = credential.intent_epoch + 1,
+      authorization_operation_id = NULL,
+      authorization_scopes = ARRAY[]::text[],
+      access_token_enc = NULL,
+      refresh_token_enc = NULL,
+      expires_at = NULL,
+      account_email = '',
+      provider_subject = NULL,
+      granted_scopes = ARRAY[]::text[],
+      refresh_claim_id = NULL,
+      refresh_claim_expires_at = NULL,
+      last_operation_id = p_operation_id,
+      last_operation_kind = 'disconnect',
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id AND credential.provider = v_provider
+  RETURNING true, credential.revision, credential.intent_epoch
+    INTO disconnected, credential_revision, intent_epoch;
+
+  DELETE FROM public.user_api_keys AS legacy
+  WHERE legacy.user_id = p_user_id
+    AND lower(legacy.provider) = v_provider
+    AND lower(coalesce(legacy.label, 'default')) = 'oauth';
+  RETURN NEXT;
+END;
+$function$;
+
+-- Preserve valid legacy Google/Microsoft OAuth rows, then remove their
+-- plaintext refresh-token metadata from the generic credential table. Legacy
+-- rows have no stable provider subject, so a later callback may not reuse their
+-- refresh token unless the provider issues a fresh one.
+DO $legacy_migration$
+DECLARE
+  v_row record;
+  v_meta jsonb;
+  v_access_token text;
+  v_refresh_token text;
+  v_expires_at timestamptz;
+  v_scopes text[];
+  v_passphrase text := public.app_encryption_key();
+BEGIN
+  FOR v_row IN
+    SELECT key_row.*
+    FROM public.user_api_keys AS key_row
+    WHERE lower(key_row.provider) IN ('google', 'microsoft')
+      AND lower(coalesce(key_row.label, 'default')) = 'oauth'
+    FOR UPDATE
+  LOOP
+    BEGIN
+      v_meta := coalesce(v_row.endpoint::jsonb, '{}'::jsonb);
+    EXCEPTION WHEN others THEN
+      v_meta := '{}'::jsonb;
+    END;
+    BEGIN
+      v_access_token := extensions.pgp_sym_decrypt(v_row.api_key_enc, v_passphrase)::text;
+    EXCEPTION WHEN others THEN
+      v_access_token := NULL;
+    END;
+    v_refresh_token := nullif(trim(coalesce(v_meta->>'refresh_token', '')), '');
+    BEGIN
+      v_expires_at := (v_meta->>'expires_at')::timestamptz;
+    EXCEPTION WHEN others THEN
+      v_expires_at := NULL;
+    END;
+    v_scopes := public.normalize_office_oauth_scopes_v1(v_meta->>'scopes');
+
+    IF nullif(trim(coalesce(v_access_token, '')), '') IS NOT NULL
+       AND v_refresh_token IS NOT NULL
+       AND v_expires_at IS NOT NULL
+       AND cardinality(v_scopes) > 0 THEN
+      INSERT INTO public.oauth_provider_credentials(
+        user_id, provider, status, access_token_enc, refresh_token_enc,
+        expires_at, account_email, granted_scopes
+      ) VALUES (
+        v_row.user_id,
+        lower(v_row.provider),
+        'connected',
+        extensions.pgp_sym_encrypt(trim(v_access_token), v_passphrase),
+        extensions.pgp_sym_encrypt(v_refresh_token, v_passphrase),
+        v_expires_at,
+        left(trim(coalesce(v_meta->>'email', '')), 320),
+        v_scopes
+      ) ON CONFLICT (user_id, provider) DO NOTHING;
+    ELSE
+      INSERT INTO public.oauth_provider_credentials(user_id, provider)
+      VALUES (v_row.user_id, lower(v_row.provider))
+      ON CONFLICT (user_id, provider) DO NOTHING;
+    END IF;
+  END LOOP;
+
+  DELETE FROM public.user_api_keys AS key_row
+  WHERE lower(key_row.provider) IN ('google', 'microsoft')
+    AND lower(coalesce(key_row.label, 'default')) = 'oauth';
+END;
+$legacy_migration$;
+
+-- Canonical RLS keeps ordinary BYOK rows owner-managed while reserving the
+-- Google/Microsoft OAuth namespace for the service-only control plane.
+DO $policies$
+DECLARE
+  policy_row record;
+BEGIN
+  FOR policy_row IN
+    SELECT policyname
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public' AND tablename = 'user_api_keys'
+  LOOP
+    EXECUTE format('DROP POLICY IF EXISTS %I ON public.user_api_keys', policy_row.policyname);
+  END LOOP;
+END;
+$policies$;
+
+CREATE POLICY user_api_keys_select_own_non_oauth
+  ON public.user_api_keys FOR SELECT TO authenticated
+  USING (
+    user_id = auth.uid()
+    AND NOT (
+      lower(provider) IN ('google', 'microsoft')
+      AND lower(coalesce(label, 'default')) = 'oauth'
+    )
+  );
+CREATE POLICY user_api_keys_insert_own_non_oauth
+  ON public.user_api_keys FOR INSERT TO authenticated
+  WITH CHECK (
+    user_id = auth.uid()
+    AND NOT (
+      lower(provider) IN ('google', 'microsoft')
+      AND lower(coalesce(label, 'default')) = 'oauth'
+    )
+  );
+CREATE POLICY user_api_keys_update_own_non_oauth
+  ON public.user_api_keys FOR UPDATE TO authenticated
+  USING (
+    user_id = auth.uid()
+    AND NOT (
+      lower(provider) IN ('google', 'microsoft')
+      AND lower(coalesce(label, 'default')) = 'oauth'
+    )
+  )
+  WITH CHECK (
+    user_id = auth.uid()
+    AND NOT (
+      lower(provider) IN ('google', 'microsoft')
+      AND lower(coalesce(label, 'default')) = 'oauth'
+    )
+  );
+CREATE POLICY user_api_keys_delete_own_non_oauth
+  ON public.user_api_keys FOR DELETE TO authenticated
+  USING (
+    user_id = auth.uid()
+    AND NOT (
+      lower(provider) IN ('google', 'microsoft')
+      AND lower(coalesce(label, 'default')) = 'oauth'
+    )
+  );
+
+CREATE OR REPLACE FUNCTION public.store_user_api_key(
+  p_provider text,
+  p_api_key text,
+  p_label text DEFAULT 'default',
+  p_endpoint text DEFAULT NULL
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_id uuid;
+  v_user_id uuid := auth.uid();
+  v_provider text := lower(trim(coalesce(p_provider, '')));
+  v_label text := coalesce(nullif(trim(p_label), ''), 'default');
+  v_passphrase text;
+BEGIN
+  IF v_user_id IS NULL THEN RAISE EXCEPTION 'not_authenticated' USING ERRCODE = '42501'; END IF;
+  IF v_provider IN ('google', 'microsoft') AND lower(v_label) = 'oauth' THEN
+    RAISE EXCEPTION 'reserved_oauth_credential' USING ERRCODE = '42501';
+  END IF;
+  v_passphrase := public.app_encryption_key();
+  INSERT INTO public.user_api_keys(user_id, provider, api_key_enc, label, endpoint)
+  VALUES (v_user_id, v_provider, extensions.pgp_sym_encrypt(p_api_key, v_passphrase), v_label, nullif(trim(p_endpoint), ''))
+  ON CONFLICT (user_id, provider, label) DO UPDATE
+  SET api_key_enc = extensions.pgp_sym_encrypt(p_api_key, v_passphrase),
+      endpoint = coalesce(nullif(trim(p_endpoint), ''), public.user_api_keys.endpoint),
+      is_active = true,
+      updated_at = clock_timestamp()
+  RETURNING id INTO v_id;
+  RETURN v_id;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.store_user_api_key_for_user(
+  p_user_id uuid,
+  p_provider text,
+  p_api_key text,
+  p_label text DEFAULT 'default',
+  p_endpoint text DEFAULT NULL
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_id uuid;
+  v_provider text := lower(trim(coalesce(p_provider, '')));
+  v_label text := coalesce(nullif(trim(p_label), ''), 'default');
+  v_passphrase text;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF v_provider IN ('google', 'microsoft') AND lower(v_label) = 'oauth' THEN
+    RAISE EXCEPTION 'reserved_oauth_credential' USING ERRCODE = '42501';
+  END IF;
+  v_passphrase := public.app_encryption_key();
+  INSERT INTO public.user_api_keys(user_id, provider, api_key_enc, label, endpoint)
+  VALUES (p_user_id, v_provider, extensions.pgp_sym_encrypt(p_api_key, v_passphrase), v_label, nullif(trim(p_endpoint), ''))
+  ON CONFLICT (user_id, provider, label) DO UPDATE
+  SET api_key_enc = extensions.pgp_sym_encrypt(p_api_key, v_passphrase),
+      endpoint = coalesce(nullif(trim(p_endpoint), ''), public.user_api_keys.endpoint),
+      is_active = true,
+      updated_at = clock_timestamp()
+  RETURNING id INTO v_id;
+  RETURN v_id;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.get_user_api_key(
+  p_user_id uuid,
+  p_provider text,
+  p_label text DEFAULT 'default'
+)
+RETURNS TABLE(api_key text, endpoint text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_passphrase text;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role'
+     AND (auth.uid() IS NULL OR auth.uid() <> p_user_id) THEN
+    RAISE EXCEPTION 'not_authorized' USING ERRCODE = '42501';
+  END IF;
+  v_passphrase := public.app_encryption_key();
+  RETURN QUERY
+  SELECT extensions.pgp_sym_decrypt(key_row.api_key_enc, v_passphrase)::text,
+         key_row.endpoint
+  FROM public.user_api_keys AS key_row
+  WHERE key_row.user_id = p_user_id
+    AND key_row.provider = lower(trim(p_provider))
+    AND (p_label IS NULL OR key_row.label = p_label)
+    AND key_row.is_active = true
+    AND NOT (
+      lower(key_row.provider) IN ('google', 'microsoft')
+      AND lower(coalesce(key_row.label, 'default')) = 'oauth'
+    )
+  ORDER BY key_row.updated_at DESC
+  LIMIT 1;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.delete_user_api_key(p_key_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'not_authenticated' USING ERRCODE = '42501'; END IF;
+  DELETE FROM public.user_api_keys AS key_row
+  WHERE key_row.id = p_key_id
+    AND key_row.user_id = auth.uid()
+    AND NOT (
+      lower(key_row.provider) IN ('google', 'microsoft')
+      AND lower(coalesce(key_row.label, 'default')) = 'oauth'
+    );
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.list_user_api_keys()
+RETURNS TABLE(
+  id uuid,
+  provider text,
+  label text,
+  endpoint text,
+  is_active boolean,
+  created_at timestamptz,
+  updated_at timestamptz
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'not_authenticated' USING ERRCODE = '42501'; END IF;
+  RETURN QUERY
+  SELECT key_row.id, key_row.provider, key_row.label, key_row.endpoint,
+         key_row.is_active, key_row.created_at, key_row.updated_at
+  FROM public.user_api_keys AS key_row
+  WHERE key_row.user_id = auth.uid()
+    AND NOT (
+      lower(key_row.provider) IN ('google', 'microsoft')
+      AND lower(coalesce(key_row.label, 'default')) = 'oauth'
+    )
+  ORDER BY key_row.provider, key_row.label;
+END;
+$function$;
+
+DROP FUNCTION IF EXISTS public.store_oauth_credential_for_user(
+  uuid, text, text, text, timestamptz, text, text, text
+);
+
+REVOKE ALL ON FUNCTION public.store_user_api_key(text, text, text, text) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.store_user_api_key_for_user(uuid, text, text, text, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.get_user_api_key(uuid, text, text) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.delete_user_api_key(uuid) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.list_user_api_keys() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.store_user_api_key(text, text, text, text) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.store_user_api_key_for_user(uuid, text, text, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.get_user_api_key(uuid, text, text) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.delete_user_api_key(uuid) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.list_user_api_keys() TO authenticated;
+
+REVOKE ALL ON FUNCTION public.reserve_office_oauth_authorization_v1(uuid, text, text, uuid)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.commit_office_oauth_authorization_v1(uuid, text, bigint, bigint, uuid, text, text, timestamptz, text, text, text, text)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.claim_office_oauth_refresh_v1(uuid, text, uuid, integer)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.commit_office_oauth_refresh_v1(uuid, text, bigint, bigint, uuid, uuid, text, text, timestamptz, text, text)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.release_office_oauth_refresh_v1(uuid, text, bigint, bigint, uuid)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.disconnect_office_oauth_provider_v1(uuid, text, uuid)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.reserve_office_oauth_authorization_v1(uuid, text, text, uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.commit_office_oauth_authorization_v1(uuid, text, bigint, bigint, uuid, text, text, timestamptz, text, text, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.claim_office_oauth_refresh_v1(uuid, text, uuid, integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.commit_office_oauth_refresh_v1(uuid, text, bigint, bigint, uuid, uuid, text, text, timestamptz, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.release_office_oauth_refresh_v1(uuid, text, bigint, bigint, uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.disconnect_office_oauth_provider_v1(uuid, text, uuid) TO service_role;
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+-- END SECTION 42: Office OAuth credential control plane
+
+-- =============================================================================
+-- SECTION 43: Figma OAuth credential and callback control plane
+-- Source: supabase/migrations/20260813200000_figma_oauth_credential_control.sql
+-- Apply only after section 42; deploy the matching figma-oauth function after
+-- this transaction succeeds.
+-- =============================================================================
+-- Figma OAuth credential and callback control plane.
+--
+-- OAuth provider calls cannot share a PostgreSQL transaction with local state.
+-- Durable intent epochs, credential revisions, and bounded refresh leases fence
+-- stale callbacks, concurrent token rotation, and disconnect races. The Figma
+-- callback state is consumed atomically before the provider token exchange.
+-- Access tokens, refresh tokens, and PKCE verifiers are encrypted at rest and
+-- are available only to service-role RPCs.
+
+BEGIN;
+
+CREATE SCHEMA IF NOT EXISTS extensions;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
+
+-- Extend the canonical provider table without creating another secret store.
+ALTER TABLE public.oauth_provider_credentials
+  DROP CONSTRAINT IF EXISTS oauth_provider_credentials_provider_check,
+  DROP CONSTRAINT IF EXISTS oauth_provider_credentials_scope_check;
+
+ALTER TABLE public.oauth_provider_credentials
+  ADD CONSTRAINT oauth_provider_credentials_provider_check
+    CHECK (provider IN ('google', 'microsoft', 'figma')),
+  ADD CONSTRAINT oauth_provider_credentials_scope_check
+    CHECK (
+      (
+        provider IN ('google', 'microsoft')
+        AND authorization_scopes <@ ARRAY['calendar', 'email']::text[]
+        AND granted_scopes <@ ARRAY['calendar', 'email']::text[]
+      )
+      OR
+      (
+        provider = 'figma'
+        AND authorization_scopes <@ ARRAY['file_content:read']::text[]
+        AND granted_scopes <@ ARRAY['file_content:read']::text[]
+      )
+    );
+
+ALTER TABLE public.oauth_provider_credentials ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.oauth_provider_credentials FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.oauth_provider_credentials FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.oauth_provider_credentials TO service_role;
+
+COMMENT ON TABLE public.oauth_provider_credentials IS
+  'Service-only encrypted OAuth credentials with revision, intent, and refresh-lease fencing.';
+
+-- Upgrade the legacy nonce table in place. Rows from the old shape cannot be
+-- proved to carry PKCE or a credential fence, so only those rows are retired.
+ALTER TABLE public.figma_oauth_states
+  ADD COLUMN IF NOT EXISTS code_verifier_enc bytea,
+  ADD COLUMN IF NOT EXISTS client_nonce text,
+  ADD COLUMN IF NOT EXISTS operation_id uuid,
+  ADD COLUMN IF NOT EXISTS intent_epoch bigint,
+  ADD COLUMN IF NOT EXISTS credential_revision bigint,
+  ADD COLUMN IF NOT EXISTS requested_scopes text[],
+  ADD COLUMN IF NOT EXISTS claimed_at timestamptz,
+  ADD COLUMN IF NOT EXISTS claim_expires_at timestamptz;
+
+DELETE FROM public.figma_oauth_states
+WHERE code_verifier_enc IS NULL
+   OR client_nonce IS NULL
+   OR client_nonce !~ '^[a-f0-9]{48}$'
+   OR operation_id IS NULL
+   OR intent_epoch IS NULL
+   OR credential_revision IS NULL
+   OR requested_scopes IS NULL;
+
+UPDATE public.figma_oauth_states
+SET claim_expires_at = claimed_at + interval '1 minute'
+WHERE claimed_at IS NOT NULL AND claim_expires_at IS NULL;
+UPDATE public.figma_oauth_states
+SET claim_expires_at = NULL
+WHERE claimed_at IS NULL AND claim_expires_at IS NOT NULL;
+
+ALTER TABLE public.figma_oauth_states
+  ALTER COLUMN code_verifier_enc SET NOT NULL,
+  ALTER COLUMN client_nonce SET NOT NULL,
+  ALTER COLUMN operation_id SET NOT NULL,
+  ALTER COLUMN intent_epoch SET NOT NULL,
+  ALTER COLUMN credential_revision SET NOT NULL,
+  ALTER COLUMN requested_scopes SET NOT NULL;
+
+ALTER TABLE public.figma_oauth_states
+  DROP CONSTRAINT IF EXISTS figma_oauth_states_fence_check,
+  DROP CONSTRAINT IF EXISTS figma_oauth_states_client_nonce_check,
+  DROP CONSTRAINT IF EXISTS figma_oauth_states_scope_check,
+  DROP CONSTRAINT IF EXISTS figma_oauth_states_claim_lease_check;
+
+ALTER TABLE public.figma_oauth_states
+  ADD CONSTRAINT figma_oauth_states_fence_check
+    CHECK (intent_epoch >= 0 AND credential_revision >= 0),
+  ADD CONSTRAINT figma_oauth_states_client_nonce_check
+    CHECK (client_nonce ~ '^[a-f0-9]{48}$'),
+  ADD CONSTRAINT figma_oauth_states_scope_check
+    CHECK (
+      cardinality(requested_scopes) > 0
+      AND requested_scopes <@ ARRAY['file_content:read']::text[]
+    ),
+  ADD CONSTRAINT figma_oauth_states_claim_lease_check
+    CHECK (
+      (claimed_at IS NULL AND claim_expires_at IS NULL)
+      OR
+      (claimed_at IS NOT NULL
+        AND claim_expires_at > claimed_at
+        AND claim_expires_at <= claimed_at + interval '2 minutes')
+    );
+
+ALTER TABLE public.figma_oauth_states ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.figma_oauth_states FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.figma_oauth_states FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.figma_oauth_states TO service_role;
+
+COMMENT ON TABLE public.figma_oauth_states IS
+  'Service-only, encrypted-PKCE, single-use Figma OAuth callback states.';
+
+CREATE OR REPLACE FUNCTION public.normalize_figma_oauth_scopes_v1(p_scopes text)
+RETURNS text[]
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT ARRAY(
+    SELECT allowed.scope
+    FROM unnest(ARRAY['file_content:read']::text[]) WITH ORDINALITY AS allowed(scope, ordinal)
+    WHERE allowed.scope = ANY (
+      regexp_split_to_array(lower(trim(coalesce(p_scopes, ''))), E'[\\s,]+')
+    )
+    ORDER BY allowed.ordinal
+  );
+$function$;
+
+CREATE OR REPLACE FUNCTION public.cleanup_figma_oauth_states_v1(
+  p_limit integer DEFAULT 500
+)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_deleted integer := 0;
+  v_limit integer := greatest(1, least(coalesce(p_limit, 500), 5000));
+  v_candidate record;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  FOR v_candidate IN
+    SELECT
+      state_row.id,
+      state_row.user_id,
+      state_row.operation_id,
+      state_row.intent_epoch,
+      state_row.credential_revision
+    FROM public.figma_oauth_states AS state_row
+    WHERE (state_row.claimed_at IS NULL AND state_row.expires_at <= clock_timestamp())
+       OR (state_row.claimed_at IS NOT NULL AND state_row.claim_expires_at <= clock_timestamp())
+    ORDER BY coalesce(state_row.claim_expires_at, state_row.expires_at), state_row.id
+    LIMIT v_limit
+  LOOP
+    -- Match reserve/claim/disconnect lock order: advisory user lock, credential
+    -- row, then state row. The unlocked candidate is only a hint and grants no
+    -- deletion or credential authority.
+    PERFORM pg_advisory_xact_lock(hashtextextended(v_candidate.user_id::text || ':figma:oauth', 0));
+    PERFORM 1
+    FROM public.oauth_provider_credentials AS credential
+    WHERE credential.user_id = v_candidate.user_id AND credential.provider = 'figma'
+    FOR UPDATE;
+
+    DELETE FROM public.figma_oauth_states AS state_row
+    WHERE state_row.id = v_candidate.id
+      AND state_row.user_id = v_candidate.user_id
+      AND state_row.operation_id = v_candidate.operation_id
+      AND state_row.intent_epoch = v_candidate.intent_epoch
+      AND state_row.credential_revision = v_candidate.credential_revision
+      AND (
+        (state_row.claimed_at IS NULL AND state_row.expires_at <= clock_timestamp())
+        OR (state_row.claimed_at IS NOT NULL AND state_row.claim_expires_at <= clock_timestamp())
+      );
+    IF NOT FOUND THEN CONTINUE; END IF;
+    v_deleted := v_deleted + 1;
+
+    -- Retire only the exact abandoned pending authorization. Keep any existing
+    -- connected credential and its revision intact so ordinary refresh can
+    -- resume; a newer/superseding authorization cannot match these fences.
+    UPDATE public.oauth_provider_credentials AS credential
+    SET authorization_operation_id = NULL,
+        authorization_scopes = ARRAY[]::text[],
+        updated_at = clock_timestamp()
+    WHERE credential.user_id = v_candidate.user_id
+      AND credential.provider = 'figma'
+      AND credential.authorization_operation_id = v_candidate.operation_id
+      AND credential.intent_epoch = v_candidate.intent_epoch
+      AND credential.revision = v_candidate.credential_revision;
+  END LOOP;
+  RETURN v_deleted;
+END;
+$function$;
+
+-- Remove the unpublished pre-full-state signatures if this transaction is
+-- reapplied over an earlier reviewed draft. Leaving either overload callable
+-- would allow a service caller to reserve or consume only the server half.
+DROP FUNCTION IF EXISTS public.reserve_figma_oauth_authorization_v1(
+  uuid, text, text, text, uuid, timestamptz
+);
+DROP FUNCTION IF EXISTS public.reserve_figma_oauth_authorization_v1(
+  uuid, text, text, text, text, uuid, timestamptz
+);
+DROP FUNCTION IF EXISTS public.claim_figma_oauth_state_v1(text);
+DROP FUNCTION IF EXISTS public.claim_figma_oauth_state_v1(text, text);
+
+CREATE OR REPLACE FUNCTION public.reserve_figma_oauth_authorization_v1(
+  p_user_id uuid,
+  p_state text,
+  p_client_nonce text,
+  p_code_verifier text,
+  p_requested_scopes text,
+  p_operation_id uuid,
+  p_expires_at timestamptz
+)
+RETURNS TABLE(
+  state_id uuid,
+  intent_epoch bigint,
+  credential_revision bigint,
+  required_scopes text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_state text := trim(coalesce(p_state, ''));
+  v_client_nonce text := coalesce(p_client_nonce, '');
+  v_verifier text := trim(coalesce(p_code_verifier, ''));
+  v_requested text[] := public.normalize_figma_oauth_scopes_v1(p_requested_scopes);
+  v_required text[];
+  v_row public.oauth_provider_credentials%ROWTYPE;
+  v_state_row public.figma_oauth_states%ROWTYPE;
+  v_passphrase text;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR p_operation_id IS NULL
+     OR v_state !~ '^[a-f0-9]{48}$'
+     OR v_client_nonce !~ '^[a-f0-9]{48}$'
+     OR v_verifier !~ '^[A-Za-z0-9._~-]{43,128}$'
+     OR cardinality(v_requested) = 0
+     OR p_expires_at IS NULL
+     OR p_expires_at <= clock_timestamp()
+     OR p_expires_at > clock_timestamp() + interval '15 minutes' THEN
+    RAISE EXCEPTION 'invalid_figma_oauth_authorization_reservation' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text || ':figma:oauth', 0));
+  INSERT INTO public.oauth_provider_credentials(user_id, provider)
+  VALUES (p_user_id, 'figma')
+  ON CONFLICT (user_id, provider) DO NOTHING;
+
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+  FOR UPDATE;
+
+  IF v_row.authorization_operation_id = p_operation_id THEN
+    SELECT * INTO v_state_row
+    FROM public.figma_oauth_states AS state_row
+    WHERE state_row.user_id = p_user_id
+      AND state_row.state = v_state
+      AND state_row.client_nonce = v_client_nonce
+      AND state_row.operation_id = p_operation_id;
+    IF FOUND THEN
+      RETURN QUERY SELECT
+        v_state_row.id,
+        v_state_row.intent_epoch,
+        v_state_row.credential_revision,
+        array_to_string(v_state_row.requested_scopes, ',');
+      RETURN;
+    END IF;
+    RAISE EXCEPTION 'figma_oauth_authorization_operation_reused' USING ERRCODE = '22023';
+  END IF;
+
+  SELECT ARRAY(
+    SELECT allowed.scope
+    FROM unnest(ARRAY['file_content:read']::text[]) WITH ORDINALITY AS allowed(scope, ordinal)
+    WHERE allowed.scope = ANY (
+      v_requested
+      || v_row.authorization_scopes
+      || CASE WHEN v_row.status = 'connected'
+        THEN v_row.granted_scopes
+        ELSE ARRAY[]::text[]
+      END
+    )
+    ORDER BY allowed.ordinal
+  ) INTO v_required;
+
+  UPDATE public.oauth_provider_credentials AS credential
+  SET intent_epoch = credential.intent_epoch + 1,
+      authorization_operation_id = p_operation_id,
+      authorization_scopes = v_required,
+      refresh_claim_id = NULL,
+      refresh_claim_expires_at = NULL,
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+  RETURNING credential.intent_epoch, credential.revision
+  INTO intent_epoch, credential_revision;
+
+  -- A user has one live Figma authorization intent. Superseded callback states
+  -- are removed in the same transaction as the intent-epoch advance.
+  DELETE FROM public.figma_oauth_states AS state_row
+  WHERE state_row.user_id = p_user_id;
+
+  v_passphrase := public.app_encryption_key();
+  INSERT INTO public.figma_oauth_states(
+    state, client_nonce, user_id, expires_at, code_verifier_enc, operation_id,
+    intent_epoch, credential_revision, requested_scopes
+  ) VALUES (
+    v_state, v_client_nonce, p_user_id, p_expires_at,
+    extensions.pgp_sym_encrypt(v_verifier, v_passphrase),
+    p_operation_id, intent_epoch, credential_revision, v_required
+  )
+  RETURNING id INTO state_id;
+
+  required_scopes := array_to_string(v_required, ',');
+  RETURN NEXT;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.claim_figma_oauth_state_v1(
+  p_state text,
+  p_client_nonce text
+)
+RETURNS TABLE(
+  user_id uuid,
+  client_nonce text,
+  code_verifier text,
+  intent_epoch bigint,
+  credential_revision bigint,
+  operation_id uuid,
+  required_scopes text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_state text := trim(coalesce(p_state, ''));
+  v_client_nonce text := coalesce(p_client_nonce, '');
+  v_user_id uuid;
+  v_state_row public.figma_oauth_states%ROWTYPE;
+  v_credential public.oauth_provider_credentials%ROWTYPE;
+  v_credential_found boolean := false;
+  v_passphrase text;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF v_state !~ '^[a-f0-9]{48}$'
+     OR v_client_nonce !~ '^[a-f0-9]{48}$' THEN
+    RETURN;
+  END IF;
+
+  -- Read only the lock key first, then follow the canonical lock order used by
+  -- reserve/disconnect: advisory lock -> credential row -> state row. The
+  -- state is re-read under lock, so this unlocked hint grants no authority.
+  SELECT state_row.user_id INTO v_user_id
+  FROM public.figma_oauth_states AS state_row
+  WHERE state_row.state = v_state
+    AND state_row.client_nonce = v_client_nonce;
+  IF NOT FOUND THEN RETURN; END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(v_user_id::text || ':figma:oauth', 0));
+  SELECT * INTO v_credential
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = v_user_id AND credential.provider = 'figma'
+  FOR UPDATE;
+  v_credential_found := FOUND;
+  SELECT * INTO v_state_row
+  FROM public.figma_oauth_states AS state_row
+  WHERE state_row.state = v_state
+    AND state_row.client_nonce = v_client_nonce
+    AND state_row.user_id = v_user_id
+  FOR UPDATE;
+  IF NOT FOUND THEN RETURN; END IF;
+  IF v_state_row.claimed_at IS NOT NULL THEN RETURN; END IF;
+  IF v_state_row.expires_at <= clock_timestamp() THEN
+    DELETE FROM public.figma_oauth_states AS state_row
+    WHERE state_row.id = v_state_row.id;
+    RETURN;
+  END IF;
+  IF NOT v_credential_found
+     OR v_credential.intent_epoch <> v_state_row.intent_epoch
+     OR v_credential.revision <> v_state_row.credential_revision
+     OR v_credential.authorization_operation_id IS DISTINCT FROM v_state_row.operation_id
+     OR v_credential.authorization_scopes IS DISTINCT FROM v_state_row.requested_scopes THEN
+    DELETE FROM public.figma_oauth_states AS state_row
+    WHERE state_row.id = v_state_row.id;
+    RETURN;
+  END IF;
+
+  -- Claim before returning the PKCE verifier: one callback can cross the
+  -- provider boundary at most once, including under concurrent requests. Keep
+  -- the claimed row until commit or expiry so refresh/status can distinguish a
+  -- legitimate in-flight exchange from an abandoned authorization.
+  UPDATE public.figma_oauth_states AS state_row
+  SET claimed_at = clock_timestamp(),
+      claim_expires_at = clock_timestamp() + interval '1 minute'
+  WHERE state_row.id = v_state_row.id
+    AND state_row.claimed_at IS NULL;
+  IF NOT FOUND THEN RETURN; END IF;
+  v_passphrase := public.app_encryption_key();
+  RETURN QUERY SELECT
+    v_state_row.user_id,
+    v_state_row.client_nonce,
+    extensions.pgp_sym_decrypt(v_state_row.code_verifier_enc, v_passphrase)::text,
+    v_state_row.intent_epoch,
+    v_state_row.credential_revision,
+    v_state_row.operation_id,
+    array_to_string(v_state_row.requested_scopes, ',');
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.commit_figma_oauth_authorization_v1(
+  p_user_id uuid,
+  p_expected_intent_epoch bigint,
+  p_expected_revision bigint,
+  p_operation_id uuid,
+  p_access_token text,
+  p_refresh_token text,
+  p_expires_at timestamptz,
+  p_provider_subject text,
+  p_granted_scopes text
+)
+RETURNS TABLE(applied boolean, credential_revision bigint, granted_scopes text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_granted text[] := public.normalize_figma_oauth_scopes_v1(p_granted_scopes);
+  v_row public.oauth_provider_credentials%ROWTYPE;
+  v_access_token text := nullif(trim(coalesce(p_access_token, '')), '');
+  v_refresh_token text := nullif(trim(coalesce(p_refresh_token, '')), '');
+  v_subject text := nullif(trim(coalesce(p_provider_subject, '')), '');
+  v_passphrase text;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR p_operation_id IS NULL
+     OR p_expected_intent_epoch IS NULL OR p_expected_revision IS NULL
+     OR v_access_token IS NULL OR length(v_access_token) > 16384
+     OR (v_refresh_token IS NOT NULL AND length(v_refresh_token) > 16384)
+     OR v_subject IS NULL OR length(v_subject) > 512
+     OR p_expires_at IS NULL OR p_expires_at <= clock_timestamp()
+     OR cardinality(v_granted) = 0 THEN
+    RAISE EXCEPTION 'invalid_figma_oauth_authorization_commit' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text || ':figma:oauth', 0));
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'figma_oauth_authorization_stale' USING ERRCODE = '40001';
+  END IF;
+  IF v_row.last_operation_kind = 'authorization'
+     AND v_row.last_operation_id = p_operation_id THEN
+    DELETE FROM public.figma_oauth_states AS state_row
+    WHERE state_row.user_id = p_user_id
+      AND state_row.operation_id = p_operation_id
+      AND state_row.intent_epoch = p_expected_intent_epoch
+      AND state_row.credential_revision = p_expected_revision
+      AND state_row.claimed_at IS NOT NULL;
+    RETURN QUERY SELECT true, v_row.revision, array_to_string(v_row.granted_scopes, ',');
+    RETURN;
+  END IF;
+  IF v_row.intent_epoch <> p_expected_intent_epoch
+     OR v_row.revision <> p_expected_revision
+     OR v_row.authorization_operation_id IS DISTINCT FROM p_operation_id THEN
+    RAISE EXCEPTION 'figma_oauth_authorization_stale' USING ERRCODE = '40001';
+  END IF;
+  IF NOT (v_row.authorization_scopes <@ v_granted) THEN
+    RAISE EXCEPTION 'figma_oauth_scope_union_not_granted' USING ERRCODE = '22023';
+  END IF;
+
+  v_passphrase := public.app_encryption_key();
+  IF v_refresh_token IS NULL
+     AND v_row.status = 'connected'
+     AND v_row.provider_subject = v_subject
+     AND v_row.refresh_token_enc IS NOT NULL THEN
+    v_refresh_token := extensions.pgp_sym_decrypt(v_row.refresh_token_enc, v_passphrase)::text;
+  END IF;
+  IF v_refresh_token IS NULL THEN
+    RAISE EXCEPTION 'figma_oauth_refresh_token_required' USING ERRCODE = '22023';
+  END IF;
+
+  UPDATE public.oauth_provider_credentials AS credential
+  SET status = 'connected',
+      revision = credential.revision + 1,
+      authorization_operation_id = NULL,
+      authorization_scopes = ARRAY[]::text[],
+      access_token_enc = extensions.pgp_sym_encrypt(v_access_token, v_passphrase),
+      refresh_token_enc = extensions.pgp_sym_encrypt(v_refresh_token, v_passphrase),
+      expires_at = p_expires_at,
+      account_email = '',
+      provider_subject = v_subject,
+      granted_scopes = v_granted,
+      refresh_claim_id = NULL,
+      refresh_claim_expires_at = NULL,
+      last_operation_id = p_operation_id,
+      last_operation_kind = 'authorization',
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+  RETURNING true, credential.revision, array_to_string(credential.granted_scopes, ',')
+  INTO applied, credential_revision, granted_scopes;
+  DELETE FROM public.figma_oauth_states AS state_row
+  WHERE state_row.user_id = p_user_id
+    AND state_row.operation_id = p_operation_id
+    AND state_row.intent_epoch = p_expected_intent_epoch
+    AND state_row.credential_revision = p_expected_revision
+    AND state_row.claimed_at IS NOT NULL;
+  RETURN NEXT;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.claim_figma_oauth_refresh_v1(
+  p_user_id uuid,
+  p_claim_id uuid,
+  p_lease_seconds integer DEFAULT 45
+)
+RETURNS TABLE(
+  outcome text,
+  access_token text,
+  refresh_token text,
+  expires_at timestamptz,
+  provider_subject text,
+  granted_scopes text,
+  credential_revision bigint,
+  intent_epoch bigint,
+  refresh_claim_id uuid
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_row public.oauth_provider_credentials%ROWTYPE;
+  v_passphrase text;
+  v_lease_seconds integer := greatest(15, least(coalesce(p_lease_seconds, 45), 120));
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR p_claim_id IS NULL THEN
+    RAISE EXCEPTION 'invalid_figma_oauth_refresh_claim' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text || ':figma:oauth', 0));
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+  FOR UPDATE;
+  IF NOT FOUND OR v_row.status <> 'connected' THEN
+    RETURN QUERY SELECT 'missing'::text, NULL::text, NULL::text, NULL::timestamptz,
+      NULL::text, ''::text, NULL::bigint, NULL::bigint, NULL::uuid;
+    RETURN;
+  END IF;
+
+  -- Self-heal an abandoned authorization while already holding the canonical
+  -- per-user lock. Refresh/status/file callers must not depend on a future
+  -- authorize request or scheduled cleanup to retire a missing/expired state.
+  IF v_row.authorization_operation_id IS NOT NULL
+     AND (
+       NOT EXISTS (
+         SELECT 1
+         FROM public.figma_oauth_states AS state_row
+         WHERE state_row.user_id = p_user_id
+           AND state_row.operation_id = v_row.authorization_operation_id
+           AND state_row.intent_epoch = v_row.intent_epoch
+           AND state_row.credential_revision = v_row.revision
+       )
+       OR EXISTS (
+         SELECT 1
+         FROM public.figma_oauth_states AS state_row
+         WHERE state_row.user_id = p_user_id
+           AND state_row.operation_id = v_row.authorization_operation_id
+           AND state_row.intent_epoch = v_row.intent_epoch
+           AND state_row.credential_revision = v_row.revision
+           AND (
+             (state_row.claimed_at IS NULL AND state_row.expires_at <= clock_timestamp())
+             OR (state_row.claimed_at IS NOT NULL AND state_row.claim_expires_at <= clock_timestamp())
+           )
+       )
+     ) THEN
+    DELETE FROM public.figma_oauth_states AS state_row
+    WHERE state_row.user_id = p_user_id
+      AND state_row.operation_id = v_row.authorization_operation_id
+      AND state_row.intent_epoch = v_row.intent_epoch
+      AND state_row.credential_revision = v_row.revision;
+    UPDATE public.oauth_provider_credentials AS credential
+    SET authorization_operation_id = NULL,
+        authorization_scopes = ARRAY[]::text[],
+        updated_at = clock_timestamp()
+    WHERE credential.user_id = p_user_id AND credential.provider = 'figma';
+    v_row.authorization_operation_id := NULL;
+    v_row.authorization_scopes := ARRAY[]::text[];
+  END IF;
+
+  v_passphrase := public.app_encryption_key();
+  -- Never rotate the credential revision beneath an already-open
+  -- authorization callback. A still-valid old access token may be observed,
+  -- but an expired token reports bounded contention until that authorization
+  -- commits, is superseded, or expires and is cleaned up.
+  IF v_row.authorization_operation_id IS NOT NULL THEN
+    IF v_row.expires_at > clock_timestamp()
+       AND v_row.access_token_enc IS NOT NULL THEN
+      RETURN QUERY SELECT
+        'fresh'::text,
+        extensions.pgp_sym_decrypt(v_row.access_token_enc, v_passphrase)::text,
+        NULL::text,
+        v_row.expires_at,
+        v_row.provider_subject,
+        array_to_string(v_row.granted_scopes, ','),
+        v_row.revision,
+        v_row.intent_epoch,
+        NULL::uuid;
+    ELSE
+      RETURN QUERY SELECT
+        'busy'::text, NULL::text, NULL::text, v_row.expires_at,
+        v_row.provider_subject, array_to_string(v_row.granted_scopes, ','),
+        v_row.revision, v_row.intent_epoch, NULL::uuid;
+    END IF;
+    RETURN;
+  END IF;
+
+  IF v_row.expires_at > clock_timestamp() + interval '5 minutes' THEN
+    RETURN QUERY SELECT
+      'fresh'::text,
+      extensions.pgp_sym_decrypt(v_row.access_token_enc, v_passphrase)::text,
+      NULL::text,
+      v_row.expires_at,
+      v_row.provider_subject,
+      array_to_string(v_row.granted_scopes, ','),
+      v_row.revision,
+      v_row.intent_epoch,
+      NULL::uuid;
+    RETURN;
+  END IF;
+
+  IF v_row.refresh_claim_id IS NOT NULL
+     AND v_row.refresh_claim_id <> p_claim_id
+     AND v_row.refresh_claim_expires_at > clock_timestamp() THEN
+    RETURN QUERY SELECT
+      'busy'::text, NULL::text, NULL::text, v_row.expires_at,
+      v_row.provider_subject, array_to_string(v_row.granted_scopes, ','),
+      v_row.revision, v_row.intent_epoch, v_row.refresh_claim_id;
+    RETURN;
+  END IF;
+
+  UPDATE public.oauth_provider_credentials AS credential
+  SET refresh_claim_id = p_claim_id,
+      refresh_claim_expires_at = clock_timestamp() + make_interval(secs => v_lease_seconds),
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma';
+
+  RETURN QUERY SELECT
+    'claimed'::text,
+    extensions.pgp_sym_decrypt(v_row.access_token_enc, v_passphrase)::text,
+    extensions.pgp_sym_decrypt(v_row.refresh_token_enc, v_passphrase)::text,
+    v_row.expires_at,
+    v_row.provider_subject,
+    array_to_string(v_row.granted_scopes, ','),
+    v_row.revision,
+    v_row.intent_epoch,
+    p_claim_id;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.commit_figma_oauth_refresh_v1(
+  p_user_id uuid,
+  p_expected_intent_epoch bigint,
+  p_expected_revision bigint,
+  p_claim_id uuid,
+  p_operation_id uuid,
+  p_access_token text,
+  p_refresh_token text,
+  p_expires_at timestamptz,
+  p_provider_subject text,
+  p_granted_scopes text
+)
+RETURNS TABLE(applied boolean, credential_revision bigint, granted_scopes text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_granted text[] := public.normalize_figma_oauth_scopes_v1(p_granted_scopes);
+  v_row public.oauth_provider_credentials%ROWTYPE;
+  v_access_token text := nullif(trim(coalesce(p_access_token, '')), '');
+  v_refresh_token text := nullif(trim(coalesce(p_refresh_token, '')), '');
+  v_subject text := nullif(trim(coalesce(p_provider_subject, '')), '');
+  v_passphrase text;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR p_claim_id IS NULL OR p_operation_id IS NULL
+     OR p_expected_intent_epoch IS NULL OR p_expected_revision IS NULL
+     OR v_access_token IS NULL OR length(v_access_token) > 16384
+     OR (v_refresh_token IS NOT NULL AND length(v_refresh_token) > 16384)
+     OR p_expires_at IS NULL OR p_expires_at <= clock_timestamp()
+     OR cardinality(v_granted) = 0 THEN
+    RAISE EXCEPTION 'invalid_figma_oauth_refresh_commit' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text || ':figma:oauth', 0));
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'figma_oauth_refresh_stale' USING ERRCODE = '40001';
+  END IF;
+  IF v_row.last_operation_kind = 'refresh' AND v_row.last_operation_id = p_operation_id THEN
+    RETURN QUERY SELECT true, v_row.revision, array_to_string(v_row.granted_scopes, ',');
+    RETURN;
+  END IF;
+  IF v_row.status <> 'connected'
+     OR v_row.intent_epoch <> p_expected_intent_epoch
+     OR v_row.revision <> p_expected_revision
+     OR v_row.refresh_claim_id IS DISTINCT FROM p_claim_id
+     OR v_row.refresh_claim_expires_at <= clock_timestamp() THEN
+    RAISE EXCEPTION 'figma_oauth_refresh_stale' USING ERRCODE = '40001';
+  END IF;
+  IF NOT (v_row.granted_scopes <@ v_granted) THEN
+    RAISE EXCEPTION 'figma_oauth_scope_narrowed' USING ERRCODE = '22023';
+  END IF;
+  IF v_subject IS NOT NULL
+     AND v_row.provider_subject IS NOT NULL
+     AND v_row.provider_subject IS DISTINCT FROM v_subject THEN
+    RAISE EXCEPTION 'figma_oauth_account_mismatch' USING ERRCODE = '22023';
+  END IF;
+  IF v_subject IS NULL AND v_row.provider_subject IS NULL THEN
+    RAISE EXCEPTION 'figma_oauth_provider_subject_required' USING ERRCODE = '22023';
+  END IF;
+
+  v_passphrase := public.app_encryption_key();
+  IF v_refresh_token IS NULL THEN
+    v_refresh_token := extensions.pgp_sym_decrypt(v_row.refresh_token_enc, v_passphrase)::text;
+  END IF;
+
+  UPDATE public.oauth_provider_credentials AS credential
+  SET revision = credential.revision + 1,
+      access_token_enc = extensions.pgp_sym_encrypt(v_access_token, v_passphrase),
+      refresh_token_enc = extensions.pgp_sym_encrypt(v_refresh_token, v_passphrase),
+      expires_at = p_expires_at,
+      provider_subject = coalesce(credential.provider_subject, v_subject),
+      granted_scopes = v_granted,
+      refresh_claim_id = NULL,
+      refresh_claim_expires_at = NULL,
+      last_operation_id = p_operation_id,
+      last_operation_kind = 'refresh',
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+  RETURNING true, credential.revision, array_to_string(credential.granted_scopes, ',')
+  INTO applied, credential_revision, granted_scopes;
+  RETURN NEXT;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.release_figma_oauth_refresh_v1(
+  p_user_id uuid,
+  p_expected_intent_epoch bigint,
+  p_expected_revision bigint,
+  p_claim_id uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_released boolean := false;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  UPDATE public.oauth_provider_credentials AS credential
+  SET refresh_claim_id = NULL,
+      refresh_claim_expires_at = NULL,
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id
+    AND credential.provider = 'figma'
+    AND credential.status = 'connected'
+    AND credential.intent_epoch = p_expected_intent_epoch
+    AND credential.revision = p_expected_revision
+    AND credential.refresh_claim_id = p_claim_id;
+  v_released := FOUND;
+  RETURN v_released;
+END;
+$function$;
+
+-- A provider can reject a token after it passed the local freshness check.
+-- Invalidate only the exact credential revision that produced that provider
+-- response. A newer authorization or refresh advances the fence and survives.
+CREATE OR REPLACE FUNCTION public.invalidate_figma_oauth_credential_v1(
+  p_user_id uuid,
+  p_expected_intent_epoch bigint,
+  p_expected_revision bigint,
+  p_operation_id uuid
+)
+RETURNS TABLE(applied boolean, credential_revision bigint, intent_epoch bigint)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_row public.oauth_provider_credentials%ROWTYPE;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR p_operation_id IS NULL
+     OR p_expected_intent_epoch IS NULL OR p_expected_intent_epoch < 0
+     OR p_expected_revision IS NULL OR p_expected_revision < 0 THEN
+    RAISE EXCEPTION 'invalid_figma_oauth_credential_invalidation' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text || ':figma:oauth', 0));
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT false, 0::bigint, 0::bigint;
+    RETURN;
+  END IF;
+
+  IF v_row.last_operation_kind = 'provider_auth_rejection'
+     AND v_row.last_operation_id = p_operation_id THEN
+    RETURN QUERY SELECT true, v_row.revision, v_row.intent_epoch;
+    RETURN;
+  END IF;
+
+  IF v_row.status <> 'connected'
+     OR v_row.intent_epoch <> p_expected_intent_epoch
+     OR v_row.revision <> p_expected_revision THEN
+    RETURN QUERY SELECT false, v_row.revision, v_row.intent_epoch;
+    RETURN;
+  END IF;
+
+  -- A reconnect can be in progress while an earlier file request is still at
+  -- Figma. Remove the exact rejected secrets, but preserve the pending
+  -- authorization operation and its intent/revision fence so that the
+  -- already-open callback can still commit. Superseding authorization and
+  -- disconnect operations remain authoritative through the advisory lock.
+  IF v_row.authorization_operation_id IS NOT NULL THEN
+    UPDATE public.oauth_provider_credentials AS credential
+    SET status = 'disconnected',
+        access_token_enc = NULL,
+        refresh_token_enc = NULL,
+        expires_at = NULL,
+        account_email = '',
+        provider_subject = NULL,
+        granted_scopes = ARRAY[]::text[],
+        refresh_claim_id = NULL,
+        refresh_claim_expires_at = NULL,
+        last_operation_id = p_operation_id,
+        last_operation_kind = 'provider_auth_rejection',
+        updated_at = clock_timestamp()
+    WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+    RETURNING true, credential.revision, credential.intent_epoch
+    INTO applied, credential_revision, intent_epoch;
+    RETURN NEXT;
+    RETURN;
+  END IF;
+
+  UPDATE public.oauth_provider_credentials AS credential
+  SET status = 'disconnected',
+      revision = credential.revision + 1,
+      intent_epoch = credential.intent_epoch + 1,
+      authorization_operation_id = NULL,
+      authorization_scopes = ARRAY[]::text[],
+      access_token_enc = NULL,
+      refresh_token_enc = NULL,
+      expires_at = NULL,
+      account_email = '',
+      provider_subject = NULL,
+      granted_scopes = ARRAY[]::text[],
+      refresh_claim_id = NULL,
+      refresh_claim_expires_at = NULL,
+      last_operation_id = p_operation_id,
+      last_operation_kind = 'provider_auth_rejection',
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+  RETURNING true, credential.revision, credential.intent_epoch
+  INTO applied, credential_revision, intent_epoch;
+
+  DELETE FROM public.figma_oauth_states AS state_row
+  WHERE state_row.user_id = p_user_id;
+  RETURN NEXT;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.disconnect_figma_oauth_provider_v1(
+  p_user_id uuid,
+  p_operation_id uuid
+)
+RETURNS TABLE(disconnected boolean, credential_revision bigint, intent_epoch bigint)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_row public.oauth_provider_credentials%ROWTYPE;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR p_operation_id IS NULL THEN
+    RAISE EXCEPTION 'invalid_figma_oauth_disconnect' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_user_id::text || ':figma:oauth', 0));
+  INSERT INTO public.oauth_provider_credentials(user_id, provider)
+  VALUES (p_user_id, 'figma')
+  ON CONFLICT (user_id, provider) DO NOTHING;
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+  FOR UPDATE;
+
+  IF v_row.last_operation_kind = 'disconnect' AND v_row.last_operation_id = p_operation_id THEN
+    RETURN QUERY SELECT true, v_row.revision, v_row.intent_epoch;
+    RETURN;
+  END IF;
+
+  UPDATE public.oauth_provider_credentials AS credential
+  SET status = 'disconnected',
+      revision = credential.revision + 1,
+      intent_epoch = credential.intent_epoch + 1,
+      authorization_operation_id = NULL,
+      authorization_scopes = ARRAY[]::text[],
+      access_token_enc = NULL,
+      refresh_token_enc = NULL,
+      expires_at = NULL,
+      account_email = '',
+      provider_subject = NULL,
+      granted_scopes = ARRAY[]::text[],
+      refresh_claim_id = NULL,
+      refresh_claim_expires_at = NULL,
+      last_operation_id = p_operation_id,
+      last_operation_kind = 'disconnect',
+      updated_at = clock_timestamp()
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma'
+  RETURNING true, credential.revision, credential.intent_epoch
+  INTO disconnected, credential_revision, intent_epoch;
+
+  DELETE FROM public.figma_oauth_states AS state_row
+  WHERE state_row.user_id = p_user_id;
+  DELETE FROM public.user_api_keys AS legacy
+  WHERE legacy.user_id = p_user_id
+    AND lower(legacy.provider) = 'figma'
+    AND lower(coalesce(legacy.label, 'default')) = 'oauth';
+  RETURN NEXT;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.get_figma_oauth_status_v1(p_user_id uuid)
+RETURNS TABLE(
+  status text,
+  expires_at timestamptz,
+  provider_subject text,
+  granted_scopes text,
+  credential_revision bigint,
+  intent_epoch bigint
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_row public.oauth_provider_credentials%ROWTYPE;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL THEN
+    RAISE EXCEPTION 'invalid_figma_oauth_status' USING ERRCODE = '22023';
+  END IF;
+  SELECT * INTO v_row
+  FROM public.oauth_provider_credentials AS credential
+  WHERE credential.user_id = p_user_id AND credential.provider = 'figma';
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT 'disconnected'::text, NULL::timestamptz, NULL::text,
+      ''::text, 0::bigint, 0::bigint;
+    RETURN;
+  END IF;
+  RETURN QUERY SELECT
+    v_row.status,
+    v_row.expires_at,
+    v_row.provider_subject,
+    array_to_string(v_row.granted_scopes, ','),
+    v_row.revision,
+    v_row.intent_epoch;
+END;
+$function$;
+
+-- Migrate only legacy rows whose full credential shape can be proved valid.
+-- Invalid/incomplete legacy OAuth rows are removed rather than exposed through
+-- the generic key surface or guessed into a connected state.
+DO $legacy_figma_oauth_migration$
+DECLARE
+  v_row record;
+  v_meta jsonb;
+  v_access_token text;
+  v_refresh_token text;
+  v_expires_at timestamptz;
+  v_subject text;
+  v_scopes text[];
+  v_passphrase text := public.app_encryption_key();
+BEGIN
+  FOR v_row IN
+    SELECT key_row.*
+    FROM public.user_api_keys AS key_row
+    WHERE lower(key_row.provider) = 'figma'
+      AND lower(coalesce(key_row.label, 'default')) = 'oauth'
+    FOR UPDATE
+  LOOP
+    v_meta := NULL;
+    v_access_token := NULL;
+    v_refresh_token := NULL;
+    v_expires_at := NULL;
+    v_subject := NULL;
+    v_scopes := ARRAY[]::text[];
+    BEGIN
+      v_meta := v_row.endpoint::jsonb;
+      v_access_token := extensions.pgp_sym_decrypt(v_row.api_key_enc, v_passphrase)::text;
+      v_refresh_token := nullif(trim(coalesce(v_meta->>'refresh_token', '')), '');
+      v_expires_at := (v_meta->>'expires_at')::timestamptz;
+      v_subject := nullif(trim(coalesce(v_meta->>'provider_subject', v_meta->>'user_id_string', '')), '');
+      v_scopes := public.normalize_figma_oauth_scopes_v1(v_meta->>'scopes');
+    EXCEPTION WHEN OTHERS THEN
+      v_access_token := NULL;
+    END;
+
+    IF nullif(trim(coalesce(v_access_token, '')), '') IS NOT NULL
+       AND v_refresh_token IS NOT NULL
+       AND v_expires_at > clock_timestamp()
+       AND v_subject IS NOT NULL
+       AND cardinality(v_scopes) > 0 THEN
+      INSERT INTO public.oauth_provider_credentials(
+        user_id, provider, status, revision, intent_epoch,
+        access_token_enc, refresh_token_enc, expires_at, provider_subject,
+        granted_scopes, last_operation_id, last_operation_kind
+      ) VALUES (
+        v_row.user_id, 'figma', 'connected', 1, 0,
+        extensions.pgp_sym_encrypt(trim(v_access_token), v_passphrase),
+        extensions.pgp_sym_encrypt(v_refresh_token, v_passphrase),
+        v_expires_at, left(v_subject, 512), v_scopes,
+        extensions.gen_random_uuid(), 'legacy_migration'
+      )
+      ON CONFLICT (user_id, provider) DO NOTHING;
+    END IF;
+  END LOOP;
+
+  DELETE FROM public.user_api_keys AS key_row
+  WHERE lower(key_row.provider) = 'figma'
+    AND lower(coalesce(key_row.label, 'default')) = 'oauth';
+END;
+$legacy_figma_oauth_migration$;
+
+-- Re-establish the generic BYOK boundary. Figma PAT/default rows remain
+-- owner-managed, while the figma/oauth label joins Google/Microsoft OAuth as a
+-- service-only reserved namespace.
+DO $figma_user_api_key_policies$
+DECLARE
+  policy_row record;
+BEGIN
+  FOR policy_row IN
+    SELECT policyname
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public' AND tablename = 'user_api_keys'
+  LOOP
+    EXECUTE format('DROP POLICY IF EXISTS %I ON public.user_api_keys', policy_row.policyname);
+  END LOOP;
+END;
+$figma_user_api_key_policies$;
+
+CREATE POLICY user_api_keys_select_own_non_oauth
+  ON public.user_api_keys FOR SELECT TO authenticated
+  USING (
+    user_id = auth.uid()
+    AND NOT (
+      lower(provider) IN ('google', 'microsoft', 'figma')
+      AND lower(coalesce(label, 'default')) = 'oauth'
+    )
+  );
+CREATE POLICY user_api_keys_insert_own_non_oauth
+  ON public.user_api_keys FOR INSERT TO authenticated
+  WITH CHECK (
+    user_id = auth.uid()
+    AND NOT (
+      lower(provider) IN ('google', 'microsoft', 'figma')
+      AND lower(coalesce(label, 'default')) = 'oauth'
+    )
+  );
+CREATE POLICY user_api_keys_update_own_non_oauth
+  ON public.user_api_keys FOR UPDATE TO authenticated
+  USING (
+    user_id = auth.uid()
+    AND NOT (
+      lower(provider) IN ('google', 'microsoft', 'figma')
+      AND lower(coalesce(label, 'default')) = 'oauth'
+    )
+  )
+  WITH CHECK (
+    user_id = auth.uid()
+    AND NOT (
+      lower(provider) IN ('google', 'microsoft', 'figma')
+      AND lower(coalesce(label, 'default')) = 'oauth'
+    )
+  );
+CREATE POLICY user_api_keys_delete_own_non_oauth
+  ON public.user_api_keys FOR DELETE TO authenticated
+  USING (
+    user_id = auth.uid()
+    AND NOT (
+      lower(provider) IN ('google', 'microsoft', 'figma')
+      AND lower(coalesce(label, 'default')) = 'oauth'
+    )
+  );
+
+CREATE OR REPLACE FUNCTION public.store_user_api_key(
+  p_provider text,
+  p_api_key text,
+  p_label text DEFAULT 'default',
+  p_endpoint text DEFAULT NULL
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_id uuid;
+  v_user_id uuid := auth.uid();
+  v_provider text := lower(trim(coalesce(p_provider, '')));
+  v_label text := coalesce(nullif(trim(p_label), ''), 'default');
+  v_passphrase text;
+BEGIN
+  IF v_user_id IS NULL THEN RAISE EXCEPTION 'not_authenticated' USING ERRCODE = '42501'; END IF;
+  IF v_provider IN ('google', 'microsoft', 'figma') AND lower(v_label) = 'oauth' THEN
+    RAISE EXCEPTION 'reserved_oauth_credential' USING ERRCODE = '42501';
+  END IF;
+  v_passphrase := public.app_encryption_key();
+  INSERT INTO public.user_api_keys(user_id, provider, api_key_enc, label, endpoint)
+  VALUES (v_user_id, v_provider, extensions.pgp_sym_encrypt(p_api_key, v_passphrase), v_label, nullif(trim(p_endpoint), ''))
+  ON CONFLICT (user_id, provider, label) DO UPDATE
+  SET api_key_enc = extensions.pgp_sym_encrypt(p_api_key, v_passphrase),
+      endpoint = coalesce(nullif(trim(p_endpoint), ''), public.user_api_keys.endpoint),
+      is_active = true,
+      updated_at = clock_timestamp()
+  RETURNING id INTO v_id;
+  RETURN v_id;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.store_user_api_key_for_user(
+  p_user_id uuid,
+  p_provider text,
+  p_api_key text,
+  p_label text DEFAULT 'default',
+  p_endpoint text DEFAULT NULL
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_id uuid;
+  v_provider text := lower(trim(coalesce(p_provider, '')));
+  v_label text := coalesce(nullif(trim(p_label), ''), 'default');
+  v_passphrase text;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'service_role_only' USING ERRCODE = '42501';
+  END IF;
+  IF v_provider IN ('google', 'microsoft', 'figma') AND lower(v_label) = 'oauth' THEN
+    RAISE EXCEPTION 'reserved_oauth_credential' USING ERRCODE = '42501';
+  END IF;
+  v_passphrase := public.app_encryption_key();
+  INSERT INTO public.user_api_keys(user_id, provider, api_key_enc, label, endpoint)
+  VALUES (p_user_id, v_provider, extensions.pgp_sym_encrypt(p_api_key, v_passphrase), v_label, nullif(trim(p_endpoint), ''))
+  ON CONFLICT (user_id, provider, label) DO UPDATE
+  SET api_key_enc = extensions.pgp_sym_encrypt(p_api_key, v_passphrase),
+      endpoint = coalesce(nullif(trim(p_endpoint), ''), public.user_api_keys.endpoint),
+      is_active = true,
+      updated_at = clock_timestamp()
+  RETURNING id INTO v_id;
+  RETURN v_id;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.get_user_api_key(
+  p_user_id uuid,
+  p_provider text,
+  p_label text DEFAULT 'default'
+)
+RETURNS TABLE(api_key text, endpoint text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, extensions
+AS $function$
+DECLARE
+  v_passphrase text;
+BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role'
+     AND (auth.uid() IS NULL OR auth.uid() <> p_user_id) THEN
+    RAISE EXCEPTION 'not_authorized' USING ERRCODE = '42501';
+  END IF;
+  v_passphrase := public.app_encryption_key();
+  RETURN QUERY
+  SELECT extensions.pgp_sym_decrypt(key_row.api_key_enc, v_passphrase)::text,
+         key_row.endpoint
+  FROM public.user_api_keys AS key_row
+  WHERE key_row.user_id = p_user_id
+    AND key_row.provider = lower(trim(p_provider))
+    AND (p_label IS NULL OR key_row.label = p_label)
+    AND key_row.is_active = true
+    AND NOT (
+      lower(key_row.provider) IN ('google', 'microsoft', 'figma')
+      AND lower(coalesce(key_row.label, 'default')) = 'oauth'
+    )
+  ORDER BY key_row.updated_at DESC
+  LIMIT 1;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.delete_user_api_key(p_key_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'not_authenticated' USING ERRCODE = '42501'; END IF;
+  DELETE FROM public.user_api_keys AS key_row
+  WHERE key_row.id = p_key_id
+    AND key_row.user_id = auth.uid()
+    AND NOT (
+      lower(key_row.provider) IN ('google', 'microsoft', 'figma')
+      AND lower(coalesce(key_row.label, 'default')) = 'oauth'
+    );
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.list_user_api_keys()
+RETURNS TABLE(
+  id uuid,
+  provider text,
+  label text,
+  endpoint text,
+  is_active boolean,
+  created_at timestamptz,
+  updated_at timestamptz
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'not_authenticated' USING ERRCODE = '42501'; END IF;
+  RETURN QUERY
+  SELECT key_row.id, key_row.provider, key_row.label, key_row.endpoint,
+         key_row.is_active, key_row.created_at, key_row.updated_at
+  FROM public.user_api_keys AS key_row
+  WHERE key_row.user_id = auth.uid()
+    AND NOT (
+      lower(key_row.provider) IN ('google', 'microsoft', 'figma')
+      AND lower(coalesce(key_row.label, 'default')) = 'oauth'
+    )
+  ORDER BY key_row.provider, key_row.label;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.normalize_figma_oauth_scopes_v1(text)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.cleanup_figma_oauth_states_v1(integer)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.reserve_figma_oauth_authorization_v1(uuid, text, text, text, text, uuid, timestamptz)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.claim_figma_oauth_state_v1(text, text)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.commit_figma_oauth_authorization_v1(uuid, bigint, bigint, uuid, text, text, timestamptz, text, text)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.claim_figma_oauth_refresh_v1(uuid, uuid, integer)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.commit_figma_oauth_refresh_v1(uuid, bigint, bigint, uuid, uuid, text, text, timestamptz, text, text)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.release_figma_oauth_refresh_v1(uuid, bigint, bigint, uuid)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.invalidate_figma_oauth_credential_v1(uuid, bigint, bigint, uuid)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.disconnect_figma_oauth_provider_v1(uuid, uuid)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.get_figma_oauth_status_v1(uuid)
+  FROM PUBLIC, anon, authenticated;
+
+GRANT EXECUTE ON FUNCTION public.normalize_figma_oauth_scopes_v1(text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.cleanup_figma_oauth_states_v1(integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.reserve_figma_oauth_authorization_v1(uuid, text, text, text, text, uuid, timestamptz) TO service_role;
+GRANT EXECUTE ON FUNCTION public.claim_figma_oauth_state_v1(text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.commit_figma_oauth_authorization_v1(uuid, bigint, bigint, uuid, text, text, timestamptz, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.claim_figma_oauth_refresh_v1(uuid, uuid, integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.commit_figma_oauth_refresh_v1(uuid, bigint, bigint, uuid, uuid, text, text, timestamptz, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.release_figma_oauth_refresh_v1(uuid, bigint, bigint, uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.invalidate_figma_oauth_credential_v1(uuid, bigint, bigint, uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.disconnect_figma_oauth_provider_v1(uuid, uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.get_figma_oauth_status_v1(uuid) TO service_role;
+
+-- Keep the generic BYOK functions usable, while their bodies reserve every
+-- provider-specific OAuth namespace.
+REVOKE ALL ON FUNCTION public.store_user_api_key(text, text, text, text) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.store_user_api_key_for_user(uuid, text, text, text, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.get_user_api_key(uuid, text, text) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.delete_user_api_key(uuid) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.list_user_api_keys() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.store_user_api_key(text, text, text, text) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.store_user_api_key_for_user(uuid, text, text, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.get_user_api_key(uuid, text, text) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.delete_user_api_key(uuid) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.list_user_api_keys() TO authenticated;
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+-- END SECTION 43: Figma OAuth credential and callback control plane
+
+-- BEGIN SECTION 44: OpenSwan Chat approval-resume authority
+-- Source: supabase/migrations/20260813210000_openswan_chat_approval_resume_authority.sql
+-- Race-free OpenSwan Chat approval-resume authority.
+--
+-- A Circle Chat thread is not an agent `chat_sessions` row. Keep the exact
+-- Circle Chat thread and originating human message on `agent_runs` as their
+-- own immutable lineage. The pair is optional for compatibility with the
+-- OpenSwan Console and legacy writers, but when present it is complete,
+-- owner/circle/thread exact, and available only to main_chat OpenSwan runs.
+--
+-- Cross-run approval consumption then happens through one authenticated RPC.
+-- It locks current membership, both run rows, the thread, the source message,
+-- and the approval before it checks terminal truth and stamps the existing
+-- schema-v2 one-shot dispatch receipt. Same-run and category-auto consumption
+-- keep using the existing section-28 state machine; this migration neither
+-- replaces that trigger nor widens its table policies.
+
+BEGIN;
+
+DO $openswan_chat_resume_dependency_preflight$
+BEGIN
+  IF to_regclass('public.agent_runs') IS NULL
+     OR to_regclass('public.agent_run_approvals') IS NULL
+     OR to_regclass('public.circle_chat_threads') IS NULL
+     OR to_regclass('public.circle_chat_thread_members') IS NULL
+     OR to_regclass('public.circle_members') IS NULL
+     OR to_regclass('public.messages') IS NULL THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_authority: apply the agent-run and thread-scoped Chat migrations first'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF to_regprocedure('public.is_valid_tool_v2_approval_payload(jsonb,boolean)') IS NULL
+     OR to_regprocedure('public.guard_tool_v2_run_approval()') IS NULL THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_authority: apply SQL section 28 first'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF (
+    SELECT count(*)
+    FROM pg_catalog.pg_trigger AS trigger_row
+    WHERE trigger_row.tgrelid = 'public.agent_run_approvals'::regclass
+      AND trigger_row.tgname IN (
+        'trg_guard_tool_v2_run_approval_insert',
+        'trg_guard_tool_v2_run_approval_update',
+        'trg_guard_tool_v2_run_approval_delete'
+      )
+      AND trigger_row.tgfoid = 'public.guard_tool_v2_run_approval()'::regprocedure
+      AND trigger_row.tgenabled <> 'D'
+      AND NOT trigger_row.tgisinternal
+  ) <> 3 THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_authority: canonical section-28 approval triggers are unavailable'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF to_regprocedure('public.guard_authenticated_message_mutation()') IS NULL
+     OR to_regprocedure('public.guard_authenticated_chat_thread_mutation()') IS NULL THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_authority: apply SQL section 31 first'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF to_regprocedure('extensions.digest(bytea,text)') IS NULL THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_authority: pgcrypto digest(bytea,text) is required in the extensions schema'
+      USING ERRCODE = '42883';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_attribute AS attribute
+    WHERE attribute.attrelid = 'public.messages'::regclass
+      AND attribute.attname = 'thread_id'
+      AND attribute.atttypid = 'uuid'::regtype
+      AND attribute.attnotnull
+      AND NOT attribute.attisdropped
+  ) OR NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_attribute AS attribute
+    WHERE attribute.attrelid = 'public.messages'::regclass
+      AND attribute.attname = 'user_id'
+      AND attribute.atttypid = 'uuid'::regtype
+      AND NOT attribute.attisdropped
+  ) OR NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_attribute AS attribute
+    WHERE attribute.attrelid = 'public.messages'::regclass
+      AND attribute.attname = 'is_bot'
+      AND attribute.atttypid = 'boolean'::regtype
+      AND NOT attribute.attisdropped
+  ) THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_authority: canonical thread-scoped message columns are unavailable'
+      USING ERRCODE = '23514';
+  END IF;
+END
+$openswan_chat_resume_dependency_preflight$;
+
+ALTER TABLE public.agent_runs
+  ADD COLUMN IF NOT EXISTS thread_id uuid,
+  ADD COLUMN IF NOT EXISTS source_message_id uuid;
+
+DO $openswan_chat_resume_column_types$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_attribute AS attribute
+    WHERE attribute.attrelid = 'public.agent_runs'::regclass
+      AND attribute.attname = 'thread_id'
+      AND attribute.atttypid = 'uuid'::regtype
+      AND NOT attribute.attisdropped
+  ) OR NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_attribute AS attribute
+    WHERE attribute.attrelid = 'public.agent_runs'::regclass
+      AND attribute.attname = 'source_message_id'
+      AND attribute.atttypid = 'uuid'::regtype
+      AND NOT attribute.attisdropped
+  ) THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_authority: agent-run lineage columns must be uuid'
+      USING ERRCODE = '42804';
+  END IF;
+END
+$openswan_chat_resume_column_types$;
+
+-- The lineage pair is optional by contract: OpenSwan Console and legacy
+-- main_chat rows have no Circle Chat message source.
+ALTER TABLE public.agent_runs
+  ALTER COLUMN thread_id DROP NOT NULL,
+  ALTER COLUMN source_message_id DROP NOT NULL;
+
+ALTER TABLE public.agent_runs
+  DROP CONSTRAINT IF EXISTS agent_runs_chat_thread_lineage_pair_v1,
+  DROP CONSTRAINT IF EXISTS agent_runs_chat_thread_lineage_scope_v1,
+  DROP CONSTRAINT IF EXISTS agent_runs_chat_thread_lineage_thread_fkey_v1,
+  DROP CONSTRAINT IF EXISTS agent_runs_chat_thread_lineage_message_fkey_v1;
+
+ALTER TABLE public.agent_runs
+  ADD CONSTRAINT agent_runs_chat_thread_lineage_pair_v1
+    CHECK ((thread_id IS NULL) = (source_message_id IS NULL)),
+  ADD CONSTRAINT agent_runs_chat_thread_lineage_scope_v1
+    CHECK (
+      thread_id IS NULL
+      OR ((surface = 'main_chat' AND provider = 'openswan') IS TRUE)
+    ),
+  ADD CONSTRAINT agent_runs_chat_thread_lineage_thread_fkey_v1
+    FOREIGN KEY (thread_id)
+    REFERENCES public.circle_chat_threads(id)
+    ON DELETE RESTRICT,
+  ADD CONSTRAINT agent_runs_chat_thread_lineage_message_fkey_v1
+    FOREIGN KEY (source_message_id)
+    REFERENCES public.messages(id)
+    ON DELETE RESTRICT;
+
+CREATE INDEX IF NOT EXISTS idx_agent_runs_chat_source_lineage_v1
+  ON public.agent_runs (circle_id, thread_id, source_message_id, created_at DESC)
+  WHERE thread_id IS NOT NULL AND source_message_id IS NOT NULL;
+
+ALTER TABLE public.agent_runs ENABLE ROW LEVEL SECURITY;
+
+-- Historical agent_runs policy variants are circle-wide and permissive. A
+-- peer may still read shared run telemetry, but cannot rewrite or delete a
+-- protected Chat run owned by somebody else. Restrictive policies compose
+-- with the current policy set without changing legacy/Console rows.
+DROP POLICY IF EXISTS agent_runs_chat_lineage_update_owner_v1
+ON public.agent_runs;
+CREATE POLICY agent_runs_chat_lineage_update_owner_v1
+ON public.agent_runs
+AS RESTRICTIVE
+FOR UPDATE
+TO authenticated
+USING (
+  thread_id IS NULL
+  OR (auth.uid() IS NOT NULL AND user_id = auth.uid())
+)
+WITH CHECK (
+  thread_id IS NULL
+  OR (auth.uid() IS NOT NULL AND user_id = auth.uid())
+);
+
+DROP POLICY IF EXISTS agent_runs_chat_lineage_delete_owner_v1
+ON public.agent_runs;
+CREATE POLICY agent_runs_chat_lineage_delete_owner_v1
+ON public.agent_runs
+AS RESTRICTIVE
+FOR DELETE
+TO authenticated
+USING (
+  thread_id IS NULL
+  OR (auth.uid() IS NOT NULL AND user_id = auth.uid())
+);
+
+COMMENT ON COLUMN public.agent_runs.thread_id IS
+  'Exact circle_chat_threads id for a protected main_chat OpenSwan run. This is not legacy chat_session_id.';
+COMMENT ON COLUMN public.agent_runs.source_message_id IS
+  'Exact non-bot human message that originated a protected main_chat OpenSwan run; immutable with thread_id once set.';
+
+CREATE OR REPLACE FUNCTION public.guard_agent_run_chat_lineage_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_uid uuid := auth.uid();
+  v_trusted_writer boolean :=
+    COALESCE(auth.role(), '') = 'service_role'
+    OR current_setting('role', true) IN ('postgres', 'supabase_admin', 'service_role')
+    OR (
+      COALESCE(current_setting('role', true), 'none') = 'none'
+      AND session_user IN ('postgres', 'supabase_admin', 'service_role')
+    );
+  v_thread public.circle_chat_threads%ROWTYPE;
+  v_message public.messages%ROWTYPE;
+BEGIN
+  IF (NEW.thread_id IS NULL) <> (NEW.source_message_id IS NULL) THEN
+    RAISE EXCEPTION 'agent_run_chat_lineage_pair_required'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF TG_OP = 'UPDATE' AND (
+    (
+      OLD.thread_id IS NOT NULL
+      AND (
+        NEW.id IS DISTINCT FROM OLD.id
+        OR NEW.circle_id IS DISTINCT FROM OLD.circle_id
+        OR NEW.user_id IS DISTINCT FROM OLD.user_id
+        OR NEW.surface IS DISTINCT FROM OLD.surface
+        OR NEW.provider IS DISTINCT FROM OLD.provider
+        OR NEW.thread_id IS DISTINCT FROM OLD.thread_id
+        OR NEW.source_message_id IS DISTINCT FROM OLD.source_message_id
+      )
+    )
+    OR (
+      OLD.thread_id IS NULL
+      AND NEW.thread_id IS NOT NULL
+      AND (
+        NEW.id IS DISTINCT FROM OLD.id
+        OR NEW.circle_id IS DISTINCT FROM OLD.circle_id
+        OR NEW.user_id IS DISTINCT FROM OLD.user_id
+        OR NEW.surface IS DISTINCT FROM OLD.surface
+        OR NEW.provider IS DISTINCT FROM OLD.provider
+      )
+    )
+  ) THEN
+    RAISE EXCEPTION 'agent_run_chat_lineage_immutable'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF TG_OP = 'UPDATE'
+     AND OLD.thread_id IS NOT NULL
+     AND NOT v_trusted_writer
+     AND (v_uid IS NULL OR OLD.user_id IS DISTINCT FROM v_uid) THEN
+    RAISE EXCEPTION 'agent_run_chat_lineage_owner_required'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF NEW.thread_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  -- Authenticated application writers must establish lineage with the INSERT.
+  -- A trusted maintenance writer may backfill an exact legacy pair, after
+  -- which the same immutable rule above applies to every writer.
+  IF TG_OP = 'UPDATE'
+     AND OLD.thread_id IS NULL
+     AND NOT v_trusted_writer THEN
+    RAISE EXCEPTION 'agent_run_chat_lineage_must_be_set_on_insert'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF NEW.surface IS DISTINCT FROM 'main_chat'
+     OR NEW.provider IS DISTINCT FROM 'openswan' THEN
+    RAISE EXCEPTION 'agent_run_chat_lineage_scope_invalid'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF NOT v_trusted_writer THEN
+    IF v_uid IS NULL OR NEW.user_id IS DISTINCT FROM v_uid THEN
+      RAISE EXCEPTION 'agent_run_chat_lineage_owner_required'
+        USING ERRCODE = '42501';
+    END IF;
+    PERFORM 1
+    FROM public.circle_members AS membership
+    WHERE membership.circle_id = NEW.circle_id
+      AND membership.user_id = v_uid
+    FOR KEY SHARE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'agent_run_chat_lineage_membership_required'
+        USING ERRCODE = '42501';
+    END IF;
+  END IF;
+
+  SELECT thread.*
+  INTO v_thread
+  FROM public.circle_chat_threads AS thread
+  WHERE thread.id = NEW.thread_id
+  FOR SHARE;
+  IF NOT FOUND OR v_thread.circle_id IS DISTINCT FROM NEW.circle_id THEN
+    RAISE EXCEPTION 'agent_run_chat_lineage_thread_invalid'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF v_thread.visibility IS DISTINCT FROM 'circle'
+     AND v_thread.created_by IS DISTINCT FROM NEW.user_id THEN
+    PERFORM 1
+    FROM public.circle_chat_thread_members AS thread_member
+    WHERE thread_member.thread_id = NEW.thread_id
+      AND thread_member.user_id = NEW.user_id
+    FOR KEY SHARE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'agent_run_chat_lineage_thread_access_required'
+        USING ERRCODE = '42501';
+    END IF;
+  END IF;
+
+  SELECT message.*
+  INTO v_message
+  FROM public.messages AS message
+  WHERE message.id = NEW.source_message_id
+  FOR SHARE;
+  IF NOT FOUND
+     OR v_message.circle_id IS DISTINCT FROM NEW.circle_id
+     OR v_message.thread_id IS DISTINCT FROM NEW.thread_id
+     OR v_message.user_id IS DISTINCT FROM NEW.user_id
+     OR v_message.is_bot IS DISTINCT FROM false THEN
+    RAISE EXCEPTION 'agent_run_chat_lineage_source_message_invalid'
+      USING ERRCODE = '23514';
+  END IF;
+
+  RETURN NEW;
+END
+$function$;
+
+DROP TRIGGER IF EXISTS trg_guard_agent_run_chat_lineage_v1
+ON public.agent_runs;
+CREATE TRIGGER trg_guard_agent_run_chat_lineage_v1
+BEFORE INSERT OR UPDATE ON public.agent_runs
+FOR EACH ROW
+EXECUTE FUNCTION public.guard_agent_run_chat_lineage_v1();
+
+REVOKE ALL ON FUNCTION public.guard_agent_run_chat_lineage_v1()
+FROM PUBLIC, anon, authenticated;
+
+-- The historical approval policy is circle-wide. Circle peers may keep the
+-- product's existing read visibility, but an explicit Chat approval is
+-- mutation authority owned by its requester. Protect both the unconsumed and
+-- consumed schema-v2 shapes so a peer cannot resolve first or mutate later.
+-- Auto approvals and non-Chat/legacy runs deliberately keep their established
+-- behavior. SECURITY DEFINER makes the source-run classification independent
+-- of permissive agent_runs RLS drift, while current membership prevents this
+-- boolean helper from becoming a cross-circle run-id oracle.
+CREATE OR REPLACE FUNCTION public.is_protected_openswan_chat_ask_approval_v1(
+  p_run_id uuid,
+  p_circle_id uuid,
+  p_payload jsonb
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT COALESCE((
+    auth.uid() IS NOT NULL
+    AND p_run_id IS NOT NULL
+    AND p_circle_id IS NOT NULL
+    AND jsonb_typeof(p_payload) = 'object'
+    AND p_payload->>'approvalSchemaVersion' = '2'
+    AND p_payload->>'approvalMode' = 'ask'
+    AND (
+      public.is_valid_tool_v2_approval_payload(p_payload, false)
+      OR public.is_valid_tool_v2_approval_payload(p_payload, true)
+    )
+    AND EXISTS (
+      SELECT 1
+      FROM public.agent_runs AS source_run
+      JOIN public.circle_members AS membership
+        ON membership.circle_id = source_run.circle_id
+       AND membership.user_id = auth.uid()
+      WHERE source_run.id = p_run_id
+        AND source_run.circle_id = p_circle_id
+        AND source_run.surface = 'main_chat'
+        AND source_run.provider = 'openswan'
+        AND source_run.thread_id IS NOT NULL
+        AND source_run.source_message_id IS NOT NULL
+    )
+  ), false);
+$function$;
+
+REVOKE ALL ON FUNCTION public.is_protected_openswan_chat_ask_approval_v1(
+  uuid, uuid, jsonb
+) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.is_protected_openswan_chat_ask_approval_v1(
+  uuid, uuid, jsonb
+) TO authenticated;
+
+ALTER TABLE public.agent_run_approvals ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS agent_run_approvals_chat_ask_requester_update_v1
+ON public.agent_run_approvals;
+CREATE POLICY agent_run_approvals_chat_ask_requester_update_v1
+ON public.agent_run_approvals
+AS RESTRICTIVE
+FOR UPDATE
+TO authenticated
+USING (
+  NOT public.is_protected_openswan_chat_ask_approval_v1(
+    run_id,
+    circle_id,
+    payload
+  )
+  OR (
+    auth.uid() IS NOT NULL
+    AND requested_by = auth.uid()::text
+  )
+)
+WITH CHECK (
+  NOT public.is_protected_openswan_chat_ask_approval_v1(
+    run_id,
+    circle_id,
+    payload
+  )
+  OR (
+    auth.uid() IS NOT NULL
+    AND requested_by = auth.uid()::text
+  )
+);
+
+-- Read-only custody preflight. This exposes no approval payload and grants no
+-- dispatch authority: it only tells the authenticated owner whether the exact
+-- consume predicates are true in this statement snapshot. Callers must treat
+-- false, an RPC/schema-cache miss, and every error as a hard no-claim result.
+-- A subsequent race is harmless because the consuming RPC repeats the checks
+-- under row locks before it writes the one-shot dispatch receipt.
+DROP FUNCTION IF EXISTS public.can_consume_openswan_chat_approval_resume_v1(
+  uuid, uuid, uuid, uuid, uuid, uuid, text, text, text, integer, text
+);
+
+CREATE FUNCTION public.can_consume_openswan_chat_approval_resume_v1(
+  p_approval_id uuid,
+  p_source_run_id uuid,
+  p_current_run_id uuid,
+  p_circle_id uuid,
+  p_thread_id uuid,
+  p_source_message_id uuid,
+  p_tool_name text,
+  p_tool_approval_digest text,
+  p_tool_use_id text,
+  p_iteration integer,
+  p_dispatch_binding_digest text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_uid uuid := auth.uid();
+  v_source_run public.agent_runs%ROWTYPE;
+  v_current_run public.agent_runs%ROWTYPE;
+  v_thread public.circle_chat_threads%ROWTYPE;
+  v_message public.messages%ROWTYPE;
+  v_approval public.agent_run_approvals%ROWTYPE;
+  v_terminal jsonb;
+  v_now timestamptz;
+  v_expires_at timestamptz;
+  v_authority_json text;
+  v_expected_binding_digest text;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_auth_required'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF p_approval_id IS NULL
+     OR p_source_run_id IS NULL
+     OR p_current_run_id IS NULL
+     OR p_source_run_id = p_current_run_id
+     OR p_circle_id IS NULL
+     OR p_thread_id IS NULL
+     OR p_source_message_id IS NULL
+     OR p_tool_name IS NULL
+     OR p_tool_name !~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$'
+     OR p_tool_approval_digest IS NULL
+     OR p_tool_approval_digest !~ '^approval-v2:sha256:[0-9a-f]{64}$'
+     OR p_tool_use_id IS NULL
+     OR p_tool_use_id !~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$'
+     OR p_tool_use_id IS DISTINCT FROM 'approval-resume:' || p_approval_id::text
+     OR p_iteration IS NULL
+     OR p_iteration < 1
+     OR p_iteration > 8
+     OR p_dispatch_binding_digest IS NULL
+     OR p_dispatch_binding_digest !~ '^authority-v2:sha256:[0-9a-f]{64}$' THEN
+    RETURN false;
+  END IF;
+
+  PERFORM 1
+  FROM public.circle_members AS membership
+  WHERE membership.circle_id = p_circle_id
+    AND membership.user_id = v_uid;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+
+  SELECT run_row.*
+  INTO v_source_run
+  FROM public.agent_runs AS run_row
+  WHERE run_row.id = p_source_run_id;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+
+  SELECT run_row.*
+  INTO v_current_run
+  FROM public.agent_runs AS run_row
+  WHERE run_row.id = p_current_run_id;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+
+  v_terminal := v_source_run.metadata->'terminal';
+  IF v_source_run.user_id IS DISTINCT FROM v_uid
+     OR v_source_run.circle_id IS DISTINCT FROM p_circle_id
+     OR v_source_run.thread_id IS DISTINCT FROM p_thread_id
+     OR v_source_run.source_message_id IS DISTINCT FROM p_source_message_id
+     OR v_source_run.provider IS DISTINCT FROM 'openswan'
+     OR v_source_run.surface IS DISTINCT FROM 'main_chat'
+     OR v_source_run.status IS DISTINCT FROM 'failed'
+     OR jsonb_typeof(v_terminal) IS DISTINCT FROM 'object'
+     OR v_terminal->>'state' IS DISTINCT FROM 'partial'
+     OR v_terminal->>'reason' IS DISTINCT FROM 'action_coverage_incomplete'
+     OR v_terminal->'completionVerified' IS DISTINCT FROM 'false'::jsonb THEN
+    RETURN false;
+  END IF;
+
+  IF v_current_run.user_id IS DISTINCT FROM v_uid
+     OR v_current_run.circle_id IS DISTINCT FROM p_circle_id
+     OR v_current_run.thread_id IS DISTINCT FROM p_thread_id
+     OR v_current_run.source_message_id IS DISTINCT FROM p_source_message_id
+     OR v_current_run.provider IS DISTINCT FROM 'openswan'
+     OR v_current_run.surface IS DISTINCT FROM 'main_chat'
+     OR v_current_run.status NOT IN ('queued', 'planning', 'running')
+     OR COALESCE(v_current_run.metadata ? 'terminal', false) THEN
+    RETURN false;
+  END IF;
+
+  SELECT thread.*
+  INTO v_thread
+  FROM public.circle_chat_threads AS thread
+  WHERE thread.id = p_thread_id;
+  IF NOT FOUND
+     OR v_thread.circle_id IS DISTINCT FROM p_circle_id
+     OR COALESCE(v_thread.archived, false) THEN
+    RETURN false;
+  END IF;
+
+  IF v_thread.visibility IS DISTINCT FROM 'circle'
+     AND v_thread.created_by IS DISTINCT FROM v_uid THEN
+    PERFORM 1
+    FROM public.circle_chat_thread_members AS thread_member
+    WHERE thread_member.thread_id = p_thread_id
+      AND thread_member.user_id = v_uid;
+    IF NOT FOUND THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  SELECT message.*
+  INTO v_message
+  FROM public.messages AS message
+  WHERE message.id = p_source_message_id;
+  IF NOT FOUND
+     OR v_message.circle_id IS DISTINCT FROM p_circle_id
+     OR v_message.thread_id IS DISTINCT FROM p_thread_id
+     OR v_message.user_id IS DISTINCT FROM v_uid
+     OR v_message.is_bot IS DISTINCT FROM false THEN
+    RETURN false;
+  END IF;
+
+  SELECT approval_row.*
+  INTO v_approval
+  FROM public.agent_run_approvals AS approval_row
+  WHERE approval_row.id = p_approval_id;
+  IF NOT FOUND THEN
+    RETURN false;
+  END IF;
+
+  v_now := statement_timestamp();
+  IF v_approval.timeout_seconds IS NULL
+     OR v_approval.timeout_seconds < 1
+     OR v_approval.timeout_seconds > 86400
+     OR v_approval.requested_at IS NULL
+     OR v_approval.resolved_at IS NULL THEN
+    RETURN false;
+  END IF;
+  v_expires_at := v_approval.requested_at
+    + make_interval(secs => v_approval.timeout_seconds);
+
+  IF v_approval.run_id IS DISTINCT FROM p_source_run_id
+     OR v_approval.circle_id IS DISTINCT FROM p_circle_id
+     OR v_approval.requested_by IS DISTINCT FROM v_uid::text
+     OR v_approval.resolved_by IS DISTINCT FROM v_uid
+     OR v_approval.status IS DISTINCT FROM 'approved'
+     OR v_approval.metadata IS DISTINCT FROM '{}'::jsonb
+     OR v_approval.requested_at > v_approval.resolved_at
+     OR v_approval.resolved_at > v_now
+     OR v_approval.resolved_at >= v_expires_at
+     OR v_now >= v_expires_at
+     OR NOT public.is_valid_tool_v2_approval_payload(v_approval.payload, false)
+     OR v_approval.payload->>'approvalMode' IS DISTINCT FROM 'ask'
+     OR v_approval.payload->>'toolName' IS DISTINCT FROM p_tool_name
+     OR v_approval.payload->>'toolName' = 'desktop.open_attachment'
+     OR v_approval.payload->>'toolApprovalDigest' IS DISTINCT FROM p_tool_approval_digest
+     OR v_approval.payload ? 'dispatchReceiptSchemaVersion'
+     OR v_approval.payload ? 'dispatchBindingDigest'
+     OR v_approval.payload ? 'dispatchConsumedAt' THEN
+    RETURN false;
+  END IF;
+
+  v_authority_json :=
+      '{"approvalDigest":' || to_json(p_tool_approval_digest)::text
+    || ',"approvalId":' || to_json(p_approval_id::text)::text
+    || ',"approvalRunId":' || to_json(p_source_run_id::text)::text
+    || ',"circleId":' || to_json(p_circle_id::text)::text
+    || ',"iteration":' || p_iteration::text
+    || ',"runId":' || to_json(p_current_run_id::text)::text
+    || ',"schemaVersion":2'
+    || ',"source":"cross_run"'
+    || ',"status":"approved"'
+    || ',"toolName":' || to_json(p_tool_name)::text
+    || ',"toolUseId":' || to_json(p_tool_use_id)::text
+    || ',"userId":' || to_json(v_uid::text)::text
+    || '}';
+  v_expected_binding_digest := 'authority-v2:sha256:' || encode(
+    extensions.digest(convert_to(v_authority_json, 'UTF8'), 'sha256'),
+    'hex'
+  );
+
+  RETURN p_dispatch_binding_digest = v_expected_binding_digest;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION public.can_consume_openswan_chat_approval_resume_v1(
+  uuid, uuid, uuid, uuid, uuid, uuid, text, text, text, integer, text
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.can_consume_openswan_chat_approval_resume_v1(
+  uuid, uuid, uuid, uuid, uuid, uuid, text, text, text, integer, text
+) TO authenticated;
+
+DROP FUNCTION IF EXISTS public.consume_openswan_chat_approval_resume_v1(
+  uuid, uuid, uuid, uuid, uuid, uuid, text, text, text, integer, text
+);
+
+CREATE FUNCTION public.consume_openswan_chat_approval_resume_v1(
+  p_approval_id uuid,
+  p_source_run_id uuid,
+  p_current_run_id uuid,
+  p_circle_id uuid,
+  p_thread_id uuid,
+  p_source_message_id uuid,
+  p_tool_name text,
+  p_tool_approval_digest text,
+  p_tool_use_id text,
+  p_iteration integer,
+  p_dispatch_binding_digest text
+)
+RETURNS TABLE (
+  approval_id uuid,
+  approval_run_id uuid,
+  dispatch_run_id uuid,
+  circle_id uuid,
+  thread_id uuid,
+  source_message_id uuid,
+  tool_name text,
+  tool_approval_digest text,
+  receipt_source text,
+  approval_status text,
+  dispatch_binding_digest text,
+  dispatch_consumed_at text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_uid uuid := auth.uid();
+  v_locked_run_count integer := 0;
+  v_source_run public.agent_runs%ROWTYPE;
+  v_current_run public.agent_runs%ROWTYPE;
+  v_thread public.circle_chat_threads%ROWTYPE;
+  v_message public.messages%ROWTYPE;
+  v_approval public.agent_run_approvals%ROWTYPE;
+  v_terminal jsonb;
+  v_now timestamptz;
+  v_expires_at timestamptz;
+  v_consumed_at_text text;
+  v_authority_json text;
+  v_expected_binding_digest text;
+  v_consumed_payload jsonb;
+  v_written_payload jsonb;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_auth_required'
+      USING ERRCODE = '42501';
+  END IF;
+  IF p_approval_id IS NULL
+     OR p_source_run_id IS NULL
+     OR p_current_run_id IS NULL
+     OR p_source_run_id = p_current_run_id
+     OR p_circle_id IS NULL
+     OR p_thread_id IS NULL
+     OR p_source_message_id IS NULL
+     OR p_tool_name IS NULL
+     OR p_tool_name !~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$'
+     OR p_tool_approval_digest IS NULL
+     OR p_tool_approval_digest !~ '^approval-v2:sha256:[0-9a-f]{64}$'
+     OR p_tool_use_id IS NULL
+     OR p_tool_use_id !~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$'
+     OR p_tool_use_id IS DISTINCT FROM 'approval-resume:' || p_approval_id::text
+     OR p_iteration IS NULL
+     OR p_iteration < 1
+     OR p_iteration > 8
+     OR p_dispatch_binding_digest IS NULL
+     OR p_dispatch_binding_digest !~ '^authority-v2:sha256:[0-9a-f]{64}$' THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_identity_invalid'
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- Keep membership live for the whole transaction. A concurrent revocation
+  -- must finish before or after this consume, never between its checks.
+  PERFORM 1
+  FROM public.circle_members AS membership
+  WHERE membership.circle_id = p_circle_id
+    AND membership.user_id = v_uid
+  FOR KEY SHARE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_membership_required'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- Deterministic id order prevents two inverse source/current requests from
+  -- deadlocking. Both rows stay locked through approval consumption.
+  PERFORM run_row.id
+  FROM public.agent_runs AS run_row
+  WHERE run_row.id IN (p_source_run_id, p_current_run_id)
+  ORDER BY run_row.id
+  FOR UPDATE;
+  GET DIAGNOSTICS v_locked_run_count = ROW_COUNT;
+  IF v_locked_run_count <> 2 THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_run_not_found'
+      USING ERRCODE = 'P0002';
+  END IF;
+
+  SELECT run_row.*
+  INTO STRICT v_source_run
+  FROM public.agent_runs AS run_row
+  WHERE run_row.id = p_source_run_id;
+
+  SELECT run_row.*
+  INTO STRICT v_current_run
+  FROM public.agent_runs AS run_row
+  WHERE run_row.id = p_current_run_id;
+
+  v_terminal := v_source_run.metadata->'terminal';
+  IF v_source_run.user_id IS DISTINCT FROM v_uid
+     OR v_source_run.circle_id IS DISTINCT FROM p_circle_id
+     OR v_source_run.thread_id IS DISTINCT FROM p_thread_id
+     OR v_source_run.source_message_id IS DISTINCT FROM p_source_message_id
+     OR v_source_run.provider IS DISTINCT FROM 'openswan'
+     OR v_source_run.surface IS DISTINCT FROM 'main_chat'
+     OR v_source_run.status IS DISTINCT FROM 'failed'
+     OR jsonb_typeof(v_terminal) IS DISTINCT FROM 'object'
+     OR v_terminal->>'state' IS DISTINCT FROM 'partial'
+     OR v_terminal->>'reason' IS DISTINCT FROM 'action_coverage_incomplete'
+     OR v_terminal->'completionVerified' IS DISTINCT FROM 'false'::jsonb THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_source_run_not_eligible'
+      USING ERRCODE = '55000';
+  END IF;
+
+  IF v_current_run.user_id IS DISTINCT FROM v_uid
+     OR v_current_run.circle_id IS DISTINCT FROM p_circle_id
+     OR v_current_run.thread_id IS DISTINCT FROM p_thread_id
+     OR v_current_run.source_message_id IS DISTINCT FROM p_source_message_id
+     OR v_current_run.provider IS DISTINCT FROM 'openswan'
+     OR v_current_run.surface IS DISTINCT FROM 'main_chat'
+     OR v_current_run.status NOT IN ('queued', 'planning', 'running')
+     OR COALESCE(v_current_run.metadata ? 'terminal', false) THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_current_run_not_eligible'
+      USING ERRCODE = '55000';
+  END IF;
+
+  SELECT thread.*
+  INTO v_thread
+  FROM public.circle_chat_threads AS thread
+  WHERE thread.id = p_thread_id
+  FOR SHARE;
+  IF NOT FOUND
+     OR v_thread.circle_id IS DISTINCT FROM p_circle_id
+     OR COALESCE(v_thread.archived, false) THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_thread_not_live'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF v_thread.visibility IS DISTINCT FROM 'circle'
+     AND v_thread.created_by IS DISTINCT FROM v_uid THEN
+    PERFORM 1
+    FROM public.circle_chat_thread_members AS thread_member
+    WHERE thread_member.thread_id = p_thread_id
+      AND thread_member.user_id = v_uid
+    FOR KEY SHARE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'openswan_chat_approval_resume_thread_access_required'
+        USING ERRCODE = '42501';
+    END IF;
+  END IF;
+
+  SELECT message.*
+  INTO v_message
+  FROM public.messages AS message
+  WHERE message.id = p_source_message_id
+  FOR SHARE;
+  IF NOT FOUND
+     OR v_message.circle_id IS DISTINCT FROM p_circle_id
+     OR v_message.thread_id IS DISTINCT FROM p_thread_id
+     OR v_message.user_id IS DISTINCT FROM v_uid
+     OR v_message.is_bot IS DISTINCT FROM false THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_source_message_invalid'
+      USING ERRCODE = '42501';
+  END IF;
+
+  SELECT approval_row.*
+  INTO v_approval
+  FROM public.agent_run_approvals AS approval_row
+  WHERE approval_row.id = p_approval_id
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_approval_not_found'
+      USING ERRCODE = 'P0002';
+  END IF;
+
+  v_now := clock_timestamp();
+  IF v_approval.timeout_seconds IS NULL
+     OR v_approval.timeout_seconds < 1
+     OR v_approval.timeout_seconds > 86400
+     OR v_approval.requested_at IS NULL
+     OR v_approval.resolved_at IS NULL THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_approval_not_live'
+      USING ERRCODE = '55000';
+  END IF;
+  v_expires_at := v_approval.requested_at
+    + make_interval(secs => v_approval.timeout_seconds);
+
+  IF v_approval.run_id IS DISTINCT FROM p_source_run_id
+     OR v_approval.circle_id IS DISTINCT FROM p_circle_id
+     OR v_approval.requested_by IS DISTINCT FROM v_uid::text
+     OR v_approval.resolved_by IS DISTINCT FROM v_uid
+     OR v_approval.status IS DISTINCT FROM 'approved'
+     OR v_approval.metadata IS DISTINCT FROM '{}'::jsonb
+     OR v_approval.requested_at > v_approval.resolved_at
+     OR v_approval.resolved_at > v_now
+     OR v_approval.resolved_at >= v_expires_at
+     OR v_now >= v_expires_at
+     OR NOT public.is_valid_tool_v2_approval_payload(v_approval.payload, false)
+     OR v_approval.payload->>'approvalMode' IS DISTINCT FROM 'ask'
+     OR v_approval.payload->>'toolName' IS DISTINCT FROM p_tool_name
+     OR v_approval.payload->>'toolName' = 'desktop.open_attachment'
+     OR v_approval.payload->>'toolApprovalDigest' IS DISTINCT FROM p_tool_approval_digest
+     OR v_approval.payload ? 'dispatchReceiptSchemaVersion'
+     OR v_approval.payload ? 'dispatchBindingDigest'
+     OR v_approval.payload ? 'dispatchConsumedAt' THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_approval_not_live'
+      USING ERRCODE = '55000';
+  END IF;
+
+  -- Match `stableApprovalJson` exactly. Its flat authority object is sorted by
+  -- key and JSON.stringify emits no whitespace. The database recomputes this
+  -- digest instead of trusting an arbitrary client-provided receipt binding.
+  v_authority_json :=
+      '{"approvalDigest":' || to_json(p_tool_approval_digest)::text
+    || ',"approvalId":' || to_json(p_approval_id::text)::text
+    || ',"approvalRunId":' || to_json(p_source_run_id::text)::text
+    || ',"circleId":' || to_json(p_circle_id::text)::text
+    || ',"iteration":' || p_iteration::text
+    || ',"runId":' || to_json(p_current_run_id::text)::text
+    || ',"schemaVersion":2'
+    || ',"source":"cross_run"'
+    || ',"status":"approved"'
+    || ',"toolName":' || to_json(p_tool_name)::text
+    || ',"toolUseId":' || to_json(p_tool_use_id)::text
+    || ',"userId":' || to_json(v_uid::text)::text
+    || '}';
+  v_expected_binding_digest := 'authority-v2:sha256:' || encode(
+    extensions.digest(convert_to(v_authority_json, 'UTF8'), 'sha256'),
+    'hex'
+  );
+  IF p_dispatch_binding_digest IS DISTINCT FROM v_expected_binding_digest THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_dispatch_binding_invalid'
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- Re-sample database time immediately before the write. The approval may
+  -- have been barely live when its locked row was first read.
+  v_now := clock_timestamp();
+  IF v_now >= v_expires_at THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_approval_not_live'
+      USING ERRCODE = '55000';
+  END IF;
+
+  v_consumed_at_text := to_char(
+    v_now AT TIME ZONE 'UTC',
+    'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+  );
+  v_consumed_payload := v_approval.payload || jsonb_build_object(
+    'dispatchReceiptSchemaVersion', 2,
+    'dispatchBindingDigest', v_expected_binding_digest,
+    'dispatchConsumedAt', v_consumed_at_text
+  );
+  IF NOT public.is_valid_tool_v2_approval_payload(v_consumed_payload, true) THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_consumed_payload_invalid'
+      USING ERRCODE = '22023';
+  END IF;
+
+  UPDATE public.agent_run_approvals AS approval_row
+  SET payload = v_consumed_payload
+  WHERE approval_row.id = p_approval_id
+    AND approval_row.run_id = p_source_run_id
+    AND approval_row.circle_id = p_circle_id
+    AND approval_row.requested_by = v_uid::text
+    AND approval_row.resolved_by = v_uid
+    AND approval_row.status = 'approved'
+    AND approval_row.payload IS NOT DISTINCT FROM v_approval.payload
+    AND clock_timestamp() < v_expires_at
+  RETURNING approval_row.payload INTO v_written_payload;
+  IF NOT FOUND
+     OR v_written_payload->>'dispatchBindingDigest'
+       IS DISTINCT FROM v_expected_binding_digest THEN
+    RAISE EXCEPTION 'openswan_chat_approval_resume_consume_conflict'
+      USING ERRCODE = '40001';
+  END IF;
+
+  RETURN QUERY SELECT
+    p_approval_id,
+    p_source_run_id,
+    p_current_run_id,
+    p_circle_id,
+    p_thread_id,
+    p_source_message_id,
+    p_tool_name,
+    p_tool_approval_digest,
+    'cross_run'::text,
+    'approved'::text,
+    v_expected_binding_digest,
+    v_consumed_at_text;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION public.consume_openswan_chat_approval_resume_v1(
+  uuid, uuid, uuid, uuid, uuid, uuid, text, text, text, integer, text
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.consume_openswan_chat_approval_resume_v1(
+  uuid, uuid, uuid, uuid, uuid, uuid, text, text, text, integer, text
+) TO authenticated;
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+
+-- Catalog readiness only. Follow with authenticated cross-user/thread/replay
+-- and locked status-race behavior before relying on this authority boundary.
+SELECT
+  (
+    SELECT count(*) = 2
+      AND bool_and(attribute.atttypid = 'uuid'::regtype)
+      AND bool_and(NOT attribute.attnotnull)
+    FROM pg_catalog.pg_attribute AS attribute
+    WHERE attribute.attrelid = 'public.agent_runs'::regclass
+      AND attribute.attname IN ('thread_id', 'source_message_id')
+      AND NOT attribute.attisdropped
+  ) AS openswan_chat_run_lineage_columns_ready,
+  (
+    SELECT count(*) = 4
+    FROM pg_catalog.pg_constraint AS constraint_row
+    WHERE constraint_row.conrelid = 'public.agent_runs'::regclass
+      AND constraint_row.conname IN (
+        'agent_runs_chat_thread_lineage_pair_v1',
+        'agent_runs_chat_thread_lineage_scope_v1',
+        'agent_runs_chat_thread_lineage_thread_fkey_v1',
+        'agent_runs_chat_thread_lineage_message_fkey_v1'
+      )
+      AND constraint_row.convalidated
+  ) AS openswan_chat_run_lineage_constraints_ready,
+  EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_constraint AS constraint_row
+    WHERE constraint_row.conrelid = 'public.agent_runs'::regclass
+      AND constraint_row.conname = 'agent_runs_chat_thread_lineage_thread_fkey_v1'
+      AND constraint_row.confrelid = 'public.circle_chat_threads'::regclass
+      AND constraint_row.contype = 'f'
+      AND constraint_row.confdeltype = 'r'
+      AND constraint_row.convalidated
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_constraint AS constraint_row
+    WHERE constraint_row.conrelid = 'public.agent_runs'::regclass
+      AND constraint_row.conname = 'agent_runs_chat_thread_lineage_message_fkey_v1'
+      AND constraint_row.confrelid = 'public.messages'::regclass
+      AND constraint_row.contype = 'f'
+      AND constraint_row.confdeltype = 'r'
+      AND constraint_row.convalidated
+  ) AS openswan_chat_run_lineage_exact_fks_ready,
+  EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_trigger AS trigger_row
+    WHERE trigger_row.tgrelid = 'public.agent_runs'::regclass
+      AND trigger_row.tgname = 'trg_guard_agent_run_chat_lineage_v1'
+      AND trigger_row.tgfoid = 'public.guard_agent_run_chat_lineage_v1()'::regprocedure
+      AND trigger_row.tgenabled <> 'D'
+      AND NOT trigger_row.tgisinternal
+  ) AS openswan_chat_run_lineage_trigger_ready,
+  (
+    SELECT count(*) = 2
+      AND bool_and(permissive = 'RESTRICTIVE')
+      AND bool_and(cmd IN ('UPDATE', 'DELETE'))
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'agent_runs'
+      AND policyname IN (
+        'agent_runs_chat_lineage_update_owner_v1',
+        'agent_runs_chat_lineage_delete_owner_v1'
+      )
+  ) AS openswan_chat_run_lineage_owner_policies_ready,
+  EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'agent_run_approvals'
+      AND policyname = 'agent_run_approvals_chat_ask_requester_update_v1'
+      AND permissive = 'RESTRICTIVE'
+      AND cmd = 'UPDATE'
+  )
+  AND to_regprocedure(
+    'public.is_protected_openswan_chat_ask_approval_v1(uuid,uuid,jsonb)'
+  ) IS NOT NULL AS openswan_chat_approval_requester_policy_ready,
+  to_regprocedure(
+    'public.can_consume_openswan_chat_approval_resume_v1(uuid,uuid,uuid,uuid,uuid,uuid,text,text,text,integer,text)'
+  ) IS NOT NULL
+  AND has_function_privilege(
+    'authenticated',
+    'public.can_consume_openswan_chat_approval_resume_v1(uuid,uuid,uuid,uuid,uuid,uuid,text,text,text,integer,text)',
+    'EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    'anon',
+    'public.can_consume_openswan_chat_approval_resume_v1(uuid,uuid,uuid,uuid,uuid,uuid,text,text,text,integer,text)',
+    'EXECUTE'
+  ) AS openswan_chat_approval_resume_preflight_rpc_ready,
+  to_regprocedure(
+    'public.consume_openswan_chat_approval_resume_v1(uuid,uuid,uuid,uuid,uuid,uuid,text,text,text,integer,text)'
+  ) IS NOT NULL
+  AND has_function_privilege(
+    'authenticated',
+    'public.consume_openswan_chat_approval_resume_v1(uuid,uuid,uuid,uuid,uuid,uuid,text,text,text,integer,text)',
+    'EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    'anon',
+    'public.consume_openswan_chat_approval_resume_v1(uuid,uuid,uuid,uuid,uuid,uuid,text,text,text,integer,text)',
+    'EXECUTE'
+  ) AS openswan_chat_approval_resume_rpc_ready;
+-- END SECTION 44: OpenSwan Chat approval-resume authority
+-- BEGIN SECTION 45: Owner-private Office user preferences
+-- Source: supabase/migrations/20260813220000_office_user_preferences.sql
+-- Owner-private, circle-scoped Office preferences with atomic patch authority.
+--
+-- `profiles.office_preferences` is a flat profile blob and profile rows are
+-- readable by fellow circle members. It therefore cannot own private Office
+-- state or credentials. This migration introduces an exact owner+circle row,
+-- limits it to reviewed non-secret fields, and makes one server-side patch RPC
+-- the only authenticated mutation surface.
+
+BEGIN;
+
+CREATE OR REPLACE FUNCTION public.office_preferences_contains_secret_key_v1(
+  p_value jsonb
+)
+RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  object_entry record;
+  array_entry jsonb;
+  normalized_key text;
+BEGIN
+  CASE jsonb_typeof(p_value)
+    WHEN 'object' THEN
+      FOR object_entry IN SELECT key, value FROM jsonb_each(p_value)
+      LOOP
+        normalized_key := regexp_replace(lower(object_entry.key), '[^a-z0-9]', '', 'g');
+        IF lower(object_entry.key) IN ('__proto__', 'prototype', 'constructor')
+           OR normalized_key ~ '(password|passwd|secret|token|apikey|accesskey|privatekey|credential|authorization|bearer|cookie|sessionkey|webhook)' THEN
+          RETURN true;
+        END IF;
+        IF public.office_preferences_contains_secret_key_v1(object_entry.value) THEN
+          RETURN true;
+        END IF;
+      END LOOP;
+    WHEN 'array' THEN
+      FOR array_entry IN SELECT value FROM jsonb_array_elements(p_value)
+      LOOP
+        IF public.office_preferences_contains_secret_key_v1(array_entry) THEN
+          RETURN true;
+        END IF;
+      END LOOP;
+    ELSE
+      NULL;
+  END CASE;
+  RETURN false;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.office_preferences_contains_secret_key_v1(jsonb)
+  FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.validate_office_user_preferences_v1(
+  p_preferences jsonb
+)
+RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  preference_entry record;
+  nested_entry record;
+  behavior_entry record;
+  state_key text;
+  numeric_value numeric;
+  entry_count integer;
+  text_value text;
+BEGIN
+  IF jsonb_typeof(p_preferences) <> 'object'
+     OR octet_length(p_preferences::text) > 131072
+     OR public.office_preferences_contains_secret_key_v1(p_preferences) THEN
+    RETURN false;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM jsonb_object_keys(p_preferences) AS preference_key
+    WHERE preference_key NOT IN (
+      'agentNames',
+      'appearances',
+      'whiteboardNotes',
+      'budgetConfig',
+      'idleConfig',
+      'agentFilterMode',
+      'telegramMetadata'
+    )
+  ) THEN
+    RETURN false;
+  END IF;
+
+  FOR preference_entry IN SELECT key, value FROM jsonb_each(p_preferences)
+  LOOP
+    CASE preference_entry.key
+      WHEN 'agentNames' THEN
+        IF jsonb_typeof(preference_entry.value) <> 'object' THEN RETURN false; END IF;
+        SELECT count(*) INTO entry_count FROM jsonb_object_keys(preference_entry.value);
+        IF entry_count > 128 THEN RETURN false; END IF;
+        FOR nested_entry IN SELECT key, value FROM jsonb_each(preference_entry.value)
+        LOOP
+          IF length(nested_entry.key) NOT BETWEEN 1 AND 240
+             OR octet_length(nested_entry.key) > 960
+             OR jsonb_typeof(nested_entry.value) <> 'string' THEN
+            RETURN false;
+          END IF;
+          text_value := nested_entry.value #>> '{}';
+          IF length(btrim(text_value)) NOT BETWEEN 1 AND 80
+             OR octet_length(text_value) > 320 THEN
+            RETURN false;
+          END IF;
+        END LOOP;
+
+      WHEN 'appearances' THEN
+        IF jsonb_typeof(preference_entry.value) <> 'object' THEN RETURN false; END IF;
+        SELECT count(*) INTO entry_count FROM jsonb_object_keys(preference_entry.value);
+        IF entry_count > 128 THEN RETURN false; END IF;
+        FOR nested_entry IN SELECT key, value FROM jsonb_each(preference_entry.value)
+        LOOP
+          IF length(nested_entry.key) NOT BETWEEN 1 AND 240
+             OR octet_length(nested_entry.key) > 960
+             OR jsonb_typeof(nested_entry.value) <> 'object' THEN
+            RETURN false;
+          END IF;
+          SELECT count(*) INTO entry_count FROM jsonb_object_keys(nested_entry.value);
+          IF entry_count <> 15
+             OR EXISTS (
+               SELECT 1 FROM jsonb_object_keys(nested_entry.value) AS appearance_key
+               WHERE appearance_key NOT IN (
+                 'skinTone', 'hairStyle', 'hairColor', 'shirtColor', 'pantsColor',
+                 'shoeColor', 'accessory', 'hat', 'expression', 'backItem',
+                 'eyeColor', 'facialHair', 'pet', 'aura', 'handItem'
+               )
+             ) THEN
+            RETURN false;
+          END IF;
+          FOREACH state_key IN ARRAY ARRAY[
+            'skinTone', 'hairStyle', 'hairColor', 'shirtColor', 'pantsColor',
+            'shoeColor', 'accessory', 'hat', 'expression', 'backItem',
+            'eyeColor', 'facialHair', 'pet', 'aura', 'handItem'
+          ]
+          LOOP
+            IF jsonb_typeof(nested_entry.value -> state_key) <> 'string' THEN
+              RETURN false;
+            END IF;
+          END LOOP;
+          FOREACH state_key IN ARRAY ARRAY[
+            'skinTone', 'hairColor', 'shirtColor', 'pantsColor', 'shoeColor', 'eyeColor'
+          ]
+          LOOP
+            IF (nested_entry.value ->> state_key) !~ '^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$' THEN
+              RETURN false;
+            END IF;
+          END LOOP;
+          IF (nested_entry.value ->> 'hairStyle') NOT IN (
+               'flat', 'spiky', 'mohawk', 'long', 'bald', 'cap', 'curly',
+               'ponytail', 'buzzcut', 'afro', 'undercut', 'pigtails'
+             )
+             OR (nested_entry.value ->> 'accessory') NOT IN (
+               'none', 'glasses', 'headphones', 'bowtie', 'scarf', 'hoodie',
+               'mask', 'monocle', 'eyepatch', 'bandana', 'chain', 'piercing',
+               'visor_shades', 'gas_mask'
+             )
+             OR (nested_entry.value ->> 'hat') NOT IN (
+               'none', 'cap', 'tophat', 'beanie', 'crown', 'helmet', 'horns',
+               'space_helmet', 'wizard_hat', 'halo', 'antenna', 'crab_helmet',
+               'pirate_hat', 'cowboy_hat', 'fez', 'mohawk_spikes'
+             )
+             OR (nested_entry.value ->> 'expression') NOT IN (
+               'neutral', 'happy', 'focused', 'sleepy', 'cool', 'angry',
+               'surprised', 'smirk', 'crying'
+             )
+             OR (nested_entry.value ->> 'backItem') NOT IN (
+               'none', 'cape', 'backpack', 'wings', 'jetpack', 'shield',
+               'sword', 'quiver', 'crab_shell', 'tentacles', 'rocket',
+               'scroll', 'boombox'
+             )
+             OR (nested_entry.value ->> 'facialHair') NOT IN (
+               'none', 'stubble', 'beard', 'mustache', 'goatee', 'fu_manchu',
+               'sideburns', 'soul_patch'
+             )
+             OR (nested_entry.value ->> 'pet') NOT IN (
+               'none', 'cat', 'dog', 'bird', 'robot', 'dragon', 'alien', 'crab',
+               'snake', 'bat', 'skull', 'mushroom', 'spider', 'shark', 'bones', 'swan'
+             )
+             OR (nested_entry.value ->> 'aura') NOT IN (
+               'none', 'fire', 'ice', 'electric', 'nature', 'shadow', 'rainbow',
+               'glitch', 'cosmic', 'toxic', 'holy', 'void', 'galaxy'
+             )
+             OR (nested_entry.value ->> 'handItem') NOT IN (
+               'none', 'lightsaber', 'coffee', 'laptop', 'flag', 'wand',
+               'crab_claws', 'sword_hand', 'pizza', 'microphone', 'torch'
+             ) THEN
+            RETURN false;
+          END IF;
+        END LOOP;
+
+      WHEN 'whiteboardNotes' THEN
+        IF jsonb_typeof(preference_entry.value) <> 'array'
+           OR jsonb_array_length(preference_entry.value) > 8 THEN
+          RETURN false;
+        END IF;
+        FOR nested_entry IN SELECT value FROM jsonb_array_elements(preference_entry.value)
+        LOOP
+          IF jsonb_typeof(nested_entry.value) <> 'string' THEN RETURN false; END IF;
+          text_value := nested_entry.value #>> '{}';
+          IF length(btrim(text_value)) NOT BETWEEN 1 AND 80
+             OR octet_length(text_value) > 320 THEN
+            RETURN false;
+          END IF;
+        END LOOP;
+
+      WHEN 'budgetConfig' THEN
+        IF jsonb_typeof(preference_entry.value) <> 'object'
+           OR jsonb_typeof(preference_entry.value -> 'enabled') <> 'boolean' THEN
+          RETURN false;
+        END IF;
+        IF EXISTS (
+          SELECT 1 FROM jsonb_object_keys(preference_entry.value) AS budget_key
+          WHERE budget_key NOT IN ('enabled', 'daily', 'weekly', 'monthly', 'hardLimit')
+        ) THEN
+          RETURN false;
+        END IF;
+        IF preference_entry.value ? 'hardLimit'
+           AND jsonb_typeof(preference_entry.value -> 'hardLimit') <> 'boolean' THEN
+          RETURN false;
+        END IF;
+        FOREACH state_key IN ARRAY ARRAY['daily', 'weekly', 'monthly']
+        LOOP
+          IF preference_entry.value ? state_key THEN
+            IF jsonb_typeof(preference_entry.value -> state_key) <> 'number' THEN
+              RETURN false;
+            END IF;
+            numeric_value := (preference_entry.value ->> state_key)::numeric;
+            IF numeric_value <= 0 OR numeric_value > 1000000 THEN RETURN false; END IF;
+          END IF;
+        END LOOP;
+
+      WHEN 'idleConfig' THEN
+        IF jsonb_typeof(preference_entry.value) <> 'object'
+           OR jsonb_typeof(preference_entry.value -> 'masterEnabled') <> 'boolean'
+           OR jsonb_typeof(preference_entry.value -> 'behaviors') <> 'object' THEN
+          RETURN false;
+        END IF;
+        IF EXISTS (
+          SELECT 1 FROM jsonb_object_keys(preference_entry.value) AS idle_key
+          WHERE idle_key NOT IN ('masterEnabled', 'behaviors', 'sharedChatOptIn')
+        ) THEN
+          RETURN false;
+        END IF;
+        IF preference_entry.value ? 'sharedChatOptIn'
+           AND jsonb_typeof(preference_entry.value -> 'sharedChatOptIn') <> 'boolean' THEN
+          RETURN false;
+        END IF;
+        SELECT count(*) INTO entry_count
+        FROM jsonb_object_keys(preference_entry.value -> 'behaviors');
+        IF entry_count > 64 THEN RETURN false; END IF;
+        FOR behavior_entry IN
+          SELECT key, value FROM jsonb_each(preference_entry.value -> 'behaviors')
+        LOOP
+          IF length(behavior_entry.key) NOT BETWEEN 1 AND 80
+             OR octet_length(behavior_entry.key) > 320
+             OR jsonb_typeof(behavior_entry.value) <> 'object'
+             OR jsonb_typeof(behavior_entry.value -> 'enabled') <> 'boolean'
+             OR jsonb_typeof(behavior_entry.value -> 'cooldownMinutes') <> 'number'
+             OR NOT (behavior_entry.value ? 'lastRanAt') THEN
+            RETURN false;
+          END IF;
+          IF EXISTS (
+            SELECT 1 FROM jsonb_object_keys(behavior_entry.value) AS behavior_key
+            WHERE behavior_key NOT IN ('enabled', 'cooldownMinutes', 'lastRanAt')
+          ) THEN
+            RETURN false;
+          END IF;
+          numeric_value := (behavior_entry.value ->> 'cooldownMinutes')::numeric;
+          IF numeric_value <> trunc(numeric_value)
+             OR numeric_value < 1
+             OR numeric_value > 10080 THEN
+            RETURN false;
+          END IF;
+          IF jsonb_typeof(behavior_entry.value -> 'lastRanAt') = 'string' THEN
+            text_value := behavior_entry.value ->> 'lastRanAt';
+            IF length(text_value) > 40
+               OR text_value !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})$' THEN
+              RETURN false;
+            END IF;
+          ELSIF jsonb_typeof(behavior_entry.value -> 'lastRanAt') <> 'null' THEN
+            RETURN false;
+          END IF;
+        END LOOP;
+
+      WHEN 'agentFilterMode' THEN
+        IF jsonb_typeof(preference_entry.value) <> 'string'
+           OR (preference_entry.value #>> '{}') NOT IN ('all', 'mine', 'active', 'bonded') THEN
+          RETURN false;
+        END IF;
+
+      WHEN 'telegramMetadata' THEN
+        IF jsonb_typeof(preference_entry.value) <> 'object' THEN RETURN false; END IF;
+        SELECT count(*) INTO entry_count FROM jsonb_object_keys(preference_entry.value);
+        IF entry_count NOT BETWEEN 1 AND 2
+           OR EXISTS (
+             SELECT 1 FROM jsonb_object_keys(preference_entry.value) AS telegram_key
+             WHERE telegram_key NOT IN ('chatId', 'botName')
+           ) THEN
+          RETURN false;
+        END IF;
+        IF preference_entry.value ? 'chatId' THEN
+          IF jsonb_typeof(preference_entry.value -> 'chatId') <> 'string'
+             OR (preference_entry.value ->> 'chatId') !~ '^(-?[0-9]{1,20}|@[A-Za-z0-9_]{5,64})$' THEN
+            RETURN false;
+          END IF;
+        END IF;
+        IF preference_entry.value ? 'botName' THEN
+          IF jsonb_typeof(preference_entry.value -> 'botName') <> 'string'
+             OR (preference_entry.value ->> 'botName') !~ '^[A-Za-z0-9_]{1,64}$' THEN
+            RETURN false;
+          END IF;
+        END IF;
+
+      ELSE
+        RETURN false;
+    END CASE;
+  END LOOP;
+
+  RETURN true;
+EXCEPTION WHEN OTHERS THEN
+  RETURN false;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.validate_office_user_preferences_v1(jsonb)
+  FROM PUBLIC, anon, authenticated, service_role;
+
+-- Convert one pair of legacy appearance fragments into the complete current
+-- 15-field shape. A valid dedicated-field value wins, otherwise a valid value
+-- from the old Office preference map wins, otherwise the current safe visual
+-- default is used. Unknown legacy fields are never projected into live state.
+CREATE OR REPLACE FUNCTION public.normalize_legacy_office_agent_appearance_v1(
+  p_office_appearance jsonb,
+  p_dedicated_appearance jsonb
+)
+RETURNS jsonb
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT jsonb_build_object(
+    'skinTone', CASE
+      WHEN jsonb_typeof(p_dedicated_appearance -> 'skinTone') = 'string'
+           AND (p_dedicated_appearance ->> 'skinTone') ~ '^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$'
+        THEN p_dedicated_appearance ->> 'skinTone'
+      WHEN jsonb_typeof(p_office_appearance -> 'skinTone') = 'string'
+           AND (p_office_appearance ->> 'skinTone') ~ '^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$'
+        THEN p_office_appearance ->> 'skinTone'
+      ELSE '#f5d0a9'
+    END,
+    'hairStyle', CASE
+      WHEN jsonb_typeof(p_dedicated_appearance -> 'hairStyle') = 'string'
+           AND (p_dedicated_appearance ->> 'hairStyle') IN (
+             'flat', 'spiky', 'mohawk', 'long', 'bald', 'cap', 'curly',
+             'ponytail', 'buzzcut', 'afro', 'undercut', 'pigtails'
+           ) THEN p_dedicated_appearance ->> 'hairStyle'
+      WHEN jsonb_typeof(p_office_appearance -> 'hairStyle') = 'string'
+           AND (p_office_appearance ->> 'hairStyle') IN (
+             'flat', 'spiky', 'mohawk', 'long', 'bald', 'cap', 'curly',
+             'ponytail', 'buzzcut', 'afro', 'undercut', 'pigtails'
+           ) THEN p_office_appearance ->> 'hairStyle'
+      ELSE 'flat'
+    END,
+    'hairColor', CASE
+      WHEN jsonb_typeof(p_dedicated_appearance -> 'hairColor') = 'string'
+           AND (p_dedicated_appearance ->> 'hairColor') ~ '^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$'
+        THEN p_dedicated_appearance ->> 'hairColor'
+      WHEN jsonb_typeof(p_office_appearance -> 'hairColor') = 'string'
+           AND (p_office_appearance ->> 'hairColor') ~ '^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$'
+        THEN p_office_appearance ->> 'hairColor'
+      ELSE '#000000'
+    END,
+    'shirtColor', CASE
+      WHEN jsonb_typeof(p_dedicated_appearance -> 'shirtColor') = 'string'
+           AND (p_dedicated_appearance ->> 'shirtColor') ~ '^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$'
+        THEN p_dedicated_appearance ->> 'shirtColor'
+      WHEN jsonb_typeof(p_office_appearance -> 'shirtColor') = 'string'
+           AND (p_office_appearance ->> 'shirtColor') ~ '^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$'
+        THEN p_office_appearance ->> 'shirtColor'
+      ELSE '#6366f1'
+    END,
+    'pantsColor', CASE
+      WHEN jsonb_typeof(p_dedicated_appearance -> 'pantsColor') = 'string'
+           AND (p_dedicated_appearance ->> 'pantsColor') ~ '^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$'
+        THEN p_dedicated_appearance ->> 'pantsColor'
+      WHEN jsonb_typeof(p_office_appearance -> 'pantsColor') = 'string'
+           AND (p_office_appearance ->> 'pantsColor') ~ '^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$'
+        THEN p_office_appearance ->> 'pantsColor'
+      ELSE '#2d2d3d'
+    END,
+    'shoeColor', CASE
+      WHEN jsonb_typeof(p_dedicated_appearance -> 'shoeColor') = 'string'
+           AND (p_dedicated_appearance ->> 'shoeColor') ~ '^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$'
+        THEN p_dedicated_appearance ->> 'shoeColor'
+      WHEN jsonb_typeof(p_office_appearance -> 'shoeColor') = 'string'
+           AND (p_office_appearance ->> 'shoeColor') ~ '^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$'
+        THEN p_office_appearance ->> 'shoeColor'
+      ELSE '#000000'
+    END,
+    'accessory', CASE
+      WHEN jsonb_typeof(p_dedicated_appearance -> 'accessory') = 'string'
+           AND (p_dedicated_appearance ->> 'accessory') IN (
+             'none', 'glasses', 'headphones', 'bowtie', 'scarf', 'hoodie',
+             'mask', 'monocle', 'eyepatch', 'bandana', 'chain', 'piercing',
+             'visor_shades', 'gas_mask'
+           ) THEN p_dedicated_appearance ->> 'accessory'
+      WHEN jsonb_typeof(p_office_appearance -> 'accessory') = 'string'
+           AND (p_office_appearance ->> 'accessory') IN (
+             'none', 'glasses', 'headphones', 'bowtie', 'scarf', 'hoodie',
+             'mask', 'monocle', 'eyepatch', 'bandana', 'chain', 'piercing',
+             'visor_shades', 'gas_mask'
+           ) THEN p_office_appearance ->> 'accessory'
+      ELSE 'none'
+    END,
+    'hat', CASE
+      WHEN jsonb_typeof(p_dedicated_appearance -> 'hat') = 'string'
+           AND (p_dedicated_appearance ->> 'hat') IN (
+             'none', 'cap', 'tophat', 'beanie', 'crown', 'helmet', 'horns',
+             'space_helmet', 'wizard_hat', 'halo', 'antenna', 'crab_helmet',
+             'pirate_hat', 'cowboy_hat', 'fez', 'mohawk_spikes'
+           ) THEN p_dedicated_appearance ->> 'hat'
+      WHEN jsonb_typeof(p_office_appearance -> 'hat') = 'string'
+           AND (p_office_appearance ->> 'hat') IN (
+             'none', 'cap', 'tophat', 'beanie', 'crown', 'helmet', 'horns',
+             'space_helmet', 'wizard_hat', 'halo', 'antenna', 'crab_helmet',
+             'pirate_hat', 'cowboy_hat', 'fez', 'mohawk_spikes'
+           ) THEN p_office_appearance ->> 'hat'
+      ELSE 'none'
+    END,
+    'expression', CASE
+      WHEN jsonb_typeof(p_dedicated_appearance -> 'expression') = 'string'
+           AND (p_dedicated_appearance ->> 'expression') IN (
+             'neutral', 'happy', 'focused', 'sleepy', 'cool', 'angry',
+             'surprised', 'smirk', 'crying'
+           ) THEN p_dedicated_appearance ->> 'expression'
+      WHEN jsonb_typeof(p_office_appearance -> 'expression') = 'string'
+           AND (p_office_appearance ->> 'expression') IN (
+             'neutral', 'happy', 'focused', 'sleepy', 'cool', 'angry',
+             'surprised', 'smirk', 'crying'
+           ) THEN p_office_appearance ->> 'expression'
+      ELSE 'neutral'
+    END,
+    'backItem', CASE
+      WHEN jsonb_typeof(p_dedicated_appearance -> 'backItem') = 'string'
+           AND (p_dedicated_appearance ->> 'backItem') IN (
+             'none', 'cape', 'backpack', 'wings', 'jetpack', 'shield', 'sword',
+             'quiver', 'crab_shell', 'tentacles', 'rocket', 'scroll', 'boombox'
+           ) THEN p_dedicated_appearance ->> 'backItem'
+      WHEN jsonb_typeof(p_office_appearance -> 'backItem') = 'string'
+           AND (p_office_appearance ->> 'backItem') IN (
+             'none', 'cape', 'backpack', 'wings', 'jetpack', 'shield', 'sword',
+             'quiver', 'crab_shell', 'tentacles', 'rocket', 'scroll', 'boombox'
+           ) THEN p_office_appearance ->> 'backItem'
+      ELSE 'none'
+    END,
+    'eyeColor', CASE
+      WHEN jsonb_typeof(p_dedicated_appearance -> 'eyeColor') = 'string'
+           AND (p_dedicated_appearance ->> 'eyeColor') ~ '^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$'
+        THEN p_dedicated_appearance ->> 'eyeColor'
+      WHEN jsonb_typeof(p_office_appearance -> 'eyeColor') = 'string'
+           AND (p_office_appearance ->> 'eyeColor') ~ '^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$'
+        THEN p_office_appearance ->> 'eyeColor'
+      ELSE '#000000'
+    END,
+    'facialHair', CASE
+      WHEN jsonb_typeof(p_dedicated_appearance -> 'facialHair') = 'string'
+           AND (p_dedicated_appearance ->> 'facialHair') IN (
+             'none', 'stubble', 'beard', 'mustache', 'goatee', 'fu_manchu',
+             'sideburns', 'soul_patch'
+           ) THEN p_dedicated_appearance ->> 'facialHair'
+      WHEN jsonb_typeof(p_office_appearance -> 'facialHair') = 'string'
+           AND (p_office_appearance ->> 'facialHair') IN (
+             'none', 'stubble', 'beard', 'mustache', 'goatee', 'fu_manchu',
+             'sideburns', 'soul_patch'
+           ) THEN p_office_appearance ->> 'facialHair'
+      ELSE 'none'
+    END,
+    'pet', CASE
+      WHEN jsonb_typeof(p_dedicated_appearance -> 'pet') = 'string'
+           AND (p_dedicated_appearance ->> 'pet') IN (
+             'none', 'cat', 'dog', 'bird', 'robot', 'dragon', 'alien', 'crab',
+             'snake', 'bat', 'skull', 'mushroom', 'spider', 'shark', 'bones', 'swan'
+           ) THEN p_dedicated_appearance ->> 'pet'
+      WHEN jsonb_typeof(p_office_appearance -> 'pet') = 'string'
+           AND (p_office_appearance ->> 'pet') IN (
+             'none', 'cat', 'dog', 'bird', 'robot', 'dragon', 'alien', 'crab',
+             'snake', 'bat', 'skull', 'mushroom', 'spider', 'shark', 'bones', 'swan'
+           ) THEN p_office_appearance ->> 'pet'
+      ELSE 'none'
+    END,
+    'aura', CASE
+      WHEN jsonb_typeof(p_dedicated_appearance -> 'aura') = 'string'
+           AND (p_dedicated_appearance ->> 'aura') IN (
+             'none', 'fire', 'ice', 'electric', 'nature', 'shadow', 'rainbow',
+             'glitch', 'cosmic', 'toxic', 'holy', 'void', 'galaxy'
+           ) THEN p_dedicated_appearance ->> 'aura'
+      WHEN jsonb_typeof(p_office_appearance -> 'aura') = 'string'
+           AND (p_office_appearance ->> 'aura') IN (
+             'none', 'fire', 'ice', 'electric', 'nature', 'shadow', 'rainbow',
+             'glitch', 'cosmic', 'toxic', 'holy', 'void', 'galaxy'
+           ) THEN p_office_appearance ->> 'aura'
+      ELSE 'none'
+    END,
+    'handItem', CASE
+      WHEN jsonb_typeof(p_dedicated_appearance -> 'handItem') = 'string'
+           AND (p_dedicated_appearance ->> 'handItem') IN (
+             'none', 'lightsaber', 'coffee', 'laptop', 'flag', 'wand',
+             'crab_claws', 'sword_hand', 'pizza', 'microphone', 'torch'
+           ) THEN p_dedicated_appearance ->> 'handItem'
+      WHEN jsonb_typeof(p_office_appearance -> 'handItem') = 'string'
+           AND (p_office_appearance ->> 'handItem') IN (
+             'none', 'lightsaber', 'coffee', 'laptop', 'flag', 'wand',
+             'crab_claws', 'sword_hand', 'pizza', 'microphone', 'torch'
+           ) THEN p_office_appearance ->> 'handItem'
+      ELSE 'none'
+    END
+  );
+$function$;
+
+REVOKE ALL ON FUNCTION public.normalize_legacy_office_agent_appearance_v1(jsonb, jsonb)
+  FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE TABLE IF NOT EXISTS public.office_user_preferences (
+  user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  circle_id uuid NOT NULL REFERENCES public.circles(id) ON DELETE CASCADE,
+  preferences jsonb NOT NULL DEFAULT '{}'::jsonb,
+  revision bigint NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (user_id, circle_id)
+);
+
+ALTER TABLE public.office_user_preferences
+  DROP CONSTRAINT IF EXISTS office_user_preferences_document_valid;
+ALTER TABLE public.office_user_preferences
+  ADD CONSTRAINT office_user_preferences_document_valid
+  CHECK (public.validate_office_user_preferences_v1(preferences));
+
+ALTER TABLE public.office_user_preferences ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.office_user_preferences FORCE ROW LEVEL SECURITY;
+DO $office_user_preferences_policy_reset$
+DECLARE
+  policy_name text;
+BEGIN
+  FOR policy_name IN
+    SELECT policy.polname
+    FROM pg_catalog.pg_policy AS policy
+    WHERE policy.polrelid = 'public.office_user_preferences'::regclass
+  LOOP
+    EXECUTE pg_catalog.format(
+      'DROP POLICY %I ON public.office_user_preferences',
+      policy_name
+    );
+  END LOOP;
+END;
+$office_user_preferences_policy_reset$;
+CREATE POLICY office_user_preferences_select_own
+ON public.office_user_preferences
+FOR SELECT
+TO authenticated
+USING (
+  user_id = auth.uid()
+  AND EXISTS (
+    SELECT 1
+    FROM public.circle_members AS membership
+    WHERE membership.circle_id = office_user_preferences.circle_id
+      AND membership.user_id = auth.uid()
+  )
+);
+
+REVOKE ALL ON TABLE public.office_user_preferences FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON TABLE public.office_user_preferences TO authenticated;
+
+-- Preserve normalized legacy appearance state that cannot fit in the bounded
+-- live preference document. This table is an owner-readable recovery archive,
+-- never a second client writer. The app continues to read and patch only
+-- `office_user_preferences`; authenticated roles receive no archive DML.
+CREATE TABLE IF NOT EXISTS public.office_user_legacy_appearances (
+  user_id uuid NOT NULL,
+  circle_id uuid NOT NULL,
+  agent_key text COLLATE "C" NOT NULL,
+  appearance jsonb NOT NULL,
+  archived_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT office_user_legacy_appearances_pkey
+    PRIMARY KEY (user_id, circle_id, agent_key),
+  CONSTRAINT office_user_legacy_appearances_user_id_fkey
+    FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE,
+  CONSTRAINT office_user_legacy_appearances_circle_id_fkey
+    FOREIGN KEY (circle_id) REFERENCES public.circles(id) ON DELETE CASCADE,
+  CONSTRAINT office_user_legacy_appearance_key_valid
+    CHECK (
+      length(agent_key) BETWEEN 1 AND 240
+      AND octet_length(agent_key) <= 960
+    ),
+  CONSTRAINT office_user_legacy_appearance_document_valid
+    CHECK (
+      public.validate_office_user_preferences_v1(
+        jsonb_build_object(
+          'appearances',
+          jsonb_build_object('archived-agent', appearance)
+        )
+      )
+    )
+);
+
+-- `CREATE TABLE IF NOT EXISTS` must not turn a pre-existing incompatible
+-- relation into migration authority. Verify the exact active-column and
+-- primary-key shape before any legacy source can be copied or scrubbed.
+DO $legacy_appearance_archive_schema$
+DECLARE
+  active_column_count integer;
+  primary_key_columns text[];
+BEGIN
+  SELECT count(*)
+  INTO active_column_count
+  FROM pg_catalog.pg_attribute
+  WHERE attrelid = 'public.office_user_legacy_appearances'::regclass
+    AND attnum > 0
+    AND NOT attisdropped;
+
+  IF active_column_count <> 5
+     OR EXISTS (
+       SELECT 1
+       FROM (
+         VALUES
+           ('user_id'::text, 'uuid'::text),
+           ('circle_id'::text, 'uuid'::text),
+           ('agent_key'::text, 'text'::text),
+           ('appearance'::text, 'jsonb'::text),
+           ('archived_at'::text, 'timestamp with time zone'::text)
+       ) AS expected(attname, formatted_type)
+       LEFT JOIN pg_catalog.pg_attribute AS actual
+         ON actual.attrelid = 'public.office_user_legacy_appearances'::regclass
+        AND actual.attname = expected.attname
+        AND actual.attnum > 0
+        AND NOT actual.attisdropped
+       WHERE actual.attname IS NULL
+          OR NOT actual.attnotnull
+          OR pg_catalog.format_type(actual.atttypid, actual.atttypmod)
+             IS DISTINCT FROM expected.formatted_type
+     )
+     OR EXISTS (
+       SELECT 1
+       FROM pg_catalog.pg_attribute AS actual
+       WHERE actual.attrelid = 'public.office_user_legacy_appearances'::regclass
+         AND actual.attname = 'agent_key'
+         AND actual.attnum > 0
+         AND NOT actual.attisdropped
+         AND actual.attcollation IS DISTINCT FROM
+           'pg_catalog."C"'::pg_catalog.regcollation
+     ) THEN
+    RAISE EXCEPTION 'office_legacy_appearance_archive_schema_mismatch';
+  END IF;
+
+  SELECT array_agg(attribute.attname ORDER BY key_column.ordinality)
+  INTO primary_key_columns
+  FROM pg_catalog.pg_constraint AS constraint_definition
+  CROSS JOIN LATERAL unnest(constraint_definition.conkey)
+    WITH ORDINALITY AS key_column(attnum, ordinality)
+  JOIN pg_catalog.pg_attribute AS attribute
+    ON attribute.attrelid = constraint_definition.conrelid
+   AND attribute.attnum = key_column.attnum
+  WHERE constraint_definition.conrelid =
+      'public.office_user_legacy_appearances'::regclass
+    AND constraint_definition.contype = 'p';
+
+  IF primary_key_columns IS DISTINCT FROM
+      ARRAY['user_id', 'circle_id', 'agent_key']::text[] THEN
+    RAISE EXCEPTION 'office_legacy_appearance_archive_primary_key_mismatch';
+  END IF;
+END;
+$legacy_appearance_archive_schema$;
+
+ALTER TABLE public.office_user_legacy_appearances
+  DROP CONSTRAINT IF EXISTS office_user_legacy_appearances_user_id_fkey;
+ALTER TABLE public.office_user_legacy_appearances
+  ADD CONSTRAINT office_user_legacy_appearances_user_id_fkey
+  FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
+ALTER TABLE public.office_user_legacy_appearances
+  DROP CONSTRAINT IF EXISTS office_user_legacy_appearances_circle_id_fkey;
+ALTER TABLE public.office_user_legacy_appearances
+  ADD CONSTRAINT office_user_legacy_appearances_circle_id_fkey
+  FOREIGN KEY (circle_id) REFERENCES public.circles(id) ON DELETE CASCADE;
+ALTER TABLE public.office_user_legacy_appearances
+  DROP CONSTRAINT IF EXISTS office_user_legacy_appearance_key_valid;
+ALTER TABLE public.office_user_legacy_appearances
+  ADD CONSTRAINT office_user_legacy_appearance_key_valid
+  CHECK (
+    length(agent_key) BETWEEN 1 AND 240
+    AND octet_length(agent_key) <= 960
+  );
+ALTER TABLE public.office_user_legacy_appearances
+  DROP CONSTRAINT IF EXISTS office_user_legacy_appearance_document_valid;
+ALTER TABLE public.office_user_legacy_appearances
+  ADD CONSTRAINT office_user_legacy_appearance_document_valid
+  CHECK (
+    public.validate_office_user_preferences_v1(
+      jsonb_build_object(
+        'appearances',
+        jsonb_build_object('archived-agent', appearance)
+      )
+    )
+  );
+
+ALTER TABLE public.office_user_legacy_appearances
+  ALTER COLUMN archived_at SET DEFAULT clock_timestamp();
+
+ALTER TABLE public.office_user_legacy_appearances ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.office_user_legacy_appearances FORCE ROW LEVEL SECURITY;
+DO $legacy_appearance_archive_policy_reset$
+DECLARE
+  policy_name text;
+BEGIN
+  FOR policy_name IN
+    SELECT policy.polname
+    FROM pg_catalog.pg_policy AS policy
+    WHERE policy.polrelid = 'public.office_user_legacy_appearances'::regclass
+  LOOP
+    EXECUTE pg_catalog.format(
+      'DROP POLICY %I ON public.office_user_legacy_appearances',
+      policy_name
+    );
+  END LOOP;
+END;
+$legacy_appearance_archive_policy_reset$;
+CREATE POLICY office_user_legacy_appearances_select_own
+ON public.office_user_legacy_appearances
+FOR SELECT
+TO authenticated
+USING (
+  user_id = auth.uid()
+  AND EXISTS (
+    SELECT 1
+    FROM public.circle_members AS membership
+    WHERE membership.circle_id = office_user_legacy_appearances.circle_id
+      AND membership.user_id = auth.uid()
+  )
+);
+
+REVOKE ALL ON TABLE public.office_user_legacy_appearances
+  FROM PUBLIC, anon, authenticated, service_role;
+GRANT SELECT ON TABLE public.office_user_legacy_appearances TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.read_my_office_preferences_v1(
+  p_circle_id uuid
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  actor_id uuid := auth.uid();
+  stored_preferences jsonb;
+  stored_revision bigint;
+  stored_updated_at timestamptz;
+BEGIN
+  IF actor_id IS NULL THEN
+    RAISE EXCEPTION 'authentication_required' USING ERRCODE = '42501';
+  END IF;
+  IF p_circle_id IS NULL THEN
+    RAISE EXCEPTION 'office_circle_membership_required' USING ERRCODE = '42501';
+  END IF;
+  PERFORM 1
+  FROM public.circle_members AS membership
+  WHERE membership.circle_id = p_circle_id
+    AND membership.user_id = actor_id
+  FOR KEY SHARE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'office_circle_membership_required' USING ERRCODE = '42501';
+  END IF;
+
+  SELECT preferences, revision, updated_at
+  INTO stored_preferences, stored_revision, stored_updated_at
+  FROM public.office_user_preferences
+  WHERE user_id = actor_id
+    AND circle_id = p_circle_id;
+
+  RETURN jsonb_build_object(
+    'preferences', coalesce(stored_preferences, '{}'::jsonb),
+    'revision', coalesce(stored_revision, 0),
+    'updatedAt', to_jsonb(stored_updated_at)
+  );
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.patch_my_office_preferences_v1(
+  p_circle_id uuid,
+  p_patch jsonb
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  actor_id uuid := auth.uid();
+  patch_entry record;
+  next_preferences jsonb;
+  accepted_revision bigint;
+  accepted_updated_at timestamptz;
+  patch_key_count integer;
+BEGIN
+  IF actor_id IS NULL THEN
+    RAISE EXCEPTION 'authentication_required' USING ERRCODE = '42501';
+  END IF;
+  IF p_circle_id IS NULL THEN
+    RAISE EXCEPTION 'office_circle_membership_required' USING ERRCODE = '42501';
+  END IF;
+  PERFORM 1
+  FROM public.circle_members AS membership
+  WHERE membership.circle_id = p_circle_id
+    AND membership.user_id = actor_id
+  FOR KEY SHARE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'office_circle_membership_required' USING ERRCODE = '42501';
+  END IF;
+  IF p_patch IS NULL
+     OR jsonb_typeof(p_patch) <> 'object'
+     OR octet_length(p_patch::text) > 131072 THEN
+    RAISE EXCEPTION 'invalid_office_preferences_patch' USING ERRCODE = '22023';
+  END IF;
+  SELECT count(*) INTO patch_key_count FROM jsonb_object_keys(p_patch);
+  IF patch_key_count NOT BETWEEN 1 AND 7
+     OR EXISTS (
+       SELECT 1
+       FROM jsonb_object_keys(p_patch) AS patch_key
+       WHERE patch_key NOT IN (
+         'agentNames',
+         'appearances',
+         'whiteboardNotes',
+         'budgetConfig',
+         'idleConfig',
+         'agentFilterMode',
+         'telegramMetadata'
+       )
+     )
+     OR public.office_preferences_contains_secret_key_v1(p_patch) THEN
+    RAISE EXCEPTION 'invalid_office_preferences_patch' USING ERRCODE = '22023';
+  END IF;
+
+  -- Establish and lock the exact owner+circle row. A concurrent first writer
+  -- waits on the same unique key, then reads the winner before applying its own
+  -- disjoint top-level patch; no client read/merge race is possible.
+  INSERT INTO public.office_user_preferences(user_id, circle_id)
+  VALUES (actor_id, p_circle_id)
+  ON CONFLICT (user_id, circle_id) DO NOTHING;
+
+  SELECT preferences
+  INTO next_preferences
+  FROM public.office_user_preferences
+  WHERE user_id = actor_id
+    AND circle_id = p_circle_id
+  FOR UPDATE;
+
+  IF next_preferences IS NULL THEN
+    RAISE EXCEPTION 'office_preferences_row_unavailable' USING ERRCODE = '55000';
+  END IF;
+
+  FOR patch_entry IN SELECT key, value FROM jsonb_each(p_patch)
+  LOOP
+    next_preferences := next_preferences - patch_entry.key;
+    IF patch_entry.value <> 'null'::jsonb THEN
+      next_preferences := next_preferences || jsonb_build_object(patch_entry.key, patch_entry.value);
+    END IF;
+  END LOOP;
+
+  IF NOT public.validate_office_user_preferences_v1(next_preferences)
+     OR octet_length(next_preferences::text) > 131072 THEN
+    RAISE EXCEPTION 'invalid_office_preferences_document' USING ERRCODE = '22023';
+  END IF;
+
+  UPDATE public.office_user_preferences
+  SET preferences = next_preferences,
+      revision = revision + 1,
+      updated_at = clock_timestamp()
+  WHERE user_id = actor_id
+    AND circle_id = p_circle_id
+  RETURNING revision, updated_at INTO accepted_revision, accepted_updated_at;
+
+  -- Value-free receipt: it proves the server-accepted revision and timestamp
+  -- without reflecting any preference or credential-adjacent caller input.
+  RETURN jsonb_build_object(
+    'schemaVersion', 1,
+    'accepted', true,
+    'revision', accepted_revision,
+    'updatedAt', accepted_updated_at
+  );
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.read_my_office_preferences_v1(uuid)
+  FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.patch_my_office_preferences_v1(uuid, jsonb)
+  FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.read_my_office_preferences_v1(uuid)
+  TO authenticated;
+GRANT EXECUTE ON FUNCTION public.patch_my_office_preferences_v1(uuid, jsonb)
+  TO authenticated;
+
+-- Copy and scrub share one transaction, and both legacy source tables stay
+-- write-stable from eligibility through the final scrub. Acquisition fails
+-- closed under live write traffic instead of waiting indefinitely; operators
+-- should apply this section only after the value-free candidate-count preflight
+-- confirms a bounded batch and during a low-write window.
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '30s';
+
+DO $legacy_private_office_lock$
+BEGIN
+  IF pg_catalog.to_regclass('public.profiles') IS NOT NULL
+     AND pg_catalog.to_regclass('public.circle_members') IS NOT NULL
+     AND pg_catalog.to_regclass('public.circle_office_agents') IS NOT NULL THEN
+    EXECUTE 'LOCK TABLE public.profiles, public.circle_members, public.circle_office_agents IN SHARE MODE';
+    LOCK TABLE public.office_user_legacy_appearances IN SHARE ROW EXCLUSIVE MODE;
+  ELSE
+    RAISE EXCEPTION 'office_legacy_preference_source_schema_missing';
+  END IF;
+END;
+$legacy_private_office_lock$;
+
+-- Abort before creating any preservation receipt when source ownership,
+-- reviewed-field safety, or per-entry normalization cannot be proven. The
+-- exception text is constant and never includes a user id, agent key, or
+-- preference value.
+DO $legacy_private_office_preflight$
+BEGIN
+  IF NOT EXISTS (
+       SELECT 1
+       FROM pg_catalog.pg_attribute
+       WHERE attrelid = 'public.profiles'::regclass
+         AND attname = 'office_preferences'
+         AND atttypid = 'pg_catalog.jsonb'::pg_catalog.regtype
+         AND NOT attisdropped
+     )
+     OR NOT EXISTS (
+       SELECT 1
+       FROM pg_catalog.pg_attribute
+       WHERE attrelid = 'public.profiles'::regclass
+         AND attname = 'agent_appearance'
+         AND atttypid = 'pg_catalog.jsonb'::pg_catalog.regtype
+         AND NOT attisdropped
+     ) THEN
+    RAISE EXCEPTION 'office_legacy_preference_source_schema_missing';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM public.profiles AS profile
+    WHERE (
+        (
+          jsonb_typeof(profile.office_preferences) = 'object'
+          AND profile.office_preferences ?| ARRAY[
+            'agentNames',
+            'appearances',
+            'whiteboardNotes',
+            'budgetConfig',
+            'idleConfig',
+            'agentFilterMode'
+          ]
+        )
+        OR coalesce(profile.agent_appearance, '{}'::jsonb) <> '{}'::jsonb
+      )
+      AND (
+        SELECT count(*)
+        FROM public.circle_members AS membership
+        WHERE membership.user_id = profile.id
+      ) <> 1
+  ) THEN
+    RAISE EXCEPTION 'office_legacy_preference_membership_ambiguous';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM public.profiles AS profile
+    WHERE public.office_preferences_contains_secret_key_v1(
+      jsonb_build_object(
+        'agentNames', profile.office_preferences -> 'agentNames',
+        'appearances', profile.office_preferences -> 'appearances',
+        'whiteboardNotes', profile.office_preferences -> 'whiteboardNotes',
+        'budgetConfig', profile.office_preferences -> 'budgetConfig',
+        'idleConfig', profile.office_preferences -> 'idleConfig',
+        'agentFilterMode', profile.office_preferences -> 'agentFilterMode',
+        'dedicatedAppearances', profile.agent_appearance
+      )
+    )
+  ) THEN
+    RAISE EXCEPTION 'office_legacy_preference_reviewed_source_unsafe';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM public.profiles AS profile
+    WHERE (
+        profile.office_preferences IS NOT NULL
+        AND jsonb_typeof(profile.office_preferences) <> 'object'
+      )
+      OR (
+        coalesce(profile.agent_appearance, '{}'::jsonb) <> '{}'::jsonb
+        AND jsonb_typeof(profile.agent_appearance) <> 'object'
+      )
+      OR (
+        jsonb_typeof(profile.office_preferences) = 'object'
+        AND profile.office_preferences ? 'appearances'
+        AND jsonb_typeof(profile.office_preferences -> 'appearances') <> 'object'
+      )
+  ) THEN
+    RAISE EXCEPTION 'office_legacy_preference_source_invalid';
+  END IF;
+
+  IF EXISTS (
+    WITH appearance_sources AS (
+      SELECT
+        CASE
+          WHEN jsonb_typeof(profile.office_preferences -> 'appearances') = 'object'
+            THEN profile.office_preferences -> 'appearances'
+          ELSE '{}'::jsonb
+        END AS office_appearances,
+        CASE
+          WHEN jsonb_typeof(profile.agent_appearance) = 'object'
+            THEN profile.agent_appearance
+          ELSE '{}'::jsonb
+        END AS dedicated_appearances
+      FROM public.profiles AS profile
+    ), appearance_entries AS (
+      SELECT
+        source.office_appearances,
+        source.dedicated_appearances,
+        appearance_name.key AS agent_key
+      FROM appearance_sources AS source
+      CROSS JOIN LATERAL (
+        SELECT key COLLATE "C" AS key FROM jsonb_object_keys(source.office_appearances) AS key
+        UNION
+        SELECT key COLLATE "C" AS key FROM jsonb_object_keys(source.dedicated_appearances) AS key
+      ) AS appearance_name
+    )
+    SELECT 1
+    FROM appearance_entries AS entry
+    WHERE length(entry.agent_key) NOT BETWEEN 1 AND 240
+       OR octet_length(entry.agent_key) > 960
+       OR (
+         entry.office_appearances ? entry.agent_key
+         AND (
+           jsonb_typeof(entry.office_appearances -> entry.agent_key) <> 'object'
+           OR octet_length((entry.office_appearances -> entry.agent_key)::text) > 16384
+         )
+       )
+       OR (
+         entry.dedicated_appearances ? entry.agent_key
+         AND (
+           jsonb_typeof(entry.dedicated_appearances -> entry.agent_key) <> 'object'
+           OR octet_length((entry.dedicated_appearances -> entry.agent_key)::text) > 16384
+         )
+       )
+  ) THEN
+    RAISE EXCEPTION 'office_legacy_appearance_entry_invalid';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM public.profiles AS profile
+    CROSS JOIN LATERAL (
+      VALUES
+        ('agentNames'::text),
+        ('whiteboardNotes'::text),
+        ('budgetConfig'::text),
+        ('agentFilterMode'::text)
+    ) AS reviewed(preference_key)
+    WHERE jsonb_typeof(profile.office_preferences) = 'object'
+      AND profile.office_preferences ? reviewed.preference_key
+      AND NOT public.validate_office_user_preferences_v1(
+        jsonb_build_object(
+          reviewed.preference_key,
+          profile.office_preferences -> reviewed.preference_key
+        )
+      )
+  ) THEN
+    RAISE EXCEPTION 'office_legacy_preference_reviewed_field_invalid';
+  END IF;
+END;
+$legacy_private_office_preflight$;
+
+-- Materialize the exact normalized appearance union once. Subsequent archive
+-- publication, equality proof, and active-map projection consume this same
+-- transaction-local snapshot, so a later CTE cannot silently reinterpret the
+-- legacy source.
+CREATE TEMP TABLE office_legacy_appearance_expected_v1
+ON COMMIT DROP
+AS
+WITH eligible_profiles AS (
+  SELECT
+    profile.id AS user_id,
+    membership.circle_id,
+    CASE
+      WHEN jsonb_typeof(profile.office_preferences -> 'appearances') = 'object'
+        THEN profile.office_preferences -> 'appearances'
+      ELSE '{}'::jsonb
+    END AS office_appearances,
+    CASE
+      WHEN jsonb_typeof(profile.agent_appearance) = 'object'
+        THEN profile.agent_appearance
+      ELSE '{}'::jsonb
+    END AS dedicated_appearances
+  FROM public.profiles AS profile
+  CROSS JOIN LATERAL (
+    SELECT candidate.circle_id
+    FROM public.circle_members AS candidate
+    WHERE candidate.user_id = profile.id
+    LIMIT 1
+  ) AS membership
+  WHERE (
+      jsonb_typeof(profile.office_preferences -> 'appearances') = 'object'
+      AND profile.office_preferences -> 'appearances' <> '{}'::jsonb
+    )
+    OR (
+      jsonb_typeof(profile.agent_appearance) = 'object'
+      AND profile.agent_appearance <> '{}'::jsonb
+    )
+), appearance_entries AS (
+  SELECT
+    source.user_id,
+    source.circle_id,
+    appearance_name.key COLLATE "C" AS agent_key,
+    source.office_appearances -> appearance_name.key AS office_appearance,
+    source.dedicated_appearances -> appearance_name.key AS dedicated_appearance
+  FROM eligible_profiles AS source
+  CROSS JOIN LATERAL (
+    SELECT key COLLATE "C" AS key FROM jsonb_object_keys(source.office_appearances) AS key
+    UNION
+    SELECT key COLLATE "C" AS key FROM jsonb_object_keys(source.dedicated_appearances) AS key
+  ) AS appearance_name
+)
+SELECT
+  user_id,
+  circle_id,
+  agent_key,
+  public.normalize_legacy_office_agent_appearance_v1(
+    office_appearance,
+    dedicated_appearance
+  ) AS appearance
+FROM appearance_entries;
+
+ALTER TABLE pg_temp.office_legacy_appearance_expected_v1
+  ADD CONSTRAINT office_legacy_appearance_expected_v1_pkey
+  PRIMARY KEY (user_id, circle_id, agent_key);
+
+INSERT INTO public.office_user_legacy_appearances(
+  user_id,
+  circle_id,
+  agent_key,
+  appearance,
+  archived_at
+)
+SELECT
+  user_id,
+  circle_id,
+  agent_key,
+  appearance,
+  clock_timestamp()
+FROM pg_temp.office_legacy_appearance_expected_v1
+ON CONFLICT (user_id, circle_id, agent_key) DO NOTHING;
+
+-- Compare keys and complete normalized JSON values after the INSERT statement;
+-- PostgreSQL 14 does not expose same-statement DML changes through a second
+-- base-table scan. Existing unequal archive rows or unexplained extras for a
+-- currently populated source scope abort the whole copy-and-scrub transaction.
+DO $legacy_appearance_archive_receipt$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM pg_temp.office_legacy_appearance_expected_v1 AS expected
+    LEFT JOIN public.office_user_legacy_appearances AS archived
+      USING (user_id, circle_id, agent_key)
+    WHERE archived.user_id IS NULL
+       OR archived.appearance IS DISTINCT FROM expected.appearance
+  )
+  OR EXISTS (
+    SELECT 1
+    FROM public.office_user_legacy_appearances AS archived
+    JOIN (
+      SELECT DISTINCT user_id, circle_id
+      FROM pg_temp.office_legacy_appearance_expected_v1
+    ) AS populated_scope
+      USING (user_id, circle_id)
+    LEFT JOIN pg_temp.office_legacy_appearance_expected_v1 AS expected
+      USING (user_id, circle_id, agent_key)
+    WHERE expected.user_id IS NULL
+  ) THEN
+    RAISE EXCEPTION 'office_legacy_appearance_archive_receipt_mismatch';
+  END IF;
+END;
+$legacy_appearance_archive_receipt$;
+
+DO $legacy_active_appearance_capacity$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM pg_temp.office_legacy_appearance_expected_v1 AS expected
+    JOIN public.circle_office_agents AS roster
+      ON roster.owner_id = expected.user_id
+     AND roster.circle_id = expected.circle_id
+     AND roster.id::text = expected.agent_key
+    GROUP BY expected.user_id, expected.circle_id
+    HAVING count(*) > 128
+  ) THEN
+    RAISE EXCEPTION 'office_legacy_active_roster_appearance_capacity_exceeded';
+  END IF;
+END;
+$legacy_active_appearance_capacity$;
+
+-- Preserve an unambiguous legacy owner before erasing the peer-readable
+-- fields. A profile with exactly one current circle membership has one safe
+-- destination; zero or multiple memberships have no inferable circle and
+-- therefore fail closed. Only reviewed non-secret fields are projected.
+-- `telegramConfig` is deliberately never selected, copied, returned, or
+-- logged. Partial legacy appearance entries are completed from the current
+-- safe visual defaults, with the dedicated legacy map winning field-level
+-- collisions. Partial legacy idle state is completed with disabled behavior
+-- defaults; malformed nested entries are dropped. The canonical validator
+-- must accept the complete normalized document before any row is inserted.
+--
+-- `ON CONFLICT DO NOTHING` makes reapplication unable to overwrite a newer
+-- private row written by the app or another tab.
+DO $legacy_private_office_copy$
+BEGIN
+  IF pg_catalog.to_regclass('public.profiles') IS NOT NULL
+     AND EXISTS (
+       SELECT 1
+       FROM pg_catalog.pg_attribute
+       WHERE attrelid = 'public.profiles'::regclass
+         AND attname = 'office_preferences'
+         AND atttypid = 'pg_catalog.jsonb'::pg_catalog.regtype
+         AND NOT attisdropped
+     )
+     AND EXISTS (
+       SELECT 1
+       FROM pg_catalog.pg_attribute
+       WHERE attrelid = 'public.profiles'::regclass
+         AND attname = 'agent_appearance'
+         AND atttypid = 'pg_catalog.jsonb'::pg_catalog.regtype
+         AND NOT attisdropped
+     ) THEN
+    EXECUTE $copy$
+      WITH eligible_profiles AS (
+        SELECT
+          profile.id AS user_id,
+          membership.circle_id,
+          profile.office_preferences -> 'agentNames' AS agent_names,
+          profile.office_preferences -> 'appearances' AS office_appearances,
+          profile.office_preferences -> 'whiteboardNotes' AS whiteboard_notes,
+          profile.office_preferences -> 'budgetConfig' AS budget_config,
+          profile.office_preferences -> 'idleConfig' AS legacy_idle_config,
+          profile.office_preferences -> 'agentFilterMode' AS agent_filter_mode,
+          profile.agent_appearance
+        FROM public.profiles AS profile
+        CROSS JOIN LATERAL (
+          SELECT candidate.circle_id
+          FROM public.circle_members AS candidate
+          WHERE candidate.user_id = profile.id
+            AND (
+              SELECT count(*)
+              FROM public.circle_members AS exact_membership
+              WHERE exact_membership.user_id = profile.id
+            ) = 1
+          LIMIT 1
+        ) AS membership
+      ), legacy_sources AS (
+        SELECT
+          user_id,
+          circle_id,
+          agent_names,
+          CASE
+            WHEN jsonb_typeof(office_appearances) = 'object'
+              THEN office_appearances
+            ELSE '{}'::jsonb
+          END AS office_appearances,
+          CASE
+            WHEN jsonb_typeof(agent_appearance) = 'object'
+              THEN agent_appearance
+            ELSE '{}'::jsonb
+          END AS dedicated_appearances,
+          whiteboard_notes,
+          budget_config,
+          legacy_idle_config,
+          agent_filter_mode,
+          public.office_preferences_contains_secret_key_v1(
+            jsonb_build_object(
+              'agentNames', agent_names,
+              'appearances', office_appearances,
+              'whiteboardNotes', whiteboard_notes,
+              'budgetConfig', budget_config,
+              'idleConfig', legacy_idle_config,
+              'agentFilterMode', agent_filter_mode,
+              'dedicatedAppearances', agent_appearance
+            )
+          ) AS source_contains_secret
+        FROM eligible_profiles
+      ), active_appearance_candidates AS (
+        SELECT
+          expected.user_id,
+          expected.circle_id,
+          expected.agent_key,
+          expected.appearance,
+          0 AS source_priority
+        FROM pg_temp.office_legacy_appearance_expected_v1 AS expected
+        JOIN public.circle_office_agents AS roster
+          ON roster.owner_id = expected.user_id
+         AND roster.circle_id = expected.circle_id
+         AND roster.id::text = expected.agent_key
+        UNION ALL
+        SELECT
+          expected.user_id,
+          expected.circle_id,
+          expected.agent_key,
+          expected.appearance,
+          1 AS source_priority
+        FROM pg_temp.office_legacy_appearance_expected_v1 AS expected
+        JOIN legacy_sources AS source
+          USING (user_id, circle_id)
+        WHERE jsonb_typeof(source.agent_names) = 'object'
+          AND source.agent_names ? expected.agent_key
+      ), deduplicated_active_appearances AS (
+        SELECT DISTINCT ON (user_id, circle_id, agent_key COLLATE "C")
+          user_id,
+          circle_id,
+          agent_key,
+          appearance,
+          source_priority
+        FROM active_appearance_candidates
+        ORDER BY
+          user_id,
+          circle_id,
+          agent_key COLLATE "C",
+          source_priority
+      ), ranked_active_appearances AS (
+        SELECT
+          user_id,
+          circle_id,
+          agent_key,
+          appearance,
+          row_number() OVER (
+            PARTITION BY user_id, circle_id
+            ORDER BY source_priority, agent_key COLLATE "C"
+          ) AS active_rank
+        FROM deduplicated_active_appearances
+      ), normalized_appearance_entries AS (
+        SELECT
+          user_id,
+          circle_id,
+          agent_key,
+          appearance
+        FROM ranked_active_appearances
+        WHERE active_rank <= 128
+      ), normalized_appearances AS (
+        SELECT
+          user_id,
+          circle_id,
+          jsonb_object_agg(agent_key, appearance ORDER BY agent_key) AS appearances
+        FROM normalized_appearance_entries
+        GROUP BY user_id, circle_id
+      ), idle_sources AS (
+        SELECT
+          user_id,
+          circle_id,
+          legacy_idle_config,
+          CASE
+            WHEN jsonb_typeof(legacy_idle_config -> 'behaviors') = 'object'
+              THEN legacy_idle_config -> 'behaviors'
+            ELSE '{}'::jsonb
+          END AS legacy_behaviors,
+          CASE
+            WHEN jsonb_typeof(legacy_idle_config -> 'sharedChatOptIn') = 'boolean'
+              THEN (legacy_idle_config ->> 'sharedChatOptIn')::boolean
+            ELSE false
+          END AS shared_chat_opt_in
+        FROM legacy_sources
+        WHERE jsonb_typeof(legacy_idle_config) = 'object'
+      ), idle_behavior_entries AS (
+        SELECT
+          source.user_id,
+          source.circle_id,
+          behavior.key AS behavior_key,
+          jsonb_build_object(
+            'enabled', CASE
+              WHEN jsonb_typeof(behavior.value -> 'enabled') = 'boolean'
+                THEN (behavior.value ->> 'enabled')::boolean
+              ELSE false
+            END,
+            'cooldownMinutes', CASE
+              WHEN jsonb_typeof(behavior.value -> 'cooldownMinutes') = 'number'
+                   AND (behavior.value ->> 'cooldownMinutes')::numeric
+                     = trunc((behavior.value ->> 'cooldownMinutes')::numeric)
+                   AND (behavior.value ->> 'cooldownMinutes')::numeric BETWEEN 1 AND 10080
+                THEN (behavior.value ->> 'cooldownMinutes')::numeric
+              ELSE 1440
+            END,
+            'lastRanAt', CASE
+              WHEN jsonb_typeof(behavior.value -> 'lastRanAt') = 'string'
+                   AND length(behavior.value ->> 'lastRanAt') <= 40
+                   AND (behavior.value ->> 'lastRanAt')
+                     ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})$'
+                THEN behavior.value ->> 'lastRanAt'
+              ELSE NULL
+            END
+          ) AS behavior_state
+        FROM idle_sources AS source
+        CROSS JOIN LATERAL jsonb_each(source.legacy_behaviors) AS behavior
+        WHERE (
+            SELECT count(*) FROM jsonb_object_keys(source.legacy_behaviors)
+          ) <= 64
+          AND length(behavior.key) BETWEEN 1 AND 80
+          AND octet_length(behavior.key) <= 320
+          AND jsonb_typeof(behavior.value) = 'object'
+          AND octet_length(behavior.value::text) <= 4096
+      ), normalized_idle_behaviors AS (
+        SELECT
+          user_id,
+          circle_id,
+          jsonb_object_agg(behavior_key, behavior_state ORDER BY behavior_key) AS behaviors
+        FROM idle_behavior_entries
+        GROUP BY user_id, circle_id
+      ), normalized_idle_configs AS (
+        SELECT
+          source.user_id,
+          source.circle_id,
+          jsonb_build_object(
+            'masterEnabled', CASE
+              WHEN jsonb_typeof(source.legacy_idle_config -> 'masterEnabled') = 'boolean'
+                THEN (source.legacy_idle_config ->> 'masterEnabled')::boolean
+              ELSE false
+            END,
+            'behaviors', coalesce(normalized.behaviors, '{}'::jsonb),
+            'sharedChatOptIn', source.shared_chat_opt_in
+          ) AS idle_config
+        FROM idle_sources AS source
+        LEFT JOIN normalized_idle_behaviors AS normalized
+          USING (user_id, circle_id)
+      ), candidate_documents AS (
+        SELECT
+          source.user_id,
+          source.circle_id,
+          (
+            SELECT coalesce(
+              jsonb_object_agg(preference.key, preference.value ORDER BY preference.key),
+              '{}'::jsonb
+            )
+            FROM jsonb_each(jsonb_build_object(
+              'agentNames', source.agent_names,
+              'appearances', normalized_appearance.appearances,
+              'whiteboardNotes', source.whiteboard_notes,
+              'budgetConfig', source.budget_config,
+              'idleConfig', normalized_idle.idle_config,
+              'agentFilterMode', source.agent_filter_mode
+            )) AS preference
+            WHERE preference.value <> 'null'::jsonb
+          ) AS preferences,
+          source.source_contains_secret
+        FROM legacy_sources AS source
+        LEFT JOIN normalized_appearances AS normalized_appearance
+          USING (user_id, circle_id)
+        LEFT JOIN normalized_idle_configs AS normalized_idle
+          USING (user_id, circle_id)
+      )
+      INSERT INTO public.office_user_preferences(
+        user_id,
+        circle_id,
+        preferences,
+        revision,
+        updated_at
+      )
+      SELECT
+        user_id,
+        circle_id,
+        preferences,
+        1,
+        clock_timestamp()
+      FROM candidate_documents
+      WHERE preferences <> '{}'::jsonb
+        AND NOT source_contains_secret
+        AND public.validate_office_user_preferences_v1(preferences)
+      ON CONFLICT (user_id, circle_id) DO NOTHING
+    $copy$;
+  END IF;
+END;
+$legacy_private_office_copy$;
+
+-- A source profile that owns any reviewed live field or any currently
+-- relevant archived appearance must now have a valid private preference row.
+-- A pre-existing newer row is accepted; a silently filtered/oversized legacy
+-- candidate is not.
+DO $legacy_private_office_copy_receipt$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM public.profiles AS profile
+    CROSS JOIN LATERAL (
+      SELECT membership.circle_id
+      FROM public.circle_members AS membership
+      WHERE membership.user_id = profile.id
+      LIMIT 1
+    ) AS exact_scope
+    WHERE (
+        (
+          jsonb_typeof(profile.office_preferences) = 'object'
+          AND profile.office_preferences ?| ARRAY[
+            'agentNames',
+            'whiteboardNotes',
+            'budgetConfig',
+            'idleConfig',
+            'agentFilterMode'
+          ]
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM pg_temp.office_legacy_appearance_expected_v1 AS expected
+          WHERE expected.user_id = profile.id
+            AND expected.circle_id = exact_scope.circle_id
+            AND (
+              EXISTS (
+                SELECT 1
+                FROM public.circle_office_agents AS roster
+                WHERE roster.owner_id = expected.user_id
+                  AND roster.circle_id = expected.circle_id
+                  AND roster.id::text = expected.agent_key
+              )
+              OR (
+                jsonb_typeof(profile.office_preferences -> 'agentNames') = 'object'
+                AND profile.office_preferences -> 'agentNames' ? expected.agent_key
+              )
+            )
+        )
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public.office_user_preferences AS stored
+        WHERE stored.user_id = profile.id
+          AND stored.circle_id = exact_scope.circle_id
+      )
+  ) THEN
+    RAISE EXCEPTION 'office_legacy_preference_copy_receipt_missing';
+  END IF;
+END;
+$legacy_private_office_copy_receipt$;
+
+-- Remove the known legacy Telegram credential object from the circle-readable
+-- profile blob. The UPDATE transforms rows in place and never selects, returns,
+-- logs, or copies the values. Reapplication is a no-op once the key is absent.
+DO $legacy_telegram_scrub$
+BEGIN
+  IF pg_catalog.to_regclass('public.profiles') IS NOT NULL
+     AND EXISTS (
+       SELECT 1
+       FROM pg_catalog.pg_attribute
+       WHERE attrelid = 'public.profiles'::regclass
+         AND attname = 'office_preferences'
+         AND NOT attisdropped
+     ) THEN
+    UPDATE public.profiles
+    SET office_preferences = office_preferences
+      - 'telegramConfig'
+      - 'agentNames'
+      - 'whiteboardNotes'
+      - 'budgetConfig'
+      - 'idleConfig'
+      - 'agentFilterMode'
+      - 'appearances'
+    WHERE jsonb_typeof(office_preferences) = 'object'
+      AND office_preferences ?| ARRAY[
+        'telegramConfig',
+        'agentNames',
+        'whiteboardNotes',
+        'budgetConfig',
+        'idleConfig',
+        'agentFilterMode',
+        'appearances'
+      ];
+  END IF;
+END;
+$legacy_telegram_scrub$;
+
+-- `profiles.agent_appearance` was a second circle-readable legacy store for
+-- the same private appearance map. Erase it only after the complete normalized
+-- union is proven in the owner-private recovery archive; the deterministic
+-- currently relevant subset also lives in
+-- `office_user_preferences.preferences.appearances`.
+DO $legacy_agent_appearance_scrub$
+BEGIN
+  IF pg_catalog.to_regclass('public.profiles') IS NOT NULL
+     AND EXISTS (
+       SELECT 1
+       FROM pg_catalog.pg_attribute
+       WHERE attrelid = 'public.profiles'::regclass
+         AND attname = 'agent_appearance'
+         AND atttypid = 'pg_catalog.jsonb'::pg_catalog.regtype
+         AND NOT attisdropped
+     ) THEN
+    UPDATE public.profiles
+    SET agent_appearance = '{}'::jsonb
+    WHERE agent_appearance IS DISTINCT FROM '{}'::jsonb;
+  END IF;
+END;
+$legacy_agent_appearance_scrub$;
+
+CREATE OR REPLACE FUNCTION public.strip_legacy_private_office_profile_keys_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  IF NEW.office_preferences IS NOT NULL
+     AND jsonb_typeof(NEW.office_preferences) = 'object' THEN
+    NEW.office_preferences := NEW.office_preferences
+      - 'telegramConfig'
+      - 'agentNames'
+      - 'whiteboardNotes'
+      - 'budgetConfig'
+      - 'idleConfig'
+      - 'agentFilterMode'
+      - 'appearances';
+  END IF;
+  RETURN NEW;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.strip_legacy_private_office_profile_keys_v1()
+  FROM PUBLIC, anon, authenticated, service_role;
+
+DO $legacy_profile_trigger$
+BEGIN
+  IF pg_catalog.to_regclass('public.profiles') IS NOT NULL
+     AND EXISTS (
+       SELECT 1
+       FROM pg_catalog.pg_attribute
+       WHERE attrelid = 'public.profiles'::regclass
+         AND attname = 'office_preferences'
+         AND NOT attisdropped
+     ) THEN
+    DROP TRIGGER IF EXISTS strip_legacy_private_office_profile_keys_v1
+      ON public.profiles;
+    CREATE TRIGGER strip_legacy_private_office_profile_keys_v1
+    BEFORE INSERT OR UPDATE OF office_preferences ON public.profiles
+    FOR EACH ROW
+    EXECUTE FUNCTION public.strip_legacy_private_office_profile_keys_v1();
+  END IF;
+END;
+$legacy_profile_trigger$;
+
+-- Keep the legacy appearance column empty even while older clients still
+-- include it in profile inserts or updates. Only this deprecated field is
+-- normalized; every unrelated NEW profile field passes through unchanged.
+CREATE OR REPLACE FUNCTION public.strip_legacy_private_office_agent_appearance_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  NEW.agent_appearance := '{}'::jsonb;
+  RETURN NEW;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.strip_legacy_private_office_agent_appearance_v1()
+  FROM PUBLIC, anon, authenticated, service_role;
+
+DO $legacy_agent_appearance_trigger$
+BEGIN
+  IF pg_catalog.to_regclass('public.profiles') IS NOT NULL
+     AND EXISTS (
+       SELECT 1
+       FROM pg_catalog.pg_attribute
+       WHERE attrelid = 'public.profiles'::regclass
+         AND attname = 'agent_appearance'
+         AND atttypid = 'pg_catalog.jsonb'::pg_catalog.regtype
+         AND NOT attisdropped
+     ) THEN
+    DROP TRIGGER IF EXISTS strip_legacy_private_office_agent_appearance_v1
+      ON public.profiles;
+    CREATE TRIGGER strip_legacy_private_office_agent_appearance_v1
+    BEFORE INSERT OR UPDATE OF agent_appearance ON public.profiles
+    FOR EACH ROW
+    EXECUTE FUNCTION public.strip_legacy_private_office_agent_appearance_v1();
+  END IF;
+END;
+$legacy_agent_appearance_trigger$;
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+-- END SECTION 45: Owner-private Office user preferences
+-- BEGIN SECTION 46: Circle-global idle-behavior claims
+-- Source: supabase/migrations/20260817120000_circle_idle_behavior_claims.sql
+-- Circle-global idle-behavior reservations.
+--
+-- Browser schedulers must claim through this RPC before producing any behavior
+-- side effect. The conditional UPSERT is the single serialization point across
+-- tabs, devices, and circle members; callers never receive direct table DML.
+
+BEGIN;
+
+-- Forward-compatible preference validator repair for databases that already
+-- applied the original §45 before sharedChatOptIn was introduced. This exact
+-- definition replaces the existing function in place, so its table constraint
+-- and patch RPC observe the new optional boolean without rebuilding either.
+CREATE OR REPLACE FUNCTION public.validate_office_user_preferences_v1(
+  p_preferences jsonb
+)
+RETURNS boolean
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  preference_entry record;
+  nested_entry record;
+  behavior_entry record;
+  state_key text;
+  numeric_value numeric;
+  entry_count integer;
+  text_value text;
+BEGIN
+  IF jsonb_typeof(p_preferences) <> 'object'
+     OR octet_length(p_preferences::text) > 131072
+     OR public.office_preferences_contains_secret_key_v1(p_preferences) THEN
+    RETURN false;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM jsonb_object_keys(p_preferences) AS preference_key
+    WHERE preference_key NOT IN (
+      'agentNames',
+      'appearances',
+      'whiteboardNotes',
+      'budgetConfig',
+      'idleConfig',
+      'agentFilterMode',
+      'telegramMetadata'
+    )
+  ) THEN
+    RETURN false;
+  END IF;
+
+  FOR preference_entry IN SELECT key, value FROM jsonb_each(p_preferences)
+  LOOP
+    CASE preference_entry.key
+      WHEN 'agentNames' THEN
+        IF jsonb_typeof(preference_entry.value) <> 'object' THEN RETURN false; END IF;
+        SELECT count(*) INTO entry_count FROM jsonb_object_keys(preference_entry.value);
+        IF entry_count > 128 THEN RETURN false; END IF;
+        FOR nested_entry IN SELECT key, value FROM jsonb_each(preference_entry.value)
+        LOOP
+          IF length(nested_entry.key) NOT BETWEEN 1 AND 240
+             OR octet_length(nested_entry.key) > 960
+             OR jsonb_typeof(nested_entry.value) <> 'string' THEN
+            RETURN false;
+          END IF;
+          text_value := nested_entry.value #>> '{}';
+          IF length(btrim(text_value)) NOT BETWEEN 1 AND 80
+             OR octet_length(text_value) > 320 THEN
+            RETURN false;
+          END IF;
+        END LOOP;
+
+      WHEN 'appearances' THEN
+        IF jsonb_typeof(preference_entry.value) <> 'object' THEN RETURN false; END IF;
+        SELECT count(*) INTO entry_count FROM jsonb_object_keys(preference_entry.value);
+        IF entry_count > 128 THEN RETURN false; END IF;
+        FOR nested_entry IN SELECT key, value FROM jsonb_each(preference_entry.value)
+        LOOP
+          IF length(nested_entry.key) NOT BETWEEN 1 AND 240
+             OR octet_length(nested_entry.key) > 960
+             OR jsonb_typeof(nested_entry.value) <> 'object' THEN
+            RETURN false;
+          END IF;
+          SELECT count(*) INTO entry_count FROM jsonb_object_keys(nested_entry.value);
+          IF entry_count <> 15
+             OR EXISTS (
+               SELECT 1 FROM jsonb_object_keys(nested_entry.value) AS appearance_key
+               WHERE appearance_key NOT IN (
+                 'skinTone', 'hairStyle', 'hairColor', 'shirtColor', 'pantsColor',
+                 'shoeColor', 'accessory', 'hat', 'expression', 'backItem',
+                 'eyeColor', 'facialHair', 'pet', 'aura', 'handItem'
+               )
+             ) THEN
+            RETURN false;
+          END IF;
+          FOREACH state_key IN ARRAY ARRAY[
+            'skinTone', 'hairStyle', 'hairColor', 'shirtColor', 'pantsColor',
+            'shoeColor', 'accessory', 'hat', 'expression', 'backItem',
+            'eyeColor', 'facialHair', 'pet', 'aura', 'handItem'
+          ]
+          LOOP
+            IF jsonb_typeof(nested_entry.value -> state_key) <> 'string' THEN
+              RETURN false;
+            END IF;
+          END LOOP;
+          FOREACH state_key IN ARRAY ARRAY[
+            'skinTone', 'hairColor', 'shirtColor', 'pantsColor', 'shoeColor', 'eyeColor'
+          ]
+          LOOP
+            IF (nested_entry.value ->> state_key) !~ '^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$' THEN
+              RETURN false;
+            END IF;
+          END LOOP;
+          IF (nested_entry.value ->> 'hairStyle') NOT IN (
+               'flat', 'spiky', 'mohawk', 'long', 'bald', 'cap', 'curly',
+               'ponytail', 'buzzcut', 'afro', 'undercut', 'pigtails'
+             )
+             OR (nested_entry.value ->> 'accessory') NOT IN (
+               'none', 'glasses', 'headphones', 'bowtie', 'scarf', 'hoodie',
+               'mask', 'monocle', 'eyepatch', 'bandana', 'chain', 'piercing',
+               'visor_shades', 'gas_mask'
+             )
+             OR (nested_entry.value ->> 'hat') NOT IN (
+               'none', 'cap', 'tophat', 'beanie', 'crown', 'helmet', 'horns',
+               'space_helmet', 'wizard_hat', 'halo', 'antenna', 'crab_helmet',
+               'pirate_hat', 'cowboy_hat', 'fez', 'mohawk_spikes'
+             )
+             OR (nested_entry.value ->> 'expression') NOT IN (
+               'neutral', 'happy', 'focused', 'sleepy', 'cool', 'angry',
+               'surprised', 'smirk', 'crying'
+             )
+             OR (nested_entry.value ->> 'backItem') NOT IN (
+               'none', 'cape', 'backpack', 'wings', 'jetpack', 'shield',
+               'sword', 'quiver', 'crab_shell', 'tentacles', 'rocket',
+               'scroll', 'boombox'
+             )
+             OR (nested_entry.value ->> 'facialHair') NOT IN (
+               'none', 'stubble', 'beard', 'mustache', 'goatee', 'fu_manchu',
+               'sideburns', 'soul_patch'
+             )
+             OR (nested_entry.value ->> 'pet') NOT IN (
+               'none', 'cat', 'dog', 'bird', 'robot', 'dragon', 'alien', 'crab',
+               'snake', 'bat', 'skull', 'mushroom', 'spider', 'shark', 'bones', 'swan'
+             )
+             OR (nested_entry.value ->> 'aura') NOT IN (
+               'none', 'fire', 'ice', 'electric', 'nature', 'shadow', 'rainbow',
+               'glitch', 'cosmic', 'toxic', 'holy', 'void', 'galaxy'
+             )
+             OR (nested_entry.value ->> 'handItem') NOT IN (
+               'none', 'lightsaber', 'coffee', 'laptop', 'flag', 'wand',
+               'crab_claws', 'sword_hand', 'pizza', 'microphone', 'torch'
+             ) THEN
+            RETURN false;
+          END IF;
+        END LOOP;
+
+      WHEN 'whiteboardNotes' THEN
+        IF jsonb_typeof(preference_entry.value) <> 'array'
+           OR jsonb_array_length(preference_entry.value) > 8 THEN
+          RETURN false;
+        END IF;
+        FOR nested_entry IN SELECT value FROM jsonb_array_elements(preference_entry.value)
+        LOOP
+          IF jsonb_typeof(nested_entry.value) <> 'string' THEN RETURN false; END IF;
+          text_value := nested_entry.value #>> '{}';
+          IF length(btrim(text_value)) NOT BETWEEN 1 AND 80
+             OR octet_length(text_value) > 320 THEN
+            RETURN false;
+          END IF;
+        END LOOP;
+
+      WHEN 'budgetConfig' THEN
+        IF jsonb_typeof(preference_entry.value) <> 'object'
+           OR jsonb_typeof(preference_entry.value -> 'enabled') <> 'boolean' THEN
+          RETURN false;
+        END IF;
+        IF EXISTS (
+          SELECT 1 FROM jsonb_object_keys(preference_entry.value) AS budget_key
+          WHERE budget_key NOT IN ('enabled', 'daily', 'weekly', 'monthly', 'hardLimit')
+        ) THEN
+          RETURN false;
+        END IF;
+        IF preference_entry.value ? 'hardLimit'
+           AND jsonb_typeof(preference_entry.value -> 'hardLimit') <> 'boolean' THEN
+          RETURN false;
+        END IF;
+        FOREACH state_key IN ARRAY ARRAY['daily', 'weekly', 'monthly']
+        LOOP
+          IF preference_entry.value ? state_key THEN
+            IF jsonb_typeof(preference_entry.value -> state_key) <> 'number' THEN
+              RETURN false;
+            END IF;
+            numeric_value := (preference_entry.value ->> state_key)::numeric;
+            IF numeric_value <= 0 OR numeric_value > 1000000 THEN RETURN false; END IF;
+          END IF;
+        END LOOP;
+
+      WHEN 'idleConfig' THEN
+        IF jsonb_typeof(preference_entry.value) <> 'object'
+           OR jsonb_typeof(preference_entry.value -> 'masterEnabled') <> 'boolean'
+           OR jsonb_typeof(preference_entry.value -> 'behaviors') <> 'object' THEN
+          RETURN false;
+        END IF;
+        IF EXISTS (
+          SELECT 1 FROM jsonb_object_keys(preference_entry.value) AS idle_key
+          WHERE idle_key NOT IN ('masterEnabled', 'behaviors', 'sharedChatOptIn')
+        ) THEN
+          RETURN false;
+        END IF;
+        IF preference_entry.value ? 'sharedChatOptIn'
+           AND jsonb_typeof(preference_entry.value -> 'sharedChatOptIn') <> 'boolean' THEN
+          RETURN false;
+        END IF;
+        SELECT count(*) INTO entry_count
+        FROM jsonb_object_keys(preference_entry.value -> 'behaviors');
+        IF entry_count > 64 THEN RETURN false; END IF;
+        FOR behavior_entry IN
+          SELECT key, value FROM jsonb_each(preference_entry.value -> 'behaviors')
+        LOOP
+          IF length(behavior_entry.key) NOT BETWEEN 1 AND 80
+             OR octet_length(behavior_entry.key) > 320
+             OR jsonb_typeof(behavior_entry.value) <> 'object'
+             OR jsonb_typeof(behavior_entry.value -> 'enabled') <> 'boolean'
+             OR jsonb_typeof(behavior_entry.value -> 'cooldownMinutes') <> 'number'
+             OR NOT (behavior_entry.value ? 'lastRanAt') THEN
+            RETURN false;
+          END IF;
+          IF EXISTS (
+            SELECT 1 FROM jsonb_object_keys(behavior_entry.value) AS behavior_key
+            WHERE behavior_key NOT IN ('enabled', 'cooldownMinutes', 'lastRanAt')
+          ) THEN
+            RETURN false;
+          END IF;
+          numeric_value := (behavior_entry.value ->> 'cooldownMinutes')::numeric;
+          IF numeric_value <> trunc(numeric_value)
+             OR numeric_value < 1
+             OR numeric_value > 10080 THEN
+            RETURN false;
+          END IF;
+          IF jsonb_typeof(behavior_entry.value -> 'lastRanAt') = 'string' THEN
+            text_value := behavior_entry.value ->> 'lastRanAt';
+            IF length(text_value) > 40
+               OR text_value !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})$' THEN
+              RETURN false;
+            END IF;
+          ELSIF jsonb_typeof(behavior_entry.value -> 'lastRanAt') <> 'null' THEN
+            RETURN false;
+          END IF;
+        END LOOP;
+
+      WHEN 'agentFilterMode' THEN
+        IF jsonb_typeof(preference_entry.value) <> 'string'
+           OR (preference_entry.value #>> '{}') NOT IN ('all', 'mine', 'active', 'bonded') THEN
+          RETURN false;
+        END IF;
+
+      WHEN 'telegramMetadata' THEN
+        IF jsonb_typeof(preference_entry.value) <> 'object' THEN RETURN false; END IF;
+        SELECT count(*) INTO entry_count FROM jsonb_object_keys(preference_entry.value);
+        IF entry_count NOT BETWEEN 1 AND 2
+           OR EXISTS (
+             SELECT 1 FROM jsonb_object_keys(preference_entry.value) AS telegram_key
+             WHERE telegram_key NOT IN ('chatId', 'botName')
+           ) THEN
+          RETURN false;
+        END IF;
+        IF preference_entry.value ? 'chatId' THEN
+          IF jsonb_typeof(preference_entry.value -> 'chatId') <> 'string'
+             OR (preference_entry.value ->> 'chatId') !~ '^(-?[0-9]{1,20}|@[A-Za-z0-9_]{5,64})$' THEN
+            RETURN false;
+          END IF;
+        END IF;
+        IF preference_entry.value ? 'botName' THEN
+          IF jsonb_typeof(preference_entry.value -> 'botName') <> 'string'
+             OR (preference_entry.value ->> 'botName') !~ '^[A-Za-z0-9_]{1,64}$' THEN
+            RETURN false;
+          END IF;
+        END IF;
+
+      ELSE
+        RETURN false;
+    END CASE;
+  END LOOP;
+
+  RETURN true;
+EXCEPTION WHEN OTHERS THEN
+  RETURN false;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.validate_office_user_preferences_v1(jsonb)
+  FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE TABLE IF NOT EXISTS public.circle_idle_behavior_claims (
+  circle_id uuid NOT NULL REFERENCES public.circles(id) ON DELETE CASCADE,
+  behavior_id text NOT NULL,
+  claimed_by uuid REFERENCES auth.users(id) ON DELETE SET NULL,
+  claimed_at timestamptz NOT NULL,
+  next_eligible_at timestamptz NOT NULL,
+  PRIMARY KEY (circle_id, behavior_id)
+);
+
+ALTER TABLE public.circle_idle_behavior_claims
+  DROP CONSTRAINT IF EXISTS circle_idle_behavior_claims_behavior_id_valid;
+ALTER TABLE public.circle_idle_behavior_claims
+  ADD CONSTRAINT circle_idle_behavior_claims_behavior_id_valid
+  CHECK (
+    behavior_id IN (
+      'streak_guardian',
+      'stale_task_detector',
+      'circle_pulse_monitor',
+      'knowledge_curator',
+      'memory_digest',
+      'morning_briefing',
+      'weekly_retro',
+      'goal_pace_tracker',
+      'codebase_scanner',
+      'dependency_health',
+      'cost_efficiency_report'
+    )
+  );
+
+ALTER TABLE public.circle_idle_behavior_claims
+  DROP CONSTRAINT IF EXISTS circle_idle_behavior_claims_window_valid;
+ALTER TABLE public.circle_idle_behavior_claims
+  ADD CONSTRAINT circle_idle_behavior_claims_window_valid
+  CHECK (
+    next_eligible_at > claimed_at
+    AND next_eligible_at <= claimed_at + interval '7 days'
+  );
+
+ALTER TABLE public.circle_idle_behavior_claims ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.circle_idle_behavior_claims FORCE ROW LEVEL SECURITY;
+
+REVOKE ALL ON TABLE public.circle_idle_behavior_claims
+  FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.claim_idle_behavior_run_v1(
+  p_circle_id uuid,
+  p_behavior_id text,
+  p_cooldown_minutes integer
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  v_actor_id uuid := auth.uid();
+  v_server_now timestamptz;
+  v_effective_cooldown_minutes integer;
+  v_claimed_at timestamptz;
+  v_next_eligible_at timestamptz;
+  v_affected_rows integer := 0;
+  v_claimed boolean := false;
+BEGIN
+  IF v_actor_id IS NULL THEN
+    RAISE EXCEPTION 'authentication_required' USING ERRCODE = '42501';
+  END IF;
+  IF p_circle_id IS NULL THEN
+    RAISE EXCEPTION 'circle_id_required' USING ERRCODE = '22023';
+  END IF;
+  IF p_behavior_id IS NULL OR p_behavior_id NOT IN (
+    'streak_guardian',
+    'stale_task_detector',
+    'circle_pulse_monitor',
+    'knowledge_curator',
+    'memory_digest',
+    'morning_briefing',
+    'weekly_retro',
+    'goal_pace_tracker',
+    'codebase_scanner',
+    'dependency_health',
+    'cost_efficiency_report'
+  ) THEN
+    RAISE EXCEPTION 'idle_behavior_not_allowed' USING ERRCODE = '22023';
+  END IF;
+  IF p_cooldown_minutes IS NULL OR p_cooldown_minutes NOT BETWEEN 1 AND 10080 THEN
+    RAISE EXCEPTION 'idle_behavior_cooldown_out_of_bounds' USING ERRCODE = '22023';
+  END IF;
+
+  PERFORM 1
+  FROM public.circle_members AS membership
+  WHERE membership.circle_id = p_circle_id
+    AND membership.user_id = v_actor_id
+  FOR KEY SHARE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'circle_membership_required' USING ERRCODE = '42501';
+  END IF;
+
+  v_effective_cooldown_minutes := CASE
+    WHEN p_behavior_id IN (
+      'streak_guardian',
+      'circle_pulse_monitor',
+      'morning_briefing',
+      'weekly_retro',
+      'goal_pace_tracker'
+    )
+      THEN greatest(p_cooldown_minutes, 1440)
+    ELSE p_cooldown_minutes
+  END;
+  v_server_now := clock_timestamp();
+
+  INSERT INTO public.circle_idle_behavior_claims AS current_claim (
+    circle_id,
+    behavior_id,
+    claimed_by,
+    claimed_at,
+    next_eligible_at
+  )
+  VALUES (
+    p_circle_id,
+    p_behavior_id,
+    v_actor_id,
+    v_server_now,
+    v_server_now + make_interval(mins => v_effective_cooldown_minutes)
+  )
+  ON CONFLICT (circle_id, behavior_id) DO UPDATE
+  SET claimed_by = EXCLUDED.claimed_by,
+      claimed_at = EXCLUDED.claimed_at,
+      next_eligible_at = EXCLUDED.next_eligible_at
+  WHERE current_claim.next_eligible_at <= EXCLUDED.claimed_at
+  RETURNING current_claim.claimed_at, current_claim.next_eligible_at
+    INTO v_claimed_at, v_next_eligible_at;
+
+  GET DIAGNOSTICS v_affected_rows = ROW_COUNT;
+  v_claimed := v_affected_rows = 1;
+
+  IF NOT v_claimed THEN
+    SELECT claim.claimed_at, claim.next_eligible_at
+      INTO v_claimed_at, v_next_eligible_at
+    FROM public.circle_idle_behavior_claims AS claim
+    WHERE claim.circle_id = p_circle_id
+      AND claim.behavior_id = p_behavior_id;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'idle_behavior_claim_state_unavailable' USING ERRCODE = '40001';
+    END IF;
+    v_effective_cooldown_minutes := greatest(
+      1,
+      least(
+        10080,
+        ceil(extract(epoch FROM (v_next_eligible_at - v_claimed_at)) / 60)::integer
+      )
+    );
+  END IF;
+
+  RETURN jsonb_build_object(
+    'schemaVersion', 1,
+    'claimed', v_claimed,
+    'behaviorId', p_behavior_id,
+    'effectiveCooldownMinutes', v_effective_cooldown_minutes,
+    'claimedAt', to_jsonb(v_claimed_at),
+    'nextEligibleAt', to_jsonb(v_next_eligible_at)
+  );
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.claim_idle_behavior_run_v1(uuid, text, integer)
+  FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.claim_idle_behavior_run_v1(uuid, text, integer)
+  TO authenticated;
+
+COMMENT ON TABLE public.circle_idle_behavior_claims IS
+  'Circle-global cooldown reservations claimed atomically before idle behavior side effects.';
+COMMENT ON FUNCTION public.claim_idle_behavior_run_v1(uuid, text, integer) IS
+  'Atomically reserves one allowlisted idle behavior for an authenticated circle member.';
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+-- END SECTION 46: Circle-global idle-behavior claims
+
+-- BEGIN SECTION 47: Transactional primary-agent identity selection
+-- Source: supabase/migrations/20260817130000_agent_identity_primary_rpc.sql
+-- Transactional primary-agent selection for durable agent identities.
+--
+-- The legacy client implementation cleared peer rows and promoted the target
+-- through separate requests. Concurrent tabs could therefore leave zero or
+-- multiple apparent primaries. This forward migration repairs legacy
+-- duplicates, installs a database invariant, and exposes one owner-bound RPC
+-- whose function call is one PostgreSQL transaction.
+
+BEGIN;
+
+DO $prerequisite$
+BEGIN
+  IF to_regclass('public.agent_identities') IS NULL THEN
+    RAISE EXCEPTION 'agent_identities_required'
+      USING ERRCODE = '55000';
+  END IF;
+END;
+$prerequisite$;
+
+ALTER TABLE public.agent_identities ENABLE ROW LEVEL SECURITY;
+
+-- Keep the newest legacy primary deterministically before installing the
+-- partial unique index. Reapplying this repair is a no-op once the invariant
+-- is present.
+WITH ranked_primaries AS (
+  SELECT
+    identity_row.ctid,
+    row_number() OVER (
+      PARTITION BY identity_row.user_id, identity_row.bound_ai_provider
+      ORDER BY
+        identity_row.last_seen DESC NULLS LAST,
+        identity_row.updated_at DESC NULLS LAST,
+        identity_row.created_at DESC NULLS LAST,
+        identity_row.id DESC
+    ) AS primary_rank
+  FROM public.agent_identities AS identity_row
+  WHERE identity_row.is_primary IS TRUE
+    AND identity_row.bound_ai_provider IS NOT NULL
+)
+UPDATE public.agent_identities AS identity_row
+SET is_primary = false
+FROM ranked_primaries AS ranked
+WHERE identity_row.ctid = ranked.ctid
+  AND ranked.primary_rank > 1;
+
+CREATE UNIQUE INDEX IF NOT EXISTS agent_identities_one_primary_per_provider_idx
+  ON public.agent_identities (user_id, bound_ai_provider)
+  WHERE is_primary IS TRUE
+    AND bound_ai_provider IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION public.set_main_agent_for_provider_v1(
+  p_session_key text,
+  p_provider_type text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $function$
+DECLARE
+  v_actor_id uuid := auth.uid();
+  v_target_id uuid;
+  v_primary_updated_at timestamptz;
+  v_inserted_rows integer := 0;
+  v_cleared_rows integer := 0;
+  v_target_rows integer := 0;
+  v_provider_row_count integer := 0;
+  v_primary_count integer := 0;
+  v_target_primary_count integer := 0;
+  v_rows jsonb := '[]'::jsonb;
+BEGIN
+  IF v_actor_id IS NULL THEN
+    RAISE EXCEPTION 'authentication_required'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF p_session_key IS NULL
+     OR p_session_key <> pg_catalog.btrim(p_session_key)
+     OR pg_catalog.char_length(p_session_key) NOT BETWEEN 1 AND 200
+     OR p_session_key ~ '[[:cntrl:]]' THEN
+    RAISE EXCEPTION 'agent_identity_session_key_invalid'
+      USING ERRCODE = '22023';
+  END IF;
+
+  IF p_provider_type IS NULL
+     OR p_provider_type <> pg_catalog.btrim(p_provider_type)
+     OR pg_catalog.char_length(p_provider_type) NOT BETWEEN 1 AND 200
+     OR p_provider_type ~ '[[:cntrl:]]' THEN
+    RAISE EXCEPTION 'agent_identity_provider_type_invalid'
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- Serialize every primary reassignment for this owner. User-wide locking
+  -- also prevents cross-provider target swaps from deadlocking when the same
+  -- two session rows are moved in opposite directions.
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(v_actor_id::text, 714071347::bigint)
+  );
+
+  INSERT INTO public.agent_identities (
+    user_id,
+    session_key,
+    bound_ai_provider,
+    is_primary
+  )
+  VALUES (
+    v_actor_id,
+    p_session_key,
+    p_provider_type,
+    false
+  )
+  ON CONFLICT (user_id, session_key) DO NOTHING;
+  GET DIAGNOSTICS v_inserted_rows = ROW_COUNT;
+
+  SELECT identity_row.id
+  INTO STRICT v_target_id
+  FROM public.agent_identities AS identity_row
+  WHERE identity_row.user_id = v_actor_id
+    AND identity_row.session_key = p_session_key
+  FOR UPDATE;
+
+  UPDATE public.agent_identities AS identity_row
+  SET is_primary = false
+  WHERE identity_row.user_id = v_actor_id
+    AND identity_row.bound_ai_provider = p_provider_type
+    AND identity_row.session_key <> p_session_key
+    AND identity_row.is_primary IS TRUE;
+  GET DIAGNOSTICS v_cleared_rows = ROW_COUNT;
+
+  UPDATE public.agent_identities AS identity_row
+  SET bound_ai_provider = p_provider_type,
+      is_primary = true,
+      last_seen = pg_catalog.clock_timestamp()
+  WHERE identity_row.id = v_target_id
+    AND identity_row.user_id = v_actor_id
+    AND identity_row.session_key = p_session_key
+  RETURNING identity_row.updated_at
+  INTO v_primary_updated_at;
+  GET DIAGNOSTICS v_target_rows = ROW_COUNT;
+
+  IF v_target_rows <> 1 THEN
+    RAISE EXCEPTION 'agent_identity_primary_target_conflict'
+      USING ERRCODE = '40001';
+  END IF;
+
+  SELECT
+    pg_catalog.count(*)::integer,
+    pg_catalog.count(*) FILTER (WHERE identity_row.is_primary IS TRUE)::integer,
+    pg_catalog.count(*) FILTER (
+      WHERE identity_row.is_primary IS TRUE
+        AND identity_row.session_key = p_session_key
+    )::integer
+  INTO
+    v_provider_row_count,
+    v_primary_count,
+    v_target_primary_count
+  FROM public.agent_identities AS identity_row
+  WHERE identity_row.user_id = v_actor_id
+    AND identity_row.bound_ai_provider = p_provider_type;
+
+  IF v_provider_row_count NOT BETWEEN 1 AND 5000 THEN
+    RAISE EXCEPTION 'agent_identity_provider_row_limit_exceeded'
+      USING ERRCODE = '54000';
+  END IF;
+
+  IF v_primary_count <> 1 OR v_target_primary_count <> 1 THEN
+    RAISE EXCEPTION 'agent_identity_primary_invariant_failed'
+      USING ERRCODE = '40001';
+  END IF;
+
+  SELECT coalesce(
+    pg_catalog.jsonb_agg(
+      pg_catalog.to_jsonb(identity_row)
+      ORDER BY identity_row.session_key
+    ),
+    '[]'::jsonb
+  )
+  INTO v_rows
+  FROM public.agent_identities AS identity_row
+  WHERE identity_row.user_id = v_actor_id
+    AND identity_row.bound_ai_provider = p_provider_type;
+
+  IF pg_catalog.pg_column_size(v_rows) > 4194304 THEN
+    RAISE EXCEPTION 'agent_identity_primary_receipt_too_large'
+      USING ERRCODE = '54000';
+  END IF;
+
+  RETURN pg_catalog.jsonb_build_object(
+    'schemaVersion', 1,
+    'userId', v_actor_id::text,
+    'providerType', p_provider_type,
+    'requestedSessionKey', p_session_key,
+    'primarySessionKey', p_session_key,
+    'primaryId', v_target_id::text,
+    'primaryUpdatedAt', pg_catalog.to_jsonb(v_primary_updated_at),
+    'inserted', v_inserted_rows = 1,
+    'clearedCount', v_cleared_rows,
+    'targetRowCount', v_target_rows,
+    'rowCount', v_provider_row_count,
+    'rows', v_rows
+  );
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.guard_agent_identity_primary_columns_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = ''
+AS $function$
+DECLARE
+  v_primary_rpc_owner name;
+  v_sensitive_change boolean := false;
+BEGIN
+  SELECT pg_catalog.pg_get_userbyid(procedure_row.proowner)
+  INTO v_primary_rpc_owner
+  FROM pg_catalog.pg_proc AS procedure_row
+  WHERE procedure_row.oid =
+    'public.set_main_agent_for_provider_v1(text,text)'::pg_catalog.regprocedure;
+
+  IF TG_OP = 'INSERT' THEN
+    v_sensitive_change := NEW.is_primary IS TRUE;
+  ELSIF TG_OP = 'UPDATE' THEN
+    v_sensitive_change := (NEW.is_primary IS TRUE) IS DISTINCT FROM (OLD.is_primary IS TRUE)
+      OR (
+        NEW.bound_ai_provider IS DISTINCT FROM OLD.bound_ai_provider
+        AND (NEW.is_primary IS TRUE OR OLD.is_primary IS TRUE)
+      );
+  ELSIF TG_OP = 'DELETE' THEN
+    v_sensitive_change := OLD.is_primary IS TRUE;
+  END IF;
+
+  IF v_sensitive_change
+     AND (
+       v_primary_rpc_owner IS NULL
+       OR current_user IS DISTINCT FROM v_primary_rpc_owner
+     ) THEN
+    RAISE EXCEPTION 'agent_identity_primary_rpc_required'
+      USING ERRCODE = '42501';
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+    RETURN OLD;
+  END IF;
+  RETURN NEW;
+END;
+$function$;
+
+DROP TRIGGER IF EXISTS agent_identity_primary_columns_guard
+  ON public.agent_identities;
+CREATE TRIGGER agent_identity_primary_columns_guard
+  BEFORE INSERT OR UPDATE OF is_primary, bound_ai_provider
+  ON public.agent_identities
+  FOR EACH ROW
+  EXECUTE FUNCTION public.guard_agent_identity_primary_columns_v1();
+
+DROP TRIGGER IF EXISTS agent_identity_primary_delete_guard
+  ON public.agent_identities;
+CREATE TRIGGER agent_identity_primary_delete_guard
+  BEFORE DELETE
+  ON public.agent_identities
+  FOR EACH ROW
+  EXECUTE FUNCTION public.guard_agent_identity_primary_columns_v1();
+
+REVOKE ALL ON FUNCTION public.set_main_agent_for_provider_v1(text, text)
+  FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.set_main_agent_for_provider_v1(text, text)
+  TO authenticated;
+REVOKE ALL ON FUNCTION public.guard_agent_identity_primary_columns_v1()
+  FROM PUBLIC, anon, authenticated, service_role;
+
+COMMENT ON INDEX public.agent_identities_one_primary_per_provider_idx IS
+  'At most one durable primary identity per exact owner and provider.';
+COMMENT ON FUNCTION public.set_main_agent_for_provider_v1(text, text) IS
+  'Atomically selects one authenticated owner session as the exact primary for one provider and returns validated provider rows.';
+COMMENT ON FUNCTION public.guard_agent_identity_primary_columns_v1() IS
+  'Rejects direct primary/provider identity changes and primary-row deletion outside the canonical SECURITY DEFINER RPC.';
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+-- END SECTION 47: Transactional primary-agent identity selection
+-- BEGIN SECTION 48: Atomic published-agent Spirit projection
+-- Source: supabase/migrations/20260817140000_agent_spirit_assignment_rpc.sql
+-- Atomic published-agent Spirit projection.
+--
+-- A published Office agent has one peer-visible Spirit projection and one
+-- owner-private durable identity. Updating those tables in separate client
+-- requests can split truth. This RPC locks the exact published row and updates
+-- both projections in one authenticated PostgreSQL transaction.
+
+BEGIN;
+
+DO $prerequisites$
+BEGIN
+  IF to_regclass('public.circle_office_agents') IS NULL
+     OR to_regclass('public.agent_identities') IS NULL
+     OR to_regclass('public.circle_members') IS NULL
+     OR to_regclass('public.custom_agent_profiles') IS NULL THEN
+    RAISE EXCEPTION 'agent_spirit_assignment_prerequisites_required'
+      USING ERRCODE = '55000';
+  END IF;
+END;
+$prerequisites$;
+
+ALTER TABLE public.circle_office_agents
+  ADD COLUMN IF NOT EXISTS spirit text,
+  ADD COLUMN IF NOT EXISTS spirit_emoji text;
+
+ALTER TABLE public.circle_office_agents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.agent_identities ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.circle_members ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.custom_agent_profiles ENABLE ROW LEVEL SECURITY;
+
+CREATE OR REPLACE FUNCTION public.set_published_agent_spirit_v1(
+  p_circle_id uuid,
+  p_office_agent_id uuid,
+  p_spirit_id text,
+  p_spirit_emoji text,
+  p_custom_profile_id uuid
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $function$
+DECLARE
+  v_actor_id uuid := auth.uid();
+  v_session_key text := p_office_agent_id::text;
+  v_spirit_id text := p_spirit_id;
+  v_spirit_emoji text := p_spirit_emoji;
+  v_custom_profile_id text := NULL;
+  v_custom_profile_name text := NULL;
+  v_office_row jsonb;
+  v_identity_row jsonb;
+  v_office_row_count integer := 0;
+  v_identity_row_count integer := 0;
+  v_receipt jsonb;
+BEGIN
+  IF v_actor_id IS NULL THEN
+    RAISE EXCEPTION 'authentication_required'
+      USING ERRCODE = '42501';
+  END IF;
+  IF p_circle_id IS NULL OR p_office_agent_id IS NULL THEN
+    RAISE EXCEPTION 'agent_spirit_assignment_target_invalid'
+      USING ERRCODE = '22023';
+  END IF;
+
+  IF p_spirit_id IS NULL THEN
+    IF p_spirit_emoji IS NOT NULL OR p_custom_profile_id IS NOT NULL THEN
+      RAISE EXCEPTION 'agent_spirit_clear_payload_invalid'
+        USING ERRCODE = '22023';
+    END IF;
+  ELSE
+    IF p_spirit_id <> pg_catalog.btrim(p_spirit_id)
+       OR pg_catalog.char_length(p_spirit_id) NOT BETWEEN 1 AND 200
+       OR p_spirit_id OPERATOR(pg_catalog.~) '[[:cntrl:]]' THEN
+      RAISE EXCEPTION 'agent_spirit_id_invalid'
+        USING ERRCODE = '22023';
+    END IF;
+    IF p_spirit_emoji IS NOT NULL
+       AND (
+         p_spirit_emoji <> pg_catalog.btrim(p_spirit_emoji)
+         OR pg_catalog.char_length(p_spirit_emoji) NOT BETWEEN 1 AND 64
+         OR p_spirit_emoji OPERATOR(pg_catalog.~) '[[:cntrl:]]'
+       ) THEN
+      RAISE EXCEPTION 'agent_spirit_emoji_invalid'
+        USING ERRCODE = '22023';
+    END IF;
+  END IF;
+
+  PERFORM 1
+  FROM public.circle_members AS membership
+  WHERE membership.circle_id = p_circle_id
+    AND membership.user_id = v_actor_id
+  FOR KEY SHARE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'circle_membership_required'
+      USING ERRCODE = '42501';
+  END IF;
+
+  PERFORM 1
+  FROM public.circle_office_agents AS office_agent
+  WHERE office_agent.id = p_office_agent_id
+    AND office_agent.circle_id = p_circle_id
+    AND office_agent.owner_id = v_actor_id
+    AND office_agent.is_published IS TRUE
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'published_agent_ownership_required'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF p_custom_profile_id IS NOT NULL THEN
+    IF p_spirit_id IS NULL
+       OR p_spirit_id <> 'custom::' || p_custom_profile_id::text THEN
+      RAISE EXCEPTION 'agent_spirit_custom_profile_mismatch'
+        USING ERRCODE = '22023';
+    END IF;
+    SELECT
+      profile.id::text,
+      profile.name,
+      profile.emoji
+    INTO
+      v_custom_profile_id,
+      v_custom_profile_name,
+      v_spirit_emoji
+    FROM public.custom_agent_profiles AS profile
+    WHERE profile.id = p_custom_profile_id
+      AND profile.user_id = v_actor_id
+    FOR KEY SHARE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'agent_spirit_custom_profile_ownership_required'
+        USING ERRCODE = '42501';
+    END IF;
+    IF v_custom_profile_name IS NULL
+       OR v_custom_profile_name <> pg_catalog.btrim(v_custom_profile_name)
+       OR pg_catalog.char_length(v_custom_profile_name) NOT BETWEEN 1 AND 200
+       OR v_custom_profile_name OPERATOR(pg_catalog.~) '[[:cntrl:]]'
+       OR (
+         v_spirit_emoji IS NOT NULL
+         AND (
+           v_spirit_emoji <> pg_catalog.btrim(v_spirit_emoji)
+           OR pg_catalog.char_length(v_spirit_emoji) NOT BETWEEN 1 AND 64
+           OR v_spirit_emoji OPERATOR(pg_catalog.~) '[[:cntrl:]]'
+         )
+       ) THEN
+      RAISE EXCEPTION 'agent_spirit_custom_profile_invalid'
+        USING ERRCODE = '22023';
+    END IF;
+  ELSIF p_spirit_id IS NOT NULL
+        AND pg_catalog.left(p_spirit_id, 8) = 'custom::' THEN
+    RAISE EXCEPTION 'agent_spirit_custom_profile_required'
+      USING ERRCODE = '22023';
+  END IF;
+
+  UPDATE public.circle_office_agents AS office_agent
+  SET spirit = v_spirit_id,
+      spirit_emoji = v_spirit_emoji
+  WHERE office_agent.id = p_office_agent_id
+    AND office_agent.circle_id = p_circle_id
+    AND office_agent.owner_id = v_actor_id
+    AND office_agent.is_published IS TRUE
+  RETURNING pg_catalog.to_jsonb(office_agent)
+  INTO v_office_row;
+  GET DIAGNOSTICS v_office_row_count = ROW_COUNT;
+
+  IF v_office_row_count <> 1 THEN
+    RAISE EXCEPTION 'agent_spirit_office_row_conflict'
+      USING ERRCODE = '40001';
+  END IF;
+
+  INSERT INTO public.agent_identities AS identity_row (
+    user_id,
+    session_key,
+    spirit_id,
+    spirit_emoji,
+    custom_profile_id,
+    custom_profile_name,
+    is_customized,
+    last_seen
+  ) VALUES (
+    v_actor_id,
+    v_session_key,
+    v_spirit_id,
+    v_spirit_emoji,
+    v_custom_profile_id,
+    v_custom_profile_name,
+    true,
+    pg_catalog.clock_timestamp()
+  )
+  ON CONFLICT (user_id, session_key) DO UPDATE
+  SET spirit_id = EXCLUDED.spirit_id,
+      spirit_emoji = EXCLUDED.spirit_emoji,
+      custom_profile_id = EXCLUDED.custom_profile_id,
+      custom_profile_name = EXCLUDED.custom_profile_name,
+      is_customized = true,
+      last_seen = EXCLUDED.last_seen
+  RETURNING pg_catalog.to_jsonb(identity_row)
+  INTO v_identity_row;
+  GET DIAGNOSTICS v_identity_row_count = ROW_COUNT;
+
+  IF v_identity_row_count <> 1
+     OR v_identity_row ->> 'user_id' <> v_actor_id::text
+     OR v_identity_row ->> 'session_key' <> v_session_key
+     OR v_identity_row ->> 'spirit_id' IS DISTINCT FROM v_spirit_id
+     OR v_identity_row ->> 'spirit_emoji' IS DISTINCT FROM v_spirit_emoji
+     OR v_identity_row ->> 'custom_profile_id' IS DISTINCT FROM v_custom_profile_id
+     OR v_identity_row ->> 'custom_profile_name' IS DISTINCT FROM v_custom_profile_name THEN
+    RAISE EXCEPTION 'agent_spirit_identity_row_conflict'
+      USING ERRCODE = '40001';
+  END IF;
+
+  v_receipt := pg_catalog.jsonb_build_object(
+    'schemaVersion', 1,
+    'userId', v_actor_id::text,
+    'circleId', p_circle_id::text,
+    'officeAgentId', p_office_agent_id::text,
+    'sessionKey', v_session_key,
+    'spiritId', v_spirit_id,
+    'spiritEmoji', v_spirit_emoji,
+    'customProfileId', v_custom_profile_id,
+    'customProfileName', v_custom_profile_name,
+    'officeRowCount', v_office_row_count,
+    'identityRowCount', v_identity_row_count,
+    'officeAgent', v_office_row,
+    'identity', v_identity_row
+  );
+
+  IF pg_catalog.pg_column_size(v_receipt) > 4194304 THEN
+    RAISE EXCEPTION 'agent_spirit_assignment_receipt_too_large'
+      USING ERRCODE = '54000';
+  END IF;
+
+  RETURN v_receipt;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.delete_unreferenced_custom_agent_profile_v1(
+  p_profile_id uuid
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $function$
+DECLARE
+  v_actor_id uuid := auth.uid();
+  v_profile_row jsonb;
+  v_deleted_row jsonb;
+  v_deleted_row_count integer := 0;
+  v_receipt jsonb;
+BEGIN
+  IF v_actor_id IS NULL THEN
+    RAISE EXCEPTION 'authentication_required'
+      USING ERRCODE = '42501';
+  END IF;
+  IF p_profile_id IS NULL THEN
+    RAISE EXCEPTION 'custom_agent_profile_target_invalid'
+      USING ERRCODE = '22023';
+  END IF;
+
+  SELECT pg_catalog.to_jsonb(profile)
+  INTO v_profile_row
+  FROM public.custom_agent_profiles AS profile
+  WHERE profile.id = p_profile_id
+    AND profile.user_id = v_actor_id
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'custom_agent_profile_ownership_required'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- Spirit assignment takes a key-share lock on this exact profile before it
+  -- writes either projection. The exclusive profile lock above therefore
+  -- serializes assign-versus-delete: a committed assignment is visible here,
+  -- while a deletion that wins first makes the later assignment fail closed.
+  IF EXISTS (
+    SELECT 1
+    FROM public.agent_identities AS identity_row
+    WHERE identity_row.user_id = v_actor_id
+      AND (
+        identity_row.custom_profile_id = p_profile_id::text
+        OR identity_row.spirit_id = 'custom::' || p_profile_id::text
+      )
+    LIMIT 1
+  ) OR EXISTS (
+    SELECT 1
+    FROM public.circle_office_agents AS office_agent
+    WHERE office_agent.owner_id = v_actor_id
+      AND office_agent.spirit = 'custom::' || p_profile_id::text
+    LIMIT 1
+  ) THEN
+    RAISE EXCEPTION 'custom_agent_profile_still_referenced'
+      USING ERRCODE = '55000';
+  END IF;
+
+  DELETE FROM public.custom_agent_profiles AS profile
+  WHERE profile.id = p_profile_id
+    AND profile.user_id = v_actor_id
+  RETURNING pg_catalog.to_jsonb(profile)
+  INTO v_deleted_row;
+  GET DIAGNOSTICS v_deleted_row_count = ROW_COUNT;
+
+  IF v_deleted_row_count <> 1
+     OR v_deleted_row ->> 'id' <> p_profile_id::text
+     OR v_deleted_row ->> 'user_id' <> v_actor_id::text THEN
+    RAISE EXCEPTION 'custom_agent_profile_delete_conflict'
+      USING ERRCODE = '40001';
+  END IF;
+
+  v_receipt := pg_catalog.jsonb_build_object(
+    'schemaVersion', 1,
+    'userId', v_actor_id::text,
+    'profileId', p_profile_id::text,
+    'deletedRowCount', v_deleted_row_count,
+    'profile', v_deleted_row
+  );
+  IF pg_catalog.pg_column_size(v_receipt) > 1048576 THEN
+    RAISE EXCEPTION 'custom_agent_profile_delete_receipt_too_large'
+      USING ERRCODE = '54000';
+  END IF;
+  RETURN v_receipt;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.guard_circle_office_agent_spirit_columns_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = ''
+AS $function$
+DECLARE
+  v_spirit_rpc_owner name;
+  v_sensitive_change boolean := false;
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.is_published IS TRUE THEN
+      PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(
+          NEW.owner_id::text || ':' || NEW.id::text,
+          714071348::bigint
+        )
+      );
+    END IF;
+    v_sensitive_change := NEW.is_published IS TRUE
+      AND (NEW.spirit IS NOT NULL OR NEW.spirit_emoji IS NOT NULL);
+    IF NEW.is_published IS TRUE AND NOT v_sensitive_change THEN
+      SELECT EXISTS (
+        SELECT 1
+        FROM public.agent_identities AS identity_row
+        WHERE identity_row.user_id = NEW.owner_id
+          AND identity_row.session_key = NEW.id::text
+          AND (
+            identity_row.spirit_id IS NOT NULL
+            OR identity_row.spirit_emoji IS NOT NULL
+            OR identity_row.custom_profile_id IS NOT NULL
+            OR identity_row.custom_profile_name IS NOT NULL
+          )
+      )
+      INTO v_sensitive_change;
+    END IF;
+  ELSIF TG_OP = 'UPDATE' THEN
+    IF NEW.is_published IS TRUE
+       AND (
+         OLD.is_published IS NOT TRUE
+         OR NEW.id IS DISTINCT FROM OLD.id
+         OR NEW.owner_id IS DISTINCT FROM OLD.owner_id
+         OR NEW.circle_id IS DISTINCT FROM OLD.circle_id
+         OR NEW.spirit IS DISTINCT FROM OLD.spirit
+         OR NEW.spirit_emoji IS DISTINCT FROM OLD.spirit_emoji
+       ) THEN
+      PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(
+          NEW.owner_id::text || ':' || NEW.id::text,
+          714071348::bigint
+        )
+      );
+    END IF;
+    v_sensitive_change := NEW.is_published IS TRUE
+      AND (
+        NEW.id IS DISTINCT FROM OLD.id
+        OR NEW.owner_id IS DISTINCT FROM OLD.owner_id
+        OR NEW.circle_id IS DISTINCT FROM OLD.circle_id
+        OR NEW.spirit IS DISTINCT FROM OLD.spirit
+        OR NEW.spirit_emoji IS DISTINCT FROM OLD.spirit_emoji
+      );
+    IF NEW.is_published IS TRUE
+       AND OLD.is_published IS NOT TRUE
+       AND NOT v_sensitive_change THEN
+      v_sensitive_change := NEW.spirit IS NOT NULL OR NEW.spirit_emoji IS NOT NULL;
+      IF NOT v_sensitive_change THEN
+        SELECT EXISTS (
+          SELECT 1
+          FROM public.agent_identities AS identity_row
+          WHERE identity_row.user_id = NEW.owner_id
+            AND identity_row.session_key = NEW.id::text
+            AND (
+              identity_row.spirit_id IS NOT NULL
+              OR identity_row.spirit_emoji IS NOT NULL
+              OR identity_row.custom_profile_id IS NOT NULL
+              OR identity_row.custom_profile_name IS NOT NULL
+            )
+        )
+        INTO v_sensitive_change;
+      END IF;
+    END IF;
+  END IF;
+
+  IF NOT v_sensitive_change THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT pg_catalog.pg_get_userbyid(procedure_row.proowner)
+  INTO v_spirit_rpc_owner
+  FROM pg_catalog.pg_proc AS procedure_row
+  WHERE procedure_row.oid =
+    'public.set_published_agent_spirit_v1(uuid,uuid,text,text,uuid)'::pg_catalog.regprocedure;
+
+  IF v_spirit_rpc_owner IS NULL
+     OR current_user IS DISTINCT FROM v_spirit_rpc_owner THEN
+    RAISE EXCEPTION 'published_agent_spirit_rpc_required'
+      USING ERRCODE = '42501';
+  END IF;
+  RETURN NEW;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.guard_published_agent_identity_spirit_columns_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = ''
+AS $function$
+DECLARE
+  v_spirit_rpc_owner name;
+  v_sensitive_change boolean := false;
+  v_is_published_projection boolean := false;
+  v_old_is_published_projection boolean := false;
+  v_projection_key_changed boolean := false;
+  v_new_projection_lock bigint;
+  v_old_projection_lock bigint;
+  v_custom_profile_uuid uuid;
+  v_expected_profile_name text;
+  v_expected_profile_emoji text;
+BEGIN
+  SELECT pg_catalog.pg_get_userbyid(procedure_row.proowner)
+  INTO v_spirit_rpc_owner
+  FROM pg_catalog.pg_proc AS procedure_row
+  WHERE procedure_row.oid =
+    'public.set_published_agent_spirit_v1(uuid,uuid,text,text,uuid)'::pg_catalog.regprocedure;
+
+  -- The canonical SECURITY DEFINER writer owns both projections. Returning
+  -- early also avoids an unnecessary public-row lookup inside that RPC.
+  IF v_spirit_rpc_owner IS NOT NULL
+     AND current_user IS NOT DISTINCT FROM v_spirit_rpc_owner THEN
+    IF TG_OP = 'DELETE' THEN
+      RETURN OLD;
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  -- A published Office Spirit requires its exact private identity projection.
+  -- Legacy owner RLS permits ordinary identity deletion, so serialize and
+  -- reject only the exact UUID-keyed row that backs a currently published
+  -- Office agent. Genuinely private live-session identities remain deletable.
+  IF TG_OP = 'DELETE' THEN
+    IF pg_catalog.char_length(OLD.session_key) = 36
+       AND OLD.session_key OPERATOR(pg_catalog.~)
+         '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$' THEN
+      v_old_projection_lock := pg_catalog.hashtextextended(
+        OLD.user_id::text || ':' || OLD.session_key,
+        714071348::bigint
+      );
+      PERFORM pg_catalog.pg_advisory_xact_lock(v_old_projection_lock);
+      SELECT EXISTS (
+        SELECT 1
+        FROM public.circle_office_agents AS office_agent
+        WHERE office_agent.id = OLD.session_key::uuid
+          AND office_agent.owner_id = OLD.user_id
+          AND office_agent.is_published IS TRUE
+      )
+      INTO v_old_is_published_projection;
+    END IF;
+    IF v_old_is_published_projection THEN
+      RAISE EXCEPTION 'published_agent_spirit_rpc_required'
+        USING ERRCODE = '42501';
+    END IF;
+    RETURN OLD;
+  END IF;
+
+  IF TG_OP = 'INSERT' THEN
+    v_sensitive_change := NEW.spirit_id IS NOT NULL
+      OR NEW.spirit_emoji IS NOT NULL
+      OR NEW.custom_profile_id IS NOT NULL
+      OR NEW.custom_profile_name IS NOT NULL;
+  ELSIF TG_OP = 'UPDATE' THEN
+    v_projection_key_changed := NEW.session_key IS DISTINCT FROM OLD.session_key
+      OR NEW.user_id IS DISTINCT FROM OLD.user_id;
+    v_sensitive_change := NEW.spirit_id IS DISTINCT FROM OLD.spirit_id
+      OR NEW.spirit_emoji IS DISTINCT FROM OLD.spirit_emoji
+      OR NEW.custom_profile_id IS DISTINCT FROM OLD.custom_profile_id
+      OR NEW.custom_profile_name IS DISTINCT FROM OLD.custom_profile_name
+      OR v_projection_key_changed;
+  END IF;
+
+  IF NOT v_sensitive_change THEN
+    RETURN NEW;
+  END IF;
+
+  IF pg_catalog.char_length(NEW.session_key) = 36
+     AND NEW.session_key OPERATOR(pg_catalog.~)
+       '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$' THEN
+    v_new_projection_lock := pg_catalog.hashtextextended(
+      NEW.user_id::text || ':' || NEW.session_key,
+      714071348::bigint
+    );
+  END IF;
+  IF v_projection_key_changed
+     AND pg_catalog.char_length(OLD.session_key) = 36
+     AND OLD.session_key OPERATOR(pg_catalog.~)
+       '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$' THEN
+    v_old_projection_lock := pg_catalog.hashtextextended(
+      OLD.user_id::text || ':' || OLD.session_key,
+      714071348::bigint
+    );
+  END IF;
+
+  -- Projection keys are mutable under the legacy owner policy, so direct
+  -- retargets must serialize with the same advisory lane as the canonical
+  -- public/private writer. Acquire two different lanes in numeric order to
+  -- keep inverse retarget attempts deadlock-free.
+  IF v_new_projection_lock IS NOT NULL
+     AND v_old_projection_lock IS NOT NULL
+     AND v_new_projection_lock <> v_old_projection_lock THEN
+    IF v_new_projection_lock < v_old_projection_lock THEN
+      PERFORM pg_catalog.pg_advisory_xact_lock(v_new_projection_lock);
+      PERFORM pg_catalog.pg_advisory_xact_lock(v_old_projection_lock);
+    ELSE
+      PERFORM pg_catalog.pg_advisory_xact_lock(v_old_projection_lock);
+      PERFORM pg_catalog.pg_advisory_xact_lock(v_new_projection_lock);
+    END IF;
+  ELSIF v_new_projection_lock IS NOT NULL THEN
+    PERFORM pg_catalog.pg_advisory_xact_lock(v_new_projection_lock);
+  ELSIF v_old_projection_lock IS NOT NULL THEN
+    PERFORM pg_catalog.pg_advisory_xact_lock(v_old_projection_lock);
+  END IF;
+
+  IF v_new_projection_lock IS NOT NULL THEN
+    SELECT EXISTS (
+      SELECT 1
+      FROM public.circle_office_agents AS office_agent
+      WHERE office_agent.id = NEW.session_key::uuid
+        AND office_agent.owner_id = NEW.user_id
+        AND office_agent.is_published IS TRUE
+    )
+    INTO v_is_published_projection;
+  END IF;
+  IF v_projection_key_changed AND v_old_projection_lock IS NOT NULL THEN
+    SELECT EXISTS (
+      SELECT 1
+      FROM public.circle_office_agents AS office_agent
+      WHERE office_agent.id = OLD.session_key::uuid
+        AND office_agent.owner_id = OLD.user_id
+        AND office_agent.is_published IS TRUE
+    )
+    INTO v_old_is_published_projection;
+  END IF;
+
+  IF v_is_published_projection OR v_old_is_published_projection THEN
+    RAISE EXCEPTION 'published_agent_spirit_rpc_required'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- Private live-session identities remain directly writable, but a custom
+  -- Spirit must be one coherent owner profile projection. The key-share lock
+  -- conflicts with the profile delete RPC's FOR UPDATE lock, so whichever
+  -- operation commits first determines one coherent outcome: referenced and
+  -- retained, or deleted and impossible to assign.
+  IF NEW.custom_profile_id IS NULL THEN
+    IF NEW.custom_profile_name IS NOT NULL
+       OR (
+         NEW.spirit_id IS NOT NULL
+         AND pg_catalog.left(NEW.spirit_id, 8) = 'custom::'
+       ) THEN
+      RAISE EXCEPTION 'agent_spirit_custom_profile_mismatch'
+        USING ERRCODE = '22023';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF pg_catalog.char_length(NEW.custom_profile_id) <> 36
+     OR NOT (
+       NEW.custom_profile_id OPERATOR(pg_catalog.~)
+         '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+     ) THEN
+    RAISE EXCEPTION 'agent_spirit_custom_profile_invalid'
+      USING ERRCODE = '22023';
+  END IF;
+  v_custom_profile_uuid := NEW.custom_profile_id::uuid;
+  IF NEW.custom_profile_id <> v_custom_profile_uuid::text
+     OR NEW.spirit_id IS DISTINCT FROM
+       'custom::' || v_custom_profile_uuid::text THEN
+    RAISE EXCEPTION 'agent_spirit_custom_profile_mismatch'
+      USING ERRCODE = '22023';
+  END IF;
+
+  SELECT profile.name, profile.emoji
+  INTO v_expected_profile_name, v_expected_profile_emoji
+  FROM public.custom_agent_profiles AS profile
+  WHERE profile.id = v_custom_profile_uuid
+    AND profile.user_id = NEW.user_id
+  FOR KEY SHARE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'agent_spirit_custom_profile_ownership_required'
+      USING ERRCODE = '42501';
+  END IF;
+  IF NEW.custom_profile_name IS DISTINCT FROM v_expected_profile_name
+     OR NEW.spirit_emoji IS DISTINCT FROM v_expected_profile_emoji THEN
+    RAISE EXCEPTION 'agent_spirit_custom_profile_mismatch'
+      USING ERRCODE = '22023';
+  END IF;
+  RETURN NEW;
+END;
+$function$;
+
+DROP TRIGGER IF EXISTS circle_office_agent_spirit_columns_guard
+  ON public.circle_office_agents;
+CREATE TRIGGER circle_office_agent_spirit_columns_guard
+  BEFORE INSERT OR UPDATE OF id, circle_id, owner_id, spirit, spirit_emoji, is_published
+  ON public.circle_office_agents
+  FOR EACH ROW
+  EXECUTE FUNCTION public.guard_circle_office_agent_spirit_columns_v1();
+
+DROP TRIGGER IF EXISTS published_agent_identity_spirit_columns_guard
+  ON public.agent_identities;
+CREATE TRIGGER published_agent_identity_spirit_columns_guard
+  BEFORE INSERT OR DELETE OR UPDATE OF user_id, session_key, spirit_id, spirit_emoji, custom_profile_id, custom_profile_name
+  ON public.agent_identities
+  FOR EACH ROW
+  EXECUTE FUNCTION public.guard_published_agent_identity_spirit_columns_v1();
+
+REVOKE ALL ON FUNCTION public.set_published_agent_spirit_v1(uuid, uuid, text, text, uuid)
+  FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.set_published_agent_spirit_v1(uuid, uuid, text, text, uuid)
+  TO authenticated;
+REVOKE ALL ON FUNCTION public.delete_unreferenced_custom_agent_profile_v1(uuid)
+  FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.delete_unreferenced_custom_agent_profile_v1(uuid)
+  TO authenticated;
+REVOKE ALL ON FUNCTION public.guard_circle_office_agent_spirit_columns_v1()
+  FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.guard_published_agent_identity_spirit_columns_v1()
+  FROM PUBLIC, anon, authenticated, service_role;
+
+-- The only shipped direct DELETE caller is migrated to the guarded RPC. Keep
+-- profile create/update/select available through the existing owner policy,
+-- but prevent a client from bypassing the reference check.
+REVOKE DELETE ON TABLE public.custom_agent_profiles FROM authenticated;
+
+COMMENT ON COLUMN public.circle_office_agents.spirit IS
+  'Peer-visible Spirit id projected atomically with the owner-private durable identity.';
+COMMENT ON COLUMN public.circle_office_agents.spirit_emoji IS
+  'Peer-visible Spirit emoji projected atomically with the owner-private durable identity.';
+COMMENT ON FUNCTION public.set_published_agent_spirit_v1(uuid, uuid, text, text, uuid) IS
+  'Atomically projects one exact published Office agent Spirit into its owner-private identity.';
+COMMENT ON FUNCTION public.delete_unreferenced_custom_agent_profile_v1(uuid) IS
+  'Deletes one exact owner profile only when no owner public or private Spirit projection references it.';
+COMMENT ON FUNCTION public.guard_circle_office_agent_spirit_columns_v1() IS
+  'Rejects direct published Office Spirit or projection-key changes outside the canonical atomic RPC.';
+COMMENT ON FUNCTION public.guard_published_agent_identity_spirit_columns_v1() IS
+  'Rejects direct Spirit, identity-key, or identity-delete changes that enter, leave, or remove a published Office projection and validates plus locks exact owner profiles for private custom Spirit assignments.';
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+-- END SECTION 48: Atomic published-agent Spirit projection
+
+-- BEGIN SECTION 49: Exact Office-agent session binding compare-and-set
+-- Exact compare-and-set mutation contract for owner-private Office-agent to
+-- OpenSwan session bindings. The original §36 set/clear RPCs accepted no
+-- expected row and therefore allowed a stale client to overwrite or clear a
+-- route changed by another tab. This forward migration retires their execute
+-- authority and exposes one receipt-bearing CAS RPC instead.
+
+BEGIN;
+
+CREATE OR REPLACE FUNCTION public.compare_and_set_office_agent_session_binding_v1(
+  p_office_agent_id uuid,
+  p_circle_id uuid,
+  p_expected_binding_id uuid,
+  p_expected_agent_bot_id uuid,
+  p_expected_session_key text,
+  p_expected_updated_at timestamptz,
+  p_next_agent_bot_id uuid,
+  p_next_session_key text
+)
+RETURNS TABLE (
+  mutation_contract_version integer,
+  mutation_disposition text,
+  mutation_operation text,
+  office_agent_id uuid,
+  observed_binding_id uuid,
+  observed_agent_bot_id uuid,
+  observed_session_key text,
+  observed_updated_at timestamptz,
+  result_binding_id uuid,
+  result_agent_bot_id uuid,
+  result_session_key text,
+  result_updated_at timestamptz
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $function$
+DECLARE
+  v_uid uuid := auth.uid();
+  v_office_provider text;
+  v_office_is_published boolean;
+  v_bot_provider text;
+  v_observed_owner_id uuid;
+  v_observed_binding_id uuid;
+  v_observed_agent_bot_id uuid;
+  v_observed_session_key text;
+  v_observed_updated_at timestamptz;
+  v_has_observed boolean := false;
+  v_expected_missing boolean;
+  v_next_missing boolean;
+  v_expected_matches boolean;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42501',
+      MESSAGE = 'office_agent_session_binding_auth_required';
+  END IF;
+  IF p_office_agent_id IS NULL OR p_circle_id IS NULL THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '22023',
+      MESSAGE = 'office_agent_session_binding_invalid_identity';
+  END IF;
+
+  v_expected_missing := p_expected_binding_id IS NULL
+    AND p_expected_agent_bot_id IS NULL
+    AND p_expected_session_key IS NULL
+    AND p_expected_updated_at IS NULL;
+  IF NOT v_expected_missing AND (
+    p_expected_binding_id IS NULL
+    OR p_expected_agent_bot_id IS NULL
+    OR p_expected_session_key IS NULL
+    OR p_expected_updated_at IS NULL
+    OR pg_catalog.char_length(p_expected_session_key) NOT BETWEEN 1 AND 160
+    OR p_expected_session_key !~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
+  ) THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '22023',
+      MESSAGE = 'office_agent_session_binding_invalid_expected_identity';
+  END IF;
+
+  v_next_missing := p_next_agent_bot_id IS NULL AND p_next_session_key IS NULL;
+  IF NOT v_next_missing AND (
+    p_next_agent_bot_id IS NULL
+    OR p_next_session_key IS NULL
+    OR pg_catalog.char_length(p_next_session_key) NOT BETWEEN 1 AND 160
+    OR p_next_session_key !~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
+  ) THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '22023',
+      MESSAGE = 'office_agent_session_binding_invalid_next_identity';
+  END IF;
+
+  -- Every mutation for one Office agent serializes through its public owner
+  -- row, including the expected-null first-bind case where no private row yet
+  -- exists to lock.
+  SELECT office_agent.provider, office_agent.is_published
+  INTO v_office_provider, v_office_is_published
+  FROM public.circle_office_agents AS office_agent
+  WHERE office_agent.id = p_office_agent_id
+    AND office_agent.circle_id = p_circle_id
+    AND office_agent.owner_id = v_uid
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42501',
+      MESSAGE = 'office_agent_session_binding_agent_scope_required';
+  END IF;
+
+  IF NOT v_next_missing THEN
+    IF v_office_is_published IS DISTINCT FROM true THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '22023',
+        MESSAGE = 'office_agent_session_binding_published_agent_required';
+    END IF;
+    IF v_office_provider IS DISTINCT FROM 'openswan' THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '22023',
+        MESSAGE = 'office_agent_session_binding_office_provider_required';
+    END IF;
+
+    SELECT agent_bot.metadata ->> 'provider'
+    INTO v_bot_provider
+    FROM public.agents_bots AS agent_bot
+    WHERE agent_bot.id = p_next_agent_bot_id
+      AND agent_bot.owner_id = v_uid
+    FOR SHARE;
+
+    IF NOT FOUND THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '42501',
+        MESSAGE = 'office_agent_session_binding_bot_ownership_required';
+    END IF;
+    IF v_bot_provider IS DISTINCT FROM 'openswan' THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '22023',
+        MESSAGE = 'office_agent_session_binding_bot_provider_required';
+    END IF;
+  END IF;
+
+  SELECT
+    binding.id,
+    binding.owner_id,
+    binding.agent_bot_id,
+    binding.session_key,
+    binding.updated_at
+  INTO
+    v_observed_binding_id,
+    v_observed_owner_id,
+    v_observed_agent_bot_id,
+    v_observed_session_key,
+    v_observed_updated_at
+  FROM public.office_agent_session_bindings AS binding
+  WHERE binding.office_agent_id = p_office_agent_id
+  FOR UPDATE;
+  v_has_observed := FOUND;
+
+  IF v_has_observed AND v_observed_owner_id IS DISTINCT FROM v_uid THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42501',
+      MESSAGE = 'office_agent_session_binding_ownership_conflict';
+  END IF;
+
+  mutation_contract_version := 1;
+  office_agent_id := p_office_agent_id;
+  mutation_operation := CASE
+    WHEN v_next_missing THEN 'clear'
+    WHEN v_expected_missing THEN 'bind'
+    ELSE 'move'
+  END;
+  observed_binding_id := CASE WHEN v_has_observed THEN v_observed_binding_id ELSE NULL END;
+  observed_agent_bot_id := CASE WHEN v_has_observed THEN v_observed_agent_bot_id ELSE NULL END;
+  observed_session_key := CASE WHEN v_has_observed THEN v_observed_session_key ELSE NULL END;
+  observed_updated_at := CASE WHEN v_has_observed THEN v_observed_updated_at ELSE NULL END;
+
+  v_expected_matches := CASE
+    WHEN v_expected_missing THEN NOT v_has_observed
+    ELSE v_has_observed
+      AND v_observed_binding_id = p_expected_binding_id
+      AND v_observed_agent_bot_id = p_expected_agent_bot_id
+      AND v_observed_session_key = p_expected_session_key
+      AND v_observed_updated_at = p_expected_updated_at
+  END;
+
+  IF NOT v_expected_matches THEN
+    mutation_disposition := 'conflict';
+    result_binding_id := observed_binding_id;
+    result_agent_bot_id := observed_agent_bot_id;
+    result_session_key := observed_session_key;
+    result_updated_at := observed_updated_at;
+    RETURN NEXT;
+    RETURN;
+  END IF;
+
+  IF v_next_missing AND NOT v_has_observed THEN
+    mutation_disposition := 'unchanged';
+    RETURN NEXT;
+    RETURN;
+  END IF;
+  IF v_has_observed
+     AND NOT v_next_missing
+     AND v_observed_agent_bot_id = p_next_agent_bot_id
+     AND v_observed_session_key = p_next_session_key THEN
+    mutation_disposition := 'unchanged';
+    result_binding_id := observed_binding_id;
+    result_agent_bot_id := observed_agent_bot_id;
+    result_session_key := observed_session_key;
+    result_updated_at := observed_updated_at;
+    RETURN NEXT;
+    RETURN;
+  END IF;
+
+  IF v_next_missing THEN
+    DELETE FROM public.office_agent_session_bindings AS binding
+    WHERE binding.id = v_observed_binding_id
+      AND binding.office_agent_id = p_office_agent_id
+      AND binding.owner_id = v_uid;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '40001',
+        MESSAGE = 'office_agent_session_binding_locked_clear_failed';
+    END IF;
+    mutation_disposition := 'applied';
+    RETURN NEXT;
+    RETURN;
+  END IF;
+
+  IF NOT v_has_observed THEN
+    INSERT INTO public.office_agent_session_bindings (
+      office_agent_id,
+      owner_id,
+      agent_bot_id,
+      session_key
+    ) VALUES (
+      p_office_agent_id,
+      v_uid,
+      p_next_agent_bot_id,
+      p_next_session_key
+    )
+    ON CONFLICT DO NOTHING
+    RETURNING id, agent_bot_id, session_key, updated_at
+    INTO result_binding_id, result_agent_bot_id, result_session_key, result_updated_at;
+
+    IF result_binding_id IS NULL THEN
+      mutation_disposition := 'target_conflict';
+    ELSE
+      mutation_disposition := 'applied';
+    END IF;
+    RETURN NEXT;
+    RETURN;
+  END IF;
+
+  BEGIN
+    UPDATE public.office_agent_session_bindings AS binding
+    SET agent_bot_id = p_next_agent_bot_id,
+        session_key = p_next_session_key,
+        updated_at = GREATEST(
+          pg_catalog.clock_timestamp(),
+          binding.updated_at + INTERVAL '1 microsecond'
+        )
+    WHERE binding.id = v_observed_binding_id
+      AND binding.office_agent_id = p_office_agent_id
+      AND binding.owner_id = v_uid
+    RETURNING binding.id, binding.agent_bot_id, binding.session_key, binding.updated_at
+    INTO result_binding_id, result_agent_bot_id, result_session_key, result_updated_at;
+  EXCEPTION WHEN unique_violation THEN
+    mutation_disposition := 'target_conflict';
+    result_binding_id := observed_binding_id;
+    result_agent_bot_id := observed_agent_bot_id;
+    result_session_key := observed_session_key;
+    result_updated_at := observed_updated_at;
+    RETURN NEXT;
+    RETURN;
+  END;
+
+  IF result_binding_id IS NULL THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '40001',
+      MESSAGE = 'office_agent_session_binding_locked_move_failed';
+  END IF;
+  mutation_disposition := 'applied';
+  RETURN NEXT;
+END;
+$function$;
+
+-- The old APIs cannot express an expected row. Keep their definitions only so
+-- stale clients fail with denied execution rather than silently overwriting a
+-- newer route.
+REVOKE ALL ON FUNCTION public.set_office_agent_session_binding(uuid, uuid, text)
+  FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.clear_office_agent_session_binding(uuid)
+  FROM PUBLIC, anon, authenticated, service_role;
+
+REVOKE ALL ON FUNCTION public.compare_and_set_office_agent_session_binding_v1(
+  uuid, uuid, uuid, uuid, text, timestamptz, uuid, text
+) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.compare_and_set_office_agent_session_binding_v1(
+  uuid, uuid, uuid, uuid, text, timestamptz, uuid, text
+) TO authenticated;
+
+COMMENT ON FUNCTION public.set_office_agent_session_binding(uuid, uuid, text) IS
+  'Deprecated non-CAS Office session binding API; execution is revoked. Use compare_and_set_office_agent_session_binding_v1.';
+COMMENT ON FUNCTION public.clear_office_agent_session_binding(uuid) IS
+  'Deprecated non-CAS Office session clear API; execution is revoked. Use compare_and_set_office_agent_session_binding_v1.';
+COMMENT ON FUNCTION public.compare_and_set_office_agent_session_binding_v1(
+  uuid, uuid, uuid, uuid, text, timestamptz, uuid, text
+) IS
+  'Owner/circle-bound exact compare-and-set for one private Office-agent OpenSwan route. Returns the locked precondition and exact postcondition without replay.';
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+-- END SECTION 49: Exact Office-agent session binding compare-and-set
+
+-- ═════════════════════════════════════════════════════════════════════════════
+-- §50. Tenant isolation convergence
+-- Source: 20260821120000_tenant_isolation_convergence.sql
+-- ═════════════════════════════════════════════════════════════════════════════
+-- BEGIN SECTION 50: Tenant isolation convergence
+-- Tenant-isolation convergence for personal credentials, Circle rows,
+-- private Chat derivatives, reports, and private Storage objects.
+--
+-- PostgreSQL permissive RLS policies are ORed. Several historical policies
+-- admitted a row through creator/installer/org authority without also proving
+-- that the caller is still a member of the exact Circle. This migration adds
+-- restrictive guards (AND semantics), fully converges the most sensitive
+-- policy sets, and makes ambiguous legacy private-thread derivatives fail
+-- closed instead of guessing their audience.
+
+BEGIN;
+
+DO $tenant_isolation_preflight$
+DECLARE
+  required_table text;
+  required_column text;
+BEGIN
+  FOREACH required_table IN ARRAY ARRAY[
+    'public.circles',
+    'public.profiles',
+    'public.featured_trades',
+    'public.featured_trade_executions',
+    'public.spirit_learnings',
+    'public.user_points',
+    'public.user_badges',
+    'public.user_xp',
+    'public.research_agent_runs',
+    'public.circle_members',
+    'public.circle_chat_threads',
+    'public.circle_chat_thread_members',
+    'public.messages',
+    'public.direct_messages',
+    'public.message_attachments',
+    'public.agent_plans',
+    'public.agent_plan_steps',
+    'public.agent_plan_questions',
+    'public.agent_plan_artifacts',
+    'public.chat_checkpoints',
+    'public.computer_use_schedules',
+    'public.scheduled_actions',
+    'public.integrations',
+    'public.user_site_credentials',
+    'public.user_api_keys',
+    'public.oauth_provider_credentials',
+    'public.user_google_credentials',
+    'public.user_github_tokens',
+    'public.agent_connect_tokens',
+    'public.circle_integrations',
+    'public.circle_integration_secrets',
+    'public.circle_github_connections',
+    'public.tasks',
+    'public.circle_missions',
+    'public.circle_rooms',
+    'public.project_rooms',
+    'public.room_files',
+    'public.room_secrets',
+    'public.reports',
+    'public.slack_connections',
+    'public.teams_connections',
+    'storage.buckets',
+    'storage.objects',
+    'realtime.messages'
+  ]
+  LOOP
+    IF to_regclass(required_table) IS NULL THEN
+      RAISE EXCEPTION 'tenant_isolation_convergence: required table % is missing', required_table
+        USING ERRCODE = '42P01';
+    END IF;
+  END LOOP;
+
+  FOREACH required_column IN ARRAY ARRAY[
+    'public.circles.api_key',
+    'public.circles.discord_bot_token',
+    'public.circles.discord_webhook_url',
+    'public.circle_github_connections.webhook_secret',
+    'public.user_xp.user_id'
+  ]
+  LOOP
+    IF NOT EXISTS (
+      SELECT 1
+      FROM information_schema.columns AS required_column_info
+      WHERE required_column_info.table_schema = split_part(required_column, '.', 1)
+        AND required_column_info.table_name = split_part(required_column, '.', 2)
+        AND required_column_info.column_name = split_part(required_column, '.', 3)
+    ) THEN
+      RAISE EXCEPTION 'tenant_isolation_convergence: required column % is missing', required_column
+        USING ERRCODE = '42703';
+    END IF;
+  END LOOP;
+
+  IF to_regprocedure('public.message_thread_visible_to_current_user(uuid,uuid)') IS NULL THEN
+    RAISE EXCEPTION 'tenant_isolation_convergence: apply the canonical thread-authority migration first'
+      USING ERRCODE = '42883';
+  END IF;
+
+  IF to_regprocedure('public.message_attachment_row_visible_v1(uuid,uuid,uuid,uuid)') IS NULL THEN
+    RAISE EXCEPTION 'tenant_isolation_convergence: apply message-attachment visibility integrity first'
+      USING ERRCODE = '42883';
+  END IF;
+
+  IF to_regprocedure('realtime.topic()') IS NULL THEN
+    RAISE EXCEPTION 'tenant_isolation_convergence: realtime.topic() is unavailable'
+      USING ERRCODE = '42883';
+  END IF;
+END
+$tenant_isolation_preflight$;
+
+CREATE OR REPLACE FUNCTION public.current_user_is_exact_circle_member_v1(
+  p_circle_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    auth.uid() IS NOT NULL
+    AND p_circle_id IS NOT NULL
+    AND EXISTS (
+      SELECT 1
+      FROM public.circle_members AS membership
+      WHERE membership.circle_id = p_circle_id
+        AND membership.user_id = auth.uid()
+    );
+$function$;
+
+REVOKE ALL ON FUNCTION public.current_user_is_exact_circle_member_v1(uuid)
+  FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.current_user_is_exact_circle_member_v1(uuid)
+  TO authenticated;
+
+-- Raw Circle rows are exact-current-member data. Public discovery stays on
+-- discover_public_circles(), whose bounded projection intentionally excludes
+-- invite codes, settings, credentials, and every future raw column.
+ALTER TABLE public.circles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.circles FORCE ROW LEVEL SECURITY;
+
+DO $drop_circle_policies$
+DECLARE
+  policy_row record;
+BEGIN
+  FOR policy_row IN
+    SELECT policyname
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'circles'
+  LOOP
+    EXECUTE pg_catalog.format(
+      'DROP POLICY %I ON public.circles',
+      policy_row.policyname
+    );
+  END LOOP;
+END
+$drop_circle_policies$;
+
+CREATE POLICY circles_exact_member_select_v1
+ON public.circles
+FOR SELECT
+TO authenticated
+USING (public.current_user_is_exact_circle_member_v1(id));
+
+CREATE POLICY circles_creator_insert_v1
+ON public.circles
+FOR INSERT
+TO authenticated
+WITH CHECK (auth.uid() IS NOT NULL AND created_by = auth.uid());
+
+CREATE POLICY circles_current_creator_update_v1
+ON public.circles
+FOR UPDATE
+TO authenticated
+USING (
+  created_by = auth.uid()
+  AND public.current_user_is_exact_circle_member_v1(id)
+)
+WITH CHECK (
+  created_by = auth.uid()
+  AND public.current_user_is_exact_circle_member_v1(id)
+);
+
+CREATE POLICY circles_current_creator_delete_v1
+ON public.circles
+FOR DELETE
+TO authenticated
+USING (
+  created_by = auth.uid()
+  AND public.current_user_is_exact_circle_member_v1(id)
+);
+
+REVOKE ALL ON TABLE public.circles FROM PUBLIC, anon;
+REVOKE SELECT ON TABLE public.circles FROM authenticated;
+GRANT INSERT, UPDATE, DELETE ON TABLE public.circles TO authenticated;
+GRANT ALL ON TABLE public.circles TO service_role;
+
+-- RLS controls rows, not columns. Remove every historical column-level SELECT
+-- grant before installing a bounded member projection on the base table. The
+-- three retained capability secrets remain stored for creator/service control,
+-- but an authenticated SELECT cannot name them or obtain them through '*'.
+DO $revoke_circle_column_selects$
+DECLARE
+  column_row record;
+BEGIN
+  FOR column_row IN
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'circles'
+  LOOP
+    EXECUTE pg_catalog.format(
+      'REVOKE SELECT (%I) ON TABLE public.circles FROM PUBLIC, anon, authenticated',
+      column_row.column_name
+    );
+  END LOOP;
+END
+$revoke_circle_column_selects$;
+
+GRANT SELECT (
+  id,
+  name,
+  description,
+  invite_code,
+  max_members,
+  created_by,
+  created_at,
+  discord_guild_id,
+  discord_connected_at,
+  vibe,
+  rules,
+  circle_image_url,
+  org_id,
+  is_public,
+  settings,
+  circle_type,
+  icon,
+  accent_color,
+  check_in_format,
+  tags
+) ON TABLE public.circles TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.get_circle_capability_secrets_v1(
+  p_circle_id uuid
+)
+RETURNS TABLE (
+  circle_id uuid,
+  api_key text,
+  discord_bot_token text,
+  discord_webhook_url text
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    circle.id,
+    circle.api_key,
+    circle.discord_bot_token,
+    circle.discord_webhook_url
+  FROM public.circles AS circle
+  WHERE circle.id = p_circle_id
+    AND (
+      auth.role() = 'service_role'
+      OR (
+        auth.uid() IS NOT NULL
+        AND circle.created_by = auth.uid()
+        AND public.current_user_is_exact_circle_member_v1(circle.id)
+      )
+    );
+$function$;
+
+REVOKE ALL ON FUNCTION public.get_circle_capability_secrets_v1(uuid)
+  FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.get_circle_capability_secrets_v1(uuid)
+  TO authenticated, service_role;
+
+-- circle_members cannot query itself from its policy without recursion. The
+-- fixed-path SECURITY DEFINER helper above gives SELECT/UPDATE/DELETE exact
+-- current-member AND semantics while leaving creator bootstrap/public-join
+-- INSERT policies intact.
+ALTER TABLE public.circle_members ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.circle_members FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS circle_members_exact_member_select_guard_v1
+  ON public.circle_members;
+CREATE POLICY circle_members_exact_member_select_guard_v1
+ON public.circle_members
+AS RESTRICTIVE
+FOR SELECT
+TO authenticated
+USING (public.current_user_is_exact_circle_member_v1(circle_id));
+
+DROP POLICY IF EXISTS circle_members_exact_member_update_guard_v1
+  ON public.circle_members;
+CREATE POLICY circle_members_exact_member_update_guard_v1
+ON public.circle_members
+AS RESTRICTIVE
+FOR UPDATE
+TO authenticated
+USING (public.current_user_is_exact_circle_member_v1(circle_id))
+WITH CHECK (public.current_user_is_exact_circle_member_v1(circle_id));
+
+DROP POLICY IF EXISTS circle_members_exact_member_delete_guard_v1
+  ON public.circle_members;
+CREATE POLICY circle_members_exact_member_delete_guard_v1
+ON public.circle_members
+AS RESTRICTIVE
+FOR DELETE
+TO authenticated
+USING (public.current_user_is_exact_circle_member_v1(circle_id));
+
+-- Direct messages are private participant records, independent of Circle
+-- membership. This restrictive SELECT defeats any permissive-policy drift.
+ALTER TABLE public.direct_messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.direct_messages FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS direct_messages_exact_participant_select_guard_v1
+  ON public.direct_messages;
+CREATE POLICY direct_messages_exact_participant_select_guard_v1
+ON public.direct_messages
+AS RESTRICTIVE
+FOR SELECT
+TO authenticated
+USING (sender_id = auth.uid() OR receiver_id = auth.uid());
+
+-- Keep the canonical Chat helper current and install restrictive SELECT guards
+-- on every private-thread root. Existing command-specific write policies keep
+-- their narrower mutation semantics.
+CREATE OR REPLACE FUNCTION public.message_thread_visible_to_current_user(
+  p_circle_id uuid,
+  p_thread_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    auth.uid() IS NOT NULL
+    AND p_circle_id IS NOT NULL
+    AND p_thread_id IS NOT NULL
+    AND EXISTS (
+      SELECT 1
+      FROM public.circle_members AS membership
+      JOIN public.circle_chat_threads AS thread
+        ON thread.id = p_thread_id
+       AND thread.circle_id = p_circle_id
+      WHERE membership.circle_id = p_circle_id
+        AND membership.user_id = auth.uid()
+        AND (
+          thread.visibility = 'circle'
+          OR thread.created_by = auth.uid()
+          OR EXISTS (
+            SELECT 1
+            FROM public.circle_chat_thread_members AS thread_member
+            WHERE thread_member.thread_id = thread.id
+              AND thread_member.user_id = auth.uid()
+          )
+        )
+    );
+$function$;
+
+REVOKE ALL ON FUNCTION public.message_thread_visible_to_current_user(uuid, uuid)
+  FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.message_thread_visible_to_current_user(uuid, uuid)
+  TO authenticated;
+
+DO $thread_circle_unique$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_constraint
+    WHERE conrelid = 'public.circle_chat_threads'::regclass
+      AND conname = 'circle_chat_threads_id_circle_unique_v1'
+  ) THEN
+    ALTER TABLE public.circle_chat_threads
+      ADD CONSTRAINT circle_chat_threads_id_circle_unique_v1
+      UNIQUE (id, circle_id);
+  END IF;
+END
+$thread_circle_unique$;
+
+ALTER TABLE public.circle_chat_threads FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.circle_chat_thread_members FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.messages FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.message_attachments FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS circle_chat_threads_exact_visibility_guard_v1
+  ON public.circle_chat_threads;
+CREATE POLICY circle_chat_threads_exact_visibility_guard_v1
+ON public.circle_chat_threads
+AS RESTRICTIVE
+FOR SELECT
+TO authenticated
+USING (public.message_thread_visible_to_current_user(circle_id, id));
+
+DROP POLICY IF EXISTS circle_chat_thread_members_exact_visibility_guard_v1
+  ON public.circle_chat_thread_members;
+CREATE POLICY circle_chat_thread_members_exact_visibility_guard_v1
+ON public.circle_chat_thread_members
+AS RESTRICTIVE
+FOR SELECT
+TO authenticated
+USING (
+  EXISTS (
+    SELECT 1
+    FROM public.circle_chat_threads AS thread
+    WHERE thread.id = circle_chat_thread_members.thread_id
+      AND public.message_thread_visible_to_current_user(thread.circle_id, thread.id)
+  )
+);
+
+DROP POLICY IF EXISTS messages_exact_thread_visibility_guard_v1
+  ON public.messages;
+CREATE POLICY messages_exact_thread_visibility_guard_v1
+ON public.messages
+AS RESTRICTIVE
+FOR SELECT
+TO authenticated
+USING (public.message_thread_visible_to_current_user(circle_id, thread_id));
+
+DROP POLICY IF EXISTS message_attachments_exact_thread_visibility_guard_v2
+  ON public.message_attachments;
+CREATE POLICY message_attachments_exact_thread_visibility_guard_v2
+ON public.message_attachments
+AS RESTRICTIVE
+FOR SELECT
+TO authenticated
+USING (
+  public.message_attachment_row_visible_v1(
+    message_id,
+    circle_id,
+    thread_id,
+    user_id
+  )
+);
+
+-- Agent plans historically stored an arbitrary text thread_id and exposed all
+-- descendants Circle-wide. Canonical UUID lineage is backfilled only when the
+-- legacy value names a real thread in the same Circle. A UUID-looking legacy
+-- value that cannot be proven is ambiguous private data and fails closed;
+-- null/non-UUID legacy plans retain their documented Circle-wide behavior.
+ALTER TABLE public.agent_plans
+  ADD COLUMN IF NOT EXISTS chat_thread_id uuid;
+
+UPDATE public.agent_plans AS plan
+SET chat_thread_id = thread.id
+FROM public.circle_chat_threads AS thread
+WHERE plan.chat_thread_id IS NULL
+  AND pg_catalog.btrim(COALESCE(plan.thread_id, ''))
+      ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+  AND thread.id = pg_catalog.btrim(plan.thread_id)::uuid
+  AND thread.circle_id = plan.circle_id;
+
+DO $agent_plan_thread_fk$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_constraint
+    WHERE conrelid = 'public.agent_plans'::regclass
+      AND conname = 'agent_plans_chat_thread_circle_fk_v1'
+  ) THEN
+    ALTER TABLE public.agent_plans
+      ADD CONSTRAINT agent_plans_chat_thread_circle_fk_v1
+      FOREIGN KEY (chat_thread_id, circle_id)
+      REFERENCES public.circle_chat_threads(id, circle_id)
+      ON DELETE CASCADE;
+  END IF;
+END
+$agent_plan_thread_fk$;
+
+CREATE INDEX IF NOT EXISTS idx_agent_plans_chat_thread_v1
+  ON public.agent_plans(circle_id, chat_thread_id, updated_at DESC)
+  WHERE chat_thread_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION public.agent_plan_scope_visible_v1(
+  p_circle_id uuid,
+  p_chat_thread_id uuid,
+  p_legacy_thread_id text
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    public.current_user_is_exact_circle_member_v1(p_circle_id)
+    AND CASE
+      WHEN p_chat_thread_id IS NOT NULL THEN
+        public.message_thread_visible_to_current_user(
+          p_circle_id,
+          p_chat_thread_id
+        )
+      WHEN pg_catalog.btrim(COALESCE(p_legacy_thread_id, '')) = '' THEN true
+      WHEN pg_catalog.btrim(p_legacy_thread_id)
+        ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+        THEN false
+      ELSE true
+    END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.agent_plan_child_scope_visible_v1(
+  p_plan_id uuid,
+  p_circle_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.agent_plans AS plan
+    WHERE plan.id = p_plan_id
+      AND plan.circle_id = p_circle_id
+      AND public.agent_plan_scope_visible_v1(
+        plan.circle_id,
+        plan.chat_thread_id,
+        plan.thread_id
+      )
+  );
+$function$;
+
+REVOKE ALL ON FUNCTION public.agent_plan_scope_visible_v1(uuid, uuid, text)
+  FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.agent_plan_child_scope_visible_v1(uuid, uuid)
+  FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.agent_plan_scope_visible_v1(uuid, uuid, text)
+  TO authenticated;
+GRANT EXECUTE ON FUNCTION public.agent_plan_child_scope_visible_v1(uuid, uuid)
+  TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.guard_agent_plan_thread_scope_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  legacy_thread_id uuid;
+BEGIN
+  IF TG_OP = 'UPDATE' AND (
+    NEW.id IS DISTINCT FROM OLD.id
+    OR NEW.circle_id IS DISTINCT FROM OLD.circle_id
+    OR NEW.thread_id IS DISTINCT FROM OLD.thread_id
+    OR NEW.chat_thread_id IS DISTINCT FROM OLD.chat_thread_id
+    OR NEW.created_by IS DISTINCT FROM OLD.created_by
+  ) THEN
+    RAISE EXCEPTION 'agent_plan_scope_is_immutable'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF pg_catalog.btrim(COALESCE(NEW.thread_id, ''))
+      ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' THEN
+    legacy_thread_id := pg_catalog.btrim(NEW.thread_id)::uuid;
+
+    IF NEW.chat_thread_id IS NULL AND EXISTS (
+      SELECT 1
+      FROM public.circle_chat_threads AS thread
+      WHERE thread.id = legacy_thread_id
+        AND thread.circle_id = NEW.circle_id
+    ) THEN
+      NEW.chat_thread_id := legacy_thread_id;
+    END IF;
+
+    IF NEW.chat_thread_id IS NULL
+       OR NEW.chat_thread_id IS DISTINCT FROM legacy_thread_id THEN
+      RAISE EXCEPTION 'agent_plan_thread_scope_is_ambiguous'
+        USING ERRCODE = '23514';
+    END IF;
+  END IF;
+
+  IF NEW.chat_thread_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1
+    FROM public.circle_chat_threads AS thread
+    WHERE thread.id = NEW.chat_thread_id
+      AND thread.circle_id = NEW.circle_id
+  ) THEN
+    RAISE EXCEPTION 'agent_plan_thread_circle_mismatch'
+      USING ERRCODE = '23514';
+  END IF;
+
+  RETURN NEW;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION public.guard_agent_plan_thread_scope_v1()
+  FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS agent_plans_guard_thread_scope_v1
+  ON public.agent_plans;
+CREATE TRIGGER agent_plans_guard_thread_scope_v1
+BEFORE INSERT OR UPDATE ON public.agent_plans
+FOR EACH ROW
+EXECUTE FUNCTION public.guard_agent_plan_thread_scope_v1();
+
+ALTER TABLE public.agent_plans ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.agent_plans FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.agent_plan_steps ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.agent_plan_steps FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.agent_plan_questions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.agent_plan_questions FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.agent_plan_artifacts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.agent_plan_artifacts FORCE ROW LEVEL SECURITY;
+
+DO $drop_agent_plan_policies$
+DECLARE
+  table_name text;
+  policy_row record;
+BEGIN
+  FOREACH table_name IN ARRAY ARRAY[
+    'agent_plans',
+    'agent_plan_steps',
+    'agent_plan_questions',
+    'agent_plan_artifacts'
+  ]
+  LOOP
+    FOR policy_row IN
+      SELECT policyname
+      FROM pg_catalog.pg_policies
+      WHERE schemaname = 'public'
+        AND tablename = table_name
+    LOOP
+      EXECUTE pg_catalog.format(
+        'DROP POLICY %I ON public.%I',
+        policy_row.policyname,
+        table_name
+      );
+    END LOOP;
+  END LOOP;
+END
+$drop_agent_plan_policies$;
+
+CREATE POLICY agent_plans_exact_scope_select_v1
+ON public.agent_plans
+FOR SELECT
+TO authenticated
+USING (
+  public.agent_plan_scope_visible_v1(circle_id, chat_thread_id, thread_id)
+);
+
+CREATE POLICY agent_plans_exact_scope_insert_v1
+ON public.agent_plans
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  created_by = auth.uid()
+  AND public.agent_plan_scope_visible_v1(circle_id, chat_thread_id, thread_id)
+);
+
+CREATE POLICY agent_plans_exact_scope_update_v1
+ON public.agent_plans
+FOR UPDATE
+TO authenticated
+USING (
+  created_by = auth.uid()
+  AND public.agent_plan_scope_visible_v1(circle_id, chat_thread_id, thread_id)
+)
+WITH CHECK (
+  created_by = auth.uid()
+  AND public.agent_plan_scope_visible_v1(circle_id, chat_thread_id, thread_id)
+);
+
+CREATE POLICY agent_plans_exact_scope_delete_v1
+ON public.agent_plans
+FOR DELETE
+TO authenticated
+USING (
+  created_by = auth.uid()
+  AND public.agent_plan_scope_visible_v1(circle_id, chat_thread_id, thread_id)
+);
+
+CREATE POLICY agent_plan_steps_exact_scope_all_v1
+ON public.agent_plan_steps
+FOR ALL
+TO authenticated
+USING (public.agent_plan_child_scope_visible_v1(plan_id, circle_id))
+WITH CHECK (public.agent_plan_child_scope_visible_v1(plan_id, circle_id));
+
+CREATE POLICY agent_plan_questions_exact_scope_all_v1
+ON public.agent_plan_questions
+FOR ALL
+TO authenticated
+USING (public.agent_plan_child_scope_visible_v1(plan_id, circle_id))
+WITH CHECK (public.agent_plan_child_scope_visible_v1(plan_id, circle_id));
+
+CREATE POLICY agent_plan_artifacts_exact_scope_all_v1
+ON public.agent_plan_artifacts
+FOR ALL
+TO authenticated
+USING (public.agent_plan_child_scope_visible_v1(plan_id, circle_id))
+WITH CHECK (public.agent_plan_child_scope_visible_v1(plan_id, circle_id));
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_plans TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_plan_steps TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_plan_questions TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.agent_plan_artifacts TO authenticated;
+GRANT ALL ON TABLE public.agent_plans TO service_role;
+GRANT ALL ON TABLE public.agent_plan_steps TO service_role;
+GRANT ALL ON TABLE public.agent_plan_questions TO service_role;
+GRANT ALL ON TABLE public.agent_plan_artifacts TO service_role;
+
+-- Checkpoints have no trustworthy legacy thread lineage. Add a canonical UUID
+-- without guessing a backfill, and hide/reject every NULL row for authenticated
+-- callers. Trusted service maintenance can still inspect legacy rows.
+ALTER TABLE public.chat_checkpoints
+  ADD COLUMN IF NOT EXISTS chat_thread_id uuid;
+
+DO $checkpoint_thread_fk$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_constraint
+    WHERE conrelid = 'public.chat_checkpoints'::regclass
+      AND conname = 'chat_checkpoints_chat_thread_circle_fk_v1'
+  ) THEN
+    ALTER TABLE public.chat_checkpoints
+      ADD CONSTRAINT chat_checkpoints_chat_thread_circle_fk_v1
+      FOREIGN KEY (chat_thread_id, circle_id)
+      REFERENCES public.circle_chat_threads(id, circle_id)
+      ON DELETE CASCADE;
+  END IF;
+END
+$checkpoint_thread_fk$;
+
+CREATE INDEX IF NOT EXISTS idx_chat_checkpoints_chat_thread_created_v1
+  ON public.chat_checkpoints(circle_id, chat_thread_id, created_at DESC)
+  WHERE chat_thread_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION public.chat_checkpoints_enforce_immutable()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  IF (
+    NEW.id IS DISTINCT FROM OLD.id
+    OR NEW.circle_id IS DISTINCT FROM OLD.circle_id
+    OR NEW.chat_thread_id IS DISTINCT FROM OLD.chat_thread_id
+    OR NEW.session_key IS DISTINCT FROM OLD.session_key
+    OR NEW.plan_id IS DISTINCT FROM OLD.plan_id
+    OR NEW.tool_kind IS DISTINCT FROM OLD.tool_kind
+    OR NEW.target_kind IS DISTINCT FROM OLD.target_kind
+    OR NEW.target_id IS DISTINCT FROM OLD.target_id
+    OR NEW.before_json IS DISTINCT FROM OLD.before_json
+    OR NEW.after_json IS DISTINCT FROM OLD.after_json
+    OR NEW.diff_summary IS DISTINCT FROM OLD.diff_summary
+    OR NEW.hash_before IS DISTINCT FROM OLD.hash_before
+    OR NEW.hash_after IS DISTINCT FROM OLD.hash_after
+    OR NEW.created_by IS DISTINCT FROM OLD.created_by
+    OR NEW.created_at IS DISTINCT FROM OLD.created_at
+  ) THEN
+    RAISE EXCEPTION 'chat_checkpoints snapshot is immutable after commit';
+  END IF;
+  RETURN NEW;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION public.chat_checkpoints_enforce_immutable()
+  FROM PUBLIC, anon, authenticated;
+
+ALTER TABLE public.chat_checkpoints ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.chat_checkpoints FORCE ROW LEVEL SECURITY;
+
+DO $drop_checkpoint_policies$
+DECLARE
+  policy_row record;
+BEGIN
+  FOR policy_row IN
+    SELECT policyname
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'chat_checkpoints'
+  LOOP
+    EXECUTE pg_catalog.format(
+      'DROP POLICY %I ON public.chat_checkpoints',
+      policy_row.policyname
+    );
+  END LOOP;
+END
+$drop_checkpoint_policies$;
+
+CREATE POLICY chat_checkpoints_exact_thread_select_v1
+ON public.chat_checkpoints
+FOR SELECT
+TO authenticated
+USING (
+  chat_thread_id IS NOT NULL
+  AND public.message_thread_visible_to_current_user(circle_id, chat_thread_id)
+);
+
+CREATE POLICY chat_checkpoints_exact_thread_insert_v1
+ON public.chat_checkpoints
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  created_by = auth.uid()
+  AND chat_thread_id IS NOT NULL
+  AND public.message_thread_visible_to_current_user(circle_id, chat_thread_id)
+);
+
+CREATE POLICY chat_checkpoints_exact_thread_update_v1
+ON public.chat_checkpoints
+FOR UPDATE
+TO authenticated
+USING (
+  chat_thread_id IS NOT NULL
+  AND public.message_thread_visible_to_current_user(circle_id, chat_thread_id)
+)
+WITH CHECK (
+  chat_thread_id IS NOT NULL
+  AND public.message_thread_visible_to_current_user(circle_id, chat_thread_id)
+);
+
+REVOKE ALL ON TABLE public.chat_checkpoints FROM PUBLIC, anon;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.chat_checkpoints TO authenticated;
+GRANT ALL ON TABLE public.chat_checkpoints TO service_role;
+
+-- Public discovery may identify a public Circle, but private Storage URLs are
+-- never part of that projection. Members resolve the current icon through the
+-- raw Circle row and an authenticated signed-URL read.
+CREATE OR REPLACE FUNCTION public.discover_public_circles(
+  p_search text DEFAULT NULL,
+  p_limit integer DEFAULT 50,
+  p_offset integer DEFAULT 0
+)
+RETURNS TABLE (
+  id uuid,
+  name text,
+  description text,
+  max_members integer,
+  created_at timestamptz,
+  circle_image_url text,
+  member_count bigint,
+  active_missions bigint,
+  is_member boolean
+)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  caller_id uuid := auth.uid();
+  normalized_search text := pg_catalog.left(
+    pg_catalog.btrim(COALESCE(p_search, '')),
+    80
+  );
+  bounded_limit integer := least(
+    greatest(COALESCE(p_limit, 50), 1),
+    50
+  );
+  bounded_offset integer := least(
+    greatest(COALESCE(p_offset, 0), 0),
+    500
+  );
+BEGIN
+  IF caller_id IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE = '28000', MESSAGE = 'authentication_required';
+  END IF;
+
+  RETURN QUERY
+  SELECT
+    circle.id,
+    circle.name,
+    circle.description,
+    circle.max_members,
+    circle.created_at,
+    NULL::text AS circle_image_url,
+    (
+      SELECT count(*)
+      FROM public.circle_members AS membership_count
+      WHERE membership_count.circle_id = circle.id
+    )::bigint AS member_count,
+    (
+      SELECT count(*)
+      FROM public.circle_missions AS mission
+      WHERE mission.circle_id = circle.id
+        AND mission.status = 'active'
+    )::bigint AS active_missions,
+    EXISTS (
+      SELECT 1
+      FROM public.circle_members AS caller_membership
+      WHERE caller_membership.circle_id = circle.id
+        AND caller_membership.user_id = caller_id
+    ) AS is_member
+  FROM public.circles AS circle
+  WHERE circle.is_public IS TRUE
+    AND (
+      normalized_search = ''
+      OR pg_catalog.strpos(
+        pg_catalog.lower(
+          COALESCE(circle.name, '') || ' ' || COALESCE(circle.description, '')
+        ),
+        pg_catalog.lower(normalized_search)
+      ) > 0
+    )
+  ORDER BY circle.created_at DESC, circle.id
+  LIMIT bounded_limit
+  OFFSET bounded_offset;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION public.discover_public_circles(text, integer, integer)
+  FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.discover_public_circles(text, integer, integer)
+  TO authenticated;
+
+-- Personal API-key rows retain the narrower non-OAuth policies from the OAuth
+-- control-plane migration. This restrictive owner guard composes with them and
+-- prevents a future/broad permissive policy from exposing another account.
+ALTER TABLE public.user_api_keys ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.user_api_keys FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS user_api_keys_exact_owner_guard_v1
+  ON public.user_api_keys;
+CREATE POLICY user_api_keys_exact_owner_guard_v1
+ON public.user_api_keys
+AS RESTRICTIVE
+FOR ALL
+TO authenticated
+USING (user_id = auth.uid())
+WITH CHECK (user_id = auth.uid());
+
+-- These legacy personal credential tables are client-managed but self-only.
+-- Drop every historical policy so an unknown FOR ALL/TO PUBLIC policy cannot
+-- OR around the canonical owner policies.
+DO $converge_personal_credential_policies$
+DECLARE
+  table_name text;
+  policy_row record;
+BEGIN
+  FOREACH table_name IN ARRAY ARRAY[
+    'integrations',
+    'user_site_credentials',
+    'agent_connect_tokens'
+  ]
+  LOOP
+    EXECUTE pg_catalog.format(
+      'ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY',
+      table_name
+    );
+    EXECUTE pg_catalog.format(
+      'ALTER TABLE public.%I FORCE ROW LEVEL SECURITY',
+      table_name
+    );
+
+    FOR policy_row IN
+      SELECT policyname
+      FROM pg_catalog.pg_policies
+      WHERE schemaname = 'public'
+        AND tablename = table_name
+    LOOP
+      EXECUTE pg_catalog.format(
+        'DROP POLICY %I ON public.%I',
+        policy_row.policyname,
+        table_name
+      );
+    END LOOP;
+  END LOOP;
+END
+$converge_personal_credential_policies$;
+
+CREATE POLICY integrations_owner_select_v1
+ON public.integrations FOR SELECT TO authenticated
+USING (user_id = auth.uid());
+CREATE POLICY integrations_owner_insert_v1
+ON public.integrations FOR INSERT TO authenticated
+WITH CHECK (user_id = auth.uid());
+CREATE POLICY integrations_owner_update_v1
+ON public.integrations FOR UPDATE TO authenticated
+USING (user_id = auth.uid())
+WITH CHECK (user_id = auth.uid());
+CREATE POLICY integrations_owner_delete_v1
+ON public.integrations FOR DELETE TO authenticated
+USING (user_id = auth.uid());
+
+CREATE POLICY user_site_credentials_owner_select_v1
+ON public.user_site_credentials FOR SELECT TO authenticated
+USING (user_id = auth.uid());
+CREATE POLICY user_site_credentials_owner_insert_v1
+ON public.user_site_credentials FOR INSERT TO authenticated
+WITH CHECK (user_id = auth.uid());
+CREATE POLICY user_site_credentials_owner_update_v1
+ON public.user_site_credentials FOR UPDATE TO authenticated
+USING (user_id = auth.uid())
+WITH CHECK (user_id = auth.uid());
+CREATE POLICY user_site_credentials_owner_delete_v1
+ON public.user_site_credentials FOR DELETE TO authenticated
+USING (user_id = auth.uid());
+
+CREATE POLICY agent_connect_tokens_owner_select_v1
+ON public.agent_connect_tokens FOR SELECT TO authenticated
+USING (user_id = auth.uid());
+CREATE POLICY agent_connect_tokens_owner_insert_v1
+ON public.agent_connect_tokens FOR INSERT TO authenticated
+WITH CHECK (
+  user_id = auth.uid()
+  AND (
+    circle_id IS NULL
+    OR public.current_user_is_exact_circle_member_v1(circle_id)
+  )
+);
+CREATE POLICY agent_connect_tokens_owner_delete_v1
+ON public.agent_connect_tokens FOR DELETE TO authenticated
+USING (user_id = auth.uid());
+
+REVOKE ALL ON TABLE public.integrations FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.integrations TO authenticated;
+GRANT ALL ON TABLE public.integrations TO service_role;
+
+REVOKE ALL ON TABLE public.user_site_credentials FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.user_site_credentials TO authenticated;
+GRANT ALL ON TABLE public.user_site_credentials TO service_role;
+
+REVOKE ALL ON TABLE public.agent_connect_tokens FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, DELETE ON TABLE public.agent_connect_tokens TO authenticated;
+GRANT ALL ON TABLE public.agent_connect_tokens TO service_role;
+
+-- OAuth credential rows contain bearer/refresh tokens and are never a browser
+-- table surface. FORCE RLS plus restrictive authenticated denials keep them
+-- service-only even if a permissive policy is accidentally added later.
+DO $force_service_only_credential_tables$
+DECLARE
+  table_name text;
+BEGIN
+  FOREACH table_name IN ARRAY ARRAY[
+    'oauth_provider_credentials',
+    'user_google_credentials',
+    'user_github_tokens'
+  ]
+  LOOP
+    EXECUTE pg_catalog.format(
+      'ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY',
+      table_name
+    );
+    EXECUTE pg_catalog.format(
+      'ALTER TABLE public.%I FORCE ROW LEVEL SECURITY',
+      table_name
+    );
+    EXECUTE pg_catalog.format(
+      'DROP POLICY IF EXISTS service_only_authenticated_deny_guard_v1 ON public.%I',
+      table_name
+    );
+    EXECUTE pg_catalog.format(
+      'CREATE POLICY service_only_authenticated_deny_guard_v1 ON public.%I AS RESTRICTIVE FOR ALL TO authenticated USING (false) WITH CHECK (false)',
+      table_name
+    );
+    EXECUTE pg_catalog.format(
+      'REVOKE ALL ON TABLE public.%I FROM PUBLIC, anon, authenticated',
+      table_name
+    );
+    EXECUTE pg_catalog.format(
+      'GRANT ALL ON TABLE public.%I TO service_role',
+      table_name
+    );
+  END LOOP;
+END
+$force_service_only_credential_tables$;
+
+-- Nested Circle integration secrets have no direct circle_id column. Require
+-- exact current membership in the parent integration as a restrictive guard;
+-- manager policies continue to decide which current members may read/write.
+CREATE OR REPLACE FUNCTION public.current_user_is_exact_integration_member_v1(
+  p_integration_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT auth.uid() IS NOT NULL AND EXISTS (
+    SELECT 1
+    FROM public.circle_integrations AS integration
+    JOIN public.circle_members AS membership
+      ON membership.circle_id = integration.circle_id
+     AND membership.user_id = auth.uid()
+    WHERE integration.id = p_integration_id
+  );
+$function$;
+
+REVOKE ALL ON FUNCTION public.current_user_is_exact_integration_member_v1(uuid)
+  FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.current_user_is_exact_integration_member_v1(uuid)
+  TO authenticated;
+
+DO $converge_circle_integration_secret_surface$
+DECLARE
+  secret_relkind "char";
+BEGIN
+  SELECT target.relkind
+  INTO secret_relkind
+  FROM pg_catalog.pg_class AS target
+  WHERE target.oid = 'public.circle_integration_secrets'::regclass;
+
+  IF secret_relkind IN ('r', 'p') THEN
+    ALTER TABLE public.circle_integration_secrets ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE public.circle_integration_secrets FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS circle_integration_secrets_exact_member_guard_v1
+      ON public.circle_integration_secrets;
+    CREATE POLICY circle_integration_secrets_exact_member_guard_v1
+    ON public.circle_integration_secrets
+    AS RESTRICTIVE
+    FOR ALL
+    TO authenticated
+    USING (public.current_user_is_exact_integration_member_v1(integration_id))
+    WITH CHECK (public.current_user_is_exact_integration_member_v1(integration_id));
+  ELSIF secret_relkind = 'v' THEN
+    -- §40 moves the ciphertext table out of public and leaves this
+    -- service-role-only compatibility view for existing Edge readers.
+    REVOKE ALL ON TABLE public.circle_integration_secrets
+      FROM PUBLIC, anon, authenticated, service_role;
+    GRANT SELECT ON TABLE public.circle_integration_secrets TO service_role;
+  ELSE
+    RAISE EXCEPTION
+      'tenant_isolation_convergence: unsupported public.circle_integration_secrets relkind %',
+      secret_relkind
+      USING ERRCODE = '42809';
+  END IF;
+END
+$converge_circle_integration_secret_surface$;
+
+-- GitHub webhook verification secrets are plaintext compatibility data consumed
+-- only by service-role webhook handling. Preserve the values, but remove every
+-- authenticated/public column grant and expose only the non-secret connection
+-- projection to Circle members. Existing row policies plus the catalog-wide
+-- restrictive circle_id guard continue to enforce exact current membership.
+ALTER TABLE public.circle_github_connections ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.circle_github_connections FORCE ROW LEVEL SECURITY;
+
+REVOKE SELECT ON TABLE public.circle_github_connections
+  FROM PUBLIC, anon, authenticated;
+
+DO $revoke_github_connection_column_selects$
+DECLARE
+  column_row record;
+BEGIN
+  FOR column_row IN
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'circle_github_connections'
+  LOOP
+    EXECUTE pg_catalog.format(
+      'REVOKE SELECT (%I) ON TABLE public.circle_github_connections FROM PUBLIC, anon, authenticated',
+      column_row.column_name
+    );
+  END LOOP;
+END
+$revoke_github_connection_column_selects$;
+
+GRANT SELECT (
+  id,
+  circle_id,
+  connected_by,
+  owner,
+  repo,
+  full_name,
+  default_branch,
+  webhook_id,
+  events_enabled,
+  notify_chat,
+  notify_activity,
+  is_active,
+  last_event_at,
+  event_count,
+  created_at,
+  updated_at
+) ON TABLE public.circle_github_connections TO authenticated;
+GRANT ALL ON TABLE public.circle_github_connections TO service_role;
+
+COMMENT ON COLUMN public.circle_github_connections.webhook_secret IS
+  'Legacy plaintext webhook HMAC secret retained for service-role verification compatibility; browser roles have no SELECT privilege.';
+
+-- Office terminal command/response broadcasts and Circle presence carry
+-- Circle-private runtime state. Realtime Authorization evaluates RLS on
+-- realtime.messages only for channels opened with private:true. Exact
+-- permissive policies admit the three canonical topic shapes; matching
+-- restrictive prefix guards prevent any historical broad policy from
+-- OR-admitting a malformed topic or a caller who lost Circle membership.
+-- DEPLOYMENT PREREQUISITE: disable Realtime "Allow public access" in the
+-- Supabase project settings and open these clients with private:true. SQL
+-- policies cannot change or prove that project-level switch; until it is off,
+-- this policy catalog is not evidence that private-channel RLS is enforced.
+CREATE OR REPLACE FUNCTION public.office_realtime_topic_is_protected_v1(
+  p_topic text
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog
+AS $function$
+  SELECT
+    p_topic LIKE 'office-terminal-cmd-%'
+    OR p_topic LIKE 'office-terminal-resp-%'
+    OR p_topic LIKE 'circle-presence-%';
+$function$;
+
+CREATE OR REPLACE FUNCTION public.office_realtime_topic_circle_id_v1(
+  p_topic text
+)
+RETURNS uuid
+LANGUAGE sql
+STABLE
+SET search_path = pg_catalog
+AS $function$
+  SELECT CASE
+    WHEN p_topic ~* '^(office-terminal-cmd|office-terminal-resp|circle-presence)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      THEN pg_catalog.right(p_topic, 36)::uuid
+    ELSE NULL
+  END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.office_realtime_topic_authorized_v1(
+  p_topic text
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    auth.uid() IS NOT NULL
+    AND EXISTS (
+      SELECT 1
+      FROM public.circle_members AS membership
+      WHERE membership.circle_id =
+        public.office_realtime_topic_circle_id_v1(p_topic)
+        AND membership.user_id = auth.uid()
+    );
+$function$;
+
+REVOKE ALL ON FUNCTION public.office_realtime_topic_is_protected_v1(text)
+  FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.office_realtime_topic_circle_id_v1(text)
+  FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.office_realtime_topic_authorized_v1(text)
+  FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.office_realtime_topic_is_protected_v1(text)
+  TO authenticated;
+GRANT EXECUTE ON FUNCTION public.office_realtime_topic_circle_id_v1(text)
+  TO authenticated;
+GRANT EXECUTE ON FUNCTION public.office_realtime_topic_authorized_v1(text)
+  TO authenticated;
+
+-- Hosted Supabase owns realtime.messages through supabase_realtime_admin and
+-- keeps RLS enabled. The postgres migration role may manage policies but must
+-- not ALTER the platform-owned table.
+
+DROP POLICY IF EXISTS office_realtime_exact_select_v1
+  ON realtime.messages;
+CREATE POLICY office_realtime_exact_select_v1
+ON realtime.messages
+FOR SELECT
+TO authenticated
+USING (
+  public.office_realtime_topic_authorized_v1(realtime.topic())
+);
+
+DROP POLICY IF EXISTS office_realtime_exact_insert_v1
+  ON realtime.messages;
+CREATE POLICY office_realtime_exact_insert_v1
+ON realtime.messages
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  public.office_realtime_topic_authorized_v1(realtime.topic())
+);
+
+DROP POLICY IF EXISTS office_realtime_prefix_select_guard_v1
+  ON realtime.messages;
+CREATE POLICY office_realtime_prefix_select_guard_v1
+ON realtime.messages
+AS RESTRICTIVE
+FOR SELECT
+TO authenticated
+USING (
+  NOT public.office_realtime_topic_is_protected_v1(realtime.topic())
+  OR public.office_realtime_topic_authorized_v1(realtime.topic())
+);
+
+DROP POLICY IF EXISTS office_realtime_prefix_insert_guard_v1
+  ON realtime.messages;
+CREATE POLICY office_realtime_prefix_insert_guard_v1
+ON realtime.messages
+AS RESTRICTIVE
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  NOT public.office_realtime_topic_is_protected_v1(realtime.topic())
+  OR public.office_realtime_topic_authorized_v1(realtime.topic())
+);
+
+-- Nested Room records are exact-current-Circle-member data. One fixed-path
+-- helper covers both the active circle_rooms surface and project_rooms lineage.
+CREATE OR REPLACE FUNCTION public.current_user_is_exact_room_member_v1(
+  p_room_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    auth.uid() IS NOT NULL
+    AND p_room_id IS NOT NULL
+    AND (
+      EXISTS (
+        SELECT 1
+        FROM public.circle_rooms AS room
+        JOIN public.circle_members AS membership
+          ON membership.circle_id = room.circle_id
+         AND membership.user_id = auth.uid()
+        WHERE room.id = p_room_id
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM public.project_rooms AS room
+        JOIN public.circle_members AS membership
+          ON membership.circle_id = room.circle_id
+         AND membership.user_id = auth.uid()
+        WHERE room.id = p_room_id
+      )
+    );
+$function$;
+
+REVOKE ALL ON FUNCTION public.current_user_is_exact_room_member_v1(uuid)
+  FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.current_user_is_exact_room_member_v1(uuid)
+  TO authenticated;
+
+DO $room_nested_restrictive_guards$
+DECLARE
+  table_row record;
+BEGIN
+  FOR table_row IN
+    SELECT DISTINCT table_info.table_name
+    FROM information_schema.columns AS table_info
+    JOIN pg_catalog.pg_class AS relation
+      ON relation.relname = table_info.table_name
+    JOIN pg_catalog.pg_namespace AS namespace
+      ON namespace.oid = relation.relnamespace
+     AND namespace.nspname = table_info.table_schema
+    WHERE table_info.table_schema = 'public'
+      AND table_info.column_name = 'room_id'
+      AND table_info.data_type = 'uuid'
+      AND relation.relkind IN ('r', 'p')
+      AND relation.relrowsecurity
+  LOOP
+    EXECUTE pg_catalog.format(
+      'DROP POLICY IF EXISTS exact_current_room_member_guard_v1 ON public.%I',
+      table_row.table_name
+    );
+    EXECUTE pg_catalog.format(
+      'CREATE POLICY exact_current_room_member_guard_v1 ON public.%I AS RESTRICTIVE FOR ALL TO authenticated USING (room_id IS NULL OR public.current_user_is_exact_room_member_v1(room_id)) WITH CHECK (room_id IS NULL OR public.current_user_is_exact_room_member_v1(room_id))',
+      table_row.table_name
+    );
+  END LOOP;
+END
+$room_nested_restrictive_guards$;
+
+-- Service-role runners bypass RLS, so revocation must be re-proven in the
+-- exact transaction that claims/dispatches work. These helpers inspect the
+-- captured owner, not auth.uid(), and the triggers fire for every database
+-- role including service_role.
+CREATE OR REPLACE FUNCTION public.user_has_exact_circle_thread_access_v1(
+  p_user_id uuid,
+  p_circle_id uuid,
+  p_thread_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    p_user_id IS NOT NULL
+    AND p_circle_id IS NOT NULL
+    AND EXISTS (
+      SELECT 1
+      FROM public.circle_members AS membership
+      WHERE membership.circle_id = p_circle_id
+        AND membership.user_id = p_user_id
+    )
+    AND (
+      p_thread_id IS NULL
+      OR EXISTS (
+        SELECT 1
+        FROM public.circle_chat_threads AS thread
+        WHERE thread.id = p_thread_id
+          AND thread.circle_id = p_circle_id
+          AND (
+            thread.visibility = 'circle'
+            OR thread.created_by = p_user_id
+            OR EXISTS (
+              SELECT 1
+              FROM public.circle_chat_thread_members AS thread_member
+              WHERE thread_member.thread_id = thread.id
+                AND thread_member.user_id = p_user_id
+            )
+          )
+      )
+    );
+$function$;
+
+REVOKE ALL ON FUNCTION public.user_has_exact_circle_thread_access_v1(uuid, uuid, uuid)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.user_has_exact_circle_thread_access_v1(uuid, uuid, uuid)
+  TO service_role;
+
+CREATE OR REPLACE FUNCTION public.current_user_has_exact_circle_thread_access_v1(
+  p_circle_id uuid,
+  p_thread_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    public.current_user_is_exact_circle_member_v1(p_circle_id)
+    AND (
+      p_thread_id IS NULL
+      OR public.message_thread_visible_to_current_user(p_circle_id, p_thread_id)
+    );
+$function$;
+
+REVOKE ALL ON FUNCTION public.current_user_has_exact_circle_thread_access_v1(uuid, uuid)
+  FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.current_user_has_exact_circle_thread_access_v1(uuid, uuid)
+  TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.guard_computer_schedule_claim_scope_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  IF NEW.next_run_at > OLD.next_run_at THEN
+    IF NEW.id IS DISTINCT FROM OLD.id
+       OR NEW.circle_id IS DISTINCT FROM OLD.circle_id
+       OR NEW.created_by IS DISTINCT FROM OLD.created_by
+       OR NEW.thread_id IS DISTINCT FROM OLD.thread_id THEN
+      RAISE EXCEPTION 'computer_schedule_claim_scope_changed'
+        USING ERRCODE = '42501';
+    END IF;
+
+    IF OLD.active IS NOT TRUE
+       OR NOT public.user_has_exact_circle_thread_access_v1(
+         NEW.created_by,
+         NEW.circle_id,
+         NEW.thread_id
+       ) THEN
+      RAISE EXCEPTION 'computer_schedule_claim_authority_revoked'
+        USING ERRCODE = '42501';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION public.guard_computer_schedule_claim_scope_v1()
+  FROM PUBLIC, anon, authenticated, service_role;
+DROP TRIGGER IF EXISTS zz_guard_computer_schedule_claim_scope_v1
+  ON public.computer_use_schedules;
+CREATE TRIGGER zz_guard_computer_schedule_claim_scope_v1
+BEFORE UPDATE ON public.computer_use_schedules
+FOR EACH ROW
+EXECUTE FUNCTION public.guard_computer_schedule_claim_scope_v1();
+
+CREATE OR REPLACE FUNCTION public.guard_scheduled_action_dispatch_scope_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  IF OLD.dispatched_at IS NULL AND NEW.dispatched_at IS NOT NULL THEN
+    IF NEW.id IS DISTINCT FROM OLD.id
+       OR NEW.user_id IS DISTINCT FROM OLD.user_id
+       OR NEW.circle_id IS DISTINCT FROM OLD.circle_id THEN
+      RAISE EXCEPTION 'scheduled_action_dispatch_scope_changed'
+        USING ERRCODE = '42501';
+    END IF;
+
+    IF NEW.circle_id IS NOT NULL AND NOT EXISTS (
+      SELECT 1
+      FROM public.circle_members AS membership
+      WHERE membership.circle_id = NEW.circle_id
+        AND membership.user_id = NEW.user_id
+    ) THEN
+      RAISE EXCEPTION 'scheduled_action_dispatch_authority_revoked'
+        USING ERRCODE = '42501';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION public.guard_scheduled_action_dispatch_scope_v1()
+  FROM PUBLIC, anon, authenticated, service_role;
+DROP TRIGGER IF EXISTS zz_guard_scheduled_action_dispatch_scope_v1
+  ON public.scheduled_actions;
+CREATE TRIGGER zz_guard_scheduled_action_dispatch_scope_v1
+BEFORE UPDATE ON public.scheduled_actions
+FOR EACH ROW
+EXECUTE FUNCTION public.guard_scheduled_action_dispatch_scope_v1();
+
+-- Raw watch rows contain task text and prior findings. They belong only to the
+-- creating account while that account remains authorized for the exact Circle
+-- and private/shared/circle thread. Shared status needs a separate sanitized
+-- projection, not a broad raw-table SELECT policy.
+ALTER TABLE public.computer_use_schedules ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.computer_use_schedules FORCE ROW LEVEL SECURITY;
+
+DO $drop_computer_schedule_policies$
+DECLARE
+  policy_row record;
+BEGIN
+  FOR policy_row IN
+    SELECT policyname
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'computer_use_schedules'
+  LOOP
+    EXECUTE pg_catalog.format(
+      'DROP POLICY %I ON public.computer_use_schedules',
+      policy_row.policyname
+    );
+  END LOOP;
+END
+$drop_computer_schedule_policies$;
+
+CREATE POLICY computer_use_schedules_owner_scope_select_v1
+ON public.computer_use_schedules
+FOR SELECT
+TO authenticated
+USING (
+  created_by = auth.uid()
+  AND public.current_user_has_exact_circle_thread_access_v1(
+    circle_id,
+    thread_id
+  )
+);
+
+CREATE POLICY computer_use_schedules_owner_scope_insert_v1
+ON public.computer_use_schedules
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  created_by = auth.uid()
+  AND public.current_user_has_exact_circle_thread_access_v1(
+    circle_id,
+    thread_id
+  )
+);
+
+CREATE POLICY computer_use_schedules_owner_scope_update_v1
+ON public.computer_use_schedules
+FOR UPDATE
+TO authenticated
+USING (
+  created_by = auth.uid()
+  AND public.current_user_has_exact_circle_thread_access_v1(
+    circle_id,
+    thread_id
+  )
+)
+WITH CHECK (
+  created_by = auth.uid()
+  AND public.current_user_has_exact_circle_thread_access_v1(
+    circle_id,
+    thread_id
+  )
+);
+
+CREATE POLICY computer_use_schedules_owner_scope_delete_v1
+ON public.computer_use_schedules
+FOR DELETE
+TO authenticated
+USING (
+  created_by = auth.uid()
+  AND public.current_user_has_exact_circle_thread_access_v1(
+    circle_id,
+    thread_id
+  )
+);
+
+-- scheduled_actions.payload may contain webhook headers, recipients, content,
+-- and connector details. Raw rows are owner-only; Circle members do not gain
+-- payload access merely because an action is Circle-scoped.
+ALTER TABLE public.scheduled_actions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.scheduled_actions FORCE ROW LEVEL SECURITY;
+
+DO $drop_scheduled_action_policies$
+DECLARE
+  policy_row record;
+BEGIN
+  FOR policy_row IN
+    SELECT policyname
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'scheduled_actions'
+  LOOP
+    EXECUTE pg_catalog.format(
+      'DROP POLICY %I ON public.scheduled_actions',
+      policy_row.policyname
+    );
+  END LOOP;
+END
+$drop_scheduled_action_policies$;
+
+CREATE POLICY scheduled_actions_owner_scope_select_v1
+ON public.scheduled_actions
+FOR SELECT
+TO authenticated
+USING (
+  user_id = auth.uid()
+  AND (
+    circle_id IS NULL
+    OR public.current_user_is_exact_circle_member_v1(circle_id)
+  )
+);
+
+CREATE POLICY scheduled_actions_owner_scope_insert_v1
+ON public.scheduled_actions
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  user_id = auth.uid()
+  AND (
+    circle_id IS NULL
+    OR public.current_user_is_exact_circle_member_v1(circle_id)
+  )
+);
+
+CREATE POLICY scheduled_actions_owner_scope_update_v1
+ON public.scheduled_actions
+FOR UPDATE
+TO authenticated
+USING (
+  user_id = auth.uid()
+  AND (
+    circle_id IS NULL
+    OR public.current_user_is_exact_circle_member_v1(circle_id)
+  )
+)
+WITH CHECK (
+  user_id = auth.uid()
+  AND (
+    circle_id IS NULL
+    OR public.current_user_is_exact_circle_member_v1(circle_id)
+  )
+);
+
+CREATE POLICY scheduled_actions_owner_scope_delete_v1
+ON public.scheduled_actions
+FOR DELETE
+TO authenticated
+USING (
+  user_id = auth.uid()
+  AND (
+    circle_id IS NULL
+    OR public.current_user_is_exact_circle_member_v1(circle_id)
+  )
+);
+
+
+-- Slack/Teams connection rows may target an organization, a Circle, or both.
+-- Every non-null target must authorize installed_by, and a combined target
+-- must bind the Circle to the exact same organization. This BEFORE trigger is
+-- the atomic commit-time recheck for service-role OAuth callbacks.
+CREATE OR REPLACE FUNCTION public.connection_targets_authorized_for_user_v1(
+  p_user_id uuid,
+  p_org_id uuid,
+  p_circle_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    p_user_id IS NOT NULL
+    AND (p_org_id IS NOT NULL OR p_circle_id IS NOT NULL)
+    AND (
+      p_org_id IS NULL
+      OR EXISTS (
+        SELECT 1
+        FROM public.org_members AS membership
+        WHERE membership.org_id = p_org_id
+          AND membership.user_id = p_user_id
+          AND membership.role IN ('owner', 'admin')
+      )
+    )
+    AND (
+      p_circle_id IS NULL
+      OR EXISTS (
+        SELECT 1
+        FROM public.circle_members AS membership
+        WHERE membership.circle_id = p_circle_id
+          AND membership.user_id = p_user_id
+          AND membership.role = 'creator'
+      )
+    )
+    AND (
+      p_org_id IS NULL
+      OR p_circle_id IS NULL
+      OR EXISTS (
+        SELECT 1
+        FROM public.circles AS circle
+        WHERE circle.id = p_circle_id
+          AND circle.org_id = p_org_id
+      )
+    );
+$function$;
+
+CREATE OR REPLACE FUNCTION public.current_user_can_manage_connection_targets_v1(
+  p_org_id uuid,
+  p_circle_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT public.connection_targets_authorized_for_user_v1(
+    auth.uid(),
+    p_org_id,
+    p_circle_id
+  );
+$function$;
+
+REVOKE ALL ON FUNCTION public.connection_targets_authorized_for_user_v1(uuid, uuid, uuid)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.current_user_can_manage_connection_targets_v1(uuid, uuid)
+  FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.current_user_can_manage_connection_targets_v1(uuid, uuid)
+  TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.guard_connection_target_binding_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  IF TG_OP = 'UPDATE' AND (
+    NEW.org_id IS DISTINCT FROM OLD.org_id
+    OR NEW.circle_id IS DISTINCT FROM OLD.circle_id
+    OR NEW.installed_by IS DISTINCT FROM OLD.installed_by
+  ) THEN
+    RAISE EXCEPTION 'connection_target_binding_is_immutable'
+      USING ERRCODE = '23514';
+  END IF;
+
+  IF auth.role() <> 'service_role'
+     AND (auth.uid() IS NULL OR NEW.installed_by IS DISTINCT FROM auth.uid()) THEN
+    RAISE EXCEPTION 'connection_installer_mismatch'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF NEW.is_active IS TRUE
+     AND NOT public.connection_targets_authorized_for_user_v1(
+       NEW.installed_by,
+       NEW.org_id,
+       NEW.circle_id
+     ) THEN
+    RAISE EXCEPTION 'connection_target_authority_revoked_or_mismatched'
+      USING ERRCODE = '42501';
+  END IF;
+
+  RETURN NEW;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION public.guard_connection_target_binding_v1()
+  FROM PUBLIC, anon, authenticated, service_role;
+
+DROP TRIGGER IF EXISTS slack_connections_guard_target_binding_v1
+  ON public.slack_connections;
+CREATE TRIGGER slack_connections_guard_target_binding_v1
+BEFORE INSERT OR UPDATE ON public.slack_connections
+FOR EACH ROW
+EXECUTE FUNCTION public.guard_connection_target_binding_v1();
+
+DROP TRIGGER IF EXISTS teams_connections_guard_target_binding_v1
+  ON public.teams_connections;
+CREATE TRIGGER teams_connections_guard_target_binding_v1
+BEFORE INSERT OR UPDATE ON public.teams_connections
+FOR EACH ROW
+EXECUTE FUNCTION public.guard_connection_target_binding_v1();
+
+ALTER TABLE public.slack_connections FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.teams_connections FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS slack_connections_exact_target_guard_v1
+  ON public.slack_connections;
+CREATE POLICY slack_connections_exact_target_guard_v1
+ON public.slack_connections
+AS RESTRICTIVE
+FOR ALL
+TO authenticated
+USING (public.current_user_can_manage_connection_targets_v1(org_id, circle_id))
+WITH CHECK (
+  installed_by = auth.uid()
+  AND public.current_user_can_manage_connection_targets_v1(org_id, circle_id)
+);
+
+DROP POLICY IF EXISTS teams_connections_exact_target_guard_v1
+  ON public.teams_connections;
+CREATE POLICY teams_connections_exact_target_guard_v1
+ON public.teams_connections
+AS RESTRICTIVE
+FOR ALL
+TO authenticated
+USING (public.current_user_can_manage_connection_targets_v1(org_id, circle_id))
+WITH CHECK (
+  installed_by = auth.uid()
+  AND public.current_user_can_manage_connection_targets_v1(org_id, circle_id)
+);
+
+-- Reports are private to their creator and to the explicit non-empty set of
+-- Circles sealed into metadata.circle_ids. A pending creator-owned row may be
+-- read/deleted before Edge seals an omitted selection; every non-pending row
+-- fails closed unless all recorded Circles are still exact current memberships
+-- in the report's organization.
+CREATE OR REPLACE FUNCTION public.report_circle_scope_is_empty_v1(
+  p_metadata jsonb
+)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+SET search_path = pg_catalog
+AS $function$
+  SELECT CASE
+    WHEN p_metadata IS NULL OR NOT (p_metadata ? 'circle_ids') THEN true
+    WHEN pg_catalog.jsonb_typeof(p_metadata -> 'circle_ids') <> 'array' THEN false
+    ELSE pg_catalog.jsonb_array_length(p_metadata -> 'circle_ids') = 0
+  END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.report_circle_scope_authorized_v1(
+  p_org_id uuid,
+  p_metadata jsonb
+)
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+DECLARE
+  circle_ids jsonb;
+  circle_id_text text;
+  normalized_circle_id uuid;
+BEGIN
+  IF auth.uid() IS NULL
+     OR p_org_id IS NULL
+     OR p_metadata IS NULL
+     OR pg_catalog.jsonb_typeof(p_metadata) <> 'object' THEN
+    RETURN false;
+  END IF;
+
+  circle_ids := p_metadata -> 'circle_ids';
+  IF circle_ids IS NULL
+     OR pg_catalog.jsonb_typeof(circle_ids) <> 'array'
+     OR pg_catalog.jsonb_array_length(circle_ids) = 0 THEN
+    RETURN false;
+  END IF;
+
+  FOR circle_id_text IN
+    SELECT value
+    FROM pg_catalog.jsonb_array_elements_text(circle_ids)
+  LOOP
+    IF circle_id_text !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' THEN
+      RETURN false;
+    END IF;
+    normalized_circle_id := circle_id_text::uuid;
+
+    IF NOT EXISTS (
+      SELECT 1
+      FROM public.circles AS circle
+      JOIN public.circle_members AS membership
+        ON membership.circle_id = circle.id
+       AND membership.user_id = auth.uid()
+      WHERE circle.id = normalized_circle_id
+        AND circle.org_id = p_org_id
+    ) THEN
+      RETURN false;
+    END IF;
+  END LOOP;
+
+  RETURN true;
+EXCEPTION
+  WHEN invalid_text_representation OR data_exception THEN
+    RETURN false;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION public.report_circle_scope_is_empty_v1(jsonb)
+  FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.report_circle_scope_authorized_v1(uuid, jsonb)
+  FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.report_circle_scope_is_empty_v1(jsonb)
+  TO authenticated;
+GRANT EXECUTE ON FUNCTION public.report_circle_scope_authorized_v1(uuid, jsonb)
+  TO authenticated;
+
+ALTER TABLE public.reports ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.reports FORCE ROW LEVEL SECURITY;
+
+DO $drop_report_policies$
+DECLARE
+  policy_row record;
+BEGIN
+  FOR policy_row IN
+    SELECT policyname
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'reports'
+  LOOP
+    EXECUTE pg_catalog.format(
+      'DROP POLICY %I ON public.reports',
+      policy_row.policyname
+    );
+  END LOOP;
+END
+$drop_report_policies$;
+
+CREATE POLICY reports_creator_exact_scope_select_v1
+ON public.reports
+FOR SELECT
+TO authenticated
+USING (
+  created_by = auth.uid()
+  AND (
+    public.report_circle_scope_authorized_v1(org_id, metadata)
+    OR (
+      status = 'pending'
+      AND public.report_circle_scope_is_empty_v1(metadata)
+    )
+  )
+);
+
+CREATE POLICY reports_creator_exact_scope_insert_v1
+ON public.reports
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  created_by = auth.uid()
+  AND status = 'pending'
+  AND file_url IS NULL
+  AND EXISTS (
+    SELECT 1
+    FROM public.org_members AS membership
+    WHERE membership.org_id = reports.org_id
+      AND membership.user_id = auth.uid()
+      AND membership.role IN ('owner', 'admin')
+  )
+  AND (
+    public.report_circle_scope_is_empty_v1(metadata)
+    OR public.report_circle_scope_authorized_v1(org_id, metadata)
+  )
+);
+
+CREATE POLICY reports_creator_exact_scope_delete_v1
+ON public.reports
+FOR DELETE
+TO authenticated
+USING (
+  created_by = auth.uid()
+  AND (
+    public.report_circle_scope_authorized_v1(org_id, metadata)
+    OR (
+      status = 'pending'
+      AND public.report_circle_scope_is_empty_v1(metadata)
+    )
+  )
+);
+
+REVOKE ALL ON TABLE public.reports FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, DELETE ON TABLE public.reports TO authenticated;
+GRANT ALL ON TABLE public.reports TO service_role;
+
+-- ── Private Storage convergence ────────────────────────────────────────────
+-- Canonical paths:
+--   task-images   <task UUID>/<single filename>
+--   room-files    rooms/<circle_rooms UUID>/<single filename>
+--   circle-images circles/<Circle UUID>/icon.<safe image extension>
+--   reports       reports/<org UUID>/<report UUID>/<single filename>
+-- Reports are service-written/read only through signed URLs. The other three
+-- buckets expose authenticated exact-scope SELECT and owner-bound mutations.
+
+CREATE OR REPLACE FUNCTION public.task_image_path_authorized(p_name text)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    auth.uid() IS NOT NULL
+    AND p_name ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/[^/]{1,180}$'
+    AND EXISTS (
+      SELECT 1
+      FROM public.tasks AS task
+      JOIN public.circle_members AS membership
+        ON membership.circle_id = task.circle_id
+       AND membership.user_id = auth.uid()
+      WHERE task.id::text = pg_catalog.split_part(p_name, '/', 1)
+    );
+$function$;
+
+CREATE OR REPLACE FUNCTION public.room_file_path_authorized_v1(p_name text)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    auth.uid() IS NOT NULL
+    AND p_name ~* '^rooms/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/[^/]{1,180}$'
+    AND EXISTS (
+      SELECT 1
+      FROM public.circle_rooms AS room
+      JOIN public.circle_members AS membership
+        ON membership.circle_id = room.circle_id
+       AND membership.user_id = auth.uid()
+      WHERE room.id::text = pg_catalog.split_part(p_name, '/', 2)
+    );
+$function$;
+
+CREATE OR REPLACE FUNCTION public.circle_image_path_member_v1(p_name text)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    auth.uid() IS NOT NULL
+    AND p_name ~* '^circles/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/icon\.(avif|bmp|gif|heic|heif|jpe?g|png|webp)$'
+    AND EXISTS (
+      SELECT 1
+      FROM public.circle_members AS membership
+      WHERE membership.circle_id::text = pg_catalog.split_part(p_name, '/', 2)
+        AND membership.user_id = auth.uid()
+    );
+$function$;
+
+CREATE OR REPLACE FUNCTION public.circle_image_path_creator_v1(p_name text)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    public.circle_image_path_member_v1(p_name)
+    AND EXISTS (
+      SELECT 1
+      FROM public.circles AS circle
+      WHERE circle.id::text = pg_catalog.split_part(p_name, '/', 2)
+        AND circle.created_by = auth.uid()
+    );
+$function$;
+
+REVOKE ALL ON FUNCTION public.task_image_path_authorized(text) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.room_file_path_authorized_v1(text) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.circle_image_path_member_v1(text) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.circle_image_path_creator_v1(text) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.task_image_path_authorized(text) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.room_file_path_authorized_v1(text) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.circle_image_path_member_v1(text) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.circle_image_path_creator_v1(text) TO authenticated;
+
+DO $private_bucket_identity_preflight$
+DECLARE
+  bucket_name text;
+BEGIN
+  FOREACH bucket_name IN ARRAY ARRAY[
+    'task-images',
+    'room-files',
+    'circle-images',
+    'reports'
+  ]
+  LOOP
+    IF EXISTS (
+      SELECT 1
+      FROM storage.buckets AS bucket
+      WHERE (bucket.id = bucket_name AND bucket.name <> bucket_name)
+         OR (bucket.name = bucket_name AND bucket.id <> bucket_name)
+    ) THEN
+      RAISE EXCEPTION 'tenant_isolation_convergence: % bucket identity mismatch; inspect before applying', bucket_name
+        USING ERRCODE = '23514';
+    END IF;
+  END LOOP;
+END
+$private_bucket_identity_preflight$;
+
+INSERT INTO storage.buckets (
+  id,
+  name,
+  public,
+  file_size_limit,
+  allowed_mime_types
+)
+VALUES
+  (
+    'task-images',
+    'task-images',
+    false,
+    10485760,
+    ARRAY[
+      'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp',
+      'application/pdf', 'application/json', 'text/plain', 'text/markdown',
+      'text/csv'
+    ]::text[]
+  ),
+  ('room-files', 'room-files', false, 52428800, NULL),
+  (
+    'circle-images',
+    'circle-images',
+    false,
+    5242880,
+    ARRAY[
+      'image/avif', 'image/bmp', 'image/gif', 'image/heic', 'image/heif',
+      'image/jpeg', 'image/png', 'image/webp'
+    ]::text[]
+  ),
+  (
+    'reports',
+    'reports',
+    false,
+    52428800,
+    ARRAY['text/csv', 'text/html', 'application/pdf']::text[]
+  )
+ON CONFLICT (id) DO UPDATE
+SET
+  name = EXCLUDED.name,
+  public = false,
+  file_size_limit = EXCLUDED.file_size_limit,
+  allowed_mime_types = EXCLUDED.allowed_mime_types;
+
+UPDATE storage.buckets
+SET public = false
+WHERE id IN ('task-images', 'room-files', 'circle-images', 'reports')
+  AND name = id;
+
+-- Hosted Supabase owns storage.objects through supabase_storage_admin and
+-- keeps RLS enabled. The postgres migration role may manage policies but must
+-- not ALTER the platform-owned table.
+
+-- Remove every historical/canonical policy name owned by these buckets. The
+-- restrictive guards below also defeat any unknown broad permissive policy.
+DROP POLICY IF EXISTS "Authenticated users can upload task images" ON storage.objects;
+DROP POLICY IF EXISTS "Public read access for task images" ON storage.objects;
+DROP POLICY IF EXISTS "Users can delete task images" ON storage.objects;
+DROP POLICY IF EXISTS "Task members can upload owned task images" ON storage.objects;
+DROP POLICY IF EXISTS "Task image owners can delete own uploads" ON storage.objects;
+
+DROP POLICY IF EXISTS tenant_task_images_member_select_v1 ON storage.objects;
+DROP POLICY IF EXISTS tenant_task_images_owner_insert_v1 ON storage.objects;
+DROP POLICY IF EXISTS tenant_task_images_owner_delete_v1 ON storage.objects;
+DROP POLICY IF EXISTS tenant_room_files_member_select_v1 ON storage.objects;
+DROP POLICY IF EXISTS tenant_room_files_owner_insert_v1 ON storage.objects;
+DROP POLICY IF EXISTS tenant_room_files_owner_delete_v1 ON storage.objects;
+DROP POLICY IF EXISTS tenant_circle_images_member_select_v1 ON storage.objects;
+DROP POLICY IF EXISTS tenant_circle_images_creator_insert_v1 ON storage.objects;
+DROP POLICY IF EXISTS tenant_circle_images_creator_update_v1 ON storage.objects;
+DROP POLICY IF EXISTS tenant_circle_images_creator_delete_v1 ON storage.objects;
+
+CREATE POLICY tenant_task_images_member_select_v1
+ON storage.objects
+FOR SELECT
+TO authenticated
+USING (
+  bucket_id = 'task-images'
+  AND public.task_image_path_authorized(name)
+);
+
+CREATE POLICY tenant_task_images_owner_insert_v1
+ON storage.objects
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  bucket_id = 'task-images'
+  AND owner_id::text = auth.uid()::text
+  AND public.task_image_path_authorized(name)
+);
+
+CREATE POLICY tenant_task_images_owner_delete_v1
+ON storage.objects
+FOR DELETE
+TO authenticated
+USING (
+  bucket_id = 'task-images'
+  AND owner_id::text = auth.uid()::text
+  AND public.task_image_path_authorized(name)
+);
+
+CREATE POLICY tenant_room_files_member_select_v1
+ON storage.objects
+FOR SELECT
+TO authenticated
+USING (
+  bucket_id = 'room-files'
+  AND public.room_file_path_authorized_v1(name)
+);
+
+CREATE POLICY tenant_room_files_owner_insert_v1
+ON storage.objects
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  bucket_id = 'room-files'
+  AND owner_id::text = auth.uid()::text
+  AND public.room_file_path_authorized_v1(name)
+);
+
+CREATE POLICY tenant_room_files_owner_delete_v1
+ON storage.objects
+FOR DELETE
+TO authenticated
+USING (
+  bucket_id = 'room-files'
+  AND owner_id::text = auth.uid()::text
+  AND public.room_file_path_authorized_v1(name)
+);
+
+CREATE POLICY tenant_circle_images_member_select_v1
+ON storage.objects
+FOR SELECT
+TO authenticated
+USING (
+  bucket_id = 'circle-images'
+  AND public.circle_image_path_member_v1(name)
+);
+
+CREATE POLICY tenant_circle_images_creator_insert_v1
+ON storage.objects
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  bucket_id = 'circle-images'
+  AND owner_id::text = auth.uid()::text
+  AND public.circle_image_path_creator_v1(name)
+);
+
+CREATE POLICY tenant_circle_images_creator_update_v1
+ON storage.objects
+FOR UPDATE
+TO authenticated
+USING (
+  bucket_id = 'circle-images'
+  AND owner_id::text = auth.uid()::text
+  AND public.circle_image_path_creator_v1(name)
+)
+WITH CHECK (
+  bucket_id = 'circle-images'
+  AND owner_id::text = auth.uid()::text
+  AND public.circle_image_path_creator_v1(name)
+);
+
+CREATE POLICY tenant_circle_images_creator_delete_v1
+ON storage.objects
+FOR DELETE
+TO authenticated
+USING (
+  bucket_id = 'circle-images'
+  AND owner_id::text = auth.uid()::text
+  AND public.circle_image_path_creator_v1(name)
+);
+
+DROP POLICY IF EXISTS tenant_private_storage_authenticated_select_guard_v1
+  ON storage.objects;
+DROP POLICY IF EXISTS tenant_private_storage_authenticated_insert_guard_v1
+  ON storage.objects;
+DROP POLICY IF EXISTS tenant_private_storage_authenticated_update_guard_v1
+  ON storage.objects;
+DROP POLICY IF EXISTS tenant_private_storage_authenticated_delete_guard_v1
+  ON storage.objects;
+DROP POLICY IF EXISTS tenant_private_storage_anon_select_guard_v1
+  ON storage.objects;
+DROP POLICY IF EXISTS tenant_private_storage_anon_insert_guard_v1
+  ON storage.objects;
+DROP POLICY IF EXISTS tenant_private_storage_anon_update_guard_v1
+  ON storage.objects;
+DROP POLICY IF EXISTS tenant_private_storage_anon_delete_guard_v1
+  ON storage.objects;
+
+CREATE POLICY tenant_private_storage_authenticated_select_guard_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR SELECT
+TO authenticated
+USING (
+  CASE bucket_id
+    WHEN 'task-images' THEN public.task_image_path_authorized(name)
+    WHEN 'room-files' THEN public.room_file_path_authorized_v1(name)
+    WHEN 'circle-images' THEN public.circle_image_path_member_v1(name)
+    WHEN 'reports' THEN false
+    ELSE true
+  END
+);
+
+CREATE POLICY tenant_private_storage_authenticated_insert_guard_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  CASE bucket_id
+    WHEN 'task-images' THEN
+      owner_id::text = auth.uid()::text
+      AND public.task_image_path_authorized(name)
+    WHEN 'room-files' THEN
+      owner_id::text = auth.uid()::text
+      AND public.room_file_path_authorized_v1(name)
+    WHEN 'circle-images' THEN
+      owner_id::text = auth.uid()::text
+      AND public.circle_image_path_creator_v1(name)
+    WHEN 'reports' THEN false
+    ELSE true
+  END
+);
+
+CREATE POLICY tenant_private_storage_authenticated_update_guard_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR UPDATE
+TO authenticated
+USING (
+  CASE bucket_id
+    WHEN 'task-images' THEN false
+    WHEN 'room-files' THEN false
+    WHEN 'circle-images' THEN
+      owner_id::text = auth.uid()::text
+      AND public.circle_image_path_creator_v1(name)
+    WHEN 'reports' THEN false
+    ELSE true
+  END
+)
+WITH CHECK (
+  CASE bucket_id
+    WHEN 'task-images' THEN false
+    WHEN 'room-files' THEN false
+    WHEN 'circle-images' THEN
+      owner_id::text = auth.uid()::text
+      AND public.circle_image_path_creator_v1(name)
+    WHEN 'reports' THEN false
+    ELSE true
+  END
+);
+
+CREATE POLICY tenant_private_storage_authenticated_delete_guard_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR DELETE
+TO authenticated
+USING (
+  CASE bucket_id
+    WHEN 'task-images' THEN
+      owner_id::text = auth.uid()::text
+      AND public.task_image_path_authorized(name)
+    WHEN 'room-files' THEN
+      owner_id::text = auth.uid()::text
+      AND public.room_file_path_authorized_v1(name)
+    WHEN 'circle-images' THEN
+      owner_id::text = auth.uid()::text
+      AND public.circle_image_path_creator_v1(name)
+    WHEN 'reports' THEN false
+    ELSE true
+  END
+);
+
+CREATE POLICY tenant_private_storage_anon_select_guard_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR SELECT
+TO anon
+USING (bucket_id NOT IN ('task-images', 'room-files', 'circle-images', 'reports'));
+
+CREATE POLICY tenant_private_storage_anon_insert_guard_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR INSERT
+TO anon
+WITH CHECK (bucket_id NOT IN ('task-images', 'room-files', 'circle-images', 'reports'));
+
+CREATE POLICY tenant_private_storage_anon_update_guard_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR UPDATE
+TO anon
+USING (bucket_id NOT IN ('task-images', 'room-files', 'circle-images', 'reports'))
+WITH CHECK (bucket_id NOT IN ('task-images', 'room-files', 'circle-images', 'reports'));
+
+CREATE POLICY tenant_private_storage_anon_delete_guard_v1
+ON storage.objects
+AS RESTRICTIVE
+FOR DELETE
+TO anon
+USING (bucket_id NOT IN ('task-images', 'room-files', 'circle-images', 'reports'));
+
+-- Direct and nested Circle records get restrictive current-membership guards.
+-- This is intentionally catalog-driven: it covers old owner/creator/installer
+-- policy names without needing to know each historical spelling, while
+-- preserving the narrower permissive policies that decide allowed commands.
+DO $direct_circle_restrictive_guards$
+DECLARE
+  table_row record;
+BEGIN
+  FOR table_row IN
+    SELECT DISTINCT column_info.table_name
+    FROM information_schema.columns AS column_info
+    JOIN pg_catalog.pg_class AS relation
+      ON relation.relname = column_info.table_name
+    JOIN pg_catalog.pg_namespace AS namespace
+      ON namespace.oid = relation.relnamespace
+     AND namespace.nspname = column_info.table_schema
+    WHERE column_info.table_schema = 'public'
+      AND column_info.column_name = 'circle_id'
+      AND column_info.data_type = 'uuid'
+      AND relation.relkind IN ('r', 'p')
+      AND column_info.table_name NOT IN (
+        'circle_members',
+        'agent_connect_tokens'
+      )
+  LOOP
+    EXECUTE pg_catalog.format(
+      'ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY',
+      table_row.table_name
+    );
+    EXECUTE pg_catalog.format(
+      'ALTER TABLE public.%I FORCE ROW LEVEL SECURITY',
+      table_row.table_name
+    );
+    EXECUTE pg_catalog.format(
+      'DROP POLICY IF EXISTS exact_current_circle_member_guard_v1 ON public.%I',
+      table_row.table_name
+    );
+    EXECUTE pg_catalog.format(
+      'CREATE POLICY exact_current_circle_member_guard_v1 ON public.%I AS RESTRICTIVE FOR ALL TO authenticated USING (circle_id IS NULL OR public.current_user_is_exact_circle_member_v1(circle_id)) WITH CHECK (circle_id IS NULL OR public.current_user_is_exact_circle_member_v1(circle_id))',
+      table_row.table_name
+    );
+  END LOOP;
+END
+$direct_circle_restrictive_guards$;
+
+CREATE OR REPLACE FUNCTION public.current_user_is_exact_task_member_v1(
+  p_task_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT auth.uid() IS NOT NULL AND EXISTS (
+    SELECT 1
+    FROM public.tasks AS task
+    JOIN public.circle_members AS membership
+      ON membership.circle_id = task.circle_id
+     AND membership.user_id = auth.uid()
+    WHERE task.id = p_task_id
+  );
+$function$;
+
+CREATE OR REPLACE FUNCTION public.current_user_is_exact_mission_member_v1(
+  p_mission_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT auth.uid() IS NOT NULL AND EXISTS (
+    SELECT 1
+    FROM public.circle_missions AS mission
+    JOIN public.circle_members AS membership
+      ON membership.circle_id = mission.circle_id
+     AND membership.user_id = auth.uid()
+    WHERE mission.id = p_mission_id
+  );
+$function$;
+
+REVOKE ALL ON FUNCTION public.current_user_is_exact_task_member_v1(uuid)
+  FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION public.current_user_is_exact_mission_member_v1(uuid)
+  FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.current_user_is_exact_task_member_v1(uuid)
+  TO authenticated;
+GRANT EXECUTE ON FUNCTION public.current_user_is_exact_mission_member_v1(uuid)
+  TO authenticated;
+
+DO $nested_task_mission_restrictive_guards$
+DECLARE
+  table_row record;
+BEGIN
+  FOR table_row IN
+    SELECT DISTINCT column_info.table_name
+    FROM information_schema.columns AS column_info
+    JOIN pg_catalog.pg_class AS relation
+      ON relation.relname = column_info.table_name
+    JOIN pg_catalog.pg_namespace AS namespace
+      ON namespace.oid = relation.relnamespace
+     AND namespace.nspname = column_info.table_schema
+    WHERE column_info.table_schema = 'public'
+      AND column_info.column_name = 'task_id'
+      AND column_info.data_type = 'uuid'
+      AND relation.relkind IN ('r', 'p')
+      AND relation.relrowsecurity
+  LOOP
+    EXECUTE pg_catalog.format(
+      'DROP POLICY IF EXISTS exact_current_task_member_guard_v1 ON public.%I',
+      table_row.table_name
+    );
+    EXECUTE pg_catalog.format(
+      'CREATE POLICY exact_current_task_member_guard_v1 ON public.%I AS RESTRICTIVE FOR ALL TO authenticated USING (task_id IS NULL OR public.current_user_is_exact_task_member_v1(task_id)) WITH CHECK (task_id IS NULL OR public.current_user_is_exact_task_member_v1(task_id))',
+      table_row.table_name
+    );
+  END LOOP;
+
+  FOR table_row IN
+    SELECT DISTINCT column_info.table_name
+    FROM information_schema.columns AS column_info
+    JOIN pg_catalog.pg_class AS relation
+      ON relation.relname = column_info.table_name
+    JOIN pg_catalog.pg_namespace AS namespace
+      ON namespace.oid = relation.relnamespace
+     AND namespace.nspname = column_info.table_schema
+    WHERE column_info.table_schema = 'public'
+      AND column_info.column_name = 'mission_id'
+      AND column_info.data_type = 'uuid'
+      AND relation.relkind IN ('r', 'p')
+      AND relation.relrowsecurity
+  LOOP
+    EXECUTE pg_catalog.format(
+      'DROP POLICY IF EXISTS exact_current_mission_member_guard_v1 ON public.%I',
+      table_row.table_name
+    );
+    EXECUTE pg_catalog.format(
+      'CREATE POLICY exact_current_mission_member_guard_v1 ON public.%I AS RESTRICTIVE FOR ALL TO authenticated USING (mission_id IS NULL OR public.current_user_is_exact_mission_member_v1(mission_id)) WITH CHECK (mission_id IS NULL OR public.current_user_is_exact_mission_member_v1(mission_id))',
+      table_row.table_name
+    );
+  END LOOP;
+END
+$nested_task_mission_restrictive_guards$;
+
+-- Room secrets were documented as encrypted but the active UI can persist raw
+-- values. They are therefore personal credentials, not shared Room records.
+-- Ambiguous legacy NULL-owner rows stay stored for operator recovery but fail
+-- closed under RLS; a NOT VALID constraint rejects every new NULL owner.
+ALTER TABLE public.room_secrets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.room_secrets FORCE ROW LEVEL SECURITY;
+
+DO $drop_room_secrets_shared_unique$
+DECLARE
+  constraint_row record;
+BEGIN
+  FOR constraint_row IN
+    SELECT constraint_info.conname
+    FROM pg_catalog.pg_constraint AS constraint_info
+    WHERE constraint_info.conrelid = 'public.room_secrets'::regclass
+      AND constraint_info.contype = 'u'
+      AND pg_catalog.pg_get_constraintdef(constraint_info.oid)
+        ~* '^UNIQUE \(room_id, key\)'
+  LOOP
+    EXECUTE pg_catalog.format(
+      'ALTER TABLE public.room_secrets DROP CONSTRAINT %I',
+      constraint_row.conname
+    );
+  END LOOP;
+END
+$drop_room_secrets_shared_unique$;
+ALTER TABLE public.room_secrets
+  DROP CONSTRAINT IF EXISTS room_secrets_created_by_required_v1;
+ALTER TABLE public.room_secrets
+  ADD CONSTRAINT room_secrets_created_by_required_v1
+  CHECK (created_by IS NOT NULL) NOT VALID;
+
+DO $room_secrets_owner_unique$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_constraint
+    WHERE conrelid = 'public.room_secrets'::regclass
+      AND conname = 'room_secrets_room_owner_key_unique_v1'
+  ) THEN
+    ALTER TABLE public.room_secrets
+      ADD CONSTRAINT room_secrets_room_owner_key_unique_v1
+      UNIQUE (room_id, created_by, key);
+  END IF;
+END
+$room_secrets_owner_unique$;
+
+DO $drop_room_secret_policies$
+DECLARE
+  policy_row record;
+BEGIN
+  FOR policy_row IN
+    SELECT policyname
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'room_secrets'
+  LOOP
+    EXECUTE pg_catalog.format(
+      'DROP POLICY %I ON public.room_secrets',
+      policy_row.policyname
+    );
+  END LOOP;
+END
+$drop_room_secret_policies$;
+
+CREATE POLICY room_secrets_owner_scope_select_v1
+ON public.room_secrets
+FOR SELECT
+TO authenticated
+USING (
+  created_by = auth.uid()
+  AND public.current_user_is_exact_room_member_v1(room_id)
+);
+
+CREATE POLICY room_secrets_owner_scope_insert_v1
+ON public.room_secrets
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  created_by = auth.uid()
+  AND public.current_user_is_exact_room_member_v1(room_id)
+);
+
+CREATE POLICY room_secrets_owner_scope_update_v1
+ON public.room_secrets
+FOR UPDATE
+TO authenticated
+USING (
+  created_by = auth.uid()
+  AND public.current_user_is_exact_room_member_v1(room_id)
+)
+WITH CHECK (
+  created_by = auth.uid()
+  AND public.current_user_is_exact_room_member_v1(room_id)
+);
+
+CREATE POLICY room_secrets_owner_scope_delete_v1
+ON public.room_secrets
+FOR DELETE
+TO authenticated
+USING (
+  created_by = auth.uid()
+  AND public.current_user_is_exact_room_member_v1(room_id)
+);
+
+REVOKE ALL ON TABLE public.room_secrets FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.room_secrets TO authenticated;
+GRANT ALL ON TABLE public.room_secrets TO service_role;
+
+-- Raw profiles contain Office preferences/layouts, training/privacy settings,
+-- wallet/account details, and other owner-private fields. Converge the base
+-- table to self-only. The bounded safe_profiles view is the sole cross-user
+-- profile surface and includes only presentation/streak fields; wallet fields
+-- are null for peers.
+CREATE OR REPLACE FUNCTION public.users_share_current_circle_v1(
+  p_other_user_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+  SELECT
+    auth.uid() IS NOT NULL
+    AND p_other_user_id IS NOT NULL
+    AND (
+      p_other_user_id = auth.uid()
+      OR EXISTS (
+        SELECT 1
+        FROM public.circle_members AS caller_membership
+        JOIN public.circle_members AS peer_membership
+          ON peer_membership.circle_id = caller_membership.circle_id
+         AND peer_membership.user_id = p_other_user_id
+        WHERE caller_membership.user_id = auth.uid()
+      )
+    );
+$function$;
+
+REVOKE ALL ON FUNCTION public.users_share_current_circle_v1(uuid)
+  FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.users_share_current_circle_v1(uuid)
+  TO authenticated;
+
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.profiles FORCE ROW LEVEL SECURITY;
+
+DO $drop_profile_policies$
+DECLARE
+  policy_row record;
+BEGIN
+  FOR policy_row IN
+    SELECT policyname
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'profiles'
+  LOOP
+    EXECUTE pg_catalog.format(
+      'DROP POLICY %I ON public.profiles',
+      policy_row.policyname
+    );
+  END LOOP;
+END
+$drop_profile_policies$;
+
+CREATE POLICY profiles_self_select_v1
+ON public.profiles
+FOR SELECT
+TO authenticated
+USING (id = auth.uid());
+
+CREATE POLICY profiles_self_insert_v1
+ON public.profiles
+FOR INSERT
+TO authenticated
+WITH CHECK (id = auth.uid());
+
+CREATE POLICY profiles_self_update_v1
+ON public.profiles
+FOR UPDATE
+TO authenticated
+USING (id = auth.uid())
+WITH CHECK (id = auth.uid());
+
+REVOKE ALL ON TABLE public.profiles FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.profiles TO authenticated;
+GRANT ALL ON TABLE public.profiles TO service_role;
+
+CREATE OR REPLACE VIEW public.safe_profiles
+WITH (security_barrier = true)
+AS
+SELECT
+  profile.id,
+  profile.username,
+  profile.display_name,
+  profile.avatar_url,
+  profile.bio,
+  profile.current_streak,
+  profile.longest_streak,
+  profile.created_at,
+  CASE WHEN profile.id = auth.uid() THEN profile.wallet_address ELSE NULL END
+    AS wallet_address,
+  CASE WHEN profile.id = auth.uid() THEN profile.wallet_chain ELSE NULL END
+    AS wallet_chain
+FROM public.profiles AS profile
+WHERE public.users_share_current_circle_v1(profile.id);
+
+DO $safe_profiles_security_mode$
+BEGIN
+  -- PostgreSQL 15 introduced security_invoker. Older releases are definer by
+  -- default and reject the reloption at parse time, so set it dynamically only
+  -- where supported. This also clears the historical PG15 invoker=true option.
+  IF pg_catalog.current_setting('server_version_num')::integer >= 150000 THEN
+    EXECUTE
+      'ALTER VIEW public.safe_profiles SET (security_invoker = false)';
+  END IF;
+END
+$safe_profiles_security_mode$;
+
+REVOKE ALL ON TABLE public.safe_profiles FROM PUBLIC, anon;
+GRANT SELECT ON TABLE public.safe_profiles TO authenticated;
+
+-- Trade recommendations, executions, and learned strategy content are personal
+-- account data. Remove the historical authenticated-wide featured-trades read
+-- and converge all three tables to exact owner browser surfaces.
+DO $converge_personal_trading_policies$
+DECLARE
+  table_name text;
+  policy_row record;
+BEGIN
+  FOREACH table_name IN ARRAY ARRAY[
+    'featured_trades',
+    'featured_trade_executions',
+    'spirit_learnings'
+  ]
+  LOOP
+    EXECUTE pg_catalog.format(
+      'ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY',
+      table_name
+    );
+    EXECUTE pg_catalog.format(
+      'ALTER TABLE public.%I FORCE ROW LEVEL SECURITY',
+      table_name
+    );
+
+    FOR policy_row IN
+      SELECT policyname
+      FROM pg_catalog.pg_policies
+      WHERE schemaname = 'public'
+        AND tablename = table_name
+    LOOP
+      EXECUTE pg_catalog.format(
+        'DROP POLICY %I ON public.%I',
+        policy_row.policyname,
+        table_name
+      );
+    END LOOP;
+  END LOOP;
+END
+$converge_personal_trading_policies$;
+
+CREATE POLICY featured_trades_owner_select_v1
+ON public.featured_trades
+FOR SELECT
+TO authenticated
+USING (user_id = auth.uid());
+
+CREATE POLICY featured_trade_executions_owner_select_v1
+ON public.featured_trade_executions
+FOR SELECT
+TO authenticated
+USING (user_id = auth.uid());
+
+CREATE POLICY featured_trade_executions_owner_insert_v1
+ON public.featured_trade_executions
+FOR INSERT
+TO authenticated
+WITH CHECK (
+  user_id = auth.uid()
+  AND EXISTS (
+    SELECT 1
+    FROM public.featured_trades AS trade
+    WHERE trade.id = featured_trade_id
+      AND trade.user_id = auth.uid()
+  )
+);
+
+CREATE POLICY featured_trade_executions_owner_update_v1
+ON public.featured_trade_executions
+FOR UPDATE
+TO authenticated
+USING (user_id = auth.uid())
+WITH CHECK (
+  user_id = auth.uid()
+  AND EXISTS (
+    SELECT 1
+    FROM public.featured_trades AS trade
+    WHERE trade.id = featured_trade_id
+      AND trade.user_id = auth.uid()
+  )
+);
+
+CREATE POLICY spirit_learnings_owner_select_v1
+ON public.spirit_learnings
+FOR SELECT
+TO authenticated
+USING (user_id = auth.uid());
+
+REVOKE ALL ON TABLE public.featured_trades FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON TABLE public.featured_trades TO authenticated;
+GRANT ALL ON TABLE public.featured_trades TO service_role;
+
+REVOKE ALL ON TABLE public.featured_trade_executions FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.featured_trade_executions TO authenticated;
+GRANT ALL ON TABLE public.featured_trade_executions TO service_role;
+
+REVOKE ALL ON TABLE public.spirit_learnings FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON TABLE public.spirit_learnings TO authenticated;
+GRANT ALL ON TABLE public.spirit_learnings TO service_role;
+
+-- Leaderboard/profile-adjacent gamification rows previously exposed every
+-- account through USING (true). Preserve current-Circle peer reads, but keep
+-- every mutation tied to the authenticated row owner.
+DO $drop_peer_gamification_policies$
+DECLARE
+  target_table text;
+  policy_row record;
+BEGIN
+  FOREACH target_table IN ARRAY ARRAY[
+    'user_points',
+    'user_badges',
+    'user_xp'
+  ]
+  LOOP
+    EXECUTE pg_catalog.format(
+      'ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY',
+      target_table
+    );
+    EXECUTE pg_catalog.format(
+      'ALTER TABLE public.%I FORCE ROW LEVEL SECURITY',
+      target_table
+    );
+
+    FOR policy_row IN
+      SELECT policyname
+      FROM pg_catalog.pg_policies
+      WHERE schemaname = 'public'
+        AND tablename = target_table
+    LOOP
+      EXECUTE pg_catalog.format(
+        'DROP POLICY %I ON public.%I',
+        policy_row.policyname,
+        target_table
+      );
+    END LOOP;
+  END LOOP;
+END
+$drop_peer_gamification_policies$;
+
+CREATE POLICY user_points_current_circle_select_v1
+ON public.user_points
+FOR SELECT
+TO authenticated
+USING (public.users_share_current_circle_v1(user_id));
+
+CREATE POLICY user_points_self_insert_v1
+ON public.user_points
+FOR INSERT
+TO authenticated
+WITH CHECK (user_id = auth.uid());
+
+CREATE POLICY user_points_self_update_v1
+ON public.user_points
+FOR UPDATE
+TO authenticated
+USING (user_id = auth.uid())
+WITH CHECK (user_id = auth.uid());
+
+CREATE POLICY user_points_self_delete_v1
+ON public.user_points
+FOR DELETE
+TO authenticated
+USING (user_id = auth.uid());
+
+CREATE POLICY user_badges_current_circle_select_v1
+ON public.user_badges
+FOR SELECT
+TO authenticated
+USING (public.users_share_current_circle_v1(user_id));
+
+CREATE POLICY user_badges_self_insert_v1
+ON public.user_badges
+FOR INSERT
+TO authenticated
+WITH CHECK (user_id = auth.uid());
+
+CREATE POLICY user_badges_self_update_v1
+ON public.user_badges
+FOR UPDATE
+TO authenticated
+USING (user_id = auth.uid())
+WITH CHECK (user_id = auth.uid());
+
+CREATE POLICY user_badges_self_delete_v1
+ON public.user_badges
+FOR DELETE
+TO authenticated
+USING (user_id = auth.uid());
+
+CREATE POLICY user_xp_current_circle_select_v1
+ON public.user_xp
+FOR SELECT
+TO authenticated
+USING (public.users_share_current_circle_v1(user_id));
+
+CREATE POLICY user_xp_self_insert_v1
+ON public.user_xp
+FOR INSERT
+TO authenticated
+WITH CHECK (user_id = auth.uid());
+
+CREATE POLICY user_xp_self_update_v1
+ON public.user_xp
+FOR UPDATE
+TO authenticated
+USING (user_id = auth.uid())
+WITH CHECK (user_id = auth.uid());
+
+CREATE POLICY user_xp_self_delete_v1
+ON public.user_xp
+FOR DELETE
+TO authenticated
+USING (user_id = auth.uid());
+
+REVOKE ALL ON TABLE public.user_points FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.user_points TO authenticated;
+GRANT ALL ON TABLE public.user_points TO service_role;
+
+REVOKE ALL ON TABLE public.user_badges FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.user_badges TO authenticated;
+GRANT ALL ON TABLE public.user_badges TO service_role;
+
+REVOKE ALL ON TABLE public.user_xp FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.user_xp TO authenticated;
+GRANT ALL ON TABLE public.user_xp TO service_role;
+
+-- The research run log has no tenant/owner key and contains raw query,
+-- summary, and error material. Without exact row authority, browser access
+-- cannot be made safe; retain it as a service-run operational audit only.
+ALTER TABLE public.research_agent_runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.research_agent_runs FORCE ROW LEVEL SECURITY;
+
+DO $drop_research_run_policies$
+DECLARE
+  policy_row record;
+BEGIN
+  FOR policy_row IN
+    SELECT policyname
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'research_agent_runs'
+  LOOP
+    EXECUTE pg_catalog.format(
+      'DROP POLICY %I ON public.research_agent_runs',
+      policy_row.policyname
+    );
+  END LOOP;
+END
+$drop_research_run_policies$;
+
+REVOKE ALL ON TABLE public.research_agent_runs
+  FROM PUBLIC, anon, authenticated;
+GRANT ALL ON TABLE public.research_agent_runs TO service_role;
+
+-- The legacy fallback RPC accepted an arbitrary user UUID under SECURITY
+-- DEFINER and therefore bypassed RLS for cross-account Circle enumeration.
+-- Preserve the deployed bounded TABLE wire shape, but bind both the argument
+-- and membership predicate to auth.uid(). The projection omits every Circle
+-- capability-secret column entirely; nonmembers and anon receive no function
+-- authority.
+CREATE OR REPLACE FUNCTION public.get_user_circles(
+  user_uuid uuid DEFAULT auth.uid()
+)
+RETURNS TABLE (
+  id uuid,
+  name text,
+  description text,
+  invite_code text,
+  max_members integer,
+  created_by uuid,
+  created_at timestamptz,
+  member_count bigint,
+  user_role text,
+  circle_image_url text,
+  vibe text,
+  tab_visibility jsonb
+)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $function$
+BEGIN
+  IF auth.uid() IS NULL
+     OR (user_uuid IS NOT NULL AND user_uuid IS DISTINCT FROM auth.uid()) THEN
+    RETURN;
+  END IF;
+
+  RETURN QUERY
+    SELECT
+      circle.id,
+      circle.name,
+      circle.description,
+      circle.invite_code,
+      circle.max_members,
+      circle.created_by,
+      circle.created_at,
+      count(member_count.user_id)::bigint,
+      membership.role,
+      circle.circle_image_url,
+      circle.vibe,
+      circle.tab_visibility
+    FROM public.circles AS circle
+    JOIN public.circle_members AS membership
+      ON membership.circle_id = circle.id
+     AND membership.user_id = auth.uid()
+    LEFT JOIN public.circle_members AS member_count
+      ON member_count.circle_id = circle.id
+    GROUP BY
+      circle.id,
+      circle.name,
+      circle.description,
+      circle.invite_code,
+      circle.max_members,
+      circle.created_by,
+      circle.created_at,
+      membership.role,
+      circle.circle_image_url,
+      circle.vibe,
+      circle.tab_visibility
+    ORDER BY circle.created_at DESC
+  ;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION public.get_user_circles(uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.get_user_circles(uuid) TO authenticated;
+
+COMMENT ON COLUMN public.agent_connect_tokens.token IS
+  'Legacy plaintext one-time connect token. RLS is exact owner-only; hash-at-rest requires a coordinated Edge lookup and client one-time-display migration.';
+
+-- Source readiness receipt. This proves catalog shape after application, not
+-- multi-account behavior or the Realtime project setting. Before release,
+-- independently verify that Realtime "Allow public access" is disabled, then
+-- run authenticated private-channel and tenant-revocation canaries.
+SELECT
+  (
+    SELECT bool_and(bucket.public IS FALSE)
+    FROM storage.buckets AS bucket
+    WHERE bucket.id IN ('task-images', 'room-files', 'circle-images', 'reports')
+  ) AS all_reviewed_buckets_private,
+  (
+    SELECT count(*) = 4
+    FROM storage.buckets AS bucket
+    WHERE bucket.id IN ('task-images', 'room-files', 'circle-images', 'reports')
+  ) AS all_reviewed_buckets_present,
+  EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'agent_plans'
+      AND column_name = 'chat_thread_id'
+      AND data_type = 'uuid'
+  ) AS agent_plan_thread_scope_present,
+  EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'chat_checkpoints'
+      AND column_name = 'chat_thread_id'
+      AND data_type = 'uuid'
+  ) AS checkpoint_thread_scope_present,
+  (
+    SELECT relrowsecurity AND relforcerowsecurity
+    FROM pg_catalog.pg_class
+    WHERE oid = 'public.integrations'::regclass
+  ) AS integrations_force_rls,
+  (
+    SELECT relrowsecurity AND relforcerowsecurity
+    FROM pg_catalog.pg_class
+    WHERE oid = 'public.user_site_credentials'::regclass
+  ) AS site_credentials_force_rls,
+  (
+    NOT pg_catalog.has_column_privilege(
+      'authenticated', 'public.circles', 'api_key', 'SELECT'
+    )
+    AND NOT pg_catalog.has_column_privilege(
+      'authenticated', 'public.circles', 'discord_bot_token', 'SELECT'
+    )
+    AND NOT pg_catalog.has_column_privilege(
+      'authenticated', 'public.circles', 'discord_webhook_url', 'SELECT'
+    )
+  ) AS circle_member_secret_columns_denied,
+  to_regprocedure('public.get_circle_capability_secrets_v1(uuid)') IS NOT NULL
+    AS circle_creator_secret_rpc_present,
+  NOT pg_catalog.has_column_privilege(
+    'authenticated',
+    'public.circle_github_connections',
+    'webhook_secret',
+    'SELECT'
+  ) AS github_webhook_secret_browser_denied,
+  (
+    SELECT relrowsecurity AND relforcerowsecurity
+    FROM pg_catalog.pg_class
+    WHERE oid = 'public.profiles'::regclass
+  ) AS raw_profiles_force_rls,
+  EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_class AS safe_profile_view
+    WHERE safe_profile_view.oid = 'public.safe_profiles'::regclass
+      AND safe_profile_view.relkind = 'v'
+      AND NOT (
+        'security_invoker=true' = ANY(
+          COALESCE(safe_profile_view.reloptions, ARRAY[]::text[])
+        )
+      )
+  ) AS safe_profiles_projection_present,
+  (
+    SELECT count(*) = 3
+      AND bool_and(target.relrowsecurity AND target.relforcerowsecurity)
+    FROM pg_catalog.pg_class AS target
+    JOIN pg_catalog.pg_namespace AS namespace
+      ON namespace.oid = target.relnamespace
+    WHERE namespace.nspname = 'public'
+      AND target.relname IN (
+        'featured_trades',
+        'featured_trade_executions',
+        'spirit_learnings'
+      )
+  ) AS personal_trading_force_rls,
+  (
+    SELECT count(*) = 3
+      AND bool_and(target.relrowsecurity AND target.relforcerowsecurity)
+    FROM pg_catalog.pg_class AS target
+    JOIN pg_catalog.pg_namespace AS namespace
+      ON namespace.oid = target.relnamespace
+    WHERE namespace.nspname = 'public'
+      AND target.relname IN ('user_points', 'user_badges', 'user_xp')
+  ) AS peer_gamification_force_rls,
+  (
+    SELECT relrowsecurity AND relforcerowsecurity
+    FROM pg_catalog.pg_class
+    WHERE oid = 'public.research_agent_runs'::regclass
+  ) AS research_runs_force_rls,
+  (
+    SELECT count(*) = 4
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'realtime'
+      AND tablename = 'messages'
+      AND policyname IN (
+        'office_realtime_exact_select_v1',
+        'office_realtime_exact_insert_v1',
+        'office_realtime_prefix_select_guard_v1',
+        'office_realtime_prefix_insert_guard_v1'
+      )
+  ) AS office_realtime_authorization_present,
+  (
+    SELECT relrowsecurity AND relforcerowsecurity
+    FROM pg_catalog.pg_class
+    WHERE oid = 'public.agent_connect_tokens'::regclass
+  ) AS connect_tokens_force_rls,
+  to_regprocedure('public.guard_computer_schedule_claim_scope_v1()') IS NOT NULL
+    AS watch_claim_revocation_guard_present,
+  to_regprocedure('public.guard_scheduled_action_dispatch_scope_v1()') IS NOT NULL
+    AS scheduled_dispatch_revocation_guard_present,
+  to_regprocedure('public.guard_connection_target_binding_v1()') IS NOT NULL
+    AS oauth_connection_binding_guard_present;
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+-- END SECTION 50: Tenant isolation convergence
+
+-- BEGIN SECTION 51: Owner-private Office agent lifetime usage
+-- Source: supabase/migrations/20260821150000_office_agent_lifetime_usage.sql
+-- Owner-private Office agent lifetime token and cost ledger.
+--
+-- The legacy sync_agent_token_snapshot RPC stores usage only when a matching
+-- published circle_office_agents row exists. Local/auto-detected/private
+-- agents therefore lose their apparent totals whenever a bridge session
+-- changes. This migration makes one owner/session profile the durable source
+-- for lifetime presentation and keeps the public Office row as an optional
+-- Circle projection.
+
+BEGIN;
+
+DO $prerequisite$
+BEGIN
+  IF to_regclass('public.circle_members') IS NULL
+     OR to_regclass('public.circle_office_agents') IS NULL
+     OR to_regclass('public.agent_identities') IS NULL THEN
+    RAISE EXCEPTION 'office_agent_lifetime_usage_prerequisite_missing'
+      USING ERRCODE = '55000';
+  END IF;
+END;
+$prerequisite$;
+
+CREATE TABLE IF NOT EXISTS public.office_agent_usage_profiles (
+  owner_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  session_key text COLLATE "C" NOT NULL,
+  agent_name text NOT NULL,
+  provider_type text NOT NULL,
+  model_name text,
+  last_input_tokens bigint NOT NULL DEFAULT 0,
+  last_output_tokens bigint NOT NULL DEFAULT 0,
+  last_cached_tokens bigint NOT NULL DEFAULT 0,
+  last_message_count integer NOT NULL DEFAULT 0,
+  last_estimated_cost numeric(12,6) NOT NULL DEFAULT 0,
+  lifetime_tokens bigint NOT NULL DEFAULT 0,
+  lifetime_input_tokens bigint NOT NULL DEFAULT 0,
+  lifetime_output_tokens bigint NOT NULL DEFAULT 0,
+  lifetime_cached_tokens bigint NOT NULL DEFAULT 0,
+  lifetime_messages bigint NOT NULL DEFAULT 0,
+  lifetime_cost numeric(18,6) NOT NULL DEFAULT 0,
+  session_count integer NOT NULL DEFAULT 1,
+  baseline_observed boolean NOT NULL DEFAULT true,
+  last_observed_at timestamptz NOT NULL,
+  first_seen_at timestamptz NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+  last_seen_at timestamptz NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+  PRIMARY KEY (owner_id, session_key),
+  CONSTRAINT office_agent_usage_profile_session_key_valid CHECK (
+    session_key = pg_catalog.btrim(session_key)
+    AND pg_catalog.char_length(session_key) BETWEEN 1 AND 200
+    AND session_key !~ '[[:cntrl:]]'
+  ),
+  CONSTRAINT office_agent_usage_profile_agent_name_valid CHECK (
+    agent_name = pg_catalog.btrim(agent_name)
+    AND pg_catalog.char_length(agent_name) BETWEEN 1 AND 200
+    AND agent_name !~ '[[:cntrl:]]'
+  ),
+  CONSTRAINT office_agent_usage_profile_provider_valid CHECK (
+    provider_type = pg_catalog.btrim(provider_type)
+    AND pg_catalog.char_length(provider_type) BETWEEN 1 AND 200
+    AND provider_type !~ '[[:cntrl:]]'
+  ),
+  CONSTRAINT office_agent_usage_profile_model_valid CHECK (
+    model_name IS NULL OR (
+      model_name = pg_catalog.btrim(model_name)
+      AND pg_catalog.char_length(model_name) BETWEEN 1 AND 200
+      AND model_name !~ '[[:cntrl:]]'
+    )
+  ),
+  CONSTRAINT office_agent_usage_profile_counters_nonnegative CHECK (
+    last_input_tokens >= 0
+    AND last_output_tokens >= 0
+    AND last_cached_tokens >= 0
+    AND last_message_count >= 0
+    AND last_estimated_cost >= 0
+    AND lifetime_tokens >= 0
+    AND lifetime_input_tokens >= 0
+    AND lifetime_output_tokens >= 0
+    AND lifetime_cached_tokens >= 0
+    AND lifetime_messages >= 0
+    AND lifetime_cost >= 0
+    AND session_count >= 1
+  ),
+  CONSTRAINT office_agent_usage_profile_counters_bounded CHECK (
+    last_input_tokens <= 9007199254740991
+    AND last_output_tokens <= 9007199254740991
+    AND last_cached_tokens <= 9007199254740991
+    AND last_input_tokens <= 9007199254740991 - last_output_tokens
+    AND lifetime_tokens <= 9007199254740991
+    AND lifetime_input_tokens <= 9007199254740991
+    AND lifetime_output_tokens <= 9007199254740991
+    AND lifetime_cached_tokens <= 9007199254740991
+    AND lifetime_messages <= 9007199254740991
+    AND last_estimated_cost <= 999999.999999
+    AND lifetime_cost <= 999999999999.999999
+    AND session_count <= 2147483647
+  )
+);
+
+ALTER TABLE public.office_agent_usage_profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.office_agent_usage_profiles FORCE ROW LEVEL SECURITY;
+
+DO $drop_usage_profile_policies$
+DECLARE
+  policy_row record;
+BEGIN
+  FOR policy_row IN
+    SELECT policyname
+    FROM pg_catalog.pg_policies
+    WHERE schemaname = 'public'
+      AND tablename = 'office_agent_usage_profiles'
+  LOOP
+    EXECUTE pg_catalog.format(
+      'DROP POLICY %I ON public.office_agent_usage_profiles',
+      policy_row.policyname
+    );
+  END LOOP;
+END;
+$drop_usage_profile_policies$;
+
+CREATE POLICY office_agent_usage_profiles_select_own_v1
+  ON public.office_agent_usage_profiles
+  FOR SELECT TO authenticated
+  USING (owner_id = auth.uid());
+
+REVOKE ALL ON TABLE public.office_agent_usage_profiles
+  FROM PUBLIC, anon, authenticated, service_role;
+GRANT SELECT ON TABLE public.office_agent_usage_profiles TO authenticated;
+GRANT ALL ON TABLE public.office_agent_usage_profiles TO service_role;
+
+-- Seed the exact latest legacy snapshot for each owner/session. The legacy
+-- snapshot may have been duplicated by Circle/name observations; only its
+-- newest cumulative meter is a valid baseline. Existing identity maxima are
+-- retained as earlier owner-private history rather than added a second time.
+DO $legacy_snapshot_preflight$
+BEGIN
+  IF to_regclass('public.circle_office_agent_usage_snapshots') IS NOT NULL
+     AND EXISTS (
+       SELECT 1
+       FROM public.circle_office_agent_usage_snapshots AS snapshot
+       WHERE snapshot.snapshot_key IS NULL
+          OR snapshot.snapshot_key <> pg_catalog.btrim(snapshot.snapshot_key)
+          OR pg_catalog.char_length(snapshot.snapshot_key) NOT BETWEEN 1 AND 200
+          OR snapshot.snapshot_key ~ '[[:cntrl:]]'
+          OR snapshot.agent_name IS NULL
+          OR snapshot.agent_name <> pg_catalog.btrim(snapshot.agent_name)
+          OR pg_catalog.char_length(snapshot.agent_name) NOT BETWEEN 1 AND 200
+          OR snapshot.agent_name ~ '[[:cntrl:]]'
+          OR snapshot.input_tokens IS NULL
+          OR snapshot.input_tokens < 0
+          OR snapshot.input_tokens > 9007199254740991
+          OR snapshot.output_tokens IS NULL
+          OR snapshot.output_tokens < 0
+          OR snapshot.output_tokens > 9007199254740991
+          OR snapshot.input_tokens > 9007199254740991 - snapshot.output_tokens
+          OR snapshot.cached_tokens IS NULL
+          OR snapshot.cached_tokens < 0
+          OR snapshot.cached_tokens > 9007199254740991
+          OR snapshot.message_count IS NULL
+          OR snapshot.message_count < 0
+          OR snapshot.estimated_cost IS NULL
+          OR snapshot.estimated_cost < 0
+          OR snapshot.estimated_cost > 999999.999999
+          OR (
+            snapshot.model_name IS NOT NULL
+            AND (
+              snapshot.model_name <> pg_catalog.btrim(snapshot.model_name)
+              OR pg_catalog.char_length(snapshot.model_name) NOT BETWEEN 1 AND 200
+              OR snapshot.model_name ~ '[[:cntrl:]]'
+            )
+          )
+     ) THEN
+    RAISE EXCEPTION 'office_agent_lifetime_legacy_snapshot_invalid'
+      USING ERRCODE = '22023';
+  END IF;
+END;
+$legacy_snapshot_preflight$;
+
+DO $usage_profile_capacity_preflight$
+BEGIN
+  IF to_regclass('public.circle_office_agent_usage_snapshots') IS NOT NULL THEN
+    IF EXISTS (
+      WITH prospective AS (
+        SELECT profile.owner_id, profile.session_key COLLATE "C" AS session_key
+        FROM public.office_agent_usage_profiles AS profile
+        UNION
+        SELECT snapshot.owner_id, snapshot.snapshot_key COLLATE "C"
+        FROM public.circle_office_agent_usage_snapshots AS snapshot
+        UNION
+        SELECT identity_row.user_id, identity_row.session_key COLLATE "C"
+        FROM public.agent_identities AS identity_row
+        WHERE identity_row.total_tokens_all_time > 0
+           OR identity_row.total_cost_all_time > 0
+           OR identity_row.total_messages > 0
+      )
+      SELECT 1
+      FROM prospective
+      GROUP BY owner_id
+      HAVING pg_catalog.count(*) > 5000
+    ) THEN
+      RAISE EXCEPTION 'office_agent_usage_profile_limit_exceeded'
+        USING ERRCODE = '54000';
+    END IF;
+  ELSIF EXISTS (
+    WITH prospective AS (
+      SELECT profile.owner_id, profile.session_key COLLATE "C" AS session_key
+      FROM public.office_agent_usage_profiles AS profile
+      UNION
+      SELECT identity_row.user_id, identity_row.session_key COLLATE "C"
+      FROM public.agent_identities AS identity_row
+      WHERE identity_row.total_tokens_all_time > 0
+         OR identity_row.total_cost_all_time > 0
+         OR identity_row.total_messages > 0
+    )
+    SELECT 1
+    FROM prospective
+    GROUP BY owner_id
+    HAVING pg_catalog.count(*) > 5000
+  ) THEN
+    RAISE EXCEPTION 'office_agent_usage_profile_limit_exceeded'
+      USING ERRCODE = '54000';
+  END IF;
+END;
+$usage_profile_capacity_preflight$;
+
+DO $legacy_snapshot_seed$
+BEGIN
+  IF to_regclass('public.circle_office_agent_usage_snapshots') IS NOT NULL THEN
+    INSERT INTO public.office_agent_usage_profiles (
+      owner_id,
+      session_key,
+      agent_name,
+      provider_type,
+      model_name,
+      last_input_tokens,
+      last_output_tokens,
+      last_cached_tokens,
+      last_message_count,
+      last_estimated_cost,
+      lifetime_tokens,
+      lifetime_input_tokens,
+      lifetime_output_tokens,
+      lifetime_cached_tokens,
+      lifetime_messages,
+      lifetime_cost,
+      session_count,
+      baseline_observed,
+      last_observed_at,
+      first_seen_at,
+      last_seen_at,
+      updated_at
+    )
+    SELECT
+      latest.owner_id,
+      latest.snapshot_key,
+      latest.agent_name,
+      'legacy',
+      latest.model_name,
+      latest.input_tokens,
+      latest.output_tokens,
+      latest.cached_tokens,
+      latest.message_count,
+      latest.estimated_cost,
+      GREATEST(
+        latest.input_tokens + latest.output_tokens,
+        COALESCE(identity_row.total_tokens_all_time, 0::bigint)
+      ),
+      latest.input_tokens,
+      latest.output_tokens,
+      latest.cached_tokens,
+      GREATEST(
+        latest.message_count::bigint,
+        COALESCE(identity_row.total_messages, 0)::bigint
+      ),
+      GREATEST(
+        latest.estimated_cost::numeric,
+        COALESCE(identity_row.total_cost_all_time, 0)::numeric
+      ),
+      GREATEST(
+        1,
+        COALESCE(identity_row.total_sessions_all_time, 1)
+      ),
+      true,
+      latest.last_seen_at,
+      LEAST(
+        latest.created_at,
+        COALESCE(identity_row.first_seen, latest.created_at)
+      ),
+      GREATEST(
+        latest.last_seen_at,
+        COALESCE(identity_row.last_seen, latest.last_seen_at)
+      ),
+      GREATEST(
+        latest.last_seen_at,
+        COALESCE(identity_row.updated_at, latest.last_seen_at)
+      )
+    FROM (
+      SELECT DISTINCT ON (snapshot.owner_id, snapshot.snapshot_key COLLATE "C")
+        snapshot.owner_id,
+        snapshot.snapshot_key,
+        snapshot.agent_name,
+        snapshot.model_name,
+        snapshot.input_tokens,
+        snapshot.output_tokens,
+        snapshot.cached_tokens,
+        snapshot.message_count,
+        snapshot.estimated_cost,
+        snapshot.created_at,
+        snapshot.last_seen_at
+      FROM public.circle_office_agent_usage_snapshots AS snapshot
+      ORDER BY
+        snapshot.owner_id,
+        snapshot.snapshot_key COLLATE "C",
+        snapshot.last_seen_at DESC,
+        snapshot.created_at DESC,
+        snapshot.id DESC
+    ) AS latest
+    LEFT JOIN public.agent_identities AS identity_row
+      ON identity_row.user_id = latest.owner_id
+     AND identity_row.session_key = latest.snapshot_key
+    ON CONFLICT (owner_id, session_key) DO NOTHING;
+  END IF;
+END;
+$legacy_snapshot_seed$;
+
+-- Identity-only legacy history has no trustworthy last observed bridge meter.
+-- Preserve its lifetime maximum, mark the baseline unobserved, and let the
+-- first v1 RPC capture a baseline without double-counting it.
+DO $legacy_identity_preflight$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM public.agent_identities AS identity_row
+    WHERE (
+        identity_row.total_tokens_all_time > 0
+        OR identity_row.total_cost_all_time > 0
+        OR identity_row.total_messages > 0
+      )
+      AND (
+        identity_row.session_key IS NULL
+        OR identity_row.session_key <> pg_catalog.btrim(identity_row.session_key)
+        OR pg_catalog.char_length(identity_row.session_key) NOT BETWEEN 1 AND 200
+        OR identity_row.session_key ~ '[[:cntrl:]]'
+        OR identity_row.total_tokens_all_time IS NULL
+        OR identity_row.total_tokens_all_time < 0
+        OR identity_row.total_tokens_all_time > 9007199254740991
+        OR identity_row.total_messages IS NULL
+        OR identity_row.total_messages < 0
+        OR identity_row.total_cost_all_time IS NULL
+        OR identity_row.total_cost_all_time < 0
+        OR identity_row.total_cost_all_time > 999999999999.999999
+        OR identity_row.total_sessions_all_time IS NULL
+        OR identity_row.total_sessions_all_time < 0
+      )
+  ) THEN
+    RAISE EXCEPTION 'office_agent_lifetime_legacy_identity_invalid'
+      USING ERRCODE = '22023';
+  END IF;
+END;
+$legacy_identity_preflight$;
+
+INSERT INTO public.office_agent_usage_profiles (
+  owner_id,
+  session_key,
+  agent_name,
+  provider_type,
+  model_name,
+  lifetime_tokens,
+  lifetime_messages,
+  lifetime_cost,
+  session_count,
+  baseline_observed,
+  last_observed_at,
+  first_seen_at,
+  last_seen_at,
+  updated_at
+)
+SELECT
+  identity_row.user_id,
+  identity_row.session_key,
+  identity_row.session_key,
+  'legacy',
+  CASE
+    WHEN identity_row.most_used_model IS NOT NULL
+      AND identity_row.most_used_model = pg_catalog.btrim(identity_row.most_used_model)
+      AND pg_catalog.char_length(identity_row.most_used_model) BETWEEN 1 AND 200
+      AND identity_row.most_used_model !~ '[[:cntrl:]]'
+    THEN identity_row.most_used_model
+    ELSE NULL
+  END,
+  identity_row.total_tokens_all_time,
+  identity_row.total_messages,
+  identity_row.total_cost_all_time,
+  GREATEST(1, identity_row.total_sessions_all_time),
+  false,
+  identity_row.last_seen,
+  identity_row.first_seen,
+  identity_row.last_seen,
+  identity_row.updated_at
+FROM public.agent_identities AS identity_row
+WHERE (
+    identity_row.total_tokens_all_time > 0
+    OR identity_row.total_cost_all_time > 0
+    OR identity_row.total_messages > 0
+  )
+ON CONFLICT (owner_id, session_key) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION public.sync_agent_profile_usage_v1(
+  p_circle_id uuid,
+  p_agent_name text,
+  p_provider_type text,
+  p_input_tokens bigint,
+  p_output_tokens bigint,
+  p_cached_tokens bigint,
+  p_message_count integer,
+  p_estimated_cost numeric,
+  p_model text,
+  p_session_key text,
+  p_observed_at timestamptz
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $function$
+DECLARE
+  v_actor_id uuid := auth.uid();
+  v_now timestamptz := pg_catalog.clock_timestamp();
+  v_existing public.office_agent_usage_profiles%ROWTYPE;
+  v_profile public.office_agent_usage_profiles%ROWTYPE;
+  v_profile_exists boolean := false;
+  v_reset boolean := false;
+  v_delta_input bigint := 0;
+  v_delta_output bigint := 0;
+  v_delta_cached bigint := 0;
+  v_delta_messages integer := 0;
+  v_delta_cost numeric := 0;
+  v_owner_profile_count integer := 0;
+  v_office_agent_row_count integer := 0;
+  v_observation_disposition text := 'applied';
+  v_public_projection_disposition text := 'not_found';
+BEGIN
+  IF v_actor_id IS NULL THEN
+    RAISE EXCEPTION 'authentication_required'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF p_circle_id IS NULL OR NOT EXISTS (
+    SELECT 1
+    FROM public.circle_members AS membership
+    WHERE membership.circle_id = p_circle_id
+      AND membership.user_id = v_actor_id
+  ) THEN
+    RAISE EXCEPTION 'office_agent_usage_circle_membership_required'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF p_session_key IS NULL
+     OR p_session_key <> pg_catalog.btrim(p_session_key)
+     OR pg_catalog.char_length(p_session_key) NOT BETWEEN 1 AND 200
+     OR p_session_key ~ '[[:cntrl:]]'
+     OR p_agent_name IS NULL
+     OR p_agent_name <> pg_catalog.btrim(p_agent_name)
+     OR pg_catalog.char_length(p_agent_name) NOT BETWEEN 1 AND 200
+     OR p_agent_name ~ '[[:cntrl:]]'
+     OR p_provider_type IS NULL
+     OR p_provider_type <> pg_catalog.btrim(p_provider_type)
+     OR pg_catalog.char_length(p_provider_type) NOT BETWEEN 1 AND 200
+     OR p_provider_type ~ '[[:cntrl:]]'
+     OR (
+       p_model IS NOT NULL
+       AND (
+         p_model <> pg_catalog.btrim(p_model)
+         OR pg_catalog.char_length(p_model) NOT BETWEEN 1 AND 200
+         OR p_model ~ '[[:cntrl:]]'
+       )
+     ) THEN
+    RAISE EXCEPTION 'office_agent_usage_identity_invalid'
+      USING ERRCODE = '22023';
+  END IF;
+
+  IF p_input_tokens IS NULL OR p_input_tokens < 0
+     OR p_input_tokens > 9007199254740991
+     OR p_output_tokens IS NULL OR p_output_tokens < 0
+     OR p_output_tokens > 9007199254740991
+     OR p_input_tokens > 9007199254740991 - p_output_tokens
+     OR p_cached_tokens IS NULL OR p_cached_tokens < 0
+     OR p_cached_tokens > 9007199254740991
+     OR p_message_count IS NULL OR p_message_count < 0
+     OR p_estimated_cost IS NULL OR p_estimated_cost < 0
+     OR p_estimated_cost > 999999.999999
+     OR p_observed_at IS NULL THEN
+    RAISE EXCEPTION 'office_agent_usage_counters_invalid'
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- One owner-wide lock makes the 5,000-row cap exact and serializes every
+  -- same-session observation across tabs and Circles before any delta exists.
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(v_actor_id::text, 151817951::bigint)
+  );
+
+  SELECT profile.*
+  INTO v_existing
+  FROM public.office_agent_usage_profiles AS profile
+  WHERE profile.owner_id = v_actor_id
+    AND profile.session_key = p_session_key
+  FOR UPDATE;
+  v_profile_exists := FOUND;
+
+  IF v_profile_exists
+     AND v_existing.baseline_observed
+     AND (
+       p_observed_at < v_existing.last_observed_at
+       OR (
+         p_observed_at = v_existing.last_observed_at
+         AND (
+           p_input_tokens < v_existing.last_input_tokens
+           OR p_output_tokens < v_existing.last_output_tokens
+           OR p_cached_tokens < v_existing.last_cached_tokens
+           OR p_message_count < v_existing.last_message_count
+           OR p_estimated_cost < v_existing.last_estimated_cost
+         )
+       )
+     ) THEN
+    -- A delayed tab/poll may carry a lower cumulative meter. Without this
+    -- observation fence it would look like a bridge reset and double count an
+    -- entire session. Preserve the locked profile and publish no delta.
+    v_observation_disposition := 'stale';
+    v_profile := v_existing;
+  ELSIF v_profile_exists AND v_existing.baseline_observed THEN
+    v_delta_input := CASE
+      WHEN p_input_tokens >= v_existing.last_input_tokens
+        THEN p_input_tokens - v_existing.last_input_tokens
+      ELSE p_input_tokens
+    END;
+    v_delta_output := CASE
+      WHEN p_output_tokens >= v_existing.last_output_tokens
+        THEN p_output_tokens - v_existing.last_output_tokens
+      ELSE p_output_tokens
+    END;
+    v_delta_cached := CASE
+      WHEN p_cached_tokens >= v_existing.last_cached_tokens
+        THEN p_cached_tokens - v_existing.last_cached_tokens
+      ELSE p_cached_tokens
+    END;
+    v_delta_messages := CASE
+      WHEN p_message_count >= v_existing.last_message_count
+        THEN p_message_count - v_existing.last_message_count
+      ELSE p_message_count
+    END;
+    v_delta_cost := CASE
+      WHEN p_estimated_cost >= v_existing.last_estimated_cost
+        THEN p_estimated_cost - v_existing.last_estimated_cost
+      ELSE p_estimated_cost
+    END;
+    v_reset := p_input_tokens < v_existing.last_input_tokens
+      OR p_output_tokens < v_existing.last_output_tokens
+      OR p_cached_tokens < v_existing.last_cached_tokens
+      OR p_message_count < v_existing.last_message_count
+      OR p_estimated_cost < v_existing.last_estimated_cost;
+    IF NOT v_reset
+       AND v_delta_input = 0
+       AND v_delta_output = 0
+       AND v_delta_cached = 0
+       AND v_delta_messages = 0
+       AND v_delta_cost = 0 THEN
+      v_observation_disposition := 'unchanged';
+    END IF;
+
+    UPDATE public.office_agent_usage_profiles AS profile
+    SET agent_name = p_agent_name,
+        provider_type = p_provider_type,
+        model_name = COALESCE(p_model, profile.model_name),
+        last_input_tokens = p_input_tokens,
+        last_output_tokens = p_output_tokens,
+        last_cached_tokens = p_cached_tokens,
+        last_message_count = p_message_count,
+        last_estimated_cost = p_estimated_cost,
+        lifetime_tokens = profile.lifetime_tokens + v_delta_input + v_delta_output,
+        lifetime_input_tokens = profile.lifetime_input_tokens + v_delta_input,
+        lifetime_output_tokens = profile.lifetime_output_tokens + v_delta_output,
+        lifetime_cached_tokens = profile.lifetime_cached_tokens + v_delta_cached,
+        lifetime_messages = profile.lifetime_messages + v_delta_messages,
+        lifetime_cost = profile.lifetime_cost + v_delta_cost,
+        session_count = profile.session_count + CASE WHEN v_reset THEN 1 ELSE 0 END,
+        last_observed_at = p_observed_at,
+        last_seen_at = v_now,
+        updated_at = v_now
+    WHERE profile.owner_id = v_actor_id
+      AND profile.session_key = p_session_key
+    RETURNING profile.* INTO STRICT v_profile;
+  ELSIF v_profile_exists THEN
+    -- Identity-only backfill: capture the first real meter as a baseline and
+    -- retain whichever lifetime maximum is larger. No additive delta is
+    -- emitted, so an existing local maximum is never counted twice.
+    UPDATE public.office_agent_usage_profiles AS profile
+    SET agent_name = p_agent_name,
+        provider_type = p_provider_type,
+        model_name = COALESCE(p_model, profile.model_name),
+        last_input_tokens = p_input_tokens,
+        last_output_tokens = p_output_tokens,
+        last_cached_tokens = p_cached_tokens,
+        last_message_count = p_message_count,
+        last_estimated_cost = p_estimated_cost,
+        lifetime_tokens = GREATEST(
+          profile.lifetime_tokens,
+          p_input_tokens + p_output_tokens
+        ),
+        lifetime_input_tokens = GREATEST(profile.lifetime_input_tokens, p_input_tokens),
+        lifetime_output_tokens = GREATEST(profile.lifetime_output_tokens, p_output_tokens),
+        lifetime_cached_tokens = GREATEST(profile.lifetime_cached_tokens, p_cached_tokens),
+        lifetime_messages = GREATEST(profile.lifetime_messages, p_message_count::bigint),
+        lifetime_cost = GREATEST(profile.lifetime_cost, p_estimated_cost),
+        baseline_observed = true,
+        last_observed_at = p_observed_at,
+        last_seen_at = v_now,
+        updated_at = v_now
+    WHERE profile.owner_id = v_actor_id
+      AND profile.session_key = p_session_key
+    RETURNING profile.* INTO STRICT v_profile;
+  ELSE
+    SELECT pg_catalog.count(*)::integer
+    INTO v_owner_profile_count
+    FROM public.office_agent_usage_profiles AS profile
+    WHERE profile.owner_id = v_actor_id;
+    IF v_owner_profile_count >= 5000 THEN
+      RAISE EXCEPTION 'office_agent_usage_profile_limit_exceeded'
+        USING ERRCODE = '54000';
+    END IF;
+
+    v_delta_input := p_input_tokens;
+    v_delta_output := p_output_tokens;
+    v_delta_cached := p_cached_tokens;
+    v_delta_messages := p_message_count;
+    v_delta_cost := p_estimated_cost;
+
+    INSERT INTO public.office_agent_usage_profiles (
+      owner_id,
+      session_key,
+      agent_name,
+      provider_type,
+      model_name,
+      last_input_tokens,
+      last_output_tokens,
+      last_cached_tokens,
+      last_message_count,
+      last_estimated_cost,
+      lifetime_tokens,
+      lifetime_input_tokens,
+      lifetime_output_tokens,
+      lifetime_cached_tokens,
+      lifetime_messages,
+      lifetime_cost,
+      session_count,
+      baseline_observed,
+      last_observed_at,
+      first_seen_at,
+      last_seen_at,
+      updated_at
+    ) VALUES (
+      v_actor_id,
+      p_session_key,
+      p_agent_name,
+      p_provider_type,
+      p_model,
+      p_input_tokens,
+      p_output_tokens,
+      p_cached_tokens,
+      p_message_count,
+      p_estimated_cost,
+      p_input_tokens + p_output_tokens,
+      p_input_tokens,
+      p_output_tokens,
+      p_cached_tokens,
+      p_message_count,
+      p_estimated_cost,
+      1,
+      true,
+      p_observed_at,
+      v_now,
+      v_now,
+      v_now
+    )
+    RETURNING * INTO STRICT v_profile;
+  END IF;
+
+  SELECT pg_catalog.count(*)::integer
+  INTO v_office_agent_row_count
+  FROM public.circle_office_agents AS office_agent
+  WHERE office_agent.circle_id = p_circle_id
+    AND office_agent.owner_id = v_actor_id
+    AND pg_catalog.lower(office_agent.name) = pg_catalog.lower(p_agent_name);
+
+  IF v_office_agent_row_count = 1 AND v_observation_disposition <> 'stale' THEN
+    UPDATE public.circle_office_agents AS office_agent
+    SET token_usage_today = office_agent.token_usage_today + v_delta_input + v_delta_output,
+        input_tokens_today = office_agent.input_tokens_today + v_delta_input,
+        output_tokens_today = office_agent.output_tokens_today + v_delta_output,
+        cached_tokens_today = office_agent.cached_tokens_today + v_delta_cached,
+        message_count_today = office_agent.message_count_today + v_delta_messages,
+        estimated_cost_today = office_agent.estimated_cost_today + v_delta_cost,
+        token_usage_total = office_agent.token_usage_total + v_delta_input + v_delta_output,
+        input_tokens_total = office_agent.input_tokens_total + v_delta_input,
+        output_tokens_total = office_agent.output_tokens_total + v_delta_output,
+        cached_tokens_total = office_agent.cached_tokens_total + v_delta_cached,
+        message_count_total = office_agent.message_count_total + v_delta_messages,
+        estimated_cost_total = office_agent.estimated_cost_total + v_delta_cost,
+        model_name = COALESCE(p_model, office_agent.model_name),
+        updated_at = v_now
+    WHERE office_agent.circle_id = p_circle_id
+      AND office_agent.owner_id = v_actor_id
+      AND pg_catalog.lower(office_agent.name) = pg_catalog.lower(p_agent_name);
+  END IF;
+
+  v_public_projection_disposition := CASE
+    WHEN v_office_agent_row_count = 0 THEN 'not_found'
+    WHEN v_office_agent_row_count > 1 THEN 'ambiguous'
+    WHEN v_observation_disposition = 'stale' THEN 'stale'
+    ELSE 'applied'
+  END;
+
+  RETURN pg_catalog.jsonb_build_object(
+    'schemaVersion', 1,
+    'userId', v_actor_id::text,
+    'circleId', p_circle_id::text,
+    'sessionKey', p_session_key,
+    'observationDisposition', v_observation_disposition,
+    'officeAgentRowCount', v_office_agent_row_count,
+    'publicProjectionDisposition', v_public_projection_disposition,
+    'publicProjectionApplied', (v_public_projection_disposition = 'applied'),
+    'deltaTokens', v_delta_input + v_delta_output,
+    'deltaCost', v_delta_cost,
+    'profile', pg_catalog.to_jsonb(v_profile)
+  );
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.sync_agent_profile_usage_v1(
+  uuid, text, text, bigint, bigint, bigint, integer, numeric, text, text, timestamptz
+) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.sync_agent_profile_usage_v1(
+  uuid, text, text, bigint, bigint, bigint, integer, numeric, text, text, timestamptz
+) TO authenticated;
+
+COMMENT ON TABLE public.office_agent_usage_profiles IS
+  'Owner-private lifetime Office agent token, message, session, and estimated-cost ledger keyed by stable runtime session.';
+COMMENT ON FUNCTION public.sync_agent_profile_usage_v1(
+  uuid, text, text, bigint, bigint, bigint, integer, numeric, text, text, timestamptz
+) IS
+  'Records one exact authenticated owner/session cumulative meter, converts it to monotonic lifetime deltas, and optionally projects the same delta to one published Circle Office row.';
+
+COMMIT;
+
+NOTIFY pgrst, 'reload schema';
+-- END SECTION 51: Owner-private Office agent lifetime usage

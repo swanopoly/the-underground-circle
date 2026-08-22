@@ -645,15 +645,29 @@ const DRIVE_FILES_BASE = 'https://www.googleapis.com/drive/v3/files';
 const DRIVE_LIST_FIELDS = 'files(id,name,mimeType,modifiedTime,webViewLink,size)';
 
 /**
- * Builds the Drive `q` expression. Queries that already use Drive query
- * operators (`contains`, `mimeType`, `=`) pass through verbatim so power
- * callers keep full control; plain-text queries are wrapped as a
- * name-or-fullText search with single quotes escaped as \' (so "O'Brien"
- * cannot break out of the quoted literal).
+ * Builds the Drive `q` expression from a plain-text search string.
+ *
+ * SECURITY: this is a query-literal escaper, not a passthrough. Two earlier
+ * defects made the old comment's claim ("O'Brien cannot break out") false:
+ *
+ *   1. Any query containing `contains`, `mimeType`, or `=` was returned
+ *      VERBATIM as the Drive `q` expression. Since Drive reads are
+ *      auto-approved, a model- or injection-controlled query could silently
+ *      widen its own scope — `trashed = true`, `'attacker@x' in writers`,
+ *      `mimeType != 'x'` to enumerate the whole drive.
+ *   2. The escaper replaced `'` but not `\`, so a trailing backslash
+ *      (`a\'`) escaped the escape and still closed the literal.
+ *
+ * Drive query literals use backslash escaping, so `\` MUST be escaped before
+ * `'` — doing it in the other order double-escapes the backslashes that step
+ * one just introduced and reopens the hole.
  */
+function escapeDriveQueryLiteral(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
 function buildDriveQuery(raw: string): string {
-  if (/\bcontains\b|\bmimeType\b|=/.test(raw)) return raw;
-  const escaped = raw.replace(/'/g, "\\'");
+  const escaped = escapeDriveQueryLiteral(raw);
   return `name contains '${escaped}' or fullText contains '${escaped}'`;
 }
 

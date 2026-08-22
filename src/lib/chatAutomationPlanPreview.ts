@@ -123,6 +123,39 @@ function inferSurfaceLabel(plan: ChatAutomationPlan): string {
   }
 }
 
+function inferRouteLabel(plan: ChatAutomationPlan): string {
+  switch (plan.computerRequestRoute?.kind) {
+    case 'desktop_app':
+      return 'Desktop app';
+    case 'local_file':
+      return 'Local files';
+    case 'browser':
+      return 'Browser';
+    case 'hybrid':
+      return 'Browser + desktop';
+    case 'agent_buildout':
+      return 'Capability buildout';
+    default:
+      break;
+  }
+
+  if (plan.execution.routeId) return plan.execution.routeId;
+  switch (plan.execution.kind) {
+    case 'run_plain_chat':
+      return 'Chat';
+    case 'run_openswan':
+      return 'OpenSwan';
+    case 'run_build_discovery':
+      return 'Build';
+    case 'run_browser_plan':
+      return 'Browser';
+    case 'ask_clarification':
+      return 'Chat';
+    default:
+      return 'Direct';
+  }
+}
+
 function inferIntentLabel(plan: ChatAutomationPlan): string {
   switch (plan.intent.kind) {
     case 'slash_command':
@@ -211,7 +244,11 @@ export function buildChatAutomationPlanPreview(plan: ChatAutomationPlan): ChatAu
   return {
     title: EXECUTION_LABELS[plan.execution.kind],
     intentLabel: inferIntentLabel(plan),
-    routeLabel: plan.execution.routeId || 'direct',
+    // `execution.routeId` identifies slash/natural-command handlers. Native
+    // app and local-file tasks intentionally keep it null so they are never
+    // mislabeled as the legacy `browser` command route. Their canonical
+    // execution surface lives on `computerRequestRoute.kind` instead.
+    routeLabel: inferRouteLabel(plan),
     surfaceLabel: inferSurfaceLabel(plan),
     mode,
     riskLabel: risk.label,

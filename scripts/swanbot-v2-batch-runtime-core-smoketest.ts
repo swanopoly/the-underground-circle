@@ -69,8 +69,8 @@ ok(
 // ── 2. Model gate — allowlist aliases resolve to concrete ids ────────────────
 group('2. resolveV2BatchModel — MODEL_MAP aliases');
 ok(asModel(resolveV2BatchModel('claude-haiku')) === 'claude-haiku-4-5-20251001', 'claude-haiku alias');
-ok(asModel(resolveV2BatchModel('claude-sonnet')) === 'claude-sonnet-4-6', 'claude-sonnet alias');
-ok(asModel(resolveV2BatchModel('claude-opus')) === 'claude-opus-4-8', 'claude-opus alias');
+ok(asModel(resolveV2BatchModel('claude-sonnet')) === 'claude-sonnet-5', 'claude-sonnet floating alias');
+ok(asModel(resolveV2BatchModel('claude-opus')) === 'claude-opus-5', 'claude-opus floating alias');
 ok(asModel(resolveV2BatchModel('claude-fable')) === 'claude-fable-5', 'claude-fable alias');
 // Every MODEL_MAP entry resolves to its mapped value (lockstep with the edge map).
 for (const [alias, expected] of Object.entries(V2_BATCH_MODEL_MAP)) {

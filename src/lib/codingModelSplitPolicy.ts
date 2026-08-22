@@ -351,10 +351,10 @@ export interface AutoBestOfNDecision {
 /** Race candidates in priority order — one concrete strong coder per
  *  eligible provider. */
 const BEST_OF_N_PRIORITY: ReadonlyArray<{ provider: string; modelId: string }> = [
-  { provider: 'anthropic', modelId: 'claude-sonnet-4-6' },
-  { provider: 'openai', modelId: 'gpt-5.5' },
-  { provider: 'google_ai', modelId: 'google_ai/gemini-2.5-pro' },
-  { provider: 'deepseek', modelId: 'deepseek/deepseek-v3.2' },
+  { provider: 'anthropic', modelId: 'claude-sonnet-5' },
+  { provider: 'openai', modelId: 'gpt-5.6-sol' },
+  { provider: 'google_ai', modelId: 'google_ai/gemini-3.6-flash' },
+  { provider: 'deepseek', modelId: 'deepseek/deepseek-v4-pro' },
   { provider: 'openrouter', modelId: 'openrouter/auto' },
 ];
 

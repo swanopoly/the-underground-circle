@@ -17,6 +17,7 @@
  */
 
 import { supabase } from './supabase';
+import { claimApprovalExecution } from './approvalExecutionClaim';
 import { parseSkillFrontmatter } from './skillLibrary';
 
 export type ApplySkillActionResult =
@@ -25,6 +26,7 @@ export type ApplySkillActionResult =
 
 type ApprovalRow = {
   id: string;
+  action_type: string;
   status: string;
   payload: Record<string, any>;
   applied_at?: string | null;
@@ -107,7 +109,7 @@ export async function fileComputerTaskRecipeProposal(args: {
 export async function applyApprovedSkillAction(approvalId: string): Promise<ApplySkillActionResult> {
   const { data: approval, error: loadError } = await supabase
     .from('agent_approvals')
-    .select('id, status, payload, applied_at')
+    .select('id, action_type, status, payload, applied_at')
     .eq('id', approvalId)
     .maybeSingle<ApprovalRow>();
 
@@ -122,11 +124,25 @@ export async function applyApprovedSkillAction(approvalId: string): Promise<Appl
   }
 
   const payload = approval.payload || {};
-  const action = payload.action as 'create' | 'patch' | 'delete' | 'write_file' | 'remove_file' | undefined;
-  const circleId = payload.circleId as string | undefined;
-  const name = payload.name as string | undefined;
+  const rawAction = typeof payload.action === 'string' ? payload.action.trim() : '';
+  const action = (
+    rawAction === 'create'
+    || rawAction === 'patch'
+    || rawAction === 'delete'
+    || rawAction === 'write_file'
+    || rawAction === 'remove_file'
+  ) ? rawAction : undefined;
+  const circleId = typeof payload.circleId === 'string' ? payload.circleId.trim() : '';
+  const name = typeof payload.name === 'string' ? payload.name.trim() : '';
   if (!action || !circleId || !name) {
     return { ok: false, error: 'approval payload missing action / circleId / name' };
+  }
+  const expectedActionType = `skill.${action}`;
+  if (approval.action_type !== expectedActionType) {
+    return {
+      ok: false,
+      error: `approval action_type does not match payload action "${action}"`,
+    };
   }
 
   const authorId = payload.authorId as string | null | undefined;
@@ -139,6 +155,9 @@ export async function applyApprovedSkillAction(approvalId: string): Promise<Appl
       const parsed = parseSkillFrontmatter(content);
       const description = payload.description || parsed.description;
       if (!description) return { ok: false, error: 'create: description required' };
+      const claim = await claimApprovalExecution(approvalId, expectedActionType);
+      if (!claim.ok) return { ok: false, error: claim.error };
+      if (!claim.claimed) return { ok: true, applied: false, reason: 'already applied' };
       const { data, error } = await supabase
         .from('circle_skills')
         .insert({
@@ -164,6 +183,9 @@ export async function applyApprovedSkillAction(approvalId: string): Promise<Appl
         // only updated_at
         return { ok: false, error: 'patch: no fields to update' };
       }
+      const claim = await claimApprovalExecution(approvalId, expectedActionType);
+      if (!claim.ok) return { ok: false, error: claim.error };
+      if (!claim.claimed) return { ok: true, applied: false, reason: 'already applied' };
       const { data, error } = await supabase
         .from('circle_skills')
         .update(updates)
@@ -175,6 +197,9 @@ export async function applyApprovedSkillAction(approvalId: string): Promise<Appl
       if (!data)  return { ok: false, error: `patch: no skill named "${name}" in circle ${circleId}` };
       skillId = data.id;
     } else if (action === 'delete') {
+      const claim = await claimApprovalExecution(approvalId, expectedActionType);
+      if (!claim.ok) return { ok: false, error: claim.error };
+      if (!claim.claimed) return { ok: true, applied: false, reason: 'already applied' };
       const { data, error } = await supabase
         .from('circle_skills')
         .delete()
@@ -209,6 +234,9 @@ export async function applyApprovedSkillAction(approvalId: string): Promise<Appl
           return { ok: false, error: 'write_file: content required and must be non-empty' };
         }
         const mimeType = typeof payload.mimeType === 'string' ? payload.mimeType : 'text/plain';
+        const claim = await claimApprovalExecution(approvalId, expectedActionType);
+        if (!claim.ok) return { ok: false, error: claim.error };
+        if (!claim.claimed) return { ok: true, applied: false, reason: 'already applied' };
         // upsert keyed by (skill_id, relpath) — matches the unique index
         // in the 20260507_circle_skill_files migration.
         const { error: writeErr } = await supabase
@@ -224,6 +252,9 @@ export async function applyApprovedSkillAction(approvalId: string): Promise<Appl
           }, { onConflict: 'skill_id,relpath' });
         if (writeErr) return { ok: false, error: `write_file failed: ${writeErr.message}` };
       } else {
+        const claim = await claimApprovalExecution(approvalId, expectedActionType);
+        if (!claim.ok) return { ok: false, error: claim.error };
+        if (!claim.claimed) return { ok: true, applied: false, reason: 'already applied' };
         const { data: removed, error: removeErr } = await supabase
           .from('circle_skill_files')
           .delete()
@@ -239,16 +270,6 @@ export async function applyApprovedSkillAction(approvalId: string): Promise<Appl
     }
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
-  }
-
-  // Mark the approval row as applied so re-runs short-circuit.
-  try {
-    await supabase
-      .from('agent_approvals')
-      .update({ applied_at: new Date().toISOString() })
-      .eq('id', approvalId);
-  } catch {
-    // Non-fatal — the skill change is already committed.
   }
 
   return { ok: true, applied: true, skillId };

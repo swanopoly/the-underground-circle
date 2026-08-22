@@ -456,6 +456,73 @@ async function runAgentTask(input: {
 
 // ── Chat notification ───────────────────────────────────────────────────────
 
+type ScheduleDispatchAuthority =
+  | { ok: true; threadId: string }
+  | { ok: false; unavailable: boolean };
+
+/**
+ * Re-prove the schedule owner and exact destination under the service role.
+ * A schedule row is historical intent, not durable authority: Circle or
+ * private/shared-thread membership can be revoked between recurrences.
+ */
+async function resolveScheduleDispatchAuthority(
+  supabase: ReturnType<typeof createClient<any>>,
+  schedule: ScheduleRow,
+): Promise<ScheduleDispatchAuthority> {
+  if (!schedule.created_by) return { ok: false, unavailable: false };
+
+  const { data: membership, error: membershipError } = await supabase
+    .from("circle_members")
+    .select("user_id")
+    .eq("circle_id", schedule.circle_id)
+    .eq("user_id", schedule.created_by)
+    .maybeSingle();
+  if (membershipError) return { ok: false, unavailable: true };
+  if (!membership) return { ok: false, unavailable: false };
+
+  let threadQuery = supabase
+    .from("circle_chat_threads")
+    .select("id,created_by,visibility")
+    .eq("circle_id", schedule.circle_id)
+    .eq("archived", false);
+  threadQuery = schedule.thread_id
+    ? threadQuery.eq("id", schedule.thread_id)
+    : threadQuery.eq("visibility", "circle");
+  const { data: thread, error: threadError } = await threadQuery.maybeSingle();
+  if (threadError) return { ok: false, unavailable: true };
+  if (!thread) return { ok: false, unavailable: false };
+
+  if (thread.visibility === "circle" || thread.created_by === schedule.created_by) {
+    return { ok: true, threadId: thread.id };
+  }
+
+  const { data: threadMembership, error: threadMembershipError } = await supabase
+    .from("circle_chat_thread_members")
+    .select("thread_id")
+    .eq("thread_id", thread.id)
+    .eq("user_id", schedule.created_by)
+    .maybeSingle();
+  if (threadMembershipError) return { ok: false, unavailable: true };
+  return threadMembership
+    ? { ok: true, threadId: thread.id }
+    : { ok: false, unavailable: false };
+}
+
+async function deactivateRevokedSchedule(
+  supabase: ReturnType<typeof createClient<any>>,
+  scheduleId: string,
+): Promise<void> {
+  await supabase
+    .from(SCHEDULES_TABLE)
+    .update({
+      active: false,
+      last_diff_summary: "Watch paused because its Circle or Chat access changed.",
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", scheduleId)
+    .eq("active", true);
+}
+
 /**
  * Post the watch update as a bot message. Same insert shape the other
  * service-role posters use (automation-executor, github-webhook):
@@ -470,17 +537,30 @@ async function postWatchMessage(
   supabase: ReturnType<typeof createClient<any>>,
   schedule: ScheduleRow,
   content: string,
-): Promise<void> {
+): Promise<"posted" | "scope_revoked" | "authority_unavailable" | "insert_failed"> {
+  const authority = await resolveScheduleDispatchAuthority(supabase, schedule);
+  if (!authority.ok) {
+    if (!authority.unavailable) await deactivateRevokedSchedule(supabase, schedule.id);
+    return authority.unavailable ? "authority_unavailable" : "scope_revoked";
+  }
   try {
-    await supabase.from("messages").insert({
+    const { error } = await supabase.from("messages").insert({
       circle_id: schedule.circle_id,
       content,
       is_bot: true,
       user_id: null,
-      ...(schedule.thread_id ? { thread_id: schedule.thread_id } : {}),
+      thread_id: authority.threadId,
     });
+    if (error) {
+      console.warn(`[watch-scheduler] message insert failed for schedule ${schedule.id}`);
+      return "insert_failed";
+    }
+    return "posted";
   } catch (err) {
-    console.warn(`[watch-scheduler] message insert failed for schedule ${schedule.id}:`, err);
+    console.warn(`[watch-scheduler] message insert failed for schedule ${schedule.id}`, {
+      name: err instanceof Error ? err.name : typeof err,
+    });
+    return "insert_failed";
   }
 }
 
@@ -512,6 +592,19 @@ async function processSchedule(
     return { scheduleId: schedule.id, status: "claim_lost" };
   }
 
+  // The due row proves only that a watch once existed. Re-check the current
+  // user/Circle/private-thread relationship before decrypting either Circle
+  // Browserbase credentials or the creator's personal model key.
+  let dispatchAuthority = await resolveScheduleDispatchAuthority(supabase, schedule);
+  if (!dispatchAuthority.ok) {
+    if (!dispatchAuthority.unavailable) await deactivateRevokedSchedule(supabase, schedule.id);
+    return {
+      scheduleId: schedule.id,
+      status: dispatchAuthority.unavailable ? "authority_unavailable" : "scope_revoked",
+    };
+  }
+  schedule.thread_id = dispatchAuthority.threadId;
+
   // b. Resolve Browserbase creds for the schedule's circle. Missing creds →
   // failed-soft: stamp the skip reason and tell the thread. The claim above
   // already advanced next_run_at, so this posts at most once per cadence.
@@ -527,7 +620,7 @@ async function processSchedule(
         })
         .eq("id", schedule.id);
     } catch { /* best-effort */ }
-    await postWatchMessage(
+    const postStatus = await postWatchMessage(
       supabase,
       schedule,
       formatWatchUpdateMessage({
@@ -537,11 +630,23 @@ async function processSchedule(
         errorMessage: credsResult.reason,
       }),
     );
+    if (postStatus === "scope_revoked" || postStatus === "authority_unavailable") {
+      return { scheduleId: schedule.id, status: postStatus };
+    }
     return { scheduleId: schedule.id, status: "skipped_no_creds" };
   }
 
   // c. Run the task through the normal computer-use pipeline and wait for
   // the stream to finish.
+  dispatchAuthority = await resolveScheduleDispatchAuthority(supabase, schedule);
+  if (!dispatchAuthority.ok) {
+    if (!dispatchAuthority.unavailable) await deactivateRevokedSchedule(supabase, schedule.id);
+    return {
+      scheduleId: schedule.id,
+      status: dispatchAuthority.unavailable ? "authority_unavailable" : "scope_revoked",
+    };
+  }
+  schedule.thread_id = dispatchAuthority.threadId;
   const outcome = await runAgentTask({
     supabaseUrl: env.supabaseUrl,
     serviceKey: env.serviceKey,
@@ -606,7 +711,7 @@ async function processSchedule(
   // NO message (that silence is the point of changes_only).
   const shouldNotify = Boolean(errorMessage) || schedule.notify_on === "always" || hasChanges;
   if (shouldNotify) {
-    await postWatchMessage(
+    const postStatus = await postWatchMessage(
       supabase,
       schedule,
       formatWatchUpdateMessage({
@@ -616,6 +721,9 @@ async function processSchedule(
         errorMessage,
       }),
     );
+    if (postStatus === "scope_revoked" || postStatus === "authority_unavailable") {
+      return { scheduleId: schedule.id, status: postStatus };
+    }
   }
 
   return { scheduleId: schedule.id, status: outcome.ok ? "completed" : "failed" };

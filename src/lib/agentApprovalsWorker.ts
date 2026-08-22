@@ -10,17 +10,18 @@
  *     → hitlService.resolveApproval(id, 'approved')
  *     → HitlApprovalBanner calls applyApprovedAction(id)   ← THIS FILE
  *     → dispatches by action_type:
- *         - skill.create/patch/delete  → applyApprovedSkillAction
+ *         - skill.create/patch/delete/write_file/remove_file
+ *                                      → applyApprovedSkillAction
  *         - memory.compact             → applyApprovedMemoryCompaction
  *         - user_memory.replace/delete → applyApprovedUserMemoryAction
  *         - chat.review_comment        → applyApprovedReviewCommentAction (new)
  *     → `agent_approvals.applied_at` stamped; re-runs are no-ops.
  *
- * The dispatcher enforces idempotency BEFORE dispatch (see
- * `./approvalIdempotency`): `applied_at` is the atomic executed-claim, so an
- * approved-then-retried row replays the cached success without re-invoking the
- * handler — no double publish/upload/comment/skill-write. Each apply function
- * also stamps `applied_at` itself, keeping the claim close to its side effect.
+ * The dispatcher coalesces same-process calls by approval id. Each handler
+ * performs its read-only validation/preflight first, then atomically consumes
+ * `applied_at` immediately before its first mutation or transport. The durable
+ * claim is the cross-tab/process safety boundary; post-dispatch ambiguity is
+ * never replayed automatically.
  * Unknown `action_type`s mark the approval row with a `worker_skipped_at`
  * metadata note and return silently — we never throw across the approval UI
  * boundary.
@@ -29,8 +30,13 @@
 import { supabase } from './supabase';
 import { applyApprovedSkillAction } from './skillLibraryWrite';
 import { applyApprovedMemoryCompaction } from './circleMemoryCompaction';
-import { deleteUserMemory, replaceUserMemory } from './userMemory';
 import { createPullRequestComment } from './github';
+import {
+  looksLikeCredentialMemoryContent,
+  USER_MEMORY_CAP_ERROR,
+  USER_MEMORY_CREDENTIAL_ERROR,
+  USER_MEMORY_HARD_CAP,
+} from './userMemoryCaps';
 import {
   composeReviewCommentBody,
   resolveReviewGithubToken,
@@ -44,6 +50,8 @@ import {
   isAlreadyApplied,
   PARAM_MISMATCH_ERROR,
 } from './approvalIdempotency';
+import { createApprovalSingleFlight } from './approvalSingleFlight';
+import { claimApprovalExecution } from './approvalExecutionClaim';
 
 export type ApprovalApplyResult =
   | { ok: true; actionType: string; applied: boolean; reason?: string; skillId?: string }
@@ -64,11 +72,21 @@ export function isRuntimeOwnedAgentApprovalActionType(actionType: unknown): bool
  * Apply a single approved row. Idempotent: re-running on an already-applied
  * or non-approved row short-circuits BEFORE any side-effecting handler runs,
  * so a double-click / resubmit / network retry / sweep race can never
- * double-execute (idempotency key = the approval id; applied_at = the executed
- * claim; see ./approvalIdempotency). Safe to call from UI approve handlers
+ * double-execute (idempotency key = the approval id). Process-local calls are
+ * coalesced as an optimization; every handler also wins a durable one-row CAS
+ * after validation and directly before its first side effect. Safe to call from UI approve handlers
  * without awaiting the result — the return value is for telemetry/toasts.
  */
-export async function applyApprovedAction(approvalId: string): Promise<ApprovalApplyResult> {
+const runApprovedActionSingleFlight = createApprovalSingleFlight<ApprovalApplyResult>();
+
+export function applyApprovedAction(approvalId: string): Promise<ApprovalApplyResult> {
+  return runApprovedActionSingleFlight(
+    approvalId,
+    () => applyApprovedActionOnce(approvalId),
+  );
+}
+
+async function applyApprovedActionOnce(approvalId: string): Promise<ApprovalApplyResult> {
   const { data, error } = await supabase
     .from('agent_approvals')
     .select('id, circle_id, action_type, status, applied_at, payload, resolved_by')
@@ -96,15 +114,13 @@ export async function applyApprovedAction(approvalId: string): Promise<ApprovalA
     };
   }
 
-  // ── Idempotency guard (atomic claim = applied_at) ─────────────────────────
+  // ── Durable one-shot consumption guard ───────────────────────────────────
   // APIs with side effects aren't safe to retry unless they provide
   // idempotency. The approval `id` is the logical-operation key; `applied_at`
-  // is the server-cached "already executed" claim. This guard runs BEFORE we
-  // dispatch to any side-effecting handler, so a double-click / resubmit /
-  // network retry / sweep race on the SAME approved row can never re-publish,
-  // re-upload, re-comment, or re-write a skill/memory — it replays the cached
-  // success instead. (Read-only / unknown-handler action types are unaffected:
-  // they only reach the dispatch below.)
+  // is the durable "already consumed" claim. This snapshot check avoids
+  // needless handler preflight on ordinary retries; the handler-local guarded
+  // UPDATE is what arbitrates concurrent tabs/processes immediately before the
+  // mutation.
   const incomingKey = buildApprovalIdempotencyKey({
     id: String(data.id),
     action_type: actionType,
@@ -148,22 +164,34 @@ export async function applyApprovedAction(approvalId: string): Promise<ApprovalA
       return { ok: true, actionType, applied: r.applied, reason: r.reason };
     }
 
-    // Unknown kind — don't guess, but do mark it so we can see it in the
-    // dashboard and add a handler later.
-    await supabase
+    // Unknown kind — don't guess. Atomically seal it as a terminal worker skip
+    // so a mount sweep cannot process it forever, while preserving the same
+    // one-winner/status/action binding as every side-effecting family.
+    const skippedAt = new Date().toISOString();
+    const { data: skippedRows, error: skipError } = await supabase
       .from('agent_approvals')
       .update({
-        applied_at: new Date().toISOString(),
+        applied_at: skippedAt,
         payload: {
           ...(data.payload || {}),
           // Persist the logical-operation key so any (pathological) re-file
           // under this id with mutated params is caught by detectParamMismatch.
           workerIdempotencyKey: incomingKey,
-          worker_skipped_at: new Date().toISOString(),
+          worker_skipped_at: skippedAt,
           worker_skipped_reason: `no handler for action_type "${actionType}"`,
         },
       })
-      .eq('id', approvalId);
+      .eq('id', approvalId)
+      .eq('action_type', actionType)
+      .in('status', ['approved', 'auto_approved'])
+      .is('applied_at', null)
+      .select('id');
+    if (skipError) {
+      return { ok: false, actionType, error: 'Could not record the unsupported approval action.' };
+    }
+    if (!skippedRows || skippedRows.length !== 1) {
+      return buildIdempotentSkipResult({ ...data, applied_at: skippedAt, action_type: actionType });
+    }
     return { ok: true, actionType, applied: false, reason: `no handler for "${actionType}"` };
   } catch (e) {
     return { ok: false, actionType, error: e instanceof Error ? e.message : String(e) };
@@ -227,33 +255,77 @@ async function applyApprovedUserMemoryAction(
 ): Promise<{ ok: true; applied: boolean; reason?: string } | { ok: false; error: string }> {
   const payload = row.payload || {};
   const userId = String(payload.userId || '').trim();
-  const circleId = (payload.circleId ?? null) as string | null;
+  const rawCircleId = payload.circleId;
+  const circleId = rawCircleId == null
+    ? null
+    : typeof rawCircleId === 'string' && rawCircleId.trim()
+      ? rawCircleId.trim()
+      : undefined;
   const action = String(payload.action || '').trim();
   if (!userId) return { ok: false, error: 'payload missing userId' };
+  if (circleId === undefined) return { ok: false, error: 'payload has invalid circleId' };
   if (action !== 'replace' && action !== 'delete') {
     return { ok: false, error: `unexpected user_memory action "${action}"` };
   }
-
-  // NB: `replaceUserMemory` + `deleteUserMemory` are user-owned writes (RLS
-  // user_rw_own_memory). Running them from an approval handler is safe
-  // because the HITL banner only lets the row's target user approve it.
-  if (action === 'replace') {
-    const proposed = String(payload.proposedContent || '');
-    if (proposed.length === 0) return { ok: false, error: 'replace: empty proposedContent' };
-    const r = await replaceUserMemory(userId, circleId, proposed);
-    if (!r.ok) return { ok: false, error: r.error || 'replace failed' };
-  } else {
-    const r = await deleteUserMemory(userId, circleId);
-    if (!r.ok) return { ok: false, error: r.error || 'delete failed' };
+  const expectedActionType = `user_memory.${action}`;
+  if (row.action_type !== expectedActionType) {
+    return { ok: false, error: 'approval action_type does not match its user-memory payload' };
+  }
+  if ((row.circle_id ?? null) !== circleId) {
+    return { ok: false, error: 'approval circle_id does not match its user-memory payload' };
   }
 
-  try {
-    await supabase
-      .from('agent_approvals')
-      .update({ applied_at: new Date().toISOString() })
-      .eq('id', approvalId);
-  } catch {}
+  const proposed = action === 'replace' && typeof payload.proposedContent === 'string'
+    ? payload.proposedContent.trim()
+    : null;
+  if (action === 'replace') {
+    if (!proposed) return { ok: false, error: 'replace: empty proposedContent' };
+    if (looksLikeCredentialMemoryContent(proposed)) {
+      return { ok: false, error: USER_MEMORY_CREDENTIAL_ERROR };
+    }
+    if (proposed.length > USER_MEMORY_HARD_CAP) {
+      return { ok: false, error: USER_MEMORY_CAP_ERROR };
+    }
+  }
 
+  // Read-only target/access preflight. The approval remains unconsumed on a
+  // lookup/RLS failure, and the winning CAS sits directly beside the eventual
+  // update/insert/delete instead of before helper-internal validation.
+  let targetQuery = supabase
+    .from('user_memory')
+    .select('id')
+    .eq('user_id', userId);
+  targetQuery = circleId === null
+    ? targetQuery.is('circle_id', null)
+    : targetQuery.eq('circle_id', circleId);
+  const { data: existing, error: lookupError } = await targetQuery.maybeSingle();
+  if (lookupError) return { ok: false, error: `user memory lookup failed: ${lookupError.message}` };
+
+  const claim = await claimApprovalExecution(approvalId, expectedActionType);
+  if (!claim.ok) return { ok: false, error: claim.error };
+  if (!claim.claimed) return { ok: true, applied: false, reason: 'already applied' };
+
+  if (action === 'replace') {
+    const mutation = existing
+      ? await supabase
+          .from('user_memory')
+          .update({ content: proposed, updated_at: new Date().toISOString() })
+          .eq('id', existing.id)
+      : await supabase
+          .from('user_memory')
+          .insert({ user_id: userId, circle_id: circleId, content: proposed });
+    if (mutation.error) return { ok: false, error: `replace failed: ${mutation.error.message}` };
+    return { ok: true, applied: true };
+  }
+
+  if (!existing) {
+    return { ok: true, applied: false, reason: 'no user memory row to delete' };
+  }
+  const { error: deleteError } = await supabase
+    .from('user_memory')
+    .delete()
+    .eq('id', existing.id);
+  if (deleteError) return { ok: false, error: `delete failed: ${deleteError.message}` };
   return { ok: true, applied: true };
 }
 
@@ -287,6 +359,9 @@ export async function applyApprovedReviewCommentAction(
   row: ApprovalRow,
   deps: ReviewCommentApplyDeps = {},
 ): Promise<{ ok: true; applied: boolean; reason?: string } | { ok: false; error: string }> {
+  if (row.action_type !== REVIEW_COMMENT_ACTION_TYPE) {
+    return { ok: false, error: 'approval action_type is not chat.review_comment' };
+  }
   // Fail-closed payload validation (pure, shared with the filer).
   const validated = validateReviewCommentApprovalPayload(row.payload);
   if (!validated.ok) return { ok: false, error: validated.error };
@@ -312,20 +387,26 @@ export async function applyApprovedReviewCommentAction(
     };
   }
 
+  const commentBody = composeReviewCommentBody(body);
   const postComment = deps.postComment ?? createPullRequestComment;
-  const posted = await postComment(owner, repo, number, composeReviewCommentBody(body), token);
-  if (!posted.success) {
-    // Surface per the worker contract (dispatcher returns { ok:false, error })
-    // and leave applied_at unstamped so a later sweep can retry.
-    return { ok: false, error: `GitHub comment on ${owner}/${repo}#${number} failed: ${posted.error || 'unknown error'}` };
-  }
+  const claim = await claimApprovalExecution(approvalId, REVIEW_COMMENT_ACTION_TYPE);
+  if (!claim.ok) return { ok: false, error: claim.error };
+  if (!claim.claimed) return { ok: true, applied: false, reason: 'already applied' };
 
+  let posted: { success: boolean; error?: string };
   try {
-    await supabase
-      .from('agent_approvals')
-      .update({ applied_at: new Date().toISOString() })
-      .eq('id', approvalId);
-  } catch {}
+    posted = await postComment(owner, repo, number, commentBody, token);
+  } catch {
+    return {
+      ok: false,
+      error: `GitHub comment dispatch on ${owner}/${repo}#${number} has an unknown outcome and was not retried automatically.`,
+    };
+  }
+  if (!posted.success) {
+    // The one-shot claim remains consumed: a transport failure after dispatch
+    // can be outcome-unknown, so an automatic retry could duplicate a comment.
+    return { ok: false, error: `GitHub comment on ${owner}/${repo}#${number} failed and was not retried automatically: ${posted.error || 'unknown error'}` };
+  }
 
   return { ok: true, applied: true };
 }

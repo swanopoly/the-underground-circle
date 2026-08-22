@@ -1,29 +1,26 @@
-// Session Tags Help Dialog
+// Session Tags Help disclosure
 import React from 'react';
-import { View, Text, StyleSheet, ScrollView, Pressable, Platform } from 'react-native';
+import { View, Text, StyleSheet, Platform } from 'react-native';
 import { TAG_CATEGORIES } from '../lib/sessionTags';
 
 interface Props {
   visible: boolean;
-  onClose: () => void;
 }
 
-export default function SessionTagsHelp({ visible, onClose }: Props) {
+export default function SessionTagsHelp({ visible }: Props) {
   if (!visible) return null;
 
   return (
-    <Pressable style={styles.overlay} onPress={onClose}>
-      <Pressable style={styles.modal} onPress={(e) => e.stopPropagation()}>
-        <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
+    <View
+      nativeID="uc-session-tags-help"
+      accessibilityLabel="Session Tags Guide"
+      {...(Platform.OS === 'web' ? ({ role: 'region' } as any) : {})}
+      style={styles.disclosure}
+    >
+        <View style={styles.content}>
           {/* Header */}
           <View style={styles.header}>
             <Text style={styles.title}>🏷️ Session Tags Guide</Text>
-            <Pressable
-              onPress={onClose}
-              style={[styles.closeBtn, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
-            >
-              <Text style={styles.closeBtnText}>✕</Text>
-            </Pressable>
           </View>
 
           {/* What Are Tags */}
@@ -218,37 +215,20 @@ export default function SessionTagsHelp({ visible, onClose }: Props) {
               Tags are stored locally and persist across sessions. Start tagging to unlock powerful cost analytics! 🎯
             </Text>
           </View>
-        </ScrollView>
-      </Pressable>
-    </Pressable>
+        </View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  overlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: '#00000090',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20,
-    zIndex: 10000,
-  },
-  modal: {
+  disclosure: {
     backgroundColor: '#0a0a0a',
-    borderWidth: 2,
+    borderWidth: 1,
     borderColor: '#6366f1',
     borderRadius: 12,
-    maxWidth: 600,
     width: '100%',
-    maxHeight: '90%',
     overflow: 'hidden',
-  },
-  scroll: {
-    flex: 1,
+    marginBottom: 14,
   },
   content: {
     padding: 20,
@@ -270,20 +250,6 @@ const styles = StyleSheet.create({
     color: '#e8e8e8',
     fontFamily: 'monospace',
   },
-  closeBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: '#6366f115',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  closeBtnText: {
-    fontSize: 18,
-    color: '#9e9e9e',
-    fontWeight: '700',
-  },
-
   // Sections
   section: {
     marginBottom: 24,
@@ -304,8 +270,8 @@ const styles = StyleSheet.create({
   },
   code: {
     fontFamily: 'monospace',
-    color: '#22d3ee',
-    backgroundColor: '#22d3ee15',
+    color: '#6366f1',
+    backgroundColor: '#6366f115',
     paddingHorizontal: 4,
     paddingVertical: 2,
     borderRadius: 4,

@@ -11,13 +11,15 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   View, Text, StyleSheet, ScrollView, Pressable, TextInput,
   Modal, Platform, useWindowDimensions, ActivityIndicator,
   Image, Alert, FlatList,
 } from 'react-native';
 import { LoadingScreen } from '../../../components/LoadingWave';
-import { supabase } from '../../../lib/supabase';
+import { getSupabaseClientForAccessToken, supabase } from '../../../lib/supabase';
+import { indexSafeProfiles, loadSafeCircleProfiles } from '../../../lib/safeProfiles';
 import { getSwanBotResponse as getAIResponse } from '../../../lib/swanbot';
 import { dispatchBridgeTask, spawnNewSession, wakeAndAssignTask } from '../../../lib/bridgeTaskDispatcher';
 import SpawnAgentPanel from '../../../components/SpawnAgentPanel';
@@ -25,6 +27,8 @@ import ChatArtifacts from '../../../components/chat/ChatArtifacts';
 import CodingWorkbenchPreview from '../../../components/chat/CodingWorkbenchPreview';
 import RunExecutionCard from '../../../components/chat/RunExecutionCard';
 import RunHistoryDrawer from '../../../components/chat/RunHistoryDrawer';
+import { useExactRunHistoryAuthority } from '../../../hooks/useAuth';
+import BuilderGithubSaveModal from './chat/BuilderGithubSaveModal';
 import {
   getStoredToken, storeToken, removeToken, validateToken as ghValidateToken,
   listRepos, getRepoTree, getFileContent, groupTreeByFolder,
@@ -58,6 +62,7 @@ import { getEmptyStateSuggestions, type EmptyStateSuggestionAction } from '../..
 import { SEED_EVENT_NAME, buildComposerSeedDetail } from '../../../lib/chatComposerSeedCore';
 import RoomFileTree from '../../../components/rooms/RoomFileTree.web';
 import type { RoomFileEntry } from '../../../components/rooms/roomTreeAdapter';
+import { subscribeUserApiKeyChanges } from '../../../lib/llmProviders';
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 // ── Persistent state keys ────────────────────────────────────────────────────
@@ -69,6 +74,63 @@ const ROOM_STORAGE = {
   sidebar: (roomId: string) => `uc_room_sidebar_${roomId}`,
   panelWidth: (roomId: string) => `uc_room_panel_w_${roomId}`,
 };
+
+const ROOM_FILE_BUCKET = 'room-files';
+const ROOM_FILE_REFERENCE_PREFIX = 'room-file:';
+const ROOM_FILE_SIGN_TTL_SECONDS = 15 * 60;
+const ROOM_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function roomFilePath(roomId: string, filename: string): string {
+  if (!ROOM_UUID_RE.test(roomId)) throw new Error('A persisted room id is required.');
+  const safeName = String(filename || 'file')
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+    .replace(/^\.+/, '')
+    .slice(0, 120) || 'file';
+  return `rooms/${roomId}/${Date.now()}_${safeName}`;
+}
+
+function validRoomFilePath(path: string): boolean {
+  const parts = path.split('/');
+  return parts.length === 3
+    && parts[0] === 'rooms'
+    && ROOM_UUID_RE.test(parts[1])
+    && parts[2].length > 0
+    && parts[2].length <= 180;
+}
+
+function roomFileReference(path: string): string {
+  if (!validRoomFilePath(path)) throw new Error('Invalid room file path.');
+  return `${ROOM_FILE_REFERENCE_PREFIX}${encodeURIComponent(path)}`;
+}
+
+function roomFilePathFromValue(value: unknown): string | null {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  if (!normalized) return null;
+  if (normalized.startsWith(ROOM_FILE_REFERENCE_PREFIX)) {
+    try {
+      const decoded = decodeURIComponent(normalized.slice(ROOM_FILE_REFERENCE_PREFIX.length));
+      return validRoomFilePath(decoded) ? decoded : null;
+    } catch {
+      return null;
+    }
+  }
+  try {
+    const configured = new URL(process.env.EXPO_PUBLIC_SUPABASE_URL || '');
+    const candidate = new URL(normalized);
+    if (candidate.origin !== configured.origin) return null;
+    const prefixes = [
+      `/storage/v1/object/public/${ROOM_FILE_BUCKET}/`,
+      `/storage/v1/object/sign/${ROOM_FILE_BUCKET}/`,
+      `/storage/v1/object/authenticated/${ROOM_FILE_BUCKET}/`,
+    ];
+    const prefix = prefixes.find(item => candidate.pathname.startsWith(item));
+    if (!prefix) return null;
+    const path = decodeURIComponent(candidate.pathname.slice(prefix.length));
+    return validRoomFilePath(path) ? path : null;
+  } catch {
+    return null;
+  }
+}
 
 function storageGet(key: string): string | null {
   try { return typeof localStorage !== 'undefined' ? localStorage.getItem(key) : null; } catch { return null; }
@@ -106,6 +168,52 @@ interface RoomFile {
   created_at: string;
   updated_at: string;
   is_deleted: boolean;
+  /** Client-only private Storage path. Never render or persist a signed URL. */
+  storage_path?: string | null;
+  /** Client-only marker: the current editor value differs from the saved row. */
+  local_draft?: boolean;
+}
+
+async function hydratePrivateRoomFiles(
+  client: SupabaseClient,
+  rows: readonly RoomFile[],
+): Promise<RoomFile[]> {
+  const rowsByPath = new Map<string, number[]>();
+  rows.forEach((row, index) => {
+    const path = roomFilePathFromValue(row.storage_url)
+      || roomFilePathFromValue(row.content);
+    if (!path) return;
+    const indexes = rowsByPath.get(path) || [];
+    indexes.push(index);
+    rowsByPath.set(path, indexes);
+  });
+
+  const signedByPath = new Map<string, string>();
+  const paths = [...rowsByPath.keys()];
+  for (let offset = 0; offset < paths.length; offset += 20) {
+    const batch = paths.slice(offset, offset + 20);
+    const { data, error } = await client.storage
+      .from(ROOM_FILE_BUCKET)
+      .createSignedUrls(batch, ROOM_FILE_SIGN_TTL_SECONDS);
+    if (error) continue;
+    for (const item of data || []) {
+      if (item.path && item.signedUrl) signedByPath.set(item.path, item.signedUrl);
+    }
+  }
+
+  return rows.map((row) => {
+    const storagePath = roomFilePathFromValue(row.storage_url)
+      || roomFilePathFromValue(row.content);
+    if (!storagePath) return row;
+    const signedUrl = signedByPath.get(storagePath) || null;
+    const contentIsStorageReference = roomFilePathFromValue(row.content) === storagePath;
+    return {
+      ...row,
+      storage_path: storagePath,
+      storage_url: signedUrl,
+      content: contentIsStorageReference ? (signedUrl || '') : row.content,
+    };
+  });
 }
 
 interface RoomMessage {
@@ -272,8 +380,8 @@ const FILE_TYPES = [
 type FileType = typeof FILE_TYPES[number];
 
 const LANG_COLORS: Record<string, string> = {
-  typescript:'#3b82f6', javascript:'#f59e0b', python:'#22c55e', sql:'#22d3ee',
-  json:'#6f6f6f', bash:'#22c55e', rust:'#f97316', go:'#22d3ee',
+  typescript:'#3b82f6', javascript:'#f59e0b', python:'#22c55e', sql:'#6366f1',
+  json:'#6f6f6f', bash:'#22c55e', rust:'#f97316', go:'#6366f1',
   markdown:'#a855f7', plaintext:'#9e9e9e', csv:'#22c55e', image:'#ec4899',
   html:'#f97316', css:'#6366f1', yaml:'#ef4444', canvas:'#a855f7', other:'#888',
 };
@@ -317,7 +425,7 @@ const TOKEN_COLORS: Record<TokenType, string> = {
   string:      '#22c55e',   // green (strings)
   comment:     '#6f6f6f',   // muted (comments)
   number:      '#f59e0b',   // amber (numeric literals)
-  type:        '#22d3ee',   // cyan (type names, classes)
+  type:        '#6366f1',   // cyan (type names, classes)
   function:    '#3b82f6',   // blue (function names)
   operator:    '#9e9e9e',   // medium (=, +, =>)
   punctuation: '#6f6f6f',   // muted ({, }, [, ], ;)
@@ -325,7 +433,7 @@ const TOKEN_COLORS: Record<TokenType, string> = {
   builtin:     '#f97316',   // orange (console, Math, etc.)
   tag:         '#ef4444',   // red (HTML tags)
   attribute:   '#f59e0b',   // amber (HTML attributes)
-  variable:    '#22d3ee',   // cyan (special vars)
+  variable:    '#6366f1',   // cyan (special vars)
   plain:       '#e8e8e8',   // default text
 };
 
@@ -528,7 +636,7 @@ const ROOM_APIS = [
   { id: 'secrets',   label: 'Secrets',   icon: '🔒',  color: '#ef4444',
     desc: 'Encrypted KV store. Store API keys, tokens, credentials.',
     help: 'Securely store sensitive values like API keys, tokens, and credentials. Secrets are encrypted at rest and only accessible by room members. Agents can read secrets at runtime to authenticate with external services without exposing keys in code.' },
-  { id: 'containers',label: 'Containers', icon: '🐳',  color: '#22d3ee',
+  { id: 'containers',label: 'Containers', icon: '🐳',  color: '#6366f1',
     desc: 'Run sandboxed code. Execute tasks, deploy agents.',
     help: 'Execute code in isolated sandboxed environments. Specify a Docker image, mount files, and run commands. Output is captured and returned. Use this for running untrusted code, CI tasks, data pipelines, or spinning up temporary agent environments.' },
 ] as const;
@@ -540,12 +648,12 @@ const INTEGRATIONS = [
   { name: 'Python',    icon: '🐍', color: '#22c55e' },
   { name: 'JS',        icon: '🟡', color: '#f59e0b' },
   { name: 'TypeScript',icon: '📘', color: '#3b82f6' },
-  { name: 'React',     icon: '⚛', color: '#22d3ee' },
+  { name: 'React',     icon: '⚛', color: '#6366f1' },
   { name: 'Flutter',   icon: '🐦', color: '#3b82f6' },
   { name: 'OpenAI',    icon: '🤖', color: '#22c55e' },
   { name: 'Anthropic', icon: '🅐', color: '#f97316' },
   { name: 'GitHub',    icon: '🐙', color: '#a855f7' },
-  { name: 'Docker',    icon: '🐳', color: '#22d3ee' },
+  { name: 'Docker',    icon: '🐳', color: '#6366f1' },
 ];
 
 // ─── JS Syntax Highlighter ───────────────────────────────────────────────────
@@ -578,7 +686,7 @@ function highlightLine(line: string, lang: string): React.ReactNode[] {
     else if (word) {
       if (JS_KEYWORDS.has(word)) parts.push(<Text key={idx++} style={{ color:'#a855f7', fontWeight:'700' }}>{word}</Text>);
       else if (word[0] === word[0].toUpperCase() && word[0] !== word[0].toLowerCase())
-        parts.push(<Text key={idx++} style={{ color:'#22d3ee' }}>{word}</Text>);
+        parts.push(<Text key={idx++} style={{ color:'#6366f1' }}>{word}</Text>);
       else parts.push(<Text key={idx++} style={{ color:'#e8e8e8' }}>{word}</Text>);
     } else if (op) parts.push(<Text key={idx++} style={{ color:'#9e9e9e' }}>{op}</Text>);
   }
@@ -1079,6 +1187,17 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
   room: Room; accentColor: string; isMobile: boolean;
   onClose: () => void; onDelete: () => void; onRoomUpdated: (r: Room) => void;
 }) {
+  const {
+    exactAuthority: roomAuthority,
+    isExactAuthorityCurrent: isRoomAuthorityCurrent,
+  } = useExactRunHistoryAuthority(room.circle_id);
+  const roomClient = useMemo(
+    () => roomAuthority
+      ? getSupabaseClientForAccessToken(roomAuthority.accessToken)
+      : null,
+    [roomAuthority?.accessToken],
+  );
+  const fileLoadGenerationRef = useRef(0);
   const [files, setFiles] = useState<RoomFile[]>([]);
   const [openTabs, setOpenTabs] = useState<RoomFile[]>([]);
   const savedTabIdsRef = React.useRef<string[]>(JSON.parse(storageGet(ROOM_STORAGE.openTabs(room.id)) || '[]'));
@@ -1148,9 +1267,34 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
   const [ghBrowsing, setGhBrowsing] = useState(false);
   const [ghLoadingFile, setGhLoadingFile] = useState<string | null>(null);
   const [ghLoadingTree, setGhLoadingTree] = useState(false);
+  const [githubSubmitOpen, setGithubSubmitOpen] = useState(false);
 
   const activeTab = openTabs.find(t => t.id === activeTabId) ?? null;
   const isDirty = activeTab ? (editingContent[activeTab.id] !== undefined && editingContent[activeTab.id] !== activeTab.content) : false;
+  const activeFileForAgent = useMemo<RoomFile | null>(() => activeTab ? {
+    ...activeTab,
+    content: editingContent[activeTab.id] ?? activeTab.content,
+    local_draft: editingContent[activeTab.id] !== undefined && editingContent[activeTab.id] !== activeTab.content,
+  } : null, [activeTab, editingContent]);
+  const githubSubmitFiles = useMemo(() => {
+    const candidates = activeTab && !files.some(file => file.id === activeTab.id)
+      ? [activeTab, ...files]
+      : files;
+    return candidates
+      .filter(file => !file.is_deleted && !file.id.startsWith('gh_') && !file.storage_url && file.file_type !== 'image')
+      .map(file => {
+        const folder = String(file.folder || '').replace(/^\/+|\/+$/g, '');
+        return {
+          path: folder ? `${folder}/${file.name}` : file.name,
+          content: editingContent[file.id] ?? file.content ?? '',
+        };
+      });
+  }, [activeTab, editingContent, files]);
+  const activeGithubSubmitPath = useMemo(() => {
+    if (!activeTab || activeTab.id.startsWith('gh_') || activeTab.storage_url) return [];
+    const folder = String(activeTab.folder || '').replace(/^\/+|\/+$/g, '');
+    return [folder ? `${folder}/${activeTab.name}` : activeTab.name];
+  }, [activeTab]);
   const hasOpenedRef = useRef(false);
 
   // Check for GitHub connection on mount — tries PAT (local) then OAuth (Supabase)
@@ -1192,36 +1336,10 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
 
   const isGitHubFile = (file: RoomFile) => file.id.startsWith('gh_');
 
-  // Shared helper: get a working GitHub token (PAT or OAuth)
+  // Shared helper: only client-held PATs are returned. OAuth tokens remain
+  // server-only and operations using them must go through an edge action.
   const getGitHubToken = async (): Promise<string | null> => {
-    // 1. Try PAT token (local storage)
-    const pat = await getStoredToken(room.circle_id);
-    if (pat) return pat;
-    // 2. Try OAuth token from user_github_tokens table
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return null;
-      // Use maybeSingle() — returns null if no row exists instead of erroring
-      const { data: tokenRow } = await supabase
-        .from('user_github_tokens')
-        .select('access_token')
-        .eq('user_id', user.id)
-        .maybeSingle();
-      if (tokenRow?.access_token) return tokenRow.access_token;
-    } catch {}
-    // 3. Try via edge function with auth header
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) return null;
-      const res = await fetch(
-        `${process.env.EXPO_PUBLIC_SUPABASE_URL}/functions/v1/github-oauth?action=status&user_id=${session.user.id}`,
-        { headers: { Authorization: `Bearer ${session.access_token}` } },
-      );
-      if (!res.ok) return null;
-      const status = await res.json();
-      if (status.connected && status.access_token) return status.access_token;
-    } catch {}
-    return null;
+    return (await getStoredToken(room.circle_id)) || null;
   };
 
   const openFile = useCallback((file: RoomFile) => {
@@ -1307,14 +1425,35 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
 
   // Load files
   const loadFiles = useCallback(async () => {
-    const { data } = await supabase.from('room_files')
+    const authority = roomAuthority;
+    const client = roomClient;
+    const generation = fileLoadGenerationRef.current + 1;
+    fileLoadGenerationRef.current = generation;
+    if (!authority || !client || !isRoomAuthorityCurrent(authority)) {
+      setFiles([]);
+      setOpenTabs([]);
+      return;
+    }
+    const { data, error } = await client.from('room_files')
       .select('*').eq('room_id', room.id).eq('is_deleted', false)
       .order('folder').order('name');
-    if (data) {
-      setFiles(data);
+    if (error || !data) {
+      if (generation === fileLoadGenerationRef.current && isRoomAuthorityCurrent(authority)) {
+        setFiles([]);
+        setOpenTabs([]);
+      }
+      return;
+    }
+    const hydrated = await hydratePrivateRoomFiles(client, data as RoomFile[]);
+    if (
+      generation !== fileLoadGenerationRef.current
+      || !isRoomAuthorityCurrent(authority)
+    ) return;
+    if (hydrated) {
+      setFiles(hydrated);
       // Sync open tabs with latest file content from DB (e.g. after agent writes)
       setOpenTabs(prev => prev.map(tab => {
-        const updated = data.find((f: any) => f.id === tab.id);
+        const updated = hydrated.find((f: any) => f.id === tab.id);
         if (updated && updated.content !== tab.content) {
           // Only update if user hasn't made local edits
           setEditingContent(ec => {
@@ -1326,7 +1465,7 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
         return tab;
       }));
       // Seed initial tab from legacy content if no files yet
-      if (data.length === 0 && room.content) {
+      if (hydrated.length === 0 && room.content) {
         const seed: RoomFile = {
           id: 'legacy', room_id: room.id,
           name: room.file_path || room.name,
@@ -1337,15 +1476,19 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
         };
         setFiles([seed]);
         if (!hasOpenedRef.current) { hasOpenedRef.current = true; openFile(seed); }
-      } else if (data.length > 0 && !hasOpenedRef.current) {
+      } else if (hydrated.length > 0 && !hasOpenedRef.current) {
         hasOpenedRef.current = true;
-        openFile(data[0]);
+        openFile(hydrated[0]);
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [room.id]); // room.content/file_path/language intentionally excluded — only re-fetch on room switch
+  }, [isRoomAuthorityCurrent, room.id, roomAuthority, roomClient]); // room content fields intentionally excluded
 
   useEffect(() => { loadFiles(); }, [loadFiles]);
+
+  useEffect(() => () => {
+    fileLoadGenerationRef.current += 1;
+  }, [room.id, roomAuthority?.userId, roomAuthority?.circleId]);
 
   // Realtime file updates
   useEffect(() => {
@@ -1387,35 +1530,77 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
   };
 
   const uploadFile = async (file: File) => {
-    const { data:{ user } } = await supabase.auth.getUser();
+    const authority = roomAuthority;
+    const client = roomClient;
+    if (!authority || !client || !isRoomAuthorityCurrent(authority)) {
+      Alert.alert('Upload unavailable', 'Your Circle access changed. Reopen the room and try again.');
+      return;
+    }
+    let storagePath: string | null = null;
+    try {
     const isText = file.type.startsWith('text/') || file.name.match(/\.(ts|tsx|js|jsx|py|sql|json|md|txt|csv|html|css|yaml|yml|sh|rs|go)$/i);
     let content = '';
     let storageUrl: string | null = null;
+    let displayStorageUrl: string | null = null;
 
     if (isText) {
       content = await file.text();
     } else {
-      // Upload binary to Supabase Storage
-      const path = `rooms/${room.id}/${Date.now()}_${file.name}`;
-      const { data: uploaded } = await supabase.storage.from('room-files').upload(path, file);
-      if (uploaded) {
-        const { data: url } = supabase.storage.from('room-files').getPublicUrl(path);
-        storageUrl = url.publicUrl;
-        content = storageUrl; // store URL as content for images
+      storagePath = roomFilePath(room.id, file.name);
+      const { error: uploadError } = await client.storage
+        .from(ROOM_FILE_BUCKET)
+        .upload(storagePath, file, { contentType: file.type || undefined });
+      if (uploadError) throw uploadError;
+      if (!isRoomAuthorityCurrent(authority)) {
+        await client.storage.from(ROOM_FILE_BUCKET).remove([storagePath]);
+        return;
       }
+      const { data: signed, error: signError } = await client.storage
+        .from(ROOM_FILE_BUCKET)
+        .createSignedUrl(storagePath, ROOM_FILE_SIGN_TTL_SECONDS);
+      if (signError || !signed?.signedUrl) {
+        await client.storage.from(ROOM_FILE_BUCKET).remove([storagePath]);
+        throw signError || new Error('The private upload could not be signed.');
+      }
+      displayStorageUrl = signed.signedUrl;
+      storageUrl = roomFileReference(storagePath);
+      content = storageUrl;
     }
 
     const ft = detectFileType(file.name, 'plaintext');
-    const { data, error } = await supabase.from('room_files').insert({
+    if (!isRoomAuthorityCurrent(authority)) {
+      if (storagePath) await client.storage.from(ROOM_FILE_BUCKET).remove([storagePath]);
+      return;
+    }
+    const { data, error } = await client.from('room_files').insert({
       room_id: room.id, name: file.name, folder: '/',
       file_type: ft, content, storage_url: storageUrl,
       mime_type: file.type, size_bytes: file.size,
-      created_by: user?.id || null,
+      created_by: authority.userId,
     }).select().single();
 
-    if (!error && data) {
-      setFiles(p => [...p, data]);
-      openFile(data);
+    if (error || !data) {
+      if (storagePath) await client.storage.from(ROOM_FILE_BUCKET).remove([storagePath]);
+      throw error || new Error('The room file row was not created.');
+    }
+    if (isRoomAuthorityCurrent(authority)) {
+      const displayed: RoomFile = {
+        ...(data as RoomFile),
+        storage_path: storagePath,
+        storage_url: displayStorageUrl,
+        content: storagePath ? (displayStorageUrl || '') : content,
+      };
+      setFiles(p => [...p, displayed]);
+      openFile(displayed);
+    }
+    } catch (error) {
+      if (storagePath) {
+        await client.storage.from(ROOM_FILE_BUCKET).remove([storagePath]).catch(() => undefined);
+      }
+      Alert.alert(
+        'Upload failed',
+        error instanceof Error ? error.message : 'The private room file could not be uploaded.',
+      );
     }
   };
 
@@ -1466,7 +1651,25 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
         ]));
     if (!ok) return;
     if (file.id !== 'legacy') {
-      await supabase.from('room_files').delete().eq('id', file.id);
+      const authority = roomAuthority;
+      const client = roomClient;
+      if (!authority || !client || !isRoomAuthorityCurrent(authority)) return;
+      const { data: deleted, error } = await client.from('room_files')
+        .delete()
+        .eq('id', file.id)
+        .eq('room_id', room.id)
+        .select('id')
+        .maybeSingle();
+      if (error || !deleted || !isRoomAuthorityCurrent(authority)) {
+        Alert.alert('Delete failed', error?.message || 'The file was not removed.');
+        return;
+      }
+      const storagePath = file.storage_path
+        || roomFilePathFromValue(file.storage_url)
+        || roomFilePathFromValue(file.content);
+      if (storagePath) {
+        await client.storage.from(ROOM_FILE_BUCKET).remove([storagePath]);
+      }
     }
     setFiles(p => p.filter(f => f.id !== file.id));
     closeTab(file.id);
@@ -1813,13 +2016,13 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
               ))}
             </ArrowScrollView>
             {/* Panel content */}
-            {rightPanel === 'chat'        && <ChatPanel roomId={room.id} accentColor={accentColor} circleId={room.circle_id} activeFile={activeTab} />}
+            {rightPanel === 'chat'        && <ChatPanel roomId={room.id} accentColor={accentColor} circleId={room.circle_id} activeFile={activeFileForAgent} githubRepoFullName={ghRepo?.full_name || null} onSubmitToGitHub={() => setGithubSubmitOpen(true)} />}
             {rightPanel === 'apis'        && <APIsPanel room={room} accentColor={accentColor} />}
-            {rightPanel === 'secrets'     && <SecretsPanel roomId={room.id} accentColor={accentColor} />}
+            {rightPanel === 'secrets'     && <SecretsPanel roomId={room.id} circleId={room.circle_id} accentColor={accentColor} />}
             {rightPanel === 'usage'       && <UsagePanel roomId={room.id} accentColor={accentColor} />}
             {rightPanel === 'sessions'    && <SessionsPanel roomId={room.id} roomName={room.name} accentColor={accentColor} />}
             {rightPanel === 'services'    && <ServicesPanel roomId={room.id} accentColor={accentColor} />}
-            {rightPanel === 'permissions' && <PermissionsPanel roomId={room.id} accentColor={accentColor} />}
+            {rightPanel === 'permissions' && <PermissionsPanel roomId={room.id} circleId={room.circle_id} accentColor={accentColor} />}
             {rightPanel === 'tasks'       && <TasksPanel roomId={room.id} accentColor={accentColor} />}
             {rightPanel === 'playground'  && <PlaygroundPanel roomId={room.id} accentColor={accentColor} activeFile={activeTab} circleId={room.circle_id} />}
             {rightPanel === 'github' && <GitHubPanel circleId={room.circle_id} accentColor={accentColor}
@@ -1877,13 +2080,13 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
               </Pressable>
             ))}
           </ArrowScrollView>
-          {rightPanel === 'chat'        && <ChatPanel roomId={room.id} accentColor={accentColor} circleId={room.circle_id} activeFile={activeTab} />}
+          {rightPanel === 'chat'        && <ChatPanel roomId={room.id} accentColor={accentColor} circleId={room.circle_id} activeFile={activeFileForAgent} githubRepoFullName={ghRepo?.full_name || null} onSubmitToGitHub={() => setGithubSubmitOpen(true)} />}
           {rightPanel === 'apis'        && <APIsPanel room={room} accentColor={accentColor} />}
-          {rightPanel === 'secrets'     && <SecretsPanel roomId={room.id} accentColor={accentColor} />}
+          {rightPanel === 'secrets'     && <SecretsPanel roomId={room.id} circleId={room.circle_id} accentColor={accentColor} />}
           {rightPanel === 'usage'       && <UsagePanel roomId={room.id} accentColor={accentColor} />}
           {rightPanel === 'sessions'    && <SessionsPanel roomId={room.id} roomName={room.name} accentColor={accentColor} />}
           {rightPanel === 'services'    && <ServicesPanel roomId={room.id} accentColor={accentColor} />}
-          {rightPanel === 'permissions' && <PermissionsPanel roomId={room.id} accentColor={accentColor} />}
+          {rightPanel === 'permissions' && <PermissionsPanel roomId={room.id} circleId={room.circle_id} accentColor={accentColor} />}
           {rightPanel === 'tasks'       && <TasksPanel roomId={room.id} accentColor={accentColor} />}
             {rightPanel === 'playground'  && <PlaygroundPanel roomId={room.id} accentColor={accentColor} activeFile={activeTab} circleId={room.circle_id} />}
           {rightPanel === 'github' && <GitHubPanel circleId={room.circle_id} accentColor={accentColor}
@@ -1935,6 +2138,39 @@ function RoomDetail({ room, accentColor, isMobile, onClose, onDelete, onRoomUpda
       <NewFileModal visible={showNewFile} roomId={room.id} accentColor={accentColor}
         onClose={()=>setShowNewFile(false)}
         onCreated={f => { setFiles(p=>[...p,f]); setShowNewFile(false); openFile(f); }} />
+      <BuilderGithubSaveModal
+        circleId={room.circle_id}
+        title={`${room.name}: reviewed file changes`}
+        html={null}
+        files={githubSubmitFiles}
+        initialFilePaths={activeGithubSubmitPath}
+        initialRepoFullName={ghRepo?.full_name || null}
+        visible={githubSubmitOpen}
+        onClose={() => setGithubSubmitOpen(false)}
+        onSubmitted={async result => {
+          const { data: { user } } = await supabase.auth.getUser();
+          await supabase.from('room_messages').insert({
+            room_id: room.id,
+            user_id: user?.id || null,
+            agent_name: 'GitHub',
+            message_type: 'system',
+            content: result.pullRequest
+              ? `Submitted ${result.verifiedPaths.length} verified file${result.verifiedPaths.length === 1 ? '' : 's'} to ${result.owner}/${result.repo} and opened draft PR #${result.pullRequest.number}.`
+              : `Committed ${result.verifiedPaths.length} verified file${result.verifiedPaths.length === 1 ? '' : 's'} to ${result.owner}/${result.repo} on ${result.branch}.`,
+            metadata: {
+              github_submission: true,
+              owner: result.owner,
+              repo: result.repo,
+              base_branch: result.baseBranch,
+              branch: result.branch,
+              commit_sha: result.commitSha,
+              commit_url: result.commitUrl,
+              verified_paths: result.verifiedPaths,
+              pull_request: result.pullRequest || null,
+            },
+          });
+        }}
+      />
     </View>
   );
 }
@@ -2242,10 +2478,16 @@ function NewFileModal({ visible, roomId, accentColor, onClose, onCreated }: {
 
 // ─── Chat Panel ───────────────────────────────────────────────────────────────
 
-function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
+function ChatPanel({ roomId, accentColor, circleId, activeFile, githubRepoFullName, onSubmitToGitHub }: {
   roomId: string; accentColor: string;
   circleId?: string; activeFile?: RoomFile | null;
+  githubRepoFullName?: string | null;
+  onSubmitToGitHub?: () => void;
 }) {
+  const {
+    exactAuthority: runHistoryExactAuthority,
+    isExactAuthorityCurrent: isRunHistoryExactAuthorityCurrent,
+  } = useExactRunHistoryAuthority(circleId || '');
   const [messages, setMessages]   = useState<RoomMessage[]>([]);
   const [input, setInput]         = useState('');
   const [showAssign, setShowAssign] = useState(false);
@@ -2281,10 +2523,10 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   // Load messages + subscribe to new ones
   useEffect(() => {
     supabase.from('room_messages').select('*').eq('room_id', roomId)
-      .order('created_at', { ascending: true }).limit(200)
+      .order('created_at', { ascending: false }).limit(200)
       .then(({ data }) => {
         if (data) {
-          setMessages(data);
+          setMessages(data.slice().reverse());
           // Scroll to bottom after initial load
           setTimeout(() => scrollRef.current?.scrollToEnd({ animated: false }), 80);
         }
@@ -2295,7 +2537,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         filter: `room_id=eq.${roomId}`,
       }, payload => {
         const incoming = payload.new as RoomMessage;
-        setMessages(prev => [...prev, incoming]);
+        setMessages(prev => prev.some(message => message.id === incoming.id) ? prev : [...prev, incoming]);
         if (pinnedToBottomRef.current) {
           setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80);
         } else {
@@ -2346,14 +2588,18 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   useEffect(() => {
     if (!circleId) return;
     supabase.from('circle_members')
-      .select('user_id, profiles!user_id(display_name, username)')
+      .select('user_id')
       .eq('circle_id', circleId)
-      .then(({ data }) => {
+      .then(async ({ data }) => {
         if (!Array.isArray(data)) return;
-        setCircleMembers(data.map((row: any) => ({
-          user_id: row.user_id,
-          name: row.profiles?.display_name || row.profiles?.username || 'Member',
-          username: row.profiles?.username || '',
+        const profiles = await loadSafeCircleProfiles({
+          circleId,
+          userIds: data.map((row: any) => row.user_id),
+        });
+        setCircleMembers(profiles.map(profile => ({
+          user_id: profile.id,
+          name: profile.display_name || profile.username || 'Member',
+          username: profile.username || '',
         })));
       });
   }, [circleId]);
@@ -2389,6 +2635,10 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   const [codingWorkbenchTick, setCodingWorkbenchTick] = useState(0);
   const [currentRunStep, setCurrentRunStep] = useState('');
   const currentProfileMeta = getSessionProfileMeta(sessionProfile);
+  const activeFileTextReadable = !!activeFile && (
+    !activeFile.storage_url
+    || (!!activeFile.content && activeFile.content.trim() !== activeFile.storage_url.trim())
+  );
 
   // ─── Phase 1 chat UX state ──────────────────────────────────────────────
   // Cancel — sendRoomStructuredChatMessage doesn't yet accept an AbortSignal,
@@ -2491,6 +2741,11 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   // integration credentials in the edge function (see swanbot-ai).
   const [modelOverride, setModelOverride] = useState<string>('auto');
   const [modelGroups, setModelGroups] = useState<Array<import('../../../lib/integrations/modelProviderRegistry').ModelGroup>>([]);
+  const [modelProviderRefreshToken, setModelProviderRefreshToken] = useState(0);
+  useEffect(
+    () => subscribeUserApiKeyChanges(() => setModelProviderRefreshToken((token) => token + 1)),
+    [],
+  );
   // Picker filter — once OpenRouter is connected the catalog jumps to
   // 200+ entries, so a free-text filter keeps the menu usable. Filters
   // the visible models within each group; groups stay so disconnected
@@ -2513,7 +2768,12 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
       } catch {}
     })();
     return () => { cancelled = true; };
-  }, [circleId]);
+  }, [circleId, modelProviderRefreshToken]);
+  const connectedModelProviders = useMemo(() => Array.from(new Set(
+    modelGroups
+      .filter((group) => group.connected && group.models.some((model) => model.ready))
+      .map((group) => group.provider),
+  )), [modelGroups]);
   // Tool approval mode — 'yolo' (default) auto-approves every tool the
   // model asks to call; 'review' surfaces an inline Approve/Reject
   // prompt before the runtime dispatches each one.
@@ -2527,6 +2787,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   // Review, Model out of the panel header so it doesn't sprawl into 8
   // separate buttons.
   const [showMoreMenu, setShowMoreMenu] = useState(false);
+  const [showFileActions, setShowFileActions] = useState(false);
 
   const handleSessionProfileSelect = useCallback(async (nextProfile: SessionCodingProfile) => {
     setSessionProfile(nextProfile);
@@ -3031,7 +3292,8 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
 
   const handlePeekFile = useCallback(async (fileName: string) => {
     setPeekFile({ name: fileName, content: null, loading: true });
-    const target = roomFiles.find((f) => f.name === fileName);
+    const matches = roomFiles.filter((f) => f.name === fileName);
+    const target = matches.length === 1 ? matches[0] : null;
     if (!target) {
       setPeekFile({ name: fileName, content: null, loading: false });
       return;
@@ -3056,7 +3318,14 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     if (fileContentCacheRef.current.has(fileName)) {
       return fileContentCacheRef.current.get(fileName) ?? null;
     }
-    const target = roomFiles.find((f) => f.name === fileName);
+    const normalized = fileName.replace(/\\/g, '/').replace(/^\/+/, '');
+    const pathMatches = roomFiles.filter((file) => {
+      const folder = String((file as any).folder || '').replace(/^\/+|\/+$/g, '');
+      return (folder ? `${folder}/${file.name}` : file.name) === normalized;
+    });
+    const base = normalized.split('/').pop() || normalized;
+    const basenameMatches = roomFiles.filter(file => file.name === base);
+    const target = pathMatches.length === 1 ? pathMatches[0] : (basenameMatches.length === 1 ? basenameMatches[0] : null);
     if (!target) {
       fileContentCacheRef.current.set(fileName, null);
       return null;
@@ -3069,46 +3338,77 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
 
   const handleApplyProposal = useCallback(async (msgId: string, proposal: AiFileProposal) => {
     const { data: { user } } = await supabase.auth.getUser();
-    const target = roomFiles.find((f) => f.name === proposal.filePath);
+    const proposalPath = proposal.filePath.replace(/\\/g, '/').replace(/^\/+/, '');
+    const proposalName = proposalPath.split('/').pop() || proposalPath;
+    const proposalFolderRaw = proposalPath.includes('/') ? proposalPath.slice(0, proposalPath.lastIndexOf('/')) : '';
+    const proposalFolder = proposalFolderRaw ? `/${proposalFolderRaw.replace(/^\/+|\/+$/g, '')}` : '/';
+    const pathMatches = roomFiles.filter((file) => {
+      const folder = String((file as any).folder || '').replace(/^\/+|\/+$/g, '');
+      const path = folder ? `${folder}/${file.name}` : file.name;
+      return path === proposalPath;
+    });
+    const basenameMatches = roomFiles.filter(file => file.name === proposalName);
+    const target = pathMatches.length === 1
+      ? pathMatches[0]
+      : (!proposalPath.includes('/') && basenameMatches.length === 1 ? basenameMatches[0] : null);
+    if (!target && basenameMatches.length > 1 && !proposalPath.includes('/')) {
+      await supabase.from('room_messages').insert({
+        room_id: roomId, user_id: null, agent_name: 'System',
+        content: `Could not apply ${proposal.filePath}: more than one room file has that name. Ask the agent to use the full folder path.`,
+        message_type: 'system',
+      });
+      return;
+    }
     try {
       if (target) {
-        const { error } = await supabase.from('room_files')
-          .update({ content: proposal.content, updated_at: new Date().toISOString() })
-          .eq('id', target.id);
+        const { data: current, error: readError } = await supabase.from('room_files')
+          .select('id, content, updated_at').eq('id', target.id).eq('room_id', roomId).eq('is_deleted', false).maybeSingle();
+        if (readError || !current) throw readError || new Error('Target file no longer exists.');
+        const { data: updated, error } = await supabase.from('room_files')
+          .update({ content: proposal.content, size_bytes: new Blob([proposal.content]).size, updated_at: new Date().toISOString() })
+          .eq('id', target.id)
+          .eq('room_id', roomId)
+          .eq('updated_at', current.updated_at)
+          .select('id, content, updated_at')
+          .maybeSingle();
         if (error) throw error;
+        if (!updated) throw new Error('The file changed while this apply was in progress. Re-open it and ask the agent to regenerate the edit.');
+        if (updated.content !== proposal.content) throw new Error('Saved file readback did not match the proposed content.');
         fileContentCacheRef.current.set(proposal.filePath, proposal.content);
       } else {
-        const { error } = await supabase.from('room_files').insert({
+        const { data: created, error } = await supabase.from('room_files').insert({
           room_id: roomId,
-          name: proposal.filePath,
+          name: proposalName,
+          folder: proposalFolder,
+          file_type: detectFileType(proposalName),
           content: proposal.content,
+          size_bytes: new Blob([proposal.content]).size,
+          tags: [],
           created_by: user?.id || null,
-        });
+        }).select('id, content').single();
         if (error) throw error;
+        if (!created || created.content !== proposal.content) throw new Error('Created file readback did not match the proposed content.');
         fileContentCacheRef.current.set(proposal.filePath, proposal.content);
         // Refresh the file list so subsequent applies hit the right row.
         const { data } = await supabase.from('room_files')
           .select('id, name').eq('room_id', roomId).eq('is_deleted', false);
         if (data) setRoomFiles(data);
       }
-      // Mark this proposal applied in the source AI message metadata so
-      // the apply card flips to "applied" for everyone in the room.
-      setMessages((prev) => prev.map((m) => {
-        if (m.id !== msgId) return m;
-        const meta = (m.metadata as any) || {};
-        const applied: string[] = Array.isArray(meta.appliedProposals) ? meta.appliedProposals.slice() : [];
-        if (!applied.includes(proposal.filePath)) applied.push(proposal.filePath);
-        const nextMeta = { ...meta, appliedProposals: applied };
-        supabase.from('room_messages').update({ metadata: nextMeta }).eq('id', m.id).then(() => {});
-        return { ...m, metadata: nextMeta };
-      }));
-      await supabase.from('room_messages').insert({
+      // Room messages are immutable. Persist the decision as its own receipt
+      // and derive the proposal-card state from these events on every reload.
+      const { data: receipt, error: receiptError } = await supabase.from('room_messages').insert({
         room_id: roomId,
         user_id: user?.id || null,
         content: `Applied proposed changes to ${proposal.filePath}`,
         message_type: 'edit_event',
-        metadata: { applied_path: proposal.filePath },
-      });
+        metadata: {
+          proposal_decision: 'applied',
+          proposal_source_message_id: msgId,
+          proposal_path: proposal.filePath,
+        },
+      }).select('*').single();
+      if (receiptError || !receipt) throw receiptError || new Error('The file was saved, but its Room receipt could not be persisted.');
+      setMessages(prev => prev.some(message => message.id === receipt.id) ? prev : [...prev, receipt as RoomMessage]);
     } catch (err: any) {
       await supabase.from('room_messages').insert({
         room_id: roomId, user_id: null, agent_name: 'System',
@@ -3119,16 +3419,22 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   }, [roomFiles, roomId]);
 
   const handleRejectProposal = useCallback(async (msgId: string, proposal: AiFileProposal) => {
-    setMessages((prev) => prev.map((m) => {
-      if (m.id !== msgId) return m;
-      const meta = (m.metadata as any) || {};
-      const rejected: string[] = Array.isArray(meta.rejectedProposals) ? meta.rejectedProposals.slice() : [];
-      if (!rejected.includes(proposal.filePath)) rejected.push(proposal.filePath);
-      const nextMeta = { ...meta, rejectedProposals: rejected };
-      supabase.from('room_messages').update({ metadata: nextMeta }).eq('id', m.id).then(() => {});
-      return { ...m, metadata: nextMeta };
-    }));
-  }, []);
+    const { data: { user } } = await supabase.auth.getUser();
+    const { data: receipt, error } = await supabase.from('room_messages').insert({
+      room_id: roomId,
+      user_id: user?.id || null,
+      content: `Rejected proposed changes to ${proposal.filePath}`,
+      message_type: 'edit_event',
+      metadata: {
+        proposal_decision: 'rejected',
+        proposal_source_message_id: msgId,
+        proposal_path: proposal.filePath,
+      },
+    }).select('*').single();
+    if (!error && receipt) {
+      setMessages(prev => prev.some(message => message.id === receipt.id) ? prev : [...prev, receipt as RoomMessage]);
+    }
+  }, [roomId]);
 
   const cutoffIndex = useMemo(() => {
     if (!contextCutoffId) return -1;
@@ -3156,6 +3462,24 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     [messages],
   );
 
+  const proposalDecisionsByMessage = useMemo(() => {
+    const decisions = new Map<string, { applied: string[]; rejected: string[] }>();
+    for (const message of messages) {
+      const metadata = (message.metadata as any) || {};
+      const sourceMessageId = typeof metadata.proposal_source_message_id === 'string'
+        ? metadata.proposal_source_message_id
+        : null;
+      const proposalPath = typeof metadata.proposal_path === 'string' ? metadata.proposal_path : null;
+      const decision = metadata.proposal_decision;
+      if (!sourceMessageId || !proposalPath || (decision !== 'applied' && decision !== 'rejected')) continue;
+      const current = decisions.get(sourceMessageId) || { applied: [], rejected: [] };
+      const target = decision === 'applied' ? current.applied : current.rejected;
+      if (!target.includes(proposalPath)) target.push(proposalPath);
+      decisions.set(sourceMessageId, current);
+    }
+    return decisions;
+  }, [messages]);
+
   const dispatchAiPrompt = useCallback(async (
     promptText: string,
     opts: { recentMessages?: RoomMessage[]; promptPrefix?: string } = {},
@@ -3175,6 +3499,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         profile: sessionProfile,
         promptPrefix: opts.promptPrefix,
         modelOverride,
+        connectedProviders: connectedModelProviders,
         onStageChange: (_stage, label) => setCurrentRunStep(label),
         onToolApproval: buildToolApprovalGate(),
       });
@@ -3188,7 +3513,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
       setBotTyping(false);
       stopCodingWorkbenchAfter(isCodingGenerationRequest(promptText, sessionProfile) ? 2600 : 0);
     }
-  }, [activeFile, buildToolApprovalGate, circleId, messages, modelOverride, roomFiles, roomId, sessionProfile, startCodingWorkbench, stopCodingWorkbenchAfter]);
+  }, [activeFile, buildToolApprovalGate, circleId, connectedModelProviders, messages, modelOverride, roomFiles, roomId, sessionProfile, startCodingWorkbench, stopCodingWorkbenchAfter]);
 
   const handleContinueFromMessage = useCallback(async (aiMessageId: string) => {
     if (botTyping) return;
@@ -3333,11 +3658,24 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
       await supabase.from('room_messages').insert({
         room_id: roomId, user_id: user?.id || null, content, message_type: 'chat',
       });
+      if (/^\/gh\s+(?:save|write|create|branch|pr)\b/i.test(content) && onSubmitToGitHub) {
+        onSubmitToGitHub();
+        await supabase.from('room_messages').insert({
+          room_id: roomId,
+          user_id: user?.id || null,
+          agent_name: 'GitHub',
+          content: 'Opened the reviewed GitHub submission flow. Choose the exact files, repository, and branch before committing.',
+          message_type: 'system',
+          metadata: { github_submission_review_required: true },
+        });
+        return;
+      }
       setBotTyping(true);
       try {
         const { executeGitHubCommand } = await import('../../../lib/githubChatCommands');
         const result = await executeGitHubCommand(content, {
           circleId: circleId || '', userId: user?.id || '',
+          repoFullName: githubRepoFullName || undefined,
         });
         await supabase.from('room_messages').insert({
           room_id: roomId, user_id: null, agent_name: 'Agent',
@@ -3409,6 +3747,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
           },
           promptPrefix: planPromptPrefix,
           modelOverride,
+          connectedProviders: connectedModelProviders,
           onStageChange: (_stage, label) => setCurrentRunStep(label),
           onToolApproval: buildToolApprovalGate(),
         });
@@ -3712,60 +4051,34 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         </View>
       ) : null}
       <View style={s.panelHeader}>
-        <Text style={[s.panelTitle, { paddingHorizontal: 0, paddingTop: 0, paddingBottom: 0 }]}>Chat</Text>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={[s.panelTitle, { paddingHorizontal: 0, paddingTop: 0, paddingBottom: 0 }]}>Room chat</Text>
+          {!botTyping ? (
+            <Text style={{ color: '#64748b', fontSize: 9, marginTop: 2 }} numberOfLines={1}>
+              {currentProfileMeta.label}{activeFile ? ` · ${activeFile.local_draft ? 'draft' : 'open'}: ${activeFile.name}` : ''}
+            </Text>
+          ) : null}
+        </View>
         {botTyping && (
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
             <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: '#f59e0b' }} />
             <Text style={{ color: '#f59e0b', fontSize: 10, fontWeight: '600' }}>{currentRunStep || 'thinking...'}</Text>
           </View>
         )}
-        {usageStats.tokens > 0 && (
-          <View style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999, backgroundColor: accentColor + '14', borderWidth: 1, borderColor: accentColor + '33' }}>
-            <Text style={{ color: accentColor, fontSize: 9, fontFamily: MONO, fontWeight: '900', letterSpacing: 0.6 }}>
-              {usageStats.tokens.toLocaleString()} TOK · ${usageStats.cost.toFixed(4)}
-            </Text>
-          </View>
-        )}
-        {/* Active-mode chips — only render when off-default so the header
-            stays clean. Each chip is tappable to flip the mode off. */}
-        {planMode ? (
-          <Pressable onPress={() => setPlanMode(false)} style={s.modeChip}>
-            <Text style={[s.modeChipText, { color: '#f59e0b' }]}>◷ PLAN</Text>
-          </Pressable>
-        ) : null}
-        {toolApprovalMode === 'review' ? (
-          <Pressable onPress={() => setToolApprovalMode('yolo')} style={s.modeChip}>
-            <Text style={[s.modeChipText, { color: '#22c55e' }]}>⏸ REVIEW</Text>
-          </Pressable>
-        ) : null}
-        {modelOverride !== 'auto' ? (
-          <Pressable onPress={() => setModelOverride('auto')} style={s.modeChip}>
-            <Text style={[s.modeChipText, { color: accentColor }]}>
-              {(() => {
-                if (modelOverride === 'claude-haiku-4-5') return 'HAIKU';
-                if (modelOverride === 'claude-sonnet-4-6') return 'SONNET';
-                if (modelOverride === 'claude-opus-4-7') return 'OPUS';
-                // Provider-routed model — show last segment of the id.
-                const tail = modelOverride.split('/').pop() || modelOverride;
-                return tail.toUpperCase().slice(0, 16);
-              })()}
-            </Text>
-          </Pressable>
-        ) : null}
         <Pressable onPress={() => setShowFilterBar((v) => !v)}
+          accessibilityRole="button"
+          accessibilityLabel="Search room messages"
           style={[
             s.panelBtn,
             { backgroundColor: showFilterBar ? accentColor + '15' : '#0f172a', borderColor: showFilterBar ? accentColor + '40' : '#1f2937' },
           ]}>
           <Text style={{ color: showFilterBar ? accentColor : '#94a3b8', fontSize: 11, fontWeight: '700' }}>
-            FIND{pinnedOnly || searchQuery ? ' ●' : ''}
+            Search{pinnedOnly || searchQuery ? ' ●' : ''}
           </Text>
         </Pressable>
-        <Pressable onPress={() => { setShowAssign(p => !p); if (showSpawnAgent) setShowSpawnAgent(false); }}
-          style={[s.panelBtn, { backgroundColor: accentColor + '15', borderColor: accentColor + '40' }]}>
-          <Text style={{ color: accentColor, fontSize: 11, fontWeight: '700' }}>Assign</Text>
-        </Pressable>
         <Pressable onPress={() => setShowMoreMenu((v) => !v)}
+          accessibilityRole="button"
+          accessibilityLabel="Open room chat settings and actions"
           style={[
             s.panelBtn,
             { backgroundColor: showMoreMenu ? '#1f2937' : '#0f172a', borderColor: '#1f2937' },
@@ -3793,7 +4106,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
                   onPress={() => { setPlanMode((v) => !v); }}
                   style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
                   <Text style={[s.moreMenuItemText, planMode && { color: '#f59e0b', fontWeight: '900' }]}>
-                    ◷ Plan-only mode
+                    ◷ Plan and propose only
                   </Text>
                   <Text style={s.moreMenuItemHint}>{planMode ? 'ON' : 'OFF'}</Text>
                 </Pressable>
@@ -3801,10 +4114,35 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
                   onPress={() => { setToolApprovalMode((m) => m === 'yolo' ? 'review' : 'yolo'); }}
                   style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
                   <Text style={[s.moreMenuItemText, toolApprovalMode === 'review' && { color: '#22c55e', fontWeight: '900' }]}>
-                    {toolApprovalMode === 'review' ? '⏸' : '⚡'} {toolApprovalMode === 'review' ? 'Review each tool' : 'YOLO (auto-approve)'}
+                    {toolApprovalMode === 'review' ? '⏸' : '⚡'} {toolApprovalMode === 'review' ? 'Review each tool' : 'Approve routine tools'}
                   </Text>
-                  <Text style={s.moreMenuItemHint}>{toolApprovalMode === 'review' ? 'REVIEW' : 'YOLO'}</Text>
+                  <Text style={s.moreMenuItemHint}>{toolApprovalMode === 'review' ? 'REVIEW' : 'AUTO'}</Text>
                 </Pressable>
+              </View>
+
+              <View style={s.moreMenuDivider} />
+
+              <View style={s.moreMenuSection}>
+                <Text style={s.moreMenuLabel}>AGENT BEHAVIOR</Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 5, paddingHorizontal: 6, paddingVertical: 4 }}>
+                  {SESSION_PROFILE_OPTIONS.map(option => {
+                    const active = option.id === sessionProfile;
+                    return (
+                      <Pressable
+                        key={option.id}
+                        onPress={() => { void handleSessionProfileSelect(option.id); }}
+                        accessibilityRole="button"
+                        accessibilityState={{ selected: active }}
+                        style={{
+                          paddingHorizontal: 8, paddingVertical: 5, borderRadius: 8,
+                          borderWidth: 1, borderColor: active ? option.color : '#1f2937',
+                          backgroundColor: active ? `${option.color}18` : '#0d1320',
+                        }}>
+                        <Text style={{ color: active ? option.color : '#94a3b8', fontSize: 9, fontWeight: '900' }}>{option.shortLabel}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
               </View>
 
               <View style={s.moreMenuDivider} />
@@ -3813,7 +4151,10 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
                 <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 6 }}>
                   <Text style={s.moreMenuLabel}>MODEL</Text>
                   {(() => {
-                    const total = modelGroups.reduce((acc, g) => acc + g.models.length, 0);
+                    const total = modelGroups.reduce(
+                      (acc, g) => acc + g.models.filter((model) => model.ready).length,
+                      0,
+                    );
                     return total > 0 ? (
                       <Text style={{ color: '#334155', fontSize: 9, fontFamily: MONO }}>{total} avail</Text>
                     ) : null;
@@ -3873,7 +4214,11 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
                         </Text>
                         {!group.connected ? (
                           <Text style={{ color: '#475569', fontSize: 9, fontStyle: 'italic' }}>not connected</Text>
-                        ) : null}
+                        ) : (
+                          <Text style={{ color: group.catalogStatus === 'account_verified' ? '#22c55e' : '#64748b', fontSize: 9 }}>
+                            {group.catalogLabel}
+                          </Text>
+                        )}
                       </View>
                       {filteredModels.map((opt) => {
                         const active = modelOverride === opt.id;
@@ -3900,7 +4245,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
                           </Pressable>
                         );
                       })}
-                      {!group.connected && group.hint && filterQ.length === 0 ? (
+                      {group.hint && filterQ.length === 0 && (!group.connected || group.catalogStatus !== 'account_verified') ? (
                         <Text style={{ color: '#475569', fontSize: 10, paddingHorizontal: 8, paddingVertical: 4, lineHeight: 14 }}>
                           {group.hint}
                         </Text>
@@ -3915,6 +4260,11 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
               <View style={s.moreMenuSection}>
                 <Text style={s.moreMenuLabel}>ACTIONS</Text>
                 <Pressable
+                  onPress={() => { setShowMoreMenu(false); setShowAssign(true); if (showSpawnAgent) setShowSpawnAgent(false); }}
+                  style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
+                  <Text style={s.moreMenuItemText}>Assign work to an agent</Text>
+                </Pressable>
+                <Pressable
                   onPress={() => { setShowMoreMenu(false); setShowSpawnAgent(true); if (showAssign) setShowAssign(false); }}
                   style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
                   <Text style={s.moreMenuItemText}>+ Spawn agent</Text>
@@ -3924,12 +4274,33 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
                   style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
                   <Text style={s.moreMenuItemText}>↻ Run history</Text>
                 </Pressable>
+                {onSubmitToGitHub ? (
+                  <Pressable
+                    onPress={() => { setShowMoreMenu(false); onSubmitToGitHub(); }}
+                    accessibilityRole="button"
+                    accessibilityLabel="Review and submit room files to GitHub"
+                    style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
+                    <Text style={s.moreMenuItemText}>Submit files to GitHub</Text>
+                  </Pressable>
+                ) : null}
                 {Platform.OS === 'web' && messages.length > 0 ? (
                   <Pressable
                     onPress={() => { setShowMoreMenu(false); handleExportChat(); }}
                     style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
                     <Text style={s.moreMenuItemText}>⤓ Export chat (.md)</Text>
                   </Pressable>
+                ) : null}
+                {Platform.OS === 'web' ? (
+                  <Pressable
+                    onPress={() => { setShowMoreMenu(false); isListening ? stopVoiceInput() : startVoiceInput(); }}
+                    style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
+                    <Text style={s.moreMenuItemText}>{isListening ? 'Stop dictation' : 'Start dictation'}</Text>
+                  </Pressable>
+                ) : null}
+                {usageStats.tokens > 0 ? (
+                  <Text style={{ color: '#64748b', fontSize: 9, fontFamily: MONO, paddingHorizontal: 8, paddingVertical: 6 }}>
+                    {usageStats.tokens.toLocaleString()} tokens · ${usageStats.cost.toFixed(4)} · {usageStats.runs} runs
+                  </Text>
                 ) : null}
               </View>
             </ScrollView>
@@ -3942,38 +4313,10 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         circleId={circleId || ''}
         roomId={roomId}
         title="Room Run History"
+        exactAuthority={runHistoryExactAuthority}
+        isExactAuthorityCurrent={isRunHistoryExactAuthorityCurrent}
         onClose={() => setShowRunHistory(false)}
       />
-
-      <View style={{ paddingHorizontal: 10, paddingTop: 8, paddingBottom: 6, borderBottomWidth: 1, borderBottomColor: '#1a1a28', gap: 6 }}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-          <Text style={{ color: '#5b6475', fontSize: 9, fontWeight: '900', letterSpacing: 1 }}>SOUL MODE</Text>
-          <Text style={{ color: currentProfileMeta.color, fontSize: 10, fontWeight: '800' }}>{currentProfileMeta.label.toUpperCase()}</Text>
-        </View>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
-          {SESSION_PROFILE_OPTIONS.map((option) => {
-            const active = option.id === sessionProfile;
-            return (
-              <Pressable
-                key={option.id}
-                onPress={() => { void handleSessionProfileSelect(option.id); }}
-                style={{
-                  paddingHorizontal: 9,
-                  paddingVertical: 5,
-                  borderRadius: 999,
-                  borderWidth: 1,
-                  borderColor: active ? option.color : '#1f2937',
-                  backgroundColor: active ? `${option.color}16` : '#0b0d12',
-                }}
-              >
-                <Text style={{ color: active ? option.color : '#64748b', fontSize: 9, fontWeight: '900', letterSpacing: 0.6 }}>
-                  {option.shortLabel}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </ScrollView>
-      </View>
 
       {/* ── Agent Assignment Panel ── */}
       {showAssign && (
@@ -4064,35 +4407,6 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         </View>
       )}
 
-      {/* ── AI Presets Strip — explicit action buttons ── */}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false}
-        contentContainerStyle={{ paddingHorizontal: 10, paddingVertical: 6, gap: 6 }}
-        style={{ maxHeight: 38, borderBottomWidth: 1, borderBottomColor: '#1a1a28' }}
-      >
-        {getRoomChatSessionActions(sessionProfile).map(preset => (
-          <Pressable
-            key={preset.id}
-            onPress={() => { setInput(preset.prompt); }}
-            accessibilityRole="button"
-            accessibilityLabel={preset.label}
-            style={[
-              {
-                flexDirection: 'row', alignItems: 'center', gap: 4,
-                paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8,
-                borderWidth: 1, borderColor: preset.color + '40',
-                backgroundColor: preset.color + '10',
-              },
-              ...(Platform.OS === 'web' ? [{ cursor: 'pointer', transition: 'all 0.15s ease' } as any] : []),
-            ]}
-          >
-            <View style={{ width: 18, height: 18, borderRadius: 4, backgroundColor: preset.color + '25', justifyContent: 'center', alignItems: 'center' }}>
-              <Text style={{ color: preset.color, fontSize: 9, fontWeight: '800', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }}>{preset.label.slice(0, 2).toUpperCase()}</Text>
-            </View>
-            <Text style={{ color: preset.color, fontSize: 10, fontWeight: '600' }}>{preset.label}</Text>
-          </Pressable>
-        ))}
-      </ScrollView>
-
       {/* Filter bar */}
       {showFilterBar ? (
         <View style={{
@@ -4145,10 +4459,10 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             ◷ PLAN-ONLY
           </Text>
           <Text style={{ color: '#cbd5e1', fontSize: 11, flex: 1 }}>
-            Agent describes the change without touching files. Toggle PLAN off to execute.
+            Agent returns a plan and reviewable proposals. Room files change only when you choose Apply.
           </Text>
           <Pressable onPress={() => setPlanMode(false)} style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, backgroundColor: '#1f2937' }}>
-            <Text style={{ color: '#cbd5e1', fontSize: 10, fontWeight: '800' }}>Switch to ACT</Text>
+            <Text style={{ color: '#cbd5e1', fontSize: 10, fontWeight: '800' }}>Exit plan mode</Text>
           </Pressable>
         </View>
       ) : null}
@@ -4188,39 +4502,36 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
       )}
 
       {messages.length === 0 ? (
-        <View style={{ padding: 18, gap: 14 }}>
+        <View style={{ padding: 18 }}>
           <View style={{
             borderWidth: 1, borderColor: accentColor + '33',
             backgroundColor: accentColor + '0c',
             borderRadius: 14, padding: 16, gap: 10,
           }}>
             <Text style={{ color: accentColor, fontSize: 10, letterSpacing: 1.4, fontWeight: '900', fontFamily: MONO }}>
-              ▲ ROOM CHAT — READY
+              ROOM AGENT
             </Text>
             <Text style={{ color: '#e2e8f0', fontSize: 16, fontWeight: '800' }}>
-              Pair-program with the team's shared agent.
+              Ask, edit, and ship from one conversation.
             </Text>
             <Text style={{ color: '#94a3b8', fontSize: 12, lineHeight: 18 }}>
-              Pull files into context, propose changes everyone reviews, and ship together. Plan-only mode previews changes; Apply lands them in the room files for the whole team.
+              {activeFile
+                ? `${activeFile.name} is in context${activeFile.local_draft ? ' with your unsaved draft' : ''}. The agent can read it, propose complete changes for review, and submit applied files to a GitHub branch.`
+                : 'Open a room file or mention one with @. Proposed changes stay reviewable until you apply them.'}
             </Text>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
-              {[
-                { label: 'Type @', tip: 'pull a file into context' },
-                { label: 'Type /', tip: 'open the command palette' },
-                { label: 'PLAN', tip: 'preview changes before apply' },
-                { label: '★', tip: 'pin a turn for the team' },
-                { label: '↻', tip: 'branch context from a past message' },
-              ].map((hint) => (
-                <View key={hint.label} style={{
-                  flexDirection: 'row', alignItems: 'center', gap: 6,
-                  paddingHorizontal: 9, paddingVertical: 5, borderRadius: 999,
-                  borderWidth: 1, borderColor: '#1f2937', backgroundColor: '#0d1320',
-                }}>
-                  <Text style={{ color: accentColor, fontSize: 10, fontWeight: '900', fontFamily: MONO }}>
-                    {hint.label}
-                  </Text>
-                  <Text style={{ color: '#94a3b8', fontSize: 11 }}>{hint.tip}</Text>
-                </View>
+              {getRoomChatSessionActions(sessionProfile).slice(0, 3).map(action => (
+                <Pressable
+                  key={action.id}
+                  onPress={() => setInput(action.prompt)}
+                  accessibilityRole="button"
+                  accessibilityLabel={action.label}
+                  style={{
+                    paddingHorizontal: 10, paddingVertical: 7, borderRadius: 9,
+                    borderWidth: 1, borderColor: '#1f2937', backgroundColor: '#0d1320',
+                  }}>
+                  <Text style={{ color: '#cbd5e1', fontSize: 10, fontWeight: '800' }}>{action.label}</Text>
+                </Pressable>
               ))}
             </View>
           </View>
@@ -4271,6 +4582,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
               onRerun={handleRerunFromMessage}
               onApplyProposal={handleApplyProposal}
               onRejectProposal={handleRejectProposal}
+              proposalDecision={proposalDecisionsByMessage.get(m.id)}
               getFileContentForDiff={getFileContentForDiff}
               onPeekFile={handlePeekFile}
               knownFileNames={roomFileNameSet}
@@ -4312,39 +4624,65 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         </View>
       ) : null}
 
-      {/* Active file chip */}
+      {/* Open document context — secondary actions stay behind one disclosure. */}
       {activeFile && (
-        <View style={{ paddingHorizontal: 12, paddingVertical: 6, backgroundColor: '#0a0a10', borderTopWidth: 1, borderTopColor: '#1a1a28', gap: 6 }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+        <View style={{ paddingHorizontal: 12, paddingVertical: 8, backgroundColor: '#0a0a10', borderTopWidth: 1, borderTopColor: '#1a1a28', gap: 7 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 7 }}>
             <View style={{ width: 16, height: 16, borderRadius: 4, backgroundColor: accentColor + '20', justifyContent: 'center', alignItems: 'center' }}>
               <Text style={{ color: accentColor, fontSize: 8, fontWeight: '800' }}>F</Text>
             </View>
-            <Text style={{ color: '#a0a0b0', fontSize: 10 }} numberOfLines={1}>Attached: {activeFile.name}</Text>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text style={{ color: '#cbd5e1', fontSize: 10, fontWeight: '800' }} numberOfLines={1}>{activeFile.name}</Text>
+              <Text style={{ color: activeFile.local_draft ? '#f59e0b' : '#64748b', fontSize: 9 }} numberOfLines={1}>
+                {activeFileTextReadable
+                  ? `${activeFile.local_draft ? 'Unsaved editor draft is in context' : 'Saved document is in context'} · agent can read and propose edits`
+                  : 'Binary preview only · text extraction is not available in Room chat'}
+              </Text>
+            </View>
+            {activeFileTextReadable ? (
+              <Pressable
+                onPress={() => setShowFileActions(value => !value)}
+                accessibilityRole="button"
+                accessibilityLabel="Open document actions"
+                accessibilityState={{ expanded: showFileActions }}
+                style={[s.panelBtn, { paddingHorizontal: 8, paddingVertical: 5, backgroundColor: showFileActions ? accentColor + '18' : '#0d1320' }]}>
+                <Text style={{ color: showFileActions ? accentColor : '#94a3b8', fontSize: 10, fontWeight: '800' }}>Actions</Text>
+              </Pressable>
+            ) : null}
           </View>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+          {showFileActions && activeFileTextReadable ? (
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
             {[
               { label: 'Explain', prompt: `Explain what @${activeFile.name} does, how it's structured, and any non-obvious behavior.` },
               { label: 'Review', prompt: `Review @${activeFile.name} for bugs, security issues, performance concerns, and code smells.` },
               { label: 'Tests', prompt: `Generate unit tests for @${activeFile.name}. Cover edge cases.` },
-              { label: 'Refactor', prompt: `Suggest a refactor for @${activeFile.name} that improves clarity and reduces complexity. Output any changes as edit:${activeFile.name} blocks.` },
-              { label: 'Docs', prompt: `Write or update documentation comments for @${activeFile.name}. Output as edit:${activeFile.name}.` },
-              { label: 'Types', prompt: `Tighten the types in @${activeFile.name}. Replace any/unknown where safe, add explicit return types, surface any TS errors.` },
+              { label: 'Propose edit', prompt: `Improve @${activeFile.name} for clarity, correctness, and maintainability. Return the complete reviewed change as an edit:${activeFile.name} block.` },
             ].map((action) => (
               <Pressable
                 key={action.label}
-                onPress={() => setInput(action.prompt)}
+                onPress={() => { setInput(action.prompt); setShowFileActions(false); inputRef.current?.focus(); }}
                 style={{
-                  paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999,
-                  borderWidth: 1, borderColor: accentColor + '40',
-                  backgroundColor: accentColor + '10',
+                  paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8,
+                  borderWidth: 1, borderColor: '#1f2937',
+                  backgroundColor: '#0d1320',
                   ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
                 }}>
-                <Text style={{ color: accentColor, fontSize: 10, fontWeight: '800', letterSpacing: 0.4 }}>
+                <Text style={{ color: '#cbd5e1', fontSize: 10, fontWeight: '800' }}>
                   {action.label}
                 </Text>
               </Pressable>
             ))}
-          </ScrollView>
+            {onSubmitToGitHub ? (
+              <Pressable
+                onPress={() => { setShowFileActions(false); onSubmitToGitHub(); }}
+                accessibilityRole="button"
+                accessibilityLabel="Submit reviewed room files to GitHub"
+                style={{ paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, borderWidth: 1, borderColor: accentColor + '55', backgroundColor: accentColor + '12' }}>
+                <Text style={{ color: accentColor, fontSize: 10, fontWeight: '900' }}>Submit to GitHub</Text>
+              </Pressable>
+            ) : null}
+            </View>
+          ) : null}
         </View>
       )}
 
@@ -4358,7 +4696,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             </View>
             {filteredMentionFiles.map((f, idx) => {
               const active = idx === paletteIndex;
-              const tagColor = f.kind === 'member' ? '#22d3ee' : f.kind === 'meta' ? accentColor : accentColor;
+              const tagColor = f.kind === 'member' ? '#6366f1' : f.kind === 'meta' ? accentColor : accentColor;
               const tagLabel = f.kind === 'member' ? 'MEMBER' : f.kind === 'meta' ? 'META' : 'FILE';
               return (
                 <Pressable
@@ -4533,7 +4871,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
               inputSelectionRef.current = e.nativeEvent.selection;
               detectPalettes(input, e.nativeEvent.selection.start);
             }}
-            placeholder={botTyping ? 'Streaming...' : 'Ask Agent anything — type @ for files, / for commands, paste images'}
+            placeholder={botTyping ? 'Agent is working…' : activeFile ? `Ask about or change ${activeFile.name}…` : 'Message the room agent…'}
             placeholderTextColor="#555"
             onSubmitEditing={send}
             returnKeyType="send"
@@ -4542,20 +4880,6 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             editable={!botTyping}
             {...(Platform.OS === 'web' ? ({ onPaste: handleClipboardPaste } as any) : {})}
           />
-          {Platform.OS === 'web' && !botTyping ? (
-            <Pressable
-              onPress={isListening ? stopVoiceInput : startVoiceInput}
-              style={[s.sendBtn, {
-                backgroundColor: isListening ? '#ef4444' : '#0d1320',
-                borderWidth: 1, borderColor: isListening ? '#ef4444' : '#1f2937',
-              }]}
-            >
-              <Text style={{
-                color: isListening ? '#fff' : '#94a3b8',
-                fontSize: 14, fontWeight: '900',
-              }}>{isListening ? '◉' : '◌'}</Text>
-            </Pressable>
-          ) : null}
           {botTyping ? (
             <Pressable onPress={handleCancelStream} style={[s.sendBtn, { backgroundColor: '#ef4444' }]}>
               <Text style={{ color: '#fff', fontSize: 10, fontWeight: '900', letterSpacing: 1 }}>STOP</Text>
@@ -4570,23 +4894,14 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             </Pressable>
           )}
         </View>
-        <View style={s.inputHints}>
-          <Text style={s.inputHintText}>
-            <Text style={s.inputHintKey}>@</Text> file
-            {'   '}
-            <Text style={s.inputHintKey}>/</Text> command
-            {'   '}
-            <Text style={s.inputHintKey}>↵</Text> send
-            {'   '}
-            <Text style={s.inputHintKey}>⇧↵</Text> newline
-          </Text>
-          {contextSummary ? (
-            <Text style={[s.inputHintText, { marginLeft: 'auto' as any, color: accentColor + 'dd' }]} numberOfLines={1}>
-              {contextSummary}
-            </Text>
-          ) : null}
-          <Text style={[s.inputHintText, contextSummary ? null : { marginLeft: 'auto' as any }]}>{input.length}/2000</Text>
-        </View>
+        {contextSummary || input.length > 1700 ? (
+          <View style={s.inputHints}>
+            {contextSummary ? (
+              <Text style={[s.inputHintText, { color: accentColor + 'dd', flex: 1 }]} numberOfLines={1}>{contextSummary}</Text>
+            ) : <View style={{ flex: 1 }} />}
+            {input.length > 1700 ? <Text style={s.inputHintText}>{input.length}/2000</Text> : null}
+          </View>
+        ) : null}
       </View>
 
       {peekFile && (
@@ -5132,7 +5447,7 @@ function FileProposalCard({ proposal, lineCount, accentColor, applied, rejected,
   );
 }
 
-const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, roomId, sessionProfile, onRunLedgerUpdate, onRetryCheck, retryingCheckId, onDelete, onTogglePin, onBranch, onCopy, onContinue, onRerun, onApplyProposal, onRejectProposal, getFileContentForDiff, onPeekFile, knownFileNames, onReply, onReact, currentUserId, busy, dimmed, isCutoff }: {
+const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, roomId, sessionProfile, onRunLedgerUpdate, onRetryCheck, retryingCheckId, onDelete, onTogglePin, onBranch, onCopy, onContinue, onRerun, onApplyProposal, onRejectProposal, proposalDecision, getFileContentForDiff, onPeekFile, knownFileNames, onReply, onReact, currentUserId, busy, dimmed, isCutoff }: {
   msg: RoomMessage;
   accentColor: string;
   circleId: string;
@@ -5149,6 +5464,7 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
   onRerun?: (id: string) => void;
   onApplyProposal?: (msgId: string, proposal: AiFileProposal) => void;
   onRejectProposal?: (msgId: string, proposal: AiFileProposal) => void;
+  proposalDecision?: { applied: string[]; rejected: string[] };
   getFileContentForDiff?: (fileName: string) => Promise<string | null>;
   onPeekFile?: (fileName: string) => void;
   knownFileNames?: Set<string>;
@@ -5159,6 +5475,7 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
   dimmed?: boolean;
   isCutoff?: boolean;
 }) {
+  const [messageActionsOpen, setMessageActionsOpen] = useState(false);
   const time = new Date(msg.created_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
   const artifacts = Array.isArray(msg.metadata?.artifacts) ? msg.metadata.artifacts : [];
   const images: string[] = Array.isArray((msg.metadata as any)?.images)
@@ -5174,15 +5491,14 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
   const reactionEntries: Array<{ kind: 'ack' | 'important' | 'question'; glyph: string; color: string; ids: string[] }> = [
     { kind: 'ack', glyph: '✓', color: '#22c55e', ids: Array.isArray(rawReactions.ack) ? rawReactions.ack : [] },
     { kind: 'important', glyph: '!', color: '#f59e0b', ids: Array.isArray(rawReactions.important) ? rawReactions.important : [] },
-    { kind: 'question', glyph: '?', color: '#22d3ee', ids: Array.isArray(rawReactions.question) ? rawReactions.question : [] },
+    { kind: 'question', glyph: '?', color: '#6366f1', ids: Array.isArray(rawReactions.question) ? rawReactions.question : [] },
   ];
   const hasAnyReaction = reactionEntries.some((r) => r.ids.length > 0);
-  const renderReactionRow = (marginLeft = 0) => onReact ? (
+  const renderReactionRow = (marginLeft = 0) => onReact && hasAnyReaction ? (
     <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 6, marginLeft }}>
       {reactionEntries.map((r) => {
         const mine = !!(currentUserId && r.ids.includes(currentUserId));
-        const showWhenZero = !hasAnyReaction;
-        if (r.ids.length === 0 && !showWhenZero) return null;
+        if (r.ids.length === 0) return null;
         return (
           <Pressable
             key={r.kind}
@@ -5206,13 +5522,67 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
       })}
     </View>
   ) : null;
+  const renderMessageActionMenu = (includeRunActions: boolean, marginLeft = 0) => !messageActionsOpen ? null : (
+    <View style={{
+      marginLeft, marginBottom: 7, padding: 6, borderRadius: 9,
+      borderWidth: 1, borderColor: '#1f2937', backgroundColor: '#0a0e1a',
+      flexDirection: 'row', flexWrap: 'wrap', gap: 5,
+    }}>
+      {onTogglePin ? (
+        <Pressable onPress={() => { onTogglePin(msg.id); setMessageActionsOpen(false); }} style={s.messageActionItem}>
+          <Text style={s.messageActionText}>{pinned ? 'Unpin' : 'Pin'}</Text>
+        </Pressable>
+      ) : null}
+      {onCopy && msg.content ? (
+        <Pressable onPress={() => { onCopy(msg.content); setMessageActionsOpen(false); }} style={s.messageActionItem}>
+          <Text style={s.messageActionText}>Copy</Text>
+        </Pressable>
+      ) : null}
+      {onReply ? (
+        <Pressable onPress={() => { onReply(msg); setMessageActionsOpen(false); }} style={s.messageActionItem}>
+          <Text style={s.messageActionText}>Reply</Text>
+        </Pressable>
+      ) : null}
+      {onBranch ? (
+        <Pressable onPress={() => { onBranch(msg.id); setMessageActionsOpen(false); }} style={s.messageActionItem}>
+          <Text style={s.messageActionText}>Branch here</Text>
+        </Pressable>
+      ) : null}
+      {includeRunActions && onContinue ? (
+        <Pressable disabled={busy} onPress={() => { onContinue(msg.id); setMessageActionsOpen(false); }} style={[s.messageActionItem, busy && { opacity: 0.4 }]}>
+          <Text style={s.messageActionText}>Continue</Text>
+        </Pressable>
+      ) : null}
+      {includeRunActions && onRerun ? (
+        <Pressable disabled={busy} onPress={() => { onRerun(msg.id); setMessageActionsOpen(false); }} style={[s.messageActionItem, busy && { opacity: 0.4 }]}>
+          <Text style={s.messageActionText}>Retry</Text>
+        </Pressable>
+      ) : null}
+      {onReact ? reactionEntries.map(reaction => (
+        <Pressable key={reaction.kind} onPress={() => { onReact(msg.id, reaction.kind); setMessageActionsOpen(false); }} style={s.messageActionItem}>
+          <Text style={[s.messageActionText, { color: reaction.color }]}>{reaction.glyph} React</Text>
+        </Pressable>
+      )) : null}
+      {onDelete ? (
+        <Pressable onPress={() => { onDelete(msg.id); setMessageActionsOpen(false); }} style={[s.messageActionItem, { borderColor: '#ef444444' }]}>
+          <Text style={[s.messageActionText, { color: '#f87171' }]}>Delete</Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
   // Parse any ```edit:filename``` proposals out of agent responses so we can
   // surface Apply / Reject cards. Strip them from the visible text below
   // (the cards carry the path + content already).
   const proposals = msg.message_type === 'agent_output' ? parseAiFileProposals(msg.content || '') : [];
   const visibleContent = proposals.length > 0 ? stripAiFileProposals(msg.content || '') : (msg.content || '');
-  const appliedSet = new Set<string>(Array.isArray((msg.metadata as any)?.appliedProposals) ? (msg.metadata as any).appliedProposals : []);
-  const rejectedSet = new Set<string>(Array.isArray((msg.metadata as any)?.rejectedProposals) ? (msg.metadata as any).rejectedProposals : []);
+  const appliedSet = new Set<string>([
+    ...(Array.isArray((msg.metadata as any)?.appliedProposals) ? (msg.metadata as any).appliedProposals : []),
+    ...(proposalDecision?.applied || []),
+  ]);
+  const rejectedSet = new Set<string>([
+    ...(Array.isArray((msg.metadata as any)?.rejectedProposals) ? (msg.metadata as any).rejectedProposals : []),
+    ...(proposalDecision?.rejected || []),
+  ]);
   if (msg.message_type==='edit_event')
     return <View style={{alignItems:'center',flexDirection:'row',justifyContent:'center',gap:6}}><Text style={{color:'#555',fontSize:11,fontStyle:'italic'}}>✏️ {msg.content} · {time}</Text>{onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{opacity:0.4}}><Text style={{color:'#f85149',fontSize:10}}>×</Text></Pressable>}</View>;
   if (msg.message_type==='system')
@@ -5263,32 +5633,17 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
             </Text>
           )}
           <Text style={{color:'#444',fontSize:10}}>{time}</Text>
-          {onTogglePin && (
-            <Pressable onPress={() => onTogglePin(msg.id)} hitSlop={6}
-              style={{ marginLeft: status ? 0 : 'auto' as any, opacity: pinned ? 1 : 0.5, paddingHorizontal: 4 } as any}>
-              <Text style={{color: pinned ? accentColor : '#94a3b8', fontSize: 12, fontWeight: '900'}}>{pinned ? '★' : '☆'}</Text>
-            </Pressable>
-          )}
-          {onCopy && msg.content && (
-            <Pressable onPress={() => onCopy(msg.content)} hitSlop={6}
-              style={{ opacity: 0.5, paddingHorizontal: 4 } as any}>
-              <Text style={{color: '#94a3b8', fontSize: 11, fontWeight: '700'}}>⧉</Text>
-            </Pressable>
-          )}
-          {onBranch && (
-            <Pressable onPress={() => onBranch(msg.id)} hitSlop={6}
-              style={{ opacity: isCutoff ? 1 : 0.5, paddingHorizontal: 4 } as any}>
-              <Text style={{color: isCutoff ? accentColor : '#94a3b8', fontSize: 11, fontWeight: '900'}}>↻</Text>
-            </Pressable>
-          )}
-          {onReply && (
-            <Pressable onPress={() => onReply(msg)} hitSlop={6}
-              style={{ opacity: 0.5, paddingHorizontal: 4 } as any}>
-              <Text style={{color: '#94a3b8', fontSize: 11, fontWeight: '900'}}>↩</Text>
-            </Pressable>
-          )}
-          {onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{ opacity: 0.5, paddingHorizontal: 4 } as any}><Text style={{color:'#f85149',fontSize:12,fontWeight:'700'}}>×</Text></Pressable>}
+          <Pressable
+            onPress={() => setMessageActionsOpen(value => !value)}
+            accessibilityRole="button"
+            accessibilityLabel="Open message actions"
+            accessibilityState={{ expanded: messageActionsOpen }}
+            hitSlop={6}
+            style={{ marginLeft: status ? 0 : 'auto' as any, paddingHorizontal: 6, opacity: messageActionsOpen ? 1 : 0.65 } as any}>
+            <Text style={{ color: messageActionsOpen ? accentColor : '#94a3b8', fontSize: 14, fontWeight: '900' }}>⋯</Text>
+          </Pressable>
         </View>
+        {renderMessageActionMenu(!isTask)}
         {repliesTo ? (
           <View style={{
             borderLeftWidth: 2, borderLeftColor: accentColor + '88',
@@ -5410,40 +5765,6 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
           </Text>
         )}
         {renderReactionRow(0)}
-        {(onContinue || onRerun) && !isTask && (
-          <View style={{ flexDirection: 'row', gap: 6, marginTop: 8 }}>
-            {onContinue && (
-              <Pressable
-                onPress={() => onContinue(msg.id)}
-                disabled={busy}
-                style={{
-                  paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999,
-                  borderWidth: 1, borderColor: accentColor + '44',
-                  backgroundColor: accentColor + '0c',
-                  opacity: busy ? 0.4 : 1,
-                  ...(Platform.OS === 'web' ? { cursor: busy ? 'wait' : 'pointer' } as any : {}),
-                }}
-              >
-                <Text style={{ color: accentColor, fontSize: 10, fontWeight: '900', letterSpacing: 0.5 }}>→ CONTINUE</Text>
-              </Pressable>
-            )}
-            {onRerun && (
-              <Pressable
-                onPress={() => onRerun(msg.id)}
-                disabled={busy}
-                style={{
-                  paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999,
-                  borderWidth: 1, borderColor: '#1f2937',
-                  backgroundColor: '#0d1320',
-                  opacity: busy ? 0.4 : 1,
-                  ...(Platform.OS === 'web' ? { cursor: busy ? 'wait' : 'pointer' } as any : {}),
-                }}
-              >
-                <Text style={{ color: '#94a3b8', fontSize: 10, fontWeight: '900', letterSpacing: 0.5 }}>↻ RETRY</Text>
-              </Pressable>
-            )}
-          </View>
-        )}
       </View>
     );
   }
@@ -5461,32 +5782,17 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
         <Text style={{color:'#ccc',fontSize:11,fontWeight:'700'}}>{msg.agent_name||'Member'}</Text>
         {pinned && <Text style={{color: accentColor, fontSize: 9, fontWeight: '900', letterSpacing: 0.7}}>★ PINNED</Text>}
         <Text style={{color:'#444',fontSize:10}}>{time}</Text>
-        {onTogglePin && (
-          <Pressable onPress={() => onTogglePin(msg.id)} hitSlop={6}
-            style={{ marginLeft: 'auto' as any, opacity: pinned ? 1 : 0.5, paddingHorizontal: 4 } as any}>
-            <Text style={{color: pinned ? accentColor : '#94a3b8', fontSize: 12, fontWeight: '900'}}>{pinned ? '★' : '☆'}</Text>
-          </Pressable>
-        )}
-        {onCopy && msg.content && (
-          <Pressable onPress={() => onCopy(msg.content)} hitSlop={6}
-            style={{ opacity: 0.5, paddingHorizontal: 4 } as any}>
-            <Text style={{color: '#94a3b8', fontSize: 11, fontWeight: '700'}}>⧉</Text>
-          </Pressable>
-        )}
-        {onBranch && (
-          <Pressable onPress={() => onBranch(msg.id)} hitSlop={6}
-            style={{ opacity: isCutoff ? 1 : 0.5, paddingHorizontal: 4 } as any}>
-            <Text style={{color: isCutoff ? accentColor : '#94a3b8', fontSize: 11, fontWeight: '900'}}>↻</Text>
-          </Pressable>
-        )}
-        {onReply && (
-          <Pressable onPress={() => onReply(msg)} hitSlop={6}
-            style={{ opacity: 0.5, paddingHorizontal: 4 } as any}>
-            <Text style={{color: '#94a3b8', fontSize: 11, fontWeight: '900'}}>↩</Text>
-          </Pressable>
-        )}
-        {onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{ opacity: 0.5, paddingHorizontal: 4 } as any}><Text style={{color:'#f85149',fontSize:12,fontWeight:'700'}}>×</Text></Pressable>}
+        <Pressable
+          onPress={() => setMessageActionsOpen(value => !value)}
+          accessibilityRole="button"
+          accessibilityLabel="Open message actions"
+          accessibilityState={{ expanded: messageActionsOpen }}
+          hitSlop={6}
+          style={{ marginLeft: 'auto' as any, paddingHorizontal: 6, opacity: messageActionsOpen ? 1 : 0.65 } as any}>
+          <Text style={{ color: messageActionsOpen ? accentColor : '#94a3b8', fontSize: 14, fontWeight: '900' }}>⋯</Text>
+        </Pressable>
       </View>
+      {renderMessageActionMenu(false, 28)}
       {repliesTo ? (
         <View style={{
           marginLeft: 28, marginBottom: 4,
@@ -5573,8 +5879,8 @@ function APIsPanel({ room, accentColor }: { room: Room; accentColor: string }) {
 
   const API_DETAILS: Record<string, { endpoint: string; example: string }> = {
     storage: {
-      endpoint: `supabase.storage\n  .from('room-files')\n  .upload('{roomId}/file.txt', data)`,
-      example: `import { supabase } from './lib/supabase'\n\n// Upload a file\nconst { data, error } = await supabase\n  .storage.from('room-files')\n  .upload('${roomShort}/report.pdf', file)\n\n// Download\nconst { data: blob } = await supabase\n  .storage.from('room-files')\n  .download('${roomShort}/report.pdf')\n\n// List files\nconst { data: list } = await supabase\n  .storage.from('room-files')\n  .list('${roomShort}/')`,
+      endpoint: `supabase.storage\n  .from('room-files')\n  .upload('rooms/{roomId}/file.txt', data)`,
+      example: `import { supabase } from './lib/supabase'\n\nconst path = 'rooms/${room.id}/report.pdf'\nconst { error } = await supabase\n  .storage.from('room-files')\n  .upload(path, file)\n\n// The bucket is private. Create a short member-authorized URL\n// for display; never persist this signed URL in room_files.\nconst { data } = await supabase\n  .storage.from('room-files')\n  .createSignedUrl(path, 900)\nconsole.log(data?.signedUrl)`,
     },
     database: {
       endpoint: `supabase\n  .from('room_files')\n  .select('*')\n  .eq('room_id', roomId)`,
@@ -5589,8 +5895,8 @@ function APIsPanel({ room, accentColor }: { room: Room; accentColor: string }) {
       example: `import { supabase } from './lib/supabase'\n\n// Enqueue a task\nconst { data } = await supabase.functions\n  .invoke('room-queue', {\n    body: {\n      room_id: '${roomShort}',\n      task: 'generate_summary',\n      payload: {\n        file_ids: ['...'],\n        model: 'claude-haiku'\n      }\n    }\n  })\n\nconsole.log('Task ID:', data.task_id)`,
     },
     secrets: {
-      endpoint: `supabase\n  .from('room_secrets')\n  .upsert({ room_id, key, value })`,
-      example: `import { supabase } from './lib/supabase'\n\n// Store a secret\nawait supabase.from('room_secrets')\n  .upsert({\n    room_id: '${roomShort}',\n    key: 'OPENAI_KEY',\n    value: 'sk-...',\n    created_by: userId\n  }, { onConflict: 'room_id,key' })\n\n// Read (only accessible by room members)\nconst { data } = await supabase\n  .from('room_secrets')\n  .select('key')\n  .eq('room_id', '${roomShort}')`,
+      endpoint: `Use the Room Secrets panel\nfor owner-private values`,
+      example: `// Add and remove values through the Secrets panel.\n// Direct room_secrets reads are intentionally owner-private,\n// and the client never reads a saved secret value back.\n// Share a capability through the Vault instead of pasting\n// a personal API key into Room chat or source files.`,
     },
     containers: {
       endpoint: `supabase.functions\n  .invoke('room-exec', { body: config })`,
@@ -5603,7 +5909,7 @@ function APIsPanel({ room, accentColor }: { room: Room; accentColor: string }) {
     database: 'All database queries go through Supabase\'s PostgREST API with Row Level Security enforced. You can only access data in rooms you\'re a member of. Use the Supabase JS client for type-safe queries.',
     messaging: 'Realtime messaging uses Supabase Channels (WebSocket). Messages are ephemeral by default — they\'re broadcast to connected clients but not stored. Use the database for persistent messages.',
     queues: 'Tasks are processed by a Supabase Edge Function. Enqueue jobs with a payload, and agents or workers will process them asynchronously. Results are stored in the room_usage table.',
-    secrets: 'Secrets are stored in the room_secrets table with RLS protection. Only room members can read/write secrets. Values are stored server-side — the API panel never exposes raw secret values to the client.',
+    secrets: 'Secret rows are private to the exact user who created them and still require current Room Circle membership. Other members cannot list, overwrite, or delete them. Use the Vault for an explicitly approved shared capability.',
     containers: 'Code runs in isolated containers via a Supabase Edge Function. Specify a Docker image, mount files, and set a timeout. Output (stdout/stderr) is captured and returned. Containers are destroyed after execution.',
   };
 
@@ -5670,7 +5976,17 @@ function APIsPanel({ room, accentColor }: { room: Room; accentColor: string }) {
 
 // ─── Secrets Panel ────────────────────────────────────────────────────────────
 
-function SecretsPanel({ roomId, accentColor }: { roomId: string; accentColor: string }) {
+function SecretsPanel({ roomId, circleId, accentColor }: { roomId: string; circleId: string; accentColor: string }) {
+  const {
+    exactAuthority,
+    isExactAuthorityCurrent,
+  } = useExactRunHistoryAuthority(circleId);
+  const client = useMemo(
+    () => exactAuthority
+      ? getSupabaseClientForAccessToken(exactAuthority.accessToken)
+      : null,
+    [exactAuthority?.accessToken],
+  );
   // Only fetch key names + IDs — never pull secret values to the client
   const [secrets, setSecrets] = useState<Array<{ id: string; key: string }>>([]);
   const [key, setKey] = useState('');
@@ -5678,18 +5994,32 @@ function SecretsPanel({ roomId, accentColor }: { roomId: string; accentColor: st
   const [adding, setAdding] = useState(false);
 
   useEffect(() => {
-    supabase.from('room_secrets').select('id,key').eq('room_id', roomId)
-      .then(({ data }) => setSecrets((data || []).map(d => ({ id: d.id, key: d.key }))));
-  }, [roomId]);
+    const authority = exactAuthority;
+    if (!authority || !client || !isExactAuthorityCurrent(authority)) {
+      setSecrets([]);
+      return;
+    }
+    let retired = false;
+    client.from('room_secrets')
+      .select('id,key')
+      .eq('room_id', roomId)
+      .eq('created_by', authority.userId)
+      .then(({ data, error }) => {
+        if (retired || !isExactAuthorityCurrent(authority)) return;
+        setSecrets(error ? [] : (data || []).map(d => ({ id: d.id, key: d.key })));
+      });
+    return () => { retired = true; };
+  }, [client, exactAuthority, isExactAuthorityCurrent, roomId]);
 
   const addSecret = async () => {
     if (!key.trim() || !val.trim()) return;
+    const authority = exactAuthority;
+    if (!authority || !client || !isExactAuthorityCurrent(authority)) return;
     setAdding(true);
-    const { data:{ user } } = await supabase.auth.getUser();
-    const { data, error } = await supabase.from('room_secrets').upsert({
-      room_id: roomId, key: key.trim(), value: val.trim(), created_by: user?.id||null,
-    }, { onConflict:'room_id,key' }).select('id,key').single();
-    if (!error && data) {
+    const { data, error } = await client.from('room_secrets').upsert({
+      room_id: roomId, key: key.trim(), value: val.trim(), created_by: authority.userId,
+    }, { onConflict:'room_id,created_by,key' }).select('id,key').single();
+    if (!error && data && isExactAuthorityCurrent(authority)) {
       setSecrets(p => [...p.filter(s=>s.key!==data.key), { id: data.id, key: data.key }]);
       setKey(''); setVal('');
     }
@@ -5697,18 +6027,28 @@ function SecretsPanel({ roomId, accentColor }: { roomId: string; accentColor: st
   };
 
   const deleteSecret = async (id: string) => {
-    await supabase.from('room_secrets').delete().eq('id', id);
-    setSecrets(p => p.filter(s => s.id !== id));
+    const authority = exactAuthority;
+    if (!authority || !client || !isExactAuthorityCurrent(authority)) return;
+    const { data, error } = await client.from('room_secrets')
+      .delete()
+      .eq('id', id)
+      .eq('room_id', roomId)
+      .eq('created_by', authority.userId)
+      .select('id')
+      .maybeSingle();
+    if (!error && data && isExactAuthorityCurrent(authority)) {
+      setSecrets(p => p.filter(s => s.id !== id));
+    }
   };
 
   return (
     <View style={s.panel}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingRight: 14 }}>
         <Text style={s.panelTitle}>Secrets</Text>
-        <HelpTip color="#9e9e9e" text="Secrets are stored server-side with Row Level Security. Only room members can add, view key names, or delete secrets. Secret values are never sent to the browser after saving — they can only be read server-side by Edge Functions or agents." />
+        <HelpTip color="#9e9e9e" text="Secrets are owner-private rows protected by exact user and Room membership policies. Other Circle members cannot list, replace, or delete them. Values are not read back into this panel after saving." />
       </View>
       <Text style={{color:'#666',fontSize:11,padding:14,paddingTop:0,lineHeight:16}}>
-        Encrypted KV store for this room. Store API keys, tokens, credentials.
+        Owner-private secret store for this room. Values are never shared with other members.
       </Text>
       <ScrollView style={{flex:1}} contentContainerStyle={{padding:14,gap:8}}>
         {secrets.map(sec => (
@@ -6114,17 +6454,17 @@ const cvSt = StyleSheet.create({
 const VARIANT_COLORS = ['#6366f1', '#22c55e', '#f59e0b', '#ec4899'];
 
 const PLAYGROUND_MODELS = [
-  { id: 'claude-opus-4-6',     label: 'Claude Opus 4.6',    provider: 'Anthropic' },
-  { id: 'claude-sonnet-4-6',   label: 'Claude Sonnet 4.6',  provider: 'Anthropic' },
+  { id: 'claude-opus-5',       label: 'Claude Opus 5',      provider: 'Anthropic' },
+  { id: 'claude-sonnet-5',     label: 'Claude Sonnet 5',    provider: 'Anthropic' },
   { id: 'claude-haiku-4-5',    label: 'Claude Haiku 4.5',   provider: 'Anthropic' },
+  { id: 'gpt-5.6-sol',         label: 'GPT-5.6 Sol',        provider: 'OpenAI' },
+  { id: 'gpt-5.6-terra',       label: 'GPT-5.6 Terra',      provider: 'OpenAI' },
+  { id: 'gpt-5.6-luna',        label: 'GPT-5.6 Luna',       provider: 'OpenAI' },
   { id: 'gpt-4.1',             label: 'GPT-4.1',            provider: 'OpenAI' },
-  { id: 'gpt-4o',              label: 'GPT-4o',             provider: 'OpenAI' },
-  { id: 'gpt-4o-mini',         label: 'GPT-4o Mini',        provider: 'OpenAI' },
-  { id: 'o4-mini',             label: 'O4 Mini',            provider: 'OpenAI' },
-  { id: 'gemini-2.5-pro',      label: 'Gemini 2.5 Pro',     provider: 'Google' },
-  { id: 'gemini-2.5-flash',    label: 'Gemini 2.5 Flash',   provider: 'Google' },
+  { id: 'gemini-3.6-flash',    label: 'Gemini 3.6 Flash',   provider: 'Google' },
+  { id: 'gemini-3.5-flash',    label: 'Gemini 3.5 Flash',   provider: 'Google' },
   { id: 'qwen3-32b',           label: 'Qwen 3 32B',         provider: 'Qwen' },
-  { id: 'deepseek-r1',         label: 'DeepSeek R1',        provider: 'DeepSeek' },
+  { id: 'deepseek-v4-pro',     label: 'DeepSeek V4 Pro',    provider: 'DeepSeek' },
 ];
 
 function makeVariant(label: string): PlaygroundVariant {
@@ -6133,7 +6473,7 @@ function makeVariant(label: string): PlaygroundVariant {
     label,
     system: 'You are a helpful assistant.',
     userMsg: '',
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-5',
     temperature: 0.7,
     maxTokens: 1024,
     outputSchema: '',
@@ -6795,25 +7135,30 @@ interface RoomMember {
   permissions: Permission[];
 }
 
-function PermissionsPanel({ roomId, accentColor }: { roomId: string; accentColor: string }) {
+function PermissionsPanel({ roomId, circleId, accentColor }: { roomId: string; circleId: string; accentColor: string }) {
   const [members, setMembers] = useState<RoomMember[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Load circle members with their profile emails
-    supabase.from('circle_members').select('user_id, role, profiles(display_name, username)')
-      .then(({ data }) => {
+    // Load only this Room's exact Circle members and hydrate the bounded
+    // presentation projection separately from owner-private profiles.
+    supabase.from('circle_members').select('user_id, role').eq('circle_id', circleId)
+      .then(async ({ data }) => {
         if (data) {
+          const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+            circleId,
+            userIds: data.map((row: any) => row.user_id),
+          }));
           setMembers(data.map((m: any) => ({
             userId: m.user_id,
-            email: m.profiles?.display_name || m.profiles?.username || m.user_id.slice(0, 8) + '...',
+            email: profileById.get(m.user_id)?.display_name || profileById.get(m.user_id)?.username || m.user_id.slice(0, 8) + '...',
             role: m.role || 'member',
             permissions: ALL_PERMISSIONS,
           })));
         }
         setLoading(false);
       });
-  }, [roomId]);
+  }, [circleId, roomId]);
 
   const ROLE_COLOR: Record<string, string> = {
     owner: '#f59e0b', admin: '#6366f1', member: '#22c55e', viewer: '#6f6f6f',
@@ -7805,6 +8150,20 @@ const s = StyleSheet.create({
   inputHintKey: {
     color: '#94a3b8',
     fontWeight: '900',
+  },
+  messageActionItem: {
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 7,
+    borderWidth: 1,
+    borderColor: '#1f2937',
+    backgroundColor: '#0d1320',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  messageActionText: {
+    color: '#cbd5e1',
+    fontSize: 10,
+    fontWeight: '800',
   },
   modeChip: {
     paddingHorizontal: 8,

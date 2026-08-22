@@ -5,7 +5,9 @@
  * existed only behind the `/desktop diag` chat command. This panel ALWAYS
  * renders — passive visibility even when everything is green — but stays one
  * line tall collapsed ('BRIDGES 4/5 ✓ · codex offline · 30s ago'); tap to
- * expand per-bridge rows.
+ * expand per-bridge rows, or dismiss it with the × (persisted — see
+ * DISMISS_KEY). Dismissing costs no alerting: OfficeBridgeReadinessStrip
+ * still fails visibly on its own when the proxy or all bridges go down.
  *
  * Self-polling (OfficeLaneHealthStrip pattern): owns its own ~30s interval
  * with a mounted-guard, takes no OfficeTab state. All impure deps
@@ -23,6 +25,27 @@ import {
 
 const POLL_MS = 30_000;
 
+// Machine-scoped, not circle-scoped: this panel reports the local bridge
+// processes, which are identical in every circle. Clear this localStorage
+// key to bring the panel back.
+const DISMISS_KEY = 'uc_office_bridge_diag_dismissed';
+
+function readDismissed(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.localStorage?.getItem(DISMISS_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function persistDismissed(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage?.setItem(DISMISS_KEY, '1');
+  } catch {}
+}
+
 const TONE_COLORS = {
   ok: '#4ade80',
   warn: '#e8b339',
@@ -39,8 +62,13 @@ const ROW_STATUS_COLORS: Record<BridgeDiagRowStatus, string> = {
 export default function OfficeBridgeDiagPanel() {
   const [model, setModel] = useState<BridgeDiagPanelModel | null>(null);
   const [expanded, setExpanded] = useState(false);
+  // Read synchronously so a dismissed panel never flashes on mount.
+  const [dismissed, setDismissed] = useState(readDismissed);
 
   useEffect(() => {
+    // Hidden means hidden: stop probing rather than polling for a strip
+    // nobody can see.
+    if (dismissed) return;
     let mounted = true;
     let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -75,8 +103,9 @@ export default function OfficeBridgeDiagPanel() {
         });
       } catch {
         // Observability only — a probe error must never break Office. Show a
-        // total, honest "no probe results" state instead of going blank.
-        if (mounted) setModel((prev) => prev ?? buildBridgeDiagPanelModel([], Date.now()));
+        // total, honest "no probe results" state instead of going blank or
+        // retaining a stale healthy snapshot from the previous poll.
+        if (mounted) setModel(buildBridgeDiagPanelModel([], Date.now()));
       }
     };
 
@@ -86,26 +115,46 @@ export default function OfficeBridgeDiagPanel() {
       mounted = false;
       if (timer) clearInterval(timer);
     };
-  }, []);
+  }, [dismissed]);
 
+  if (dismissed) return null;
   if (!model) return null;
 
   const color = TONE_COLORS[model.summary.tone];
 
   return (
     <View style={[styles.panel, { borderColor: color + '55' }]}>
-      <Pressable
-        style={styles.headerRow}
-        onPress={() => setExpanded((v) => !v)}
-        accessibilityRole="button"
-        accessibilityLabel={`Bridge status: ${model.collapsedLine}. Tap to ${expanded ? 'collapse' : 'expand'}.`}
-      >
-        <View style={[styles.dot, { backgroundColor: color }]} />
-        <Text style={[styles.headline, { color }]} numberOfLines={1}>
-          {model.collapsedLine}
-        </Text>
-        <Text style={styles.chevron}>{expanded ? '▾' : '▸'}</Text>
-      </Pressable>
+      {/* Toggle and dismiss are siblings, not nested: a × inside the expand
+          Pressable would also fire the toggle on web, where clicks bubble. */}
+      <View style={styles.headerRow}>
+        <Pressable
+          style={styles.headerToggle}
+          onPress={() => setExpanded((v) => !v)}
+          accessibilityRole="button"
+          accessibilityLabel={`Bridge status: ${model.collapsedLine}`}
+          accessibilityHint={`${expanded ? 'Collapses' : 'Expands'} per-bridge connection details.`}
+          accessibilityState={{ expanded }}
+        >
+          <View style={[styles.dot, { backgroundColor: color }]} />
+          <Text style={[styles.headline, { color }]} numberOfLines={1}>
+            {model.collapsedLine}
+          </Text>
+          <Text style={styles.chevron}>{expanded ? '▾' : '▸'}</Text>
+        </Pressable>
+        <Pressable
+          onPress={() => {
+            persistDismissed();
+            setDismissed(true);
+          }}
+          style={styles.dismiss}
+          hitSlop={8}
+          accessibilityRole="button"
+          accessibilityLabel="Hide bridge status panel"
+          accessibilityHint="Hides local bridge diagnostics on the Office dashboard."
+        >
+          <Text style={styles.dismissText}>×</Text>
+        </Pressable>
+      </View>
       {expanded ? (
         <View style={styles.rows}>
           {model.rows.map((row) => (
@@ -140,6 +189,26 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+  },
+  headerToggle: {
+    flex: 1,
+    minHeight: 44,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  dismiss: {
+    width: 44,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  dismissText: {
+    color: '#9e9e9e',
+    fontSize: 15,
+    lineHeight: 15,
+    fontFamily: 'monospace',
   },
   dot: {
     width: 8,

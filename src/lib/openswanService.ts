@@ -2,7 +2,40 @@
 // Connects to a user's OpenSwan instance to get real agent data
 import { Platform } from 'react-native';
 import { estimateCostWithCache } from './modelPricing';
-import { diagnoseConnection, DiagnosticResult } from './connectionDiagnostics';
+import {
+  diagnoseConnection,
+  isExactOpenSwanToolUnavailablePayload,
+  type DiagnosticResult,
+} from './connectionDiagnostics';
+import {
+  parseOpenSwanSessionSendHandle as parseOpenSwanSessionSendHandleCore,
+  parseOpenSwanSpawnDisposition as parseOpenSwanSpawnDispositionCore,
+  parseOpenSwanSpawnHandle as parseOpenSwanSpawnHandleCore,
+  parseOpenSwanSubagentLifecycleSnapshot as parseOpenSwanSubagentLifecycleSnapshotCore,
+  type OpenSwanSessionSendHandle,
+  type OpenSwanSpawnDisposition,
+  type OpenSwanSpawnHandle,
+  type OpenSwanSubagentLifecycleSnapshot,
+} from './openswanSubagentLifecycleCore';
+
+export {
+  classifyOpenSwanSubagentLifecycle,
+  findOpenSwanSubagentLifecycleByProviderRunId,
+  lookupOpenSwanSubagentLifecycleByProviderRunId,
+  OPENSWAN_SUBAGENT_LIFECYCLE_LIMITS,
+} from './openswanSubagentLifecycleCore';
+export type {
+  OpenSwanSessionSendHandle,
+  OpenSwanSessionSendPhase,
+  OpenSwanSpawnDisposition,
+  OpenSwanSpawnPhase,
+  OpenSwanSpawnHandle,
+  OpenSwanSubagentLifecycleClassification,
+  OpenSwanSubagentLifecycleLookup,
+  OpenSwanSubagentLifecycleRecord,
+  OpenSwanSubagentLifecycleSnapshot,
+  OpenSwanSubagentRuntimeStatus,
+} from './openswanSubagentLifecycleCore';
 
 const LEGACY_RUNTIME_PREFIX = `open${'claw'}`;
 const LEGACY_AGENT_HEADER = `x-${LEGACY_RUNTIME_PREFIX}-agent-id`;
@@ -52,14 +85,36 @@ export interface OpenSwanToolResult {
   error?: { type: string; message: string };
 }
 
+/** Read only the current gateway's structured details; never infer ids from prose. */
+export function parseOpenSwanSpawnHandle(value: unknown): OpenSwanSpawnHandle | null {
+  return parseOpenSwanSpawnHandleCore(value);
+}
+
+/** Preserve structured spawn errors whose child may already have started. */
+export function parseOpenSwanSpawnDisposition(value: unknown): OpenSwanSpawnDisposition | null {
+  return parseOpenSwanSpawnDispositionCore(value);
+}
+
+/** Read only the structured sessions_send disposition; visible prose is non-authoritative. */
+export function parseOpenSwanSessionSendHandle(value: unknown): OpenSwanSessionSendHandle | null {
+  return parseOpenSwanSessionSendHandleCore(value);
+}
+
+/** Read current structured subagents list buckets without inferring lifecycle from text. */
+export function parseOpenSwanSubagentLifecycleSnapshot(
+  value: unknown,
+): OpenSwanSubagentLifecycleSnapshot | null {
+  return parseOpenSwanSubagentLifecycleSnapshotCore(value);
+}
+
 function isWebDirectLocalGateway(endpoint: string): boolean {
   return Platform.OS === 'web' && /localhost:18789(?:\/|$)/.test(endpoint);
 }
 
 // ─── Low-level API ────────────────────────────────────
 
-const unsupportedToolCache = new Set<string>();
-const unsupportedToolEndpointCache = new Set<string>();
+const unsupportedToolCache = new Map<string, number>();
+const unsupportedToolEndpointCache = new Map<string, number>();
 const unavailableEndpointCache = new Map<string, number>();
 // Auth failures are time-boxed rather than permanently latched. The old
 // behavior (Set) meant a single stale token at app start disabled Office
@@ -69,6 +124,39 @@ const authFailedEndpointCache = new Map<string, number>();
 
 const UNAVAILABLE_ENDPOINT_COOLDOWN_MS = 30_000;
 const AUTH_FAILED_COOLDOWN_MS = 30_000;
+const UNSUPPORTED_TOOL_COOLDOWN_MS = 60_000;
+
+function isToolUnsupportedCached(toolKey: string): boolean {
+  const until = unsupportedToolCache.get(toolKey) || 0;
+  if (until > Date.now()) return true;
+  if (until > 0) unsupportedToolCache.delete(toolKey);
+  return false;
+}
+
+function markToolUnsupported(endpoint: string, tool: string): void {
+  unsupportedToolCache.set(`${normalizeEndpoint(endpoint)}::${tool}`, Date.now() + UNSUPPORTED_TOOL_COOLDOWN_MS);
+}
+
+function isToolRpcEndpointUnsupportedCached(endpoint: string): boolean {
+  const normalized = normalizeEndpoint(endpoint);
+  const until = unsupportedToolEndpointCache.get(normalized) || 0;
+  if (until > Date.now()) return true;
+  if (until > 0) unsupportedToolEndpointCache.delete(normalized);
+  return false;
+}
+
+function markToolRpcEndpointUnsupported(endpoint: string): void {
+  unsupportedToolEndpointCache.set(
+    normalizeEndpoint(endpoint),
+    Date.now() + UNSUPPORTED_TOOL_COOLDOWN_MS,
+  );
+}
+
+function isExactToolUnavailable(error: unknown, tool: string): boolean {
+  const record = error as { type?: unknown; message?: unknown } | null | undefined;
+  if (record?.type === 'unsupported') return true;
+  return isExactOpenSwanToolUnavailablePayload({ ok: false, error: record }, tool);
+}
 
 function isAuthFailed(authKey: string): boolean {
   const until = authFailedEndpointCache.get(authKey) || 0;
@@ -88,11 +176,7 @@ function getEndpointAuthKey(endpoint: string, token?: string): string {
 }
 
 export function supportsOpenSwanToolRpcEndpoint(endpoint: string): boolean {
-  const normalized = normalizeEndpoint(endpoint);
-  const unavailableUntil = unavailableEndpointCache.get(normalized) || 0;
-  if (unavailableUntil > Date.now()) return false;
-  if (unavailableUntil > 0) unavailableEndpointCache.delete(normalized);
-  return !unsupportedToolEndpointCache.has(normalized);
+  return !isToolRpcEndpointUnsupportedCached(endpoint);
 }
 
 export function getOpenSwanEndpointNotice(endpoint: string, token?: string): string | null {
@@ -108,7 +192,7 @@ export function getOpenSwanEndpointNotice(endpoint: string, token?: string): str
   if (unavailableUntil > Date.now()) {
     return getUnavailableEndpointMessage(normalized);
   }
-  if (unsupportedToolEndpointCache.has(normalized)) {
+  if (isToolRpcEndpointUnsupportedCached(normalized)) {
     return 'Endpoint does not support OpenSwan tool RPCs.';
   }
   return null;
@@ -154,7 +238,7 @@ async function invokeToolRaw(
     };
   }
   if (unavailableUntil > 0) unavailableEndpointCache.delete(endpointKey);
-  if (unsupportedToolEndpointCache.has(endpointKey)) {
+  if (isToolRpcEndpointUnsupportedCached(endpointKey)) {
     return {
       ok: false,
       error: { type: 'unsupported', message: 'Endpoint does not support OpenSwan tool RPCs' },
@@ -168,20 +252,23 @@ async function invokeToolRaw(
   }
 
   const toolKey = `${endpointKey}::${tool}`;
-  if (unsupportedToolCache.has(toolKey)) {
+  if (isToolUnsupportedCached(toolKey)) {
     return {
       ok: false,
       error: { type: 'unsupported', message: `Tool not supported: ${tool}` },
     };
   }
 
-  const timeoutMs = FAST_TOOLS.has(tool) ? FAST_TOOL_TIMEOUT_MS : SLOW_TOOL_TIMEOUT_MS;
+  // `cron` is one RPC tool for both inventory and mutations. Only its list
+  // action belongs on the fast read boundary; create/run/update/remove retain
+  // the slower mutation budget and their outcome-unknown handling.
+  const isFastRead = FAST_TOOLS.has(tool) || (tool === 'cron' && args.action === 'list');
+  const timeoutMs = isFastRead ? FAST_TOOL_TIMEOUT_MS : SLOW_TOOL_TIMEOUT_MS;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  let res: Response;
   try {
-    res = await fetch(`${endpointKey}/tools/invoke`, {
+    const res = await fetch(`${endpointKey}/tools/invoke`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${config.token}`,
@@ -190,9 +277,48 @@ async function invokeToolRaw(
       body: JSON.stringify({ tool, args }),
       signal: controller.signal,
     });
+
+    if (res.status === 404 || res.status === 405) {
+      markToolUnsupported(endpointKey, tool);
+      // An optional tool can be absent while the shared /tools/invoke endpoint
+      // remains healthy. Only the baseline session inventory may classify the
+      // endpoint itself as unsupported, and even that classification expires so
+      // an in-place gateway upgrade can be discovered without a page reload.
+      if (tool === 'sessions_list') markToolRpcEndpointUnsupported(endpointKey);
+      unavailableEndpointCache.delete(endpointKey);
+      return {
+        ok: false,
+        error: { type: 'unsupported', message: `Tool not supported: ${tool}` },
+      };
+    }
+    if (res.status === 401 || res.status === 403) {
+      authFailedEndpointCache.set(endpointAuthKey, Date.now() + AUTH_FAILED_COOLDOWN_MS);
+      unavailableEndpointCache.delete(endpointKey);
+      return {
+        ok: false,
+        error: { type: 'auth', message: 'Authentication failed — wrong or missing token' },
+      };
+    }
+    authFailedEndpointCache.delete(endpointAuthKey);
+    unavailableEndpointCache.delete(endpointKey);
+    // Keep the same abort budget alive through body consumption. `fetch()` can
+    // resolve as soon as headers arrive while a proxy/upstream body remains
+    // open; clearing the timer before `json()` left panel reads unbounded.
+    const payload = await res.json();
+    if (isExactOpenSwanToolUnavailablePayload(payload, tool)) {
+      markToolUnsupported(endpointKey, tool);
+      if (tool === 'sessions_list') markToolRpcEndpointUnsupported(endpointKey);
+      return {
+        ok: false,
+        error: { type: 'unsupported', message: `Tool not supported: ${tool}` },
+      };
+    }
+    return payload;
   } catch (error: any) {
-    clearTimeout(timer);
-    const aborted = error?.name === 'AbortError';
+    // Preserve the prior malformed-JSON behavior for the high-level parser;
+    // only transport/body-read failures are normalized here.
+    if (error instanceof SyntaxError) throw error;
+    const aborted = controller.signal.aborted || error?.name === 'AbortError';
     const message = aborted
       ? `Timeout after ${timeoutMs}ms — gateway unresponsive`
       : (typeof error?.message === 'string' ? error.message : 'Network request failed');
@@ -207,27 +333,6 @@ async function invokeToolRaw(
   } finally {
     clearTimeout(timer);
   }
-
-  if (res.status === 404 || res.status === 405) {
-    unsupportedToolCache.add(toolKey);
-    unsupportedToolEndpointCache.add(endpointKey);
-    unavailableEndpointCache.delete(endpointKey);
-    return {
-      ok: false,
-      error: { type: 'unsupported', message: 'Endpoint does not support OpenSwan tool RPCs' },
-    };
-  }
-  if (res.status === 401 || res.status === 403) {
-    authFailedEndpointCache.set(endpointAuthKey, Date.now() + AUTH_FAILED_COOLDOWN_MS);
-    unavailableEndpointCache.delete(endpointKey);
-    return {
-      ok: false,
-      error: { type: 'auth', message: 'Authentication failed — wrong or missing token' },
-    };
-  }
-  authFailedEndpointCache.delete(endpointAuthKey);
-  unavailableEndpointCache.delete(endpointKey);
-  return res.json();
 }
 async function chatCompletion(
   config: OpenSwanConfig,
@@ -311,6 +416,9 @@ export async function testConnection(config: OpenSwanConfig): Promise<{
       return { ok: false, error: diagnostic.message, diagnostic };
     }
     const sessions = parseSessionsList(result.result);
+    if (!sessions) {
+      return { ok: false, error: 'OpenSwan returned no trustworthy structured session inventory.' };
+    }
     return { ok: true, sessions };
   } catch (e: any) {
     // Run diagnostics to get an actionable error
@@ -330,7 +438,11 @@ export async function listSessions(config: OpenSwanConfig): Promise<{
       messageLimit: 3,
     });
     if (!result.ok) return { ok: false, error: result.error?.message };
-    return { ok: true, sessions: parseSessionsList(result.result) };
+    const sessions = parseSessionsList(result.result);
+    if (!sessions) {
+      return { ok: false, error: 'OpenSwan returned no trustworthy structured session inventory.' };
+    }
+    return { ok: true, sessions };
   } catch (e: any) {
     return { ok: false, error: e.message };
   }
@@ -343,7 +455,9 @@ export async function getSessionStatus(
   try {
     const result = await invokeToolRaw(config, 'session_status', { sessionKey });
     if (!result.ok) return { ok: false, error: result.error?.message };
-    return { ok: true, status: parseSessionStatus(result.result, sessionKey) };
+    const status = parseSessionStatus(result.result, sessionKey);
+    if (!status) return { ok: false, error: 'OpenSwan returned no trustworthy structured session status.' };
+    return { ok: true, status };
   } catch (e: any) {
     return { ok: false, error: e.message };
   }
@@ -361,7 +475,9 @@ export async function getSessionHistory(
       includeTools: false,
     });
     if (!result.ok) return { ok: false, error: result.error?.message };
-    return { ok: true, messages: parseHistory(result.result) };
+    const messages = parseHistory(result.result, sessionKey);
+    if (!messages) return { ok: false, error: 'OpenSwan returned no trustworthy structured session history.' };
+    return { ok: true, messages };
   } catch (e: any) {
     return { ok: false, error: e.message };
   }
@@ -393,9 +509,9 @@ export interface CronJob {
   id: string;
   name?: string;
   enabled: boolean;
-  schedule?: any;
-  payload?: any;
-  delivery?: any;
+  schedule?: string;
+  payload?: string;
+  delivery?: string;
   sessionTarget?: string;
   lastRun?: string;
   nextRun?: string;
@@ -412,54 +528,106 @@ export function isLikelyCronExpression(value: string | null | undefined): boolea
   return /^(\S+\s+){4,5}\S+$/.test(normalized);
 }
 
-export function formatCronSchedule(schedule: any): string {
-  if (!schedule) return '';
-  if (typeof schedule === 'string') return schedule;
-  if (typeof schedule === 'object') {
-    return schedule.expr || schedule.cron || schedule.kind || schedule.label || schedule.when || '';
-  }
-  return '';
+export function formatCronSchedule(schedule: unknown): string {
+  const candidate = typeof schedule === 'string'
+    ? schedule
+    : isProviderRecord(schedule)
+      ? schedule.expr ?? schedule.cron ?? schedule.kind ?? schedule.label ?? schedule.when
+      : undefined;
+  const normalized = readOptionalProviderText(candidate, 256);
+  return typeof normalized === 'string' ? normalized : '';
 }
 
-function normalizeCronJob(raw: any): CronJob | null {
-  if (!raw) return null;
+function firstDefinedProviderValue(...values: unknown[]): unknown {
+  return values.find(value => value !== undefined && value !== null);
+}
 
-  const id = raw.id || raw.jobId || raw.job_id;
+function readOptionalProviderSummary(value: unknown, maxChars: number): OptionalProviderText {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === 'string') return readOptionalProviderContent(value, maxChars);
+  if (!isProviderRecord(value) && !Array.isArray(value)) return INVALID_PROVIDER_FIELD;
+  try {
+    const encoded = JSON.stringify(value);
+    return readOptionalProviderContent(encoded, maxChars);
+  } catch {
+    return INVALID_PROVIDER_FIELD;
+  }
+}
+
+function normalizeCronJob(raw: unknown): CronJob | null {
+  if (!isProviderRecord(raw)) return null;
+
+  const id = readCronReceiptId(firstDefinedProviderValue(raw.id, raw.jobId, raw.job_id));
   if (!id) return null;
 
-  const schedule = raw.schedule || raw.cron || raw.when || raw.trigger || raw.expression;
-  const payload = raw.payload || raw.job || raw.args || raw.input;
-  const sessionTarget =
-    raw.sessionTarget ||
-    raw.session_target ||
-    raw.session ||
-    raw.payload?.sessionTarget ||
-    raw.delivery?.sessionTarget;
+  if (raw.enabled !== undefined && typeof raw.enabled !== 'boolean') return null;
+  if (raw.disabled !== undefined && typeof raw.disabled !== 'boolean') return null;
+  if (raw.enabled === undefined && raw.disabled === undefined) return null;
+  if (typeof raw.enabled === 'boolean' && typeof raw.disabled === 'boolean' && raw.enabled !== !raw.disabled) return null;
+  const enabled = typeof raw.enabled === 'boolean'
+    ? raw.enabled
+    : typeof raw.disabled === 'boolean'
+      ? !raw.disabled
+      : !raw.disabled;
+
+  const rawSchedule = firstDefinedProviderValue(raw.schedule, raw.cron, raw.when, raw.trigger, raw.expression);
+  const schedule = rawSchedule === undefined ? undefined : formatCronSchedule(rawSchedule);
+  if (rawSchedule !== undefined && !schedule) return null;
+  const rawPayload = firstDefinedProviderValue(raw.payload, raw.job, raw.args, raw.input);
+  const payload = readOptionalProviderSummary(rawPayload, 4_000);
+  const delivery = readOptionalProviderSummary(firstDefinedProviderValue(raw.delivery, raw.output, raw.target), 2_000);
+  const payloadRecord = isProviderRecord(raw.payload) ? raw.payload : null;
+  const deliveryRecord = isProviderRecord(raw.delivery) ? raw.delivery : null;
+  const sessionTarget = readOptionalProviderText(firstDefinedProviderValue(
+    raw.sessionTarget,
+    raw.session_target,
+    raw.session,
+    payloadRecord?.sessionTarget,
+    deliveryRecord?.sessionTarget,
+  ), 80);
+  const name = readOptionalProviderText(firstDefinedProviderValue(raw.name, raw.title, raw.label), 160);
+  const lastRun = readOptionalProviderDate(firstDefinedProviderValue(raw.lastRun, raw.last_run, raw.lastRunAt, raw.last_run_at));
+  const nextRun = readOptionalProviderDate(firstDefinedProviderValue(raw.nextRun, raw.next_run, raw.nextRunAt, raw.next_run_at));
+  const status = readOptionalProviderText(raw.status, 80);
+  const timezone = readOptionalProviderText(firstDefinedProviderValue(raw.timezone, raw.tz), 120);
+  const runCount = readOptionalProviderNumber(firstDefinedProviderValue(raw.runCount, raw.run_count));
+  if (
+    payload === INVALID_PROVIDER_FIELD
+    || delivery === INVALID_PROVIDER_FIELD
+    || sessionTarget === INVALID_PROVIDER_FIELD
+    || name === INVALID_PROVIDER_FIELD
+    || lastRun === INVALID_PROVIDER_FIELD
+    || nextRun === INVALID_PROVIDER_FIELD
+    || status === INVALID_PROVIDER_FIELD
+    || timezone === INVALID_PROVIDER_FIELD
+    || runCount === INVALID_PROVIDER_FIELD
+    || (runCount !== undefined && !Number.isInteger(runCount))
+  ) return null;
 
   return {
     id,
-    name: raw.name || raw.title || raw.label,
-    enabled: raw.enabled !== false && raw.disabled !== true,
-    schedule,
-    payload,
-    delivery: raw.delivery || raw.output || raw.target,
-    sessionTarget,
-    lastRun: raw.lastRun || raw.last_run || raw.lastRunAt || raw.last_run_at,
-    nextRun: raw.nextRun || raw.next_run || raw.nextRunAt || raw.next_run_at,
-    status: raw.status,
-    timezone: raw.timezone || raw.tz,
-    runCount:
-      raw.runCount == null && raw.run_count == null
-        ? undefined
-        : typeof (raw.runCount ?? raw.run_count) === 'number'
-          ? (raw.runCount ?? raw.run_count)
-          : Number(raw.runCount ?? raw.run_count),
+    enabled,
+    ...(name ? { name } : {}),
+    ...(schedule ? { schedule } : {}),
+    ...(payload ? { payload } : {}),
+    ...(delivery ? { delivery } : {}),
+    ...(sessionTarget ? { sessionTarget } : {}),
+    ...(lastRun ? { lastRun } : {}),
+    ...(nextRun ? { nextRun } : {}),
+    ...(status ? { status } : {}),
+    ...(timezone ? { timezone } : {}),
+    ...(runCount !== undefined ? { runCount } : {}),
   };
 }
 
-export async function listCronJobs(config: OpenSwanConfig): Promise<{ ok: boolean; jobs: CronJob[]; error?: string }> {
+export async function listCronJobs(config: OpenSwanConfig): Promise<{
+  ok: boolean;
+  supported: boolean;
+  jobs: CronJob[];
+  error?: string;
+}> {
   if (!supportsOpenSwanToolRpcEndpoint(config.endpoint)) {
-    return { ok: true, jobs: [] };
+    return { ok: true, supported: false, jobs: [] };
   }
   try {
     const data = await invokeToolRaw(config, 'cron', {
@@ -467,36 +635,30 @@ export async function listCronJobs(config: OpenSwanConfig): Promise<{ ok: boolea
       includeDisabled: true,
     });
     if (!data.ok) {
-      if (data.error?.type === 'unsupported') {
-        return { ok: true, jobs: [] };
+      if (isExactToolUnavailable(data.error, 'cron')) {
+        markToolUnsupported(config.endpoint, 'cron');
+        return { ok: true, supported: false, jobs: [] };
       }
-      return { ok: false, jobs: [], error: data.error?.message || 'Failed to load cron jobs' };
+      return { ok: false, supported: true, jobs: [], error: data.error?.message || 'Failed to load cron jobs' };
     }
-    // The response has content[0].text which is a text summary, and details with structured data
-    if (data?.result?.details?.jobs) {
-      return {
-        ok: true,
-        jobs: data.result.details.jobs.map(normalizeCronJob).filter(Boolean) as CronJob[],
-      };
-    }
-    // Try parsing from text content
-    if (data?.result?.content?.[0]?.text) {
-      const text = data.result.content[0].text;
-      const jobs: CronJob[] = [];
-      // Parse lines like: "1. **job-name** (id) - enabled/disabled - schedule"
-      const lines = text.split('\n');
-      for (const line of lines) {
-        const match = line.match(/\*\*(.+?)\*\*.*?`([a-f0-9-]+)`/);
-        if (match) {
-          const enabled = !line.toLowerCase().includes('disabled');
-          jobs.push({ id: match[2], name: match[1], enabled, schedule: line.includes(' - ') ? line.split(' - ').slice(-1)[0] : undefined });
-        }
+    // The response has content[0].text which is a text summary, and details
+    // with the authoritative structured inventory. Reject the whole snapshot
+    // if even one row is malformed or duplicated; a partial list is not safe
+    // evidence for update/remove postconditions.
+    const rawJobs = data?.result?.details?.jobs;
+    if (Array.isArray(rawJobs) && rawJobs.length <= 1_000) {
+      const jobs = rawJobs.map(normalizeCronJob);
+      const ids = jobs.map(job => job?.id);
+      if (jobs.every((job): job is CronJob => !!job) && new Set(ids).size === ids.length) {
+        return { ok: true, supported: true, jobs };
       }
-      return { ok: true, jobs };
+      return { ok: false, supported: true, jobs: [], error: 'Cron tool returned a malformed or duplicate job inventory' };
     }
-    return { ok: false, jobs: [], error: 'Cron tool returned no structured jobs' };
+    // Prose is not an inventory receipt. An empty list is trusted only when
+    // the tool returns the structured details.jobs array above.
+    return { ok: false, supported: true, jobs: [], error: 'Cron tool returned no structured jobs' };
   } catch (e: any) {
-    return { ok: false, jobs: [], error: e.message };
+    return { ok: false, supported: true, jobs: [], error: e.message };
   }
 }
 export async function sendAgentTask(
@@ -509,29 +671,40 @@ export async function sendAgentTask(
 
 export async function listAgents(
   config: OpenSwanConfig,
-): Promise<{ ok: boolean; agents?: string[]; error?: string }> {
+): Promise<{ ok: boolean; supported: boolean; agents?: string[]; error?: string }> {
   if (!supportsOpenSwanToolRpcEndpoint(config.endpoint)) {
-    return { ok: true, agents: [] };
+    return { ok: true, supported: false, agents: [] };
   }
   try {
     const result = await invokeToolRaw(config, 'agents_list', {});
     if (!result.ok) {
-      if (result.error?.type === 'unsupported') {
-        return { ok: true, agents: [] };
+      if (isExactToolUnavailable(result.error, 'agents_list')) {
+        markToolUnsupported(config.endpoint, 'agents_list');
+        return { ok: true, supported: false, agents: [] };
       }
-      return { ok: false, error: result.error?.message };
+      return { ok: false, supported: true, error: result.error?.message };
     }
-    // Extract agent ids from nested result
+    // Accept only a recognized structured inventory. Prose or a malformed
+    // successful payload must not become a verified empty agent list.
     const raw = result.result;
-    let agents: string[] = [];
-    if (Array.isArray(raw)) agents = raw;
-    else if (raw?.details) agents = Array.isArray(raw.details) ? raw.details : [];
-    else if (raw?.content?.[0]?.text) {
-      try { const parsed = JSON.parse(raw.content[0].text); agents = Array.isArray(parsed) ? parsed : []; } catch {}
+    const rawAgents = Array.isArray(raw)
+      ? raw
+      : Array.isArray(raw?.details)
+        ? raw.details
+        : Array.isArray(raw?.details?.agents)
+          ? raw.details.agents
+          : null;
+    if (!rawAgents || rawAgents.length > 1_000) {
+      return { ok: false, supported: true, agents: [], error: 'Runtime returned no structured agent inventory' };
     }
-    return { ok: true, agents };
+    const agents: string[] = (rawAgents as unknown[])
+      .map((value: unknown) => typeof value === 'string' ? value.trim() : '');
+    if (agents.some(agent => !agent || agent.length > 160 || /[\u0000-\u001f\u007f]/.test(agent)) || new Set(agents).size !== agents.length) {
+      return { ok: false, supported: true, agents: [], error: 'Runtime returned a malformed or duplicate agent inventory' };
+    }
+    return { ok: true, supported: true, agents };
   } catch (e: any) {
-    return { ok: false, error: e.message };
+    return { ok: false, supported: true, error: e.message };
   }
 }
 
@@ -539,17 +712,158 @@ export async function spawnSubAgent(
   config: OpenSwanConfig,
   task: string,
   model?: string,
-): Promise<{ ok: boolean; reply?: string; error?: string }> {
+): Promise<{
+  ok: boolean;
+  reply?: string;
+  error?: string;
+  providerRunId?: string;
+  sessionKey?: string;
+  providerStatus?: string;
+  transportAccepted?: boolean | null;
+}> {
   try {
     const params: any = { task };
     if (model) params.model = model;
     const result = await invokeToolRaw(config, 'sessions_spawn', params);
-    if (!result.ok) return { ok: false, error: result.error?.message };
+    if (!result.ok) {
+      return {
+        ok: false,
+        error: result.error?.message,
+        transportAccepted: null,
+      };
+    }
+    const disposition = parseOpenSwanSpawnDispositionCore(result.result);
+    if (!disposition) {
+      return {
+        ok: false,
+        error: 'OpenSwan returned no structured spawn disposition. The dispatch outcome is unknown; check the session list before retrying.',
+        transportAccepted: null,
+      };
+    }
+    const lineage = {
+      providerRunId: disposition.providerRunId || undefined,
+      sessionKey: disposition.childSessionKey || undefined,
+      providerStatus: disposition.providerStatus,
+      transportAccepted: disposition.transportAccepted,
+    };
+    if (disposition.transportAccepted === false) {
+      return {
+        ok: false,
+        error: `OpenSwan rejected the session spawn (${disposition.providerStatus}).`,
+        ...lineage,
+      };
+    }
+    if (disposition.transportAccepted !== true) {
+      return {
+        ok: false,
+        error: `OpenSwan returned ${disposition.providerStatus}, but could not prove whether the child session started. Check the session list before retrying.`,
+        ...lineage,
+      };
+    }
+    // Current OpenSwan acceptance includes both identities. A missing,
+    // malformed, or non-accepted structured result cannot be promoted to a
+    // successful handoff: the caller needs exact lineage before it creates a
+    // canonical local run or offers another dispatch attempt.
+    if (!disposition.providerRunId || !disposition.childSessionKey) {
+      return {
+        ok: false,
+        error: 'OpenSwan did not return a trustworthy structured spawn acceptance. The dispatch outcome is unknown; check the session list before retrying.',
+        ...lineage,
+        transportAccepted: null,
+      };
+    }
     const text = result.result?.content?.[0]?.text || JSON.stringify(result.result);
-    return { ok: true, reply: text };
+    return {
+      ok: true,
+      reply: text,
+      providerRunId: disposition.providerRunId,
+      sessionKey: disposition.childSessionKey,
+      providerStatus: disposition.providerStatus,
+      transportAccepted: true,
+    };
   } catch (e: any) {
-    return { ok: false, error: e.message };
+    return { ok: false, error: e.message, transportAccepted: null };
   }
+}
+
+export interface CronMutationReceipt {
+  readonly accepted: true;
+  readonly action: 'create' | 'run' | 'update' | 'remove';
+  readonly jobId: string;
+  readonly runId?: string;
+  readonly status?: string;
+}
+
+function readCronReceiptId(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 160 || /[\u0000-\u001f\u007f]/.test(normalized)) return null;
+  return normalized;
+}
+
+function normalizeCronReceiptAction(value: unknown): CronMutationReceipt['action'] | null {
+  if (typeof value !== 'string') return null;
+  switch (value.trim().toLowerCase()) {
+    case 'add':
+    case 'create':
+    case 'created':
+      return 'create';
+    case 'run':
+    case 'execute':
+    case 'executed':
+      return 'run';
+    case 'update':
+    case 'updated':
+    case 'enable':
+    case 'disable':
+      return 'update';
+    case 'remove':
+    case 'removed':
+    case 'delete':
+    case 'deleted':
+      return 'remove';
+    default:
+      return null;
+  }
+}
+
+/**
+ * Parse only a structured cron mutation acknowledgement. Visible prose is not
+ * authority: a 2xx response without an exact action and job id remains an
+ * unknown outcome and must be inspected before retrying.
+ */
+export function parseCronMutationReceipt(
+  value: unknown,
+  expectedAction: CronMutationReceipt['action'],
+  expectedJobId?: string,
+): CronMutationReceipt | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const outer = value as Record<string, unknown>;
+  const receiptValue = outer.receipt;
+  const record = receiptValue && typeof receiptValue === 'object' && !Array.isArray(receiptValue)
+    ? receiptValue as Record<string, unknown>
+    : outer;
+  if (record.error || record.failure) return null;
+
+  const nestedJob = record.job && typeof record.job === 'object' && !Array.isArray(record.job)
+    ? record.job as Record<string, unknown>
+    : null;
+  const jobId = readCronReceiptId(record.jobId ?? record.job_id ?? record.id ?? nestedJob?.id);
+  if (!jobId || (expectedJobId !== undefined && jobId !== expectedJobId)) return null;
+
+  const action = normalizeCronReceiptAction(record.action ?? record.operation ?? record.event);
+  const status = typeof record.status === 'string' ? record.status.trim().toLowerCase() : '';
+  if (action !== expectedAction || record.accepted !== true) return null;
+
+  const runId = readCronReceiptId(record.runId ?? record.run_id);
+  if (expectedAction === 'run' && !runId) return null;
+  return {
+    accepted: true,
+    action: expectedAction,
+    jobId,
+    ...(runId ? { runId } : {}),
+    ...(status ? { status } : {}),
+  };
 }
 
 export async function manageCronJob(
@@ -557,25 +871,57 @@ export async function manageCronJob(
   action: 'run' | 'update' | 'remove',
   jobId: string,
   patch?: any,
-): Promise<{ ok: boolean; reply?: string; error?: string; runId?: string }> {
+): Promise<{
+  ok: boolean;
+  reply?: string;
+  error?: string;
+  runId?: string;
+  receipt?: CronMutationReceipt;
+  outcomeUnknown?: boolean;
+}> {
   try {
     const params: any = { action, jobId };
     if (action === 'update' && patch) params.patch = patch;
     if (action === 'run') params.runMode = 'force';
     const result = await invokeToolRaw(config, 'cron', params);
-    if (!result.ok) return { ok: false, error: result.error?.message };
-    const text = result.result?.content?.[0]?.text || 'Done';
-    const runIdMatch = text.match(/run(?:\s+id)?[:\s`]+([a-f0-9-]{8,})/i);
-    return { ok: true, reply: text, runId: runIdMatch?.[1] };
+    if (!result.ok) {
+      const knownRejection = result.error?.type === 'auth' || result.error?.type === 'unsupported';
+      return {
+        ok: false,
+        error: result.error?.message,
+        ...(!knownRejection ? { outcomeUnknown: true } : {}),
+      };
+    }
+    const receipt = parseCronMutationReceipt(result.result?.details, action, jobId);
+    if (!receipt) {
+      return {
+        ok: false,
+        error: 'OpenSwan did not return a trustworthy structured cron acknowledgement. The outcome is unknown; inspect the schedule before retrying.',
+        outcomeUnknown: true,
+      };
+    }
+    const text = result.result?.content?.[0]?.text;
+    return {
+      ok: true,
+      ...(typeof text === 'string' && text.trim() ? { reply: text } : {}),
+      ...(receipt.runId ? { runId: receipt.runId } : {}),
+      receipt,
+    };
   } catch (e: any) {
-    return { ok: false, error: e.message };
+    return { ok: false, error: e.message, outcomeUnknown: true };
   }
 }
 
 export async function createCronJob(
   config: OpenSwanConfig,
   opts: { name: string; schedule: string; task: string; sessionTarget?: string; timezone?: string; enabled?: boolean },
-): Promise<{ ok: boolean; jobId?: string; error?: string }> {
+): Promise<{
+  ok: boolean;
+  jobId?: string;
+  error?: string;
+  receipt?: CronMutationReceipt;
+  outcomeUnknown?: boolean;
+}> {
   try {
     if (!isLikelyCronExpression(opts.schedule)) {
       return { ok: false, error: 'Invalid cron expression' };
@@ -589,13 +935,25 @@ export async function createCronJob(
       tz: opts.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
       enabled: opts.enabled !== false,
     });
-    if (!result.ok) return { ok: false, error: result.error?.message };
-    const text = result.result?.content?.[0]?.text || '';
-    const idMatch = text.match(/`([a-f0-9-]+)`/) || text.match(/job(?:\s+id)?[:\s`]+([a-f0-9-]{8,})/i);
-    const detailId = result.result?.details?.jobId || result.result?.details?.job_id;
-    return { ok: true, jobId: detailId || idMatch?.[1] || 'created' };
+    if (!result.ok) {
+      const knownRejection = result.error?.type === 'auth' || result.error?.type === 'unsupported';
+      return {
+        ok: false,
+        error: result.error?.message,
+        ...(!knownRejection ? { outcomeUnknown: true } : {}),
+      };
+    }
+    const receipt = parseCronMutationReceipt(result.result?.details, 'create');
+    if (!receipt) {
+      return {
+        ok: false,
+        error: 'OpenSwan did not return a trustworthy structured cron creation receipt. The outcome is unknown; inspect the schedule before retrying.',
+        outcomeUnknown: true,
+      };
+    }
+    return { ok: true, jobId: receipt.jobId, receipt };
   } catch (e: any) {
-    return { ok: false, error: e.message };
+    return { ok: false, error: e.message, outcomeUnknown: true };
   }
 }
 
@@ -617,14 +975,90 @@ export async function sendSessionMessage(
   config: OpenSwanConfig,
   sessionKey: string,
   message: string,
-): Promise<{ ok: boolean; reply?: string; error?: string }> {
+): Promise<{
+  ok: boolean;
+  reply?: string;
+  error?: string;
+  providerRunId?: string;
+  sessionKey?: string;
+  providerStatus?: string;
+  transportAccepted?: boolean | null;
+}> {
   try {
-    const result = await invokeToolRaw(config, 'sessions_send', { sessionKey, message });
-    if (!result.ok) return { ok: false, error: result.error?.message };
-    const text = result.result?.content?.[0]?.text || 'Message sent';
-    return { ok: true, reply: text };
+    // Keep a margin inside invokeToolRaw's 30s client timeout so OpenSwan can
+    // return its structured `timeout` disposition instead of leaving dispatch
+    // acceptance ambiguous at the HTTP boundary.
+    const result = await invokeToolRaw(config, 'sessions_send', { sessionKey, message, timeoutSeconds: 25 });
+    if (!result.ok) {
+      return {
+        ok: false,
+        error: result.error?.message,
+        transportAccepted: null,
+      };
+    }
+    const handle = parseOpenSwanSessionSendHandleCore(result.result);
+    if (!handle) {
+      return {
+        ok: false,
+        error: 'OpenSwan returned no structured session-send disposition; dispatch outcome is unknown.',
+        transportAccepted: null,
+      };
+    }
+    // Current accepted/ended/timeout dispositions carry both exact identities.
+    // Require the provider run id and require the echoed session to match the
+    // requested session before exposing any positive acceptance signal.
+    if (
+      handle.transportAccepted === true
+      && (!handle.providerRunId || !handle.sessionKey || handle.sessionKey !== sessionKey)
+    ) {
+      return {
+        ok: false,
+        error: 'OpenSwan returned a session-send disposition without trustworthy matching lineage. The dispatch outcome is unknown; the task was not replayed.',
+        providerRunId: handle.providerRunId || undefined,
+        sessionKey: handle.sessionKey || undefined,
+        providerStatus: handle.providerStatus,
+        transportAccepted: null,
+      };
+    }
+    const lineage = {
+      providerRunId: handle.providerRunId || undefined,
+      sessionKey: handle.sessionKey || undefined,
+      providerStatus: handle.providerStatus,
+      transportAccepted: handle.transportAccepted,
+    };
+    if (handle.transportAccepted === false) {
+      return {
+        ok: false,
+        error: `OpenSwan rejected the session send (${handle.providerStatus}).`,
+        ...lineage,
+      };
+    }
+    if (handle.transportAccepted !== true) {
+      return {
+        ok: false,
+        error: `OpenSwan returned ${handle.providerStatus}, but could not prove whether the session send began. The task was not replayed.`,
+        ...lineage,
+      };
+    }
+    if (handle.phase === 'response_timeout') {
+      return {
+        ok: true,
+        reply: 'The session accepted the task. Its response is still pending.',
+        ...lineage,
+      };
+    }
+    let structuredReply = '';
+    try {
+      const rawReply = result.result?.details?.reply;
+      if (typeof rawReply === 'string') structuredReply = rawReply.trim().slice(0, 4_000);
+    } catch {}
+    return {
+      ok: true,
+      reply: structuredReply || (handle.phase === 'turn_ended' ? 'The provider turn ended; task completion remains unverified.' : 'Message accepted.'),
+      ...lineage,
+    };
   } catch (e: any) {
-    return { ok: false, error: e.message };
+    return { ok: false, error: e.message, transportAccepted: null };
   }
 }
 
@@ -641,14 +1075,47 @@ export async function listSubAgents(
   }
 }
 
+export interface OpenSwanWebSearchResult {
+  readonly title: string;
+  readonly url: string;
+  readonly snippet?: string;
+}
+
+function normalizeWebSearchCitation(value: unknown): OpenSwanWebSearchResult | null {
+  if (!isProviderRecord(value)) return null;
+  const title = readOptionalProviderText(value.title, 240);
+  const urlText = readOptionalProviderText(value.url, 2_048);
+  const snippet = readOptionalProviderContent(value.snippet ?? value.description, 1_200);
+  if (!title || title === INVALID_PROVIDER_FIELD || !urlText || urlText === INVALID_PROVIDER_FIELD || snippet === INVALID_PROVIDER_FIELD) {
+    return null;
+  }
+  try {
+    const parsed = new URL(urlText);
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password) return null;
+    return { title, url: parsed.toString(), ...(snippet ? { snippet } : {}) };
+  } catch {
+    return null;
+  }
+}
+
 export async function runWebSearch(
   config: OpenSwanConfig,
   query: string,
-): Promise<{ ok: boolean; results?: any[]; error?: string }> {
+): Promise<{ ok: boolean; results?: OpenSwanWebSearchResult[]; error?: string }> {
   try {
     const result = await invokeToolRaw(config, 'web_search', { query, count: 5 });
     if (!result.ok) return { ok: false, error: result.error?.message };
-    return { ok: true, results: result.result?.results || [] };
+    const rawCitations = result.result?.details?.citations;
+    if (!Array.isArray(rawCitations) || rawCitations.length > 50) {
+      return { ok: false, error: 'OpenSwan returned no structured web-search citations' };
+    }
+    const results: Array<OpenSwanWebSearchResult | null> = (rawCitations as unknown[])
+      .map(normalizeWebSearchCitation);
+    const urls = results.map(citation => citation?.url);
+    if (!results.every((citation): citation is OpenSwanWebSearchResult => !!citation) || new Set(urls).size !== urls.length) {
+      return { ok: false, error: 'OpenSwan returned malformed or duplicate web-search citations' };
+    }
+    return { ok: true, results };
   } catch (e: any) {
     return { ok: false, error: e.message };
   }
@@ -656,100 +1123,170 @@ export async function runWebSearch(
 
 // ─── Parsers ────────────────────────────────────
 
-function parseSessionsList(raw: any): OpenSwanSession[] {
-  if (!raw) return [];
+const INVALID_PROVIDER_FIELD = Symbol('invalid-provider-field');
+type OptionalProviderText = string | undefined | typeof INVALID_PROVIDER_FIELD;
+type OptionalProviderNumber = number | undefined | typeof INVALID_PROVIDER_FIELD;
 
-  // OpenSwan /tools/invoke returns { content: [...], details: { sessions: [...] } }
-  if (raw.details?.sessions) {
-    return parseSessionsList(raw.details.sessions);
-  }
-  // Or it might be nested in content[0].text as JSON string
-  if (raw.content && Array.isArray(raw.content)) {
-    const textBlock = raw.content.find((c: any) => c.type === 'text' && c.text);
-    if (textBlock) {
-      try {
-        const parsed = JSON.parse(textBlock.text);
-        if (parsed.sessions) return parseSessionsList(parsed.sessions);
-      } catch {}
-    }
-  }
-  if (typeof raw === 'string') {
-    try {
-      const parsed = JSON.parse(raw);
-      if (parsed.sessions) return parseSessionsList(parsed.sessions);
-    } catch {}
-    return parseSessionsFromText(raw);
-  }
-  if (raw.sessions && Array.isArray(raw.sessions)) {
-    return parseSessionsList(raw.sessions);
-  }
-  if (Array.isArray(raw)) {
-    return raw.map((s: any) => ({
-      sessionKey: s.sessionKey || s.key || '',
-      kind: s.kind || 'unknown',
-      agentId: s.agentId || s.agent || s.displayName || undefined,
-      model: s.model || undefined,
-      lastActivity: s.updatedAt ? new Date(s.updatedAt).toISOString() : s.lastActivity || undefined,
-      messageCount: s.totalTokens || s.messageCount || undefined,
-      lastMessages: (s.messages || []).map((m: any) => ({
-        role: m.role,
-        content: typeof m.content === 'string' ? m.content :
-          Array.isArray(m.content) ? m.content.filter((c: any) => c.type === 'text').map((c: any) => c.text).join('') : '',
-        timestamp: m.timestamp ? new Date(m.timestamp).toISOString() : undefined,
-      })),
-    }));
-  }
-  return [];
+function isProviderRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function parseSessionsFromText(text: string): OpenSwanSession[] {
-  // Best-effort parse of formatted session list
-  const sessions: OpenSwanSession[] = [];
-  const lines = text.split('\n');
-  for (const line of lines) {
-    const match = line.match(/session[:\s]+(\S+)/i);
-    if (match) {
-      sessions.push({
-        sessionKey: match[1],
-        kind: line.includes('main') ? 'main' : line.includes('sub') ? 'subagent' : 'unknown',
-      });
+function readOptionalProviderText(value: unknown, maxChars: number): OptionalProviderText {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'string') return INVALID_PROVIDER_FIELD;
+  const normalized = value.trim();
+  if (!normalized || normalized.length > maxChars || /[\u0000-\u001f\u007f-\u009f]/.test(normalized)) {
+    return INVALID_PROVIDER_FIELD;
+  }
+  return normalized;
+}
+
+function readOptionalProviderContent(value: unknown, maxChars: number): OptionalProviderText {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') return INVALID_PROVIDER_FIELD;
+  if (value.length > maxChars || /[\u0000\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(value)) {
+    return INVALID_PROVIDER_FIELD;
+  }
+  return value;
+}
+
+function readOptionalProviderNumber(value: unknown): OptionalProviderNumber {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > Number.MAX_SAFE_INTEGER) {
+    return INVALID_PROVIDER_FIELD;
+  }
+  return value;
+}
+
+function readOptionalProviderDate(value: unknown): OptionalProviderText {
+  if (value === undefined || value === null || value === '') return undefined;
+  if ((typeof value !== 'string' && typeof value !== 'number') || (typeof value === 'string' && value.length > 80)) {
+    return INVALID_PROVIDER_FIELD;
+  }
+  const millis = typeof value === 'number' && value < 10_000_000_000 ? value * 1_000 : Date.parse(String(value));
+  const normalizedMillis = typeof value === 'number' && value >= 10_000_000_000 ? value : millis;
+  if (!Number.isFinite(normalizedMillis)) return INVALID_PROVIDER_FIELD;
+  try {
+    return new Date(normalizedMillis).toISOString();
+  } catch {
+    return INVALID_PROVIDER_FIELD;
+  }
+}
+
+function readExactSessionKey(value: unknown): string | null {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= 160
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value)
+    ? value
+    : null;
+}
+
+function parseStructuredProviderMessages(
+  value: unknown,
+  maxRows: number,
+): Array<{ role: string; content: string; timestamp?: string }> | null {
+  if (!Array.isArray(value) || value.length > maxRows) return null;
+  const messages: Array<{ role: string; content: string; timestamp?: string }> = [];
+  for (const rawMessage of value) {
+    if (!isProviderRecord(rawMessage)) return null;
+    const role = readOptionalProviderText(rawMessage.role, 32);
+    if (!role || role === INVALID_PROVIDER_FIELD) return null;
+    let content = '';
+    if (typeof rawMessage.content === 'string') {
+      const parsed = readOptionalProviderContent(rawMessage.content, 12_000);
+      if (parsed === INVALID_PROVIDER_FIELD) return null;
+      content = parsed || '';
+    } else if (Array.isArray(rawMessage.content)) {
+      const pieces: string[] = [];
+      if (rawMessage.content.length > 100) return null;
+      for (const block of rawMessage.content) {
+        if (!isProviderRecord(block)) return null;
+        if (block.type !== 'text') continue;
+        const text = readOptionalProviderContent(block.text, 12_000);
+        if (text === INVALID_PROVIDER_FIELD) return null;
+        if (text) pieces.push(text);
+      }
+      content = pieces.join('').slice(0, 12_000);
+    } else if (rawMessage.content !== undefined && rawMessage.content !== null) {
+      return null;
     }
+    const timestamp = readOptionalProviderDate(rawMessage.timestamp);
+    if (timestamp === INVALID_PROVIDER_FIELD) return null;
+    messages.push({ role, content, ...(timestamp ? { timestamp } : {}) });
+  }
+  return messages;
+}
+
+/** Structured sessions_list evidence used for runtime identity and bindings. */
+function parseSessionsList(raw: unknown): OpenSwanSession[] | null {
+  if (!isProviderRecord(raw) || !isProviderRecord(raw.details) || !Array.isArray(raw.details.sessions)) {
+    return null;
+  }
+  const rawSessions = raw.details.sessions;
+  if (rawSessions.length > 512) return null;
+  const sessions: OpenSwanSession[] = [];
+  const seen = new Set<string>();
+  for (const rawSession of rawSessions) {
+    if (!isProviderRecord(rawSession)) return null;
+    if (
+      rawSession.sessionKey !== undefined
+      && rawSession.key !== undefined
+      && rawSession.sessionKey !== rawSession.key
+    ) return null;
+    const sessionKey = readExactSessionKey(rawSession.sessionKey ?? rawSession.key);
+    if (!sessionKey || seen.has(sessionKey)) return null;
+    seen.add(sessionKey);
+
+    const kind = readOptionalProviderText(rawSession.kind, 64);
+    const agentId = readOptionalProviderText(
+      rawSession.agentId ?? rawSession.agent ?? rawSession.displayName,
+      160,
+    );
+    const model = readOptionalProviderText(rawSession.model, 160);
+    const lastActivity = readOptionalProviderDate(rawSession.updatedAt ?? rawSession.lastActivity);
+    const messageCount = readOptionalProviderNumber(rawSession.totalTokens ?? rawSession.messageCount);
+    if (
+      kind === INVALID_PROVIDER_FIELD
+      || agentId === INVALID_PROVIDER_FIELD
+      || model === INVALID_PROVIDER_FIELD
+      || lastActivity === INVALID_PROVIDER_FIELD
+      || messageCount === INVALID_PROVIDER_FIELD
+    ) return null;
+    const lastMessages = rawSession.messages === undefined
+      ? undefined
+      : parseStructuredProviderMessages(rawSession.messages, 20);
+    if (lastMessages === null) return null;
+    sessions.push({
+      sessionKey,
+      kind: kind || 'unknown',
+      ...(agentId ? { agentId } : {}),
+      ...(model ? { model } : {}),
+      ...(lastActivity ? { lastActivity } : {}),
+      ...(messageCount !== undefined ? { messageCount } : {}),
+      ...(lastMessages ? { lastMessages } : {}),
+    });
   }
   return sessions;
 }
 
-function parseSessionStatus(raw: any, sessionKey: string): OpenSwanSessionStatus {
-  if (!raw) return { sessionKey };
-
-  // Extract the status text from the API response
-  let text = '';
-  if (typeof raw === 'string') {
-    text = raw;
-  } else if (raw.details?.statusText) {
-    text = raw.details.statusText;
-  } else if (raw.content?.[0]?.text) {
-    text = raw.content[0].text;
-  } else if (typeof raw === 'object') {
-    // Fallback: try direct fields
-    return {
-      sessionKey,
-      model: raw.model || raw.currentModel || undefined,
-      totalInputTokens: raw.totalInputTokens || raw.inputTokens || undefined,
-      totalOutputTokens: raw.totalOutputTokens || raw.outputTokens || undefined,
-      totalCost: raw.totalCost || raw.cost || undefined,
-      turns: raw.turns || raw.turnCount || undefined,
-      uptime: raw.uptime || undefined,
-    };
-  }
-
-  if (!text) return { sessionKey };
+function parseSessionStatus(raw: unknown, sessionKey: string): OpenSwanSessionStatus | null {
+  if (!isProviderRecord(raw) || !isProviderRecord(raw.details)) return null;
+  const details = raw.details;
+  if (details.ok !== true || details.sessionKey !== sessionKey) return null;
+  const statusText = readOptionalProviderContent(details.statusText, 20_000);
+  if (!statusText || statusText === INVALID_PROVIDER_FIELD) return null;
+  const text = statusText;
 
   // Parse the emoji-formatted status text
   const result: OpenSwanSessionStatus = { sessionKey };
 
   // Model: 🧠 Model: anthropic/claude-opus-4-6
   const modelMatch = text.match(/Model:\s*([^\s·]+)/);
-  if (modelMatch) result.model = modelMatch[1];
+  if (modelMatch) {
+    const model = readOptionalProviderText(modelMatch[1], 160);
+    if (model && model !== INVALID_PROVIDER_FIELD) result.model = model;
+  }
 
   // Tokens: 🧮 Tokens: 7 in / 447 out  (latest turn — not cumulative)
   const tokensMatch = text.match(/Tokens:\s*([\d.]+[kKmM]?)\s*in\s*\/\s*([\d.]+[kKmM]?)\s*out/);
@@ -771,7 +1308,8 @@ function parseSessionStatus(raw: any, sessionKey: string): OpenSwanSessionStatus
   // Cost: 💰 Cost: $1.23  (explicit cost line — use if present)
   const costMatch = text.match(/Cost:\s*\$?([\d.]+)/);
   if (costMatch) {
-    result.totalCost = parseFloat(costMatch[1]);
+    const cost = parseFloat(costMatch[1]);
+    if (Number.isFinite(cost) && cost >= 0) result.totalCost = cost;
   } else if (result.model && (result.cachedTokens != null || result.newTokens != null)) {
     // No explicit cost — compute from cache-aware tokens + model pricing
     result.totalCost = estimateCostWithCache(
@@ -784,9 +1322,12 @@ function parseSessionStatus(raw: any, sessionKey: string): OpenSwanSessionStatus
 
   // Session: 🧵 Session: agent:main:main • updated just now
   const uptimeMatch = text.match(/updated\s+(.+?)$/m);
-  if (uptimeMatch) result.uptime = uptimeMatch[1].trim();
+  if (uptimeMatch) {
+    const uptime = readOptionalProviderText(uptimeMatch[1], 160);
+    if (uptime && uptime !== INVALID_PROVIDER_FIELD) result.uptime = uptime;
+  }
 
-  return result;
+  return Object.keys(result).length > 1 ? result : null;
 }
 
 function parseTokenCount(s: string): number {
@@ -796,15 +1337,12 @@ function parseTokenCount(s: string): number {
   return Math.round(num);
 }
 
-function parseHistory(raw: any): Array<{ role: string; content: string }> {
-  if (!raw) return [];
-  if (Array.isArray(raw)) {
-    return raw.map((m: any) => ({
-      role: m.role || 'unknown',
-      content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content || ''),
-    }));
-  }
-  return [];
+function parseHistory(raw: unknown, sessionKey: string): Array<{ role: string; content: string }> | null {
+  if (!isProviderRecord(raw) || !isProviderRecord(raw.details)) return null;
+  const details = raw.details;
+  if (details.sessionKey !== sessionKey) return null;
+  const messages = parseStructuredProviderMessages(details.messages, 200);
+  return messages?.map(({ role, content }) => ({ role, content })) ?? null;
 }
 
 // ─── Subagent Enumeration ─────────────────────────────────
@@ -818,6 +1356,39 @@ export interface OpenSwanSubAgent {
   task?: string;
 }
 
+function readOpenSwanSubagentDisplayField(value: unknown, maxChars: number): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const text = value.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!text) return undefined;
+  return text.slice(0, maxChars);
+}
+
+function normalizeLegacyOpenSwanSubagent(value: unknown): OpenSwanSubAgent | null {
+  if (!isProviderRecord(value)) return null;
+  const id = readExactSessionKey(value.id ?? value.sessionKey);
+  if (!id) return null;
+  const sessionKey = value.sessionKey === undefined ? undefined : readExactSessionKey(value.sessionKey);
+  if (value.sessionKey !== undefined && !sessionKey) return null;
+  const name = readOptionalProviderText(value.name ?? value.displayName, 96);
+  const status = readOptionalProviderText(value.status, 80);
+  const model = readOptionalProviderText(value.model, 120);
+  const task = readOptionalProviderText(value.task ?? value.description, 240);
+  if (
+    name === INVALID_PROVIDER_FIELD
+    || status === INVALID_PROVIDER_FIELD
+    || model === INVALID_PROVIDER_FIELD
+    || task === INVALID_PROVIDER_FIELD
+  ) return null;
+  return {
+    id,
+    ...(name ? { name } : {}),
+    ...(sessionKey ? { sessionKey } : {}),
+    status: status || 'unknown',
+    ...(model ? { model } : {}),
+    ...(task ? { task } : {}),
+  };
+}
+
 export async function listSubAgentsDetailed(
   config: OpenSwanConfig,
 ): Promise<{ ok: boolean; subagents: OpenSwanSubAgent[]; error?: string }> {
@@ -827,38 +1398,64 @@ export async function listSubAgentsDetailed(
     const raw = result.result;
     let subagents: OpenSwanSubAgent[] = [];
 
-    // Parse structured details if available
-    if (raw?.details?.subagents && Array.isArray(raw.details.subagents)) {
-      subagents = raw.details.subagents.map((s: any) => ({
-        id: s.id || s.sessionKey || '',
-        name: s.name || s.displayName || undefined,
-        sessionKey: s.sessionKey || s.key || undefined,
-        status: s.status || 'unknown',
-        model: s.model || undefined,
-        task: s.task || s.description || undefined,
-      }));
-    } else if (Array.isArray(raw)) {
-      subagents = raw.map((s: any) => ({
-        id: typeof s === 'string' ? s : s.id || '',
-        name: s.name || undefined,
-        sessionKey: s.sessionKey || undefined,
-        status: s.status || 'unknown',
-        model: s.model || undefined,
-        task: s.task || undefined,
-      }));
-    } else if (raw?.content?.[0]?.text) {
-      // Try parsing from text
-      try {
-        const parsed = JSON.parse(raw.content[0].text);
-        if (Array.isArray(parsed)) {
-          subagents = parsed.map((s: any) => ({
-            id: typeof s === 'string' ? s : s.id || '',
-            name: s.name || undefined,
-            sessionKey: s.sessionKey || undefined,
-            status: s.status || 'unknown',
-          }));
-        }
-      } catch {}
+    // Current OpenSwan returns exact active/recent lifecycle buckets. Lifecycle
+    // identity/status comes only from the pure structured parser; label/task
+    // fields below are bounded display copy and never completion evidence.
+    const lifecycle = parseOpenSwanSubagentLifecycleSnapshotCore(raw);
+    if (lifecycle) {
+      const activeRows = Array.isArray(raw?.details?.active) ? raw.details.active : null;
+      const recentRows = Array.isArray(raw?.details?.recent) ? raw.details.recent : null;
+      if (
+        !activeRows
+        || !recentRows
+        || lifecycle.active.length !== activeRows.length
+        || lifecycle.recent.length !== recentRows.length
+      ) {
+        return { ok: false, subagents: [], error: 'OpenSwan returned a partial or malformed subagent inventory' };
+      }
+      const displayRows = [
+        ...activeRows,
+        ...recentRows,
+      ];
+      subagents = [...lifecycle.active, ...lifecycle.recent].map((record) => {
+        let display: any = null;
+        try {
+          const matches = displayRows.filter((candidate: any) => (
+            candidate
+            && typeof candidate === 'object'
+            && candidate.runId === record.providerRunId
+            && candidate.sessionKey === record.childSessionKey
+          ));
+          if (matches.length === 1) display = matches[0];
+        } catch {}
+        const displayField = (key: 'label' | 'model' | 'task', maxChars: number) => {
+          try { return readOpenSwanSubagentDisplayField(display?.[key], maxChars); } catch { return undefined; }
+        };
+        return {
+          id: record.providerRunId,
+          name: displayField('label', 96),
+          sessionKey: record.childSessionKey,
+          status: record.runtimeStatus,
+          model: displayField('model', 120),
+          task: displayField('task', 240),
+        };
+      });
+      const exactIds = subagents.map(subagent => subagent.id);
+      if (new Set(exactIds).size !== exactIds.length) {
+        return { ok: false, subagents: [], error: 'OpenSwan returned an ambiguous duplicate subagent inventory' };
+      }
+    } else if (Array.isArray(raw?.details?.subagents) && raw.details.subagents.length <= 512) {
+      // Structured legacy compatibility only. Prose/JSON-text fallback is
+      // intentionally not used for lifecycle identity.
+      const normalized: Array<OpenSwanSubAgent | null> = (raw.details.subagents as unknown[])
+        .map(normalizeLegacyOpenSwanSubagent);
+      const ids = normalized.map(subagent => subagent?.id);
+      if (!normalized.every((subagent): subagent is OpenSwanSubAgent => !!subagent) || new Set(ids).size !== ids.length) {
+        return { ok: false, subagents: [], error: 'OpenSwan returned a malformed or duplicate legacy subagent inventory' };
+      }
+      subagents = normalized;
+    } else {
+      return { ok: false, subagents: [], error: 'OpenSwan returned no structured subagent inventory' };
     }
 
     return { ok: true, subagents };

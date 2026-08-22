@@ -1,10 +1,100 @@
 // Session Cache - Persistent storage for agent session data
 import { storage } from './storage';
 import { getAgentIdentityKey } from './agentIdentity';
-import { OfficeAgent } from './officeAgents';
+import { isValidOfficeSessionStorageScope, type OfficeSessionStorageScope } from './sessionTags';
+import type { OfficeAgent } from './officeAgents';
 
 const STORAGE_KEY_SESSION_CACHE = '@office_session_cache';
 const STORAGE_KEY_DAILY_COSTS = '@office_daily_costs';
+const STORAGE_KEY_TAGS = '@session_tags_backup';
+export const OFFICE_SESSION_CACHE_SCOPED_PREFIX = '@office_session_cache_v2:';
+export const OFFICE_DAILY_COSTS_SCOPED_PREFIX = '@office_daily_costs_v2:';
+export const OFFICE_SESSION_TAG_BACKUP_SCOPED_PREFIX = '@session_tags_backup_v2:';
+
+const OFFICE_SESSION_CACHE_SCHEMA_VERSION = 2 as const;
+const OFFICE_SESSION_CACHE_MAX_BYTES = 2_000_000;
+
+interface ScopedOfficeSessionCacheEnvelope<T> {
+  schemaVersion: typeof OFFICE_SESSION_CACHE_SCHEMA_VERSION;
+  userId: string;
+  circleId: string;
+  value: T;
+}
+
+function normalizedScope(scope: OfficeSessionStorageScope | undefined): OfficeSessionStorageScope | null {
+  if (!scope || !isValidOfficeSessionStorageScope(scope)) return null;
+  return {
+    userId: scope.userId.trim().toLowerCase(),
+    circleId: scope.circleId.trim().toLowerCase(),
+  };
+}
+
+function scopedStorageKey(prefix: string, scope: OfficeSessionStorageScope): string | null {
+  const normalized = normalizedScope(scope);
+  return normalized ? `${prefix}${normalized.userId}:${normalized.circleId}` : null;
+}
+
+export function officeSessionCacheStorageKey(scope: OfficeSessionStorageScope): string | null {
+  return scopedStorageKey(OFFICE_SESSION_CACHE_SCOPED_PREFIX, scope);
+}
+
+export function officeDailyCostsStorageKey(scope: OfficeSessionStorageScope): string | null {
+  return scopedStorageKey(OFFICE_DAILY_COSTS_SCOPED_PREFIX, scope);
+}
+
+export function officeSessionTagBackupStorageKey(scope: OfficeSessionStorageScope): string | null {
+  return scopedStorageKey(OFFICE_SESSION_TAG_BACKUP_SCOPED_PREFIX, scope);
+}
+
+function keyForScope(
+  legacyKey: string,
+  scopedPrefix: string,
+  scope: OfficeSessionStorageScope | undefined,
+): string | null {
+  return scope === undefined ? legacyKey : scopedStorageKey(scopedPrefix, scope);
+}
+
+function serializeScopedValue<T>(scope: OfficeSessionStorageScope, value: T): string | null {
+  const normalized = normalizedScope(scope);
+  if (!normalized) return null;
+  try {
+    const serialized = JSON.stringify({
+      schemaVersion: OFFICE_SESSION_CACHE_SCHEMA_VERSION,
+      ...normalized,
+      value,
+    } satisfies ScopedOfficeSessionCacheEnvelope<T>);
+    return serialized.length <= OFFICE_SESSION_CACHE_MAX_BYTES ? serialized : null;
+  } catch {
+    return null;
+  }
+}
+
+function readScopedValue<T>(raw: string, scope: OfficeSessionStorageScope): T | null {
+  const normalized = normalizedScope(scope);
+  if (!normalized || !raw || raw.length > OFFICE_SESSION_CACHE_MAX_BYTES) return null;
+  try {
+    const candidate = JSON.parse(raw) as Partial<ScopedOfficeSessionCacheEnvelope<T>>;
+    if (
+      !candidate
+      || typeof candidate !== 'object'
+      || Array.isArray(candidate)
+      || candidate.schemaVersion !== OFFICE_SESSION_CACHE_SCHEMA_VERSION
+      || candidate.userId !== normalized.userId
+      || candidate.circleId !== normalized.circleId
+    ) return null;
+    return candidate.value as T;
+  } catch {
+    return null;
+  }
+}
+
+function finiteNonNegative(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+function boundedString(value: unknown, maxLength: number): string {
+  return typeof value === 'string' ? value.trim().slice(0, maxLength) : '';
+}
 
 export interface CachedSession {
   sessionKey: string;
@@ -28,31 +118,124 @@ export interface DailyCostSnapshot {
   tokens: Record<string, number>; // agentId -> total tokens for that day
 }
 
+function decodeSessionCache(value: unknown): Map<string, CachedSession> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return new Map();
+  const cache = new Map<string, CachedSession>();
+  for (const [rawKey, rawValue] of Object.entries(value).slice(0, 2_000)) {
+    if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) continue;
+    const candidate = rawValue as Record<string, unknown>;
+    const key = boundedString(rawKey, 500);
+    const sessionKey = boundedString(candidate.sessionKey, 500);
+    const agentId = boundedString(candidate.agentId, 500);
+    const connectionId = boundedString(candidate.connectionId, 500);
+    if (!key || sessionKey !== key || !agentId || !connectionId) continue;
+    const rawTags = Array.isArray(candidate.tags)
+      ? candidate.tags
+        .map((tag) => boundedString(tag, 200))
+        .filter(Boolean)
+        .slice(0, 64)
+      : [];
+    cache.set(key, {
+      sessionKey,
+      agentId,
+      connectionId,
+      lastUpdate: finiteNonNegative(candidate.lastUpdate),
+      totalCost: finiteNonNegative(candidate.totalCost),
+      totalTokens: finiteNonNegative(candidate.totalTokens),
+      inputTokens: finiteNonNegative(candidate.inputTokens),
+      outputTokens: finiteNonNegative(candidate.outputTokens),
+      turns: finiteNonNegative(candidate.turns),
+      model: boundedString(candidate.model, 200) || undefined,
+      status: boundedString(candidate.status, 100) || undefined,
+      lastActivity: finiteNonNegative(candidate.lastActivity) || undefined,
+      tags: rawTags.length > 0 ? Array.from(new Set(rawTags)) : undefined,
+    });
+  }
+  return cache;
+}
+
+function decodeDailyCosts(value: unknown): DailyCostSnapshot[] {
+  if (!Array.isArray(value)) return [];
+  const snapshots: DailyCostSnapshot[] = [];
+  for (const rawSnapshot of value.slice(-366)) {
+    if (!rawSnapshot || typeof rawSnapshot !== 'object' || Array.isArray(rawSnapshot)) continue;
+    const candidate = rawSnapshot as Record<string, unknown>;
+    const date = boundedString(candidate.date, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+    const safeRecord = (raw: unknown): Record<string, number> => {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+      const result: Record<string, number> = {};
+      for (const [rawId, rawAmount] of Object.entries(raw).slice(0, 2_000)) {
+        const id = boundedString(rawId, 500);
+        if (id) result[id] = finiteNonNegative(rawAmount);
+      }
+      return result;
+    };
+    snapshots.push({
+      date,
+      costs: safeRecord(candidate.costs),
+      tokens: safeRecord(candidate.tokens),
+    });
+  }
+  return snapshots;
+}
+
+function decodeTagBackup(value: unknown): Map<string, any[]> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return new Map();
+  const result = new Map<string, any[]>();
+  for (const [rawKey, rawTags] of Object.entries(value).slice(0, 2_000)) {
+    const key = boundedString(rawKey, 500);
+    if (key && Array.isArray(rawTags)) result.set(key, rawTags.slice(0, 64));
+  }
+  return result;
+}
+
 // ─── Session Cache Functions ───────────────────────────────
 
-export async function loadSessionCache(): Promise<Map<string, CachedSession>> {
+/**
+ * Omitting `scope` retains the deprecated ownerless cache for compatibility.
+ * Passing a scope is fail-closed and never falls back to that legacy key.
+ */
+export async function loadSessionCache(
+  scope?: OfficeSessionStorageScope,
+): Promise<Map<string, CachedSession>> {
   try {
-    const raw = await storage.getItem(STORAGE_KEY_SESSION_CACHE);
+    const key = keyForScope(STORAGE_KEY_SESSION_CACHE, OFFICE_SESSION_CACHE_SCOPED_PREFIX, scope);
+    if (!key) return new Map();
+    const raw = await storage.getItem(key);
     if (!raw) return new Map();
-    const data = JSON.parse(raw);
-    return new Map(Object.entries(data));
+    const decoded = scope === undefined ? JSON.parse(raw) : readScopedValue(raw, scope);
+    return decodeSessionCache(decoded);
   } catch (error) {
     console.error('Failed to load session cache:', error);
     return new Map();
   }
 }
 
-export async function saveSessionCache(cache: Map<string, CachedSession>): Promise<void> {
+export async function saveSessionCache(
+  cache: Map<string, CachedSession>,
+  scope?: OfficeSessionStorageScope,
+): Promise<void> {
   try {
-    const obj = Object.fromEntries(cache.entries());
-    await storage.setItem(STORAGE_KEY_SESSION_CACHE, JSON.stringify(obj));
+    const obj = Object.fromEntries(decodeSessionCache(Object.fromEntries(cache.entries())).entries());
+    const key = keyForScope(STORAGE_KEY_SESSION_CACHE, OFFICE_SESSION_CACHE_SCOPED_PREFIX, scope);
+    if (!key) return;
+    const serialized = scope === undefined
+      ? JSON.stringify(obj)
+      : serializeScopedValue(scope, obj);
+    if (!serialized) return;
+    await storage.setItem(key, serialized);
   } catch (error) {
     console.error('Failed to save session cache:', error);
   }
 }
 
-export async function updateSessionCache(sessions: CachedSession[]): Promise<void> {
-  const cache = await loadSessionCache();
+export async function updateSessionCache(
+  sessions: CachedSession[],
+  scope?: OfficeSessionStorageScope,
+): Promise<void> {
+  if (scope !== undefined && !normalizedScope(scope)) return;
+  const cache = await loadSessionCache(scope);
   
   sessions.forEach(session => {
     const existing = cache.get(session.sessionKey);
@@ -74,48 +257,75 @@ export async function updateSessionCache(sessions: CachedSession[]): Promise<voi
     }
   });
 
-  await saveSessionCache(cache);
+  await saveSessionCache(cache, scope);
 }
 
-export async function getCachedSession(sessionKey: string): Promise<CachedSession | null> {
-  const cache = await loadSessionCache();
+export async function getCachedSession(
+  sessionKey: string,
+  scope?: OfficeSessionStorageScope,
+): Promise<CachedSession | null> {
+  const cache = await loadSessionCache(scope);
   return cache.get(sessionKey) || null;
 }
 
-export async function clearSessionCache(): Promise<void> {
-  await storage.setItem(STORAGE_KEY_SESSION_CACHE, JSON.stringify({}));
+export async function clearSessionCache(scope?: OfficeSessionStorageScope): Promise<void> {
+  const key = keyForScope(STORAGE_KEY_SESSION_CACHE, OFFICE_SESSION_CACHE_SCOPED_PREFIX, scope);
+  if (!key) return;
+  const serialized = scope === undefined
+    ? JSON.stringify({})
+    : serializeScopedValue(scope, {});
+  if (!serialized) return;
+  await storage.setItem(key, serialized);
 }
 
 // ─── Daily Cost Tracking ───────────────────────────────────
 
-export async function loadDailyCosts(): Promise<DailyCostSnapshot[]> {
+export async function loadDailyCosts(
+  scope?: OfficeSessionStorageScope,
+): Promise<DailyCostSnapshot[]> {
   try {
-    const raw = await storage.getItem(STORAGE_KEY_DAILY_COSTS);
+    const key = keyForScope(STORAGE_KEY_DAILY_COSTS, OFFICE_DAILY_COSTS_SCOPED_PREFIX, scope);
+    if (!key) return [];
+    const raw = await storage.getItem(key);
     if (!raw) return [];
-    return JSON.parse(raw);
+    const decoded = scope === undefined ? JSON.parse(raw) : readScopedValue(raw, scope);
+    return decodeDailyCosts(decoded);
   } catch (error) {
     console.error('Failed to load daily costs:', error);
     return [];
   }
 }
 
-export async function saveDailyCosts(snapshots: DailyCostSnapshot[]): Promise<void> {
+export async function saveDailyCosts(
+  snapshots: DailyCostSnapshot[],
+  scope?: OfficeSessionStorageScope,
+): Promise<void> {
   try {
     // Keep only last 90 days
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - 90);
     const cutoffStr = cutoff.toISOString().split('T')[0];
     
-    const filtered = snapshots.filter(s => s.date >= cutoffStr);
-    await storage.setItem(STORAGE_KEY_DAILY_COSTS, JSON.stringify(filtered));
+    const filtered = decodeDailyCosts(snapshots).filter(s => s.date >= cutoffStr);
+    const key = keyForScope(STORAGE_KEY_DAILY_COSTS, OFFICE_DAILY_COSTS_SCOPED_PREFIX, scope);
+    if (!key) return;
+    const serialized = scope === undefined
+      ? JSON.stringify(filtered)
+      : serializeScopedValue(scope, filtered);
+    if (!serialized) return;
+    await storage.setItem(key, serialized);
   } catch (error) {
     console.error('Failed to save daily costs:', error);
   }
 }
 
-export async function recordDailyCosts(agents: OfficeAgent[]): Promise<void> {
+export async function recordDailyCosts(
+  agents: OfficeAgent[],
+  scope?: OfficeSessionStorageScope,
+): Promise<void> {
+  if (scope !== undefined && !normalizedScope(scope)) return;
   const today = new Date().toISOString().split('T')[0];
-  const snapshots = await loadDailyCosts();
+  const snapshots = await loadDailyCosts(scope);
   
   // Find or create today's snapshot
   let todaySnapshot = snapshots.find(s => s.date === today);
@@ -130,11 +340,15 @@ export async function recordDailyCosts(agents: OfficeAgent[]): Promise<void> {
     todaySnapshot!.tokens[agent.id] = agent.tokensUsed;
   });
 
-  await saveDailyCosts(snapshots);
+  await saveDailyCosts(snapshots, scope);
 }
 
-export async function getDailyCost(date: string, agentId?: string): Promise<number> {
-  const snapshots = await loadDailyCosts();
+export async function getDailyCost(
+  date: string,
+  agentId?: string,
+  scope?: OfficeSessionStorageScope,
+): Promise<number> {
+  const snapshots = await loadDailyCosts(scope);
   const snapshot = snapshots.find(s => s.date === date);
   
   if (!snapshot) return 0;
@@ -147,8 +361,11 @@ export async function getDailyCost(date: string, agentId?: string): Promise<numb
   return Object.values(snapshot.costs).reduce((sum, cost) => sum + cost, 0);
 }
 
-export async function getWeeklyCost(agentId?: string): Promise<number> {
-  const snapshots = await loadDailyCosts();
+export async function getWeeklyCost(
+  agentId?: string,
+  scope?: OfficeSessionStorageScope,
+): Promise<number> {
+  const snapshots = await loadDailyCosts(scope);
   const today = new Date();
   let total = 0;
 
@@ -170,8 +387,11 @@ export async function getWeeklyCost(agentId?: string): Promise<number> {
   return total;
 }
 
-export async function getMonthlyCost(agentId?: string): Promise<number> {
-  const snapshots = await loadDailyCosts();
+export async function getMonthlyCost(
+  agentId?: string,
+  scope?: OfficeSessionStorageScope,
+): Promise<number> {
+  const snapshots = await loadDailyCosts(scope);
   const today = new Date();
   let total = 0;
 
@@ -195,9 +415,12 @@ export async function getMonthlyCost(agentId?: string): Promise<number> {
 
 // ─── Agent State Restoration ───────────────────────────────
 
-export async function enrichAgentsWithCache(agents: OfficeAgent[]): Promise<OfficeAgent[]> {
-  const cache = await loadSessionCache();
-  const dailyCosts = await loadDailyCosts();
+export async function enrichAgentsWithCache(
+  agents: OfficeAgent[],
+  scope?: OfficeSessionStorageScope,
+): Promise<OfficeAgent[]> {
+  const cache = await loadSessionCache(scope);
+  const dailyCosts = await loadDailyCosts(scope);
   const today = new Date().toISOString().split('T')[0];
   const todaySnapshot = dailyCosts.find(s => s.date === today);
 
@@ -206,11 +429,12 @@ export async function enrichAgentsWithCache(agents: OfficeAgent[]): Promise<Offi
     const cached = cache.get(sessionKey);
     
     if (cached) {
-      // CRITICAL: Always use MAX of cached vs fresh to prevent data loss
+      // The cache is a cumulative SESSION baseline, never a daily billing
+      // source. Preserve the server/live `costToday` value and enrich only the
+      // separate session meter so login hydration cannot rewrite today's cost.
       const cachedCost = cached.totalCost || 0;
-      const freshCost = agent.costToday || 0;
-      const snapshotCost = todaySnapshot?.costs[agent.id] || 0;
-      const maxCost = Math.max(cachedCost, freshCost, snapshotCost);
+      const freshSessionCost = agent.sessionCostToday ?? agent.costToday ?? 0;
+      const maxSessionCost = Math.max(cachedCost, freshSessionCost);
       
       const cachedTokens = cached.totalTokens || 0;
       const freshTokens = agent.tokensUsed || 0;
@@ -219,7 +443,7 @@ export async function enrichAgentsWithCache(agents: OfficeAgent[]): Promise<Offi
       
       return {
         ...agent,
-        costToday: maxCost,
+        sessionCostToday: maxSessionCost,
         tokensUsed: maxTokens,
         // Keep fresh API data for status, model, activity
       };
@@ -233,8 +457,10 @@ export async function enrichAgentsWithCache(agents: OfficeAgent[]): Promise<Offi
 
 export async function takeSnapshot(
   agents: OfficeAgent[],
-  sessionTags?: Map<string, any[]>
+  sessionTags?: Map<string, any[]>,
+  scope?: OfficeSessionStorageScope,
 ): Promise<void> {
+  if (scope !== undefined && !normalizedScope(scope)) return;
   // Save current agent states to cache
   const sessions: CachedSession[] = agents.map(agent => {
     const sessionKey = getAgentIdentityKey(agent);
@@ -246,7 +472,9 @@ export async function takeSnapshot(
       agentId: agent.id,
       connectionId: agent.connectionId,
       lastUpdate: Date.now(),
-      totalCost: agent.costToday,
+      // Persist the cumulative session meter, not the server-owned daily
+      // aggregate. The two reset on different boundaries.
+      totalCost: agent.sessionCostToday ?? agent.costToday,
       totalTokens: agent.tokensUsed,
       inputTokens: 0, // Would need to track this separately
       outputTokens: 0,
@@ -257,21 +485,22 @@ export async function takeSnapshot(
     };
   });
 
-  await updateSessionCache(sessions);
-  await recordDailyCosts(agents);
+  await updateSessionCache(sessions, scope);
+  await recordDailyCosts(agents, scope);
   
   // Also save tags separately
   if (sessionTags) {
-    await saveSessionTags(sessionTags);
+    await saveSessionTags(sessionTags, scope);
   }
 }
 
 // ─── Enrich OpenSwan Sessions ──────────────────────────────
 
 export async function enrichSessionsWithCache(
-  sessions: any[] // OpenSwanSession[] but avoiding circular import
+  sessions: any[], // OpenSwanSession[] but avoiding circular import
+  scope?: OfficeSessionStorageScope,
 ): Promise<any[]> {
-  const cache = await loadSessionCache();
+  const cache = await loadSessionCache(scope);
   
   const enriched = sessions.map(session => {
     const cached = cache.get(session.sessionKey);
@@ -299,9 +528,10 @@ export async function enrichSessionsWithCache(
 
 // ─── Tag Management ────────────────────────────────────────
 
-const STORAGE_KEY_TAGS = '@session_tags_backup';
-
-export async function saveSessionTags(tags: Map<string, any[]>): Promise<void> {
+export async function saveSessionTags(
+  tags: Map<string, any[]>,
+  scope?: OfficeSessionStorageScope,
+): Promise<void> {
   try {
     const obj: any = {};
     tags.forEach((tagList, sessionKey) => {
@@ -309,22 +539,28 @@ export async function saveSessionTags(tags: Map<string, any[]>): Promise<void> {
         obj[sessionKey] = tagList;
       }
     });
-    await storage.setItem(STORAGE_KEY_TAGS, JSON.stringify(obj));
+    const key = keyForScope(STORAGE_KEY_TAGS, OFFICE_SESSION_TAG_BACKUP_SCOPED_PREFIX, scope);
+    if (!key) return;
+    const serialized = scope === undefined
+      ? JSON.stringify(obj)
+      : serializeScopedValue(scope, obj);
+    if (!serialized) return;
+    await storage.setItem(key, serialized);
   } catch (error) {
     console.error('Failed to save session tags:', error);
   }
 }
 
-export async function loadSessionTags(): Promise<Map<string, any[]>> {
+export async function loadSessionTags(
+  scope?: OfficeSessionStorageScope,
+): Promise<Map<string, any[]>> {
   try {
-    const raw = await storage.getItem(STORAGE_KEY_TAGS);
+    const key = keyForScope(STORAGE_KEY_TAGS, OFFICE_SESSION_TAG_BACKUP_SCOPED_PREFIX, scope);
+    if (!key) return new Map();
+    const raw = await storage.getItem(key);
     if (!raw) return new Map();
-    const obj = JSON.parse(raw);
-    const map = new Map();
-    Object.entries(obj).forEach(([key, value]) => {
-      map.set(key, value);
-    });
-    return map;
+    const decoded = scope === undefined ? JSON.parse(raw) : readScopedValue(raw, scope);
+    return decodeTagBackup(decoded);
   } catch (error) {
     console.error('Failed to load session tags:', error);
     return new Map();

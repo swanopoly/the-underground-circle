@@ -1,5 +1,5 @@
-import { buildSpiritCareerPrompt } from './spiritCareerProfiles';
-import { buildSpiritOperationsPrompt } from './spiritOperationsProfiles';
+import { buildSpiritCareerPrompt } from './spiritCareerProfiles.ts';
+import { buildSpiritOperationsPrompt } from './spiritOperationsProfiles.ts';
 
 /**
  * agentSpirits.ts — Predefined agent specialty archetypes ("Spirits")

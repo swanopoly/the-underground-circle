@@ -1,42 +1,48 @@
 {
-  "stamp": "2026-08-05T08:38:17.804Z",
+  "schemaVersion": 2,
+  "runId": "d089b6f6-c64c-4c4a-af37-5d11a270f192",
+  "stamp": "2026-08-21T19:17:00.511Z",
+  "status": "regression",
+  "scope": "invariants-only",
   "typecheck": {
-    "total": 0,
+    "status": "skipped",
+    "total": null,
     "byFile": {}
   },
   "suites": {
-    "total": 573,
-    "failing": [
-      "smoke:progressive-tool-disclosure",
-      "smoke:tool-result-formatters"
-    ]
+    "status": "skipped",
+    "total": null,
+    "failing": []
   },
   "invariants": {
     "no unreachable private rows (private + user_id IS NULL)": "PASS",
     "agent-scope rows carry an agent_id": "PASS",
     "every active row has a circle": "PASS",
-    "recent memories are traceable to the run that produced them": "PASS",
+    "recent memories are traceable to the run that produced them": "WARN",
     "source_surface distribution": "PASS",
-    "memories are reachable by semantic search": "FAIL",
+    "memories are reachable by semantic search": "WARN",
     "no orphaned satellite rows": "PASS",
     "memory_access_log is being written": "PASS",
-    "no exact-content duplicate rows": "PASS",
+    "no exact-content duplicate rows": "WARN",
     "content diversity (informational, NOT a defect)": "PASS",
     "no SELECT policy exposes private rows without an owner check": "PASS",
-    "hot-path indexes present": "FAIL",
+    "hot-path indexes present": "PASS",
     "match_memories is SECURITY INVOKER": "PASS"
   },
+  "invariantRun": {
+    "status": "complete",
+    "runId": "1887f3e3-c7aa-407a-8ed7-15d2daf4230d",
+    "generatedAt": "2026-08-21T19:17:12.745Z"
+  },
+  "completedAt": "2026-08-21T19:17:12.749Z",
   "diff": {
     "regressions": [
-      "suite newly failing: smoke:progressive-tool-disclosure",
-      "suite newly failing: smoke:tool-result-formatters",
-      "invariant PASS→FAIL: memories are reachable by semantic search",
-      "invariant PASS→FAIL: hot-path indexes present"
+      "invariant PASS→WARN: memories are reachable by semantic search",
+      "invariant PASS→WARN: no exact-content duplicate rows"
     ],
     "improvements": [
-      "invariant FAIL→PASS: recent memories are traceable to the run that produced them"
+      "invariant FAIL→WARN: recent memories are traceable to the run that produced them"
     ],
-    "known": [],
-    "flaky": []
+    "known": []
   }
 }

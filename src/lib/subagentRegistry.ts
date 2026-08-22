@@ -12,7 +12,15 @@ import {
   type SwanBotStructuredArtifact,
   type SwanBotStructuredToolAction,
 } from './swanbot';
-import { createRun, addStep, mergeRunMetadata, updateRunStatus, type RunSurface } from './agentRunSystem';
+import {
+  addStep,
+  completeRunUnlessCancelled,
+  createRun,
+  failRunUnlessCancelled,
+  mergeRunMetadata,
+  updateRunStatus,
+  type RunSurface,
+} from './agentRunSystem';
 import { wrapUntrusted } from './untrustedContent';
 import { assembleDelegationBrief } from './delegationBriefCore';
 import {
@@ -42,13 +50,16 @@ import {
   buildLegacyToolEventFromResult,
   buildLegacyToolLoopResult,
   buildSwanbotToolTurnBody,
+  buildOpenSwanTerminalReceipt,
   createLegacyRoundNudgeHook,
+  hasSwanbotRoutingFallback,
   needsCapExhaustionFinalization,
   parseSwanbotToolTurnData,
   shapeLegacyToolHandlerResult,
   toAnthropicToolShapes,
   type LegacyToolEvent,
   type LegacyToolLoopResult,
+  type OpenSwanTerminalReceipt,
 } from './openswanSessionRuntimeAdapters';
 import { supabase } from './supabase';
 import { logActivity } from '../services/agentActivityLogger';
@@ -204,6 +215,9 @@ export interface DelegationResult {
     output_tokens?: number;
     total_tokens?: number;
   };
+  /** Prose-independent child terminal truth. Parent orchestration must use
+   * this or parentSummary.status, never the child's success-sounding prose. */
+  terminal?: OpenSwanTerminalReceipt;
   /** CA-8d: set when the delegation was blocked by the gate (depth,
    *  concurrency, or O4 daily spend cap). Absent on normal delegations.
    *  Parent agent can read this to decide whether to retry in-line
@@ -596,6 +610,9 @@ async function runTypedCoreSubagentToolLoop(args: {
       }
       const parsed = parseSwanbotToolTurnData(data);
       if (!routing && parsed.routing) routing = parsed.routing;
+      if (hasSwanbotRoutingFallback(parsed.routing)) {
+        edgeFailed = true;
+      }
       return parsed.turn;
     },
   };
@@ -967,9 +984,53 @@ export async function delegateToSubagent(opts: {
       // per-turn token telemetry, which feeds the summary-only contract.
       usage: toolLoopResult.usage || {},
     };
+    const childTerminalInput = {
+      cancelled: toolLoopResult.incompleteReason === 'cancelled',
+      incomplete: toolLoopResult.incomplete === true,
+      incompleteReason: toolLoopResult.incompleteReason,
+      checkpoint: toolLoopResult.checkpoint,
+      verificationDisposition: toolLoopResult.verificationReceipt?.verdict === 'failed'
+        ? 'failed'
+        : toolLoopResult.verificationReceipt?.verdict === 'verified'
+          ? 'passed'
+          : toolLoopResult.verificationReceipt?.verdict === 'unverified'
+            ? 'unverified'
+            : 'none',
+    } as const;
+    let terminal = buildOpenSwanTerminalReceipt(childTerminalInput);
+    if (runId) {
+      const usageExtras = toolLoopResult.usage
+        ? {
+            input_tokens: toolLoopResult.usage.input_tokens,
+            output_tokens: toolLoopResult.usage.output_tokens,
+            cached_tokens: typeof toolLoopResult.usage.total_tokens === 'number'
+              ? Math.max(0, toolLoopResult.usage.total_tokens - ((toolLoopResult.usage.input_tokens || 0) + (toolLoopResult.usage.output_tokens || 0)))
+              : 0,
+          }
+        : undefined;
+      if (terminal.state === 'cancelled') {
+        await updateRunStatus(runId, 'cancelled', usageExtras);
+      } else {
+        const finalized = terminal.completionVerified
+          ? await completeRunUnlessCancelled(runId, usageExtras)
+          : await failRunUnlessCancelled(runId, usageExtras);
+        terminal = buildOpenSwanTerminalReceipt({
+          ...childTerminalInput,
+          persistenceDisposition: finalized.outcome === 'applied'
+            ? 'verified'
+            : finalized.outcome === 'cancelled'
+              ? 'cancelled'
+              : 'unverified',
+        });
+      }
+    }
     const observedEval = buildOpenSwanObservedEvalSummary({
       run: {
-        status: 'completed',
+        status: terminal.completionVerified
+          ? 'completed'
+          : terminal.state === 'cancelled'
+            ? 'cancelled'
+            : 'failed',
         mode: modeKey,
         provider: 'openswan',
         metadata: {
@@ -993,13 +1054,13 @@ export async function delegateToSubagent(opts: {
     });
     void import('./memoryService')
       .then(({ recordArchiveDerivedMemorySuccess, recordArchiveDerivedMemoryWeakSignal }) => Promise.all([
-        recordArchiveDerivedMemorySuccess({
+        ...(terminal.completionVerified ? [recordArchiveDerivedMemorySuccess({
           memoryReferences: memoryBundle.references,
           observedEval,
           userId: opts.userId,
           source: 'subagent_runtime_passive_success',
           runId,
-        }),
+        })] : []),
         recordArchiveDerivedMemoryWeakSignal({
           memoryReferences: memoryBundle.references,
           observedEval,
@@ -1023,6 +1084,12 @@ export async function delegateToSubagent(opts: {
             source: skill.source,
           })),
           observedEval,
+          terminal: {
+            state: terminal.state,
+            reason: terminal.reason,
+            completionVerified: terminal.completionVerified,
+            resumable: terminal.resumable,
+          },
           runtimeToolActions: runtimeToolActions.map((action) => ({
             tool: action.tool_name,
             title: action.title,
@@ -1106,26 +1173,8 @@ export async function delegateToSubagent(opts: {
             delegatedTo: opts.subagent.role,
           });
         }
-        if (useTypedCore) {
-          // Typed path: per-event telemetry already streamed via
-          // createPersistedRun.onEvent. Terminal status follows the
-          // typed-core convention (cap exhaustion / edge failure → failed,
-          // mirroring PersistedRunHandle.finalize) and the run row gets
-          // the aggregated token totals the legacy loop never reported.
-          await updateRunStatus(runId, toolLoopResult.incomplete ? 'failed' : 'completed', {
-            ...(toolLoopResult.usage
-              ? {
-                  input_tokens: toolLoopResult.usage.input_tokens,
-                  output_tokens: toolLoopResult.usage.output_tokens,
-                  cached_tokens: typeof toolLoopResult.usage.total_tokens === 'number'
-                    ? Math.max(0, toolLoopResult.usage.total_tokens - ((toolLoopResult.usage.input_tokens || 0) + (toolLoopResult.usage.output_tokens || 0)))
-                    : 0,
-                }
-              : {}),
-          });
-        } else {
-          await updateRunStatus(runId, 'completed');
-        }
+        // The guarded terminal write happens before eval/memory above so a
+        // concurrent parent/console STOP cannot be learned as child success.
       } catch {}
     }
 
@@ -1142,7 +1191,7 @@ export async function delegateToSubagent(opts: {
         name: action.tool_name,
         ok: action.status === 'completed',
       })),
-      completedCleanly: !toolLoopResult.incomplete,
+      completedCleanly: terminal.completionVerified,
       usage: toolLoopResult.usage,
     });
     return {
@@ -1156,7 +1205,11 @@ export async function delegateToSubagent(opts: {
       },
       parentSummary: buildSubagentParentSummary({
         payload: summaryPayload,
-        status: toolLoopResult.incomplete ? 'incomplete' : 'completed',
+        status: terminal.state === 'cancelled' || terminal.state === 'partial'
+          ? 'incomplete'
+          : terminal.state === 'failed'
+            ? 'failed'
+            : 'completed',
         runId,
       }),
       subagent: opts.subagent,
@@ -1165,6 +1218,7 @@ export async function delegateToSubagent(opts: {
       toolActions: structured.tool_actions || [],
       memoryReferences: memoryBundle.references,
       observedEval,
+      terminal,
       usage: structured.usage,
     };
   } catch (err: any) {

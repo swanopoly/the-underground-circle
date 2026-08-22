@@ -150,7 +150,11 @@ async function executeHeartbeatTool(
         if (updates.status) updateData.status = updates.status;
         if (updates.priority) updateData.priority = updates.priority;
         if (updates.status === "done") updateData.completed_at = new Date().toISOString();
-        const { error } = await supabase.from("tasks").update(updateData).eq("id", task_id);
+        const { error } = await supabase
+          .from("tasks")
+          .update(updateData)
+          .eq("id", task_id)
+          .eq("circle_id", circleId);
         if (error) return JSON.stringify({ error: error.message });
         return JSON.stringify({ success: true });
       }

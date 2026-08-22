@@ -31,9 +31,16 @@ export default function OfficeBridgeReadinessStrip({
   const color = snapshot.tone === 'danger' ? '#ef4444' : '#e8b339';
   const issue = snapshot.primaryIssue || snapshot.summary || '';
   const detail = snapshot.actionDetail || '';
+  const accessibilityLabel = [snapshot.statusLabel, issue, detail].filter(Boolean).join('. ');
 
   return (
-    <View style={[styles.strip, { borderColor: color + '55' }]}>
+    <View
+      style={[styles.strip, { borderColor: color + '55' }]}
+      accessible
+      accessibilityRole="alert"
+      accessibilityLabel={accessibilityLabel}
+      accessibilityLiveRegion={snapshot.tone === 'danger' ? 'assertive' : 'polite'}
+    >
       <View style={[styles.dot, { backgroundColor: color }]} />
       <View style={styles.textCol}>
         <Text style={[styles.headline, { color }]} numberOfLines={1}>

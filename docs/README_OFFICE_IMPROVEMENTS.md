@@ -1,5 +1,12 @@
 # 🏢 Office Improvements - Executive Summary
 
+> **Historical executive summary.** This document predates the canonical Office
+> runtime contracts and may describe aspirational work as delivered. Use
+> `docs/AGENTS_ROADMAP.md`, `CLAUDE.md`, and
+> `docs/UC_APP_STACK_REFERENCE.md` for current ownership, validation, and live-
+> proof boundaries. The current addon/editor contract is recorded under the
+> 2026-08-12 Office entry in those documents.
+
 ## 🎯 Mission
 Transform The Underground Circle's Office into a **best-in-class AI Agent Farm** with world-class tracking, training, and optimization capabilities.
 

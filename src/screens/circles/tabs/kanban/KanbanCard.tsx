@@ -5,7 +5,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { View, Text, Pressable, StyleSheet, Platform, Image } from 'react-native';
-import { KanbanTask, TaskStatus, PRIORITY_COLORS, COLUMNS, DEFAULT_AGENT_ROSTER, MODEL_ICONS } from '../../../../types/kanban';
+import { KanbanTask, TaskStatus, PRIORITY_COLORS, COLUMNS, DEFAULT_AGENT_ROSTER } from '../../../../types/kanban';
 import type { CircleOfficeAgent } from '../../../../lib/circleOffice';
 import type { GoalWithCount } from '../../../../hooks/useGoals';
 
@@ -158,20 +158,13 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
           onHoverOut={() => setHovered(false)}
           style={s.cardInner}
         >
-          {/* Drag handle */}
-          {Platform.OS === 'web' && (
-            <View style={s.dragHandle}>
-              <Text style={s.dragHandleText}>⠿</Text>
-            </View>
-          )}
-
           {/* Title */}
           <Text style={[s.title, isDone && s.titleDone]} numberOfLines={2}>{task.title}</Text>
 
           {/* Description preview */}
           {task.description ? (
             <Text style={s.descriptionPreview} numberOfLines={1}>
-              {task.description.length > 60 ? task.description.slice(0, 60) + '...' : task.description}
+              {task.description}
             </Text>
           ) : null}
 
@@ -189,8 +182,8 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
           )}
 
           {task.room?.name && (
-            <View style={[s.goalTag, s.roomTag, task.room?.color ? { borderColor: task.room.color + '30', backgroundColor: task.room.color + '12' } : null]}>
-              <View style={[s.goalDot, { backgroundColor: task.room?.color || '#22d3ee' }]} />
+            <View style={[s.goalTag, s.roomTag]}>
+              <View style={[s.goalDot, { backgroundColor: task.room?.color || '#6366f1' }]} />
               <Text style={[s.goalName, task.room?.color ? { color: task.room.color } : null]} numberOfLines={1}>
                 {task.room.name}
               </Text>
@@ -236,12 +229,8 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
             </View>
           )}
 
-          {/* Footer */}
+          {/* Footer — signals only; the decorative pencil icon is gone. */}
           <View style={s.footer}>
-            <View style={s.footerLeft}>
-              <Text style={s.toolIcon}>{'\u270E'}</Text>
-            </View>
-
             <View style={s.footerRight}>
               {/* Agent avatar + model indicator */}
               {assignedAgents.length > 0 ? (
@@ -256,17 +245,6 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
                       </View>
                     )}
                   </View>
-                  {(() => {
-                    const roster = assignedAgent
-                      ? DEFAULT_AGENT_ROSTER.find(r => assignedAgent.name?.toLowerCase().includes(r.name.toLowerCase()))
-                      : null;
-                    const mi = roster ? MODEL_ICONS[roster.preferredModel] : null;
-                    return mi ? (
-                      <View style={[s.modelPill, { backgroundColor: mi.color + '15' }]}>
-                        <Text style={{ fontSize: 8, lineHeight: 10 }}>{mi.icon}</Text>
-                      </View>
-                    ) : null;
-                  })()}
                 </>
               ) : task.assignee ? (
                 <View style={[s.avatar, { backgroundColor: '#9e9e9e' }]}>
@@ -276,10 +254,13 @@ export default function KanbanCard({ task, agents, goals, onPress, onMove, onDra
                 </View>
               ) : null}
 
-              {/* Priority badge */}
-              <View style={[s.priorityBadge, { backgroundColor: pb.color + '18' }]}>
-                <Text style={[s.priorityText, { color: pb.color }]}>{pb.label}</Text>
-              </View>
+              {/* Priority badge — only when non-default; an amber M on every
+                  card was column-wide noise that buried real H/L signals. */}
+              {task.priority !== 'normal' && (
+                <View style={[s.priorityBadge, { backgroundColor: pb.color + '18' }]}>
+                  <Text style={[s.priorityText, { color: pb.color }]}>{pb.label}</Text>
+                </View>
+              )}
 
               {/* Comment count badge */}
               {task.review_comments_count != null && task.review_comments_count > 0 && (
@@ -385,22 +366,6 @@ const s = StyleSheet.create({
     borderColor: '#a855f715',
     backgroundColor: '#a855f706',
   },
-  dragHandle: {
-    position: 'absolute' as any,
-    top: 4,
-    right: 6,
-    width: 16,
-    height: 16,
-    justifyContent: 'center',
-    alignItems: 'center',
-    opacity: 0.3,
-    ...(Platform.OS === 'web' ? { cursor: 'grab' } as any : {}),
-  },
-  dragHandleText: {
-    color: '#9e9e9e',
-    fontSize: 10,
-    lineHeight: 12,
-  },
   title: {
     color: '#e8e8e8',
     fontSize: 14,
@@ -429,13 +394,8 @@ const s = StyleSheet.create({
     alignItems: 'center',
     gap: 5,
     alignSelf: 'flex-start',
-    backgroundColor: '#1a1a1a',
-    paddingHorizontal: 7,
-    paddingVertical: 3,
-    borderRadius: 6,
   },
   roomTag: {
-    borderWidth: 1,
     marginTop: -2,
   },
   ownershipTag: {
@@ -497,16 +457,8 @@ const s = StyleSheet.create({
   footer: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    justifyContent: 'flex-end',
     marginTop: 2,
-  },
-  footerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  toolIcon: {
-    color: '#6f6f6f',
-    fontSize: 13,
   },
   footerRight: {
     flexDirection: 'row',
@@ -524,14 +476,6 @@ const s = StyleSheet.create({
     color: '#fff',
     fontSize: 9,
     fontWeight: '700',
-  },
-  modelPill: {
-    width: 16,
-    height: 16,
-    borderRadius: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginLeft: -4,
   },
   priorityBadge: {
     paddingHorizontal: 5,

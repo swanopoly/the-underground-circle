@@ -8,27 +8,23 @@ import {
   useWindowDimensions, ActivityIndicator,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
-import { Circle } from '../../types';
 import { PIXEL_COLORS, GRID, pixelCard, pixelInset } from '../../lib/pixelDesign';
 
-interface DiscoverCircle extends Circle {
+interface DiscoverCircle {
+  id: string;
+  name: string;
+  description: string | null;
+  max_members: number;
+  created_at: string;
   member_count: number;
   active_missions: number;
+  is_member: boolean;
 }
-
-const CIRCLE_TYPE_COLORS: Record<string, string> = {
-  builder: '#22d3ee',
-  creator: '#a855f7',
-  operator: '#f59e0b',
-  researcher: '#3b82f6',
-  custom: '#6366f1',
-};
 
 export default function DiscoverScreen({ navigation }: any) {
   const [circles, setCircles] = useState<DiscoverCircle[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
-  const [typeFilter, setTypeFilter] = useState<string | null>(null);
   const [joining, setJoining] = useState<string | null>(null);
   const [joinError, setJoinError] = useState('');
   const { width } = useWindowDimensions();
@@ -37,38 +33,18 @@ export default function DiscoverScreen({ navigation }: any) {
   const fetchCircles = useCallback(async () => {
     setLoading(true);
     try {
-      // Fetch public circles — try is_public first, fall back to description proxy
-      let query = supabase
-        .from('circles')
-        .select('*, circle_members!inner(count)')
-        .eq('is_public', true)
-        .order('created_at', { ascending: false })
-        .limit(50);
-
-      const { data } = await query;
-
-      if (data) {
-        // Also fetch mission counts
-        const circleIds = data.map((c: any) => c.id);
-        const { data: missionCounts } = await supabase
-          .from('circle_missions')
-          .select('circle_id, status')
-          .in('circle_id', circleIds)
-          .eq('status', 'active');
-
-        const missionMap: Record<string, number> = {};
-        (missionCounts || []).forEach((m: any) => {
-          missionMap[m.circle_id] = (missionMap[m.circle_id] || 0) + 1;
-        });
-
-        setCircles(data.map((c: any) => ({
-          ...c,
-          member_count: c.circle_members?.[0]?.count || 0,
-          active_missions: missionMap[c.id] || 0,
-        })));
-      }
+      // Discovery is a narrow server-owned projection. Never read raw circle
+      // rows here: those rows include invite and integration credentials.
+      const { data, error } = await supabase.rpc('discover_public_circles', {
+        p_search: null,
+        p_limit: 50,
+        p_offset: 0,
+      });
+      if (error) throw error;
+      setCircles(Array.isArray(data) ? data as DiscoverCircle[] : []);
     } catch (err) {
       console.error('Discover fetch error:', err);
+      setCircles([]);
     }
     setLoading(false);
   }, []);
@@ -79,44 +55,34 @@ export default function DiscoverScreen({ navigation }: any) {
     setJoining(circle.id);
     setJoinError('');
     try {
-      const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
-      if (!user) { setJoinError('Not logged in'); setJoining(null); return; }
-
-      // Check if already a member
-      const { data: existing } = await supabase
-        .from('circle_members')
-        .select('id')
-        .eq('circle_id', circle.id)
-        .eq('user_id', user.id)
-        .maybeSingle();
-
-      if (existing) {
-        // Already a member — navigate directly
-        navigation.navigate('CircleDetail', { circleId: circle.id, circleName: circle.name });
-        setJoining(null);
+      const { data, error } = await supabase.rpc('join_public_circle', {
+        p_circle_id: circle.id,
+      });
+      if (error) {
+        setJoinError(error.message?.includes('circle_full')
+          ? 'This circle is full.'
+          : 'This circle is not available to join.');
         return;
       }
-
-      // Join the circle
-      const { error } = await supabase.from('circle_members').insert({
-        circle_id: circle.id,
-        user_id: user.id,
-        role: 'member',
+      const joined = Array.isArray(data) ? data[0] : data;
+      if (!joined?.circle_id) {
+        setJoinError('The join could not be verified. Please try again.');
+        return;
+      }
+      navigation.navigate('CircleDetail', {
+        circleId: joined.circle_id,
+        circleName: joined.circle_name || circle.name,
       });
-
-      if (error) { setJoinError(error.message); setJoining(null); return; }
-
-      navigation.navigate('CircleDetail', { circleId: circle.id, circleName: circle.name });
-    } catch (e: any) {
-      setJoinError(e.message);
+    } catch {
+      setJoinError('The join could not be completed. Please try again.');
+    } finally {
+      setJoining(null);
     }
-    setJoining(null);
   };
 
   const filtered = circles.filter(c => {
     if (search && !c.name.toLowerCase().includes(search.toLowerCase()) &&
         !(c.description || '').toLowerCase().includes(search.toLowerCase())) return false;
-    if (typeFilter && c.circle_type !== typeFilter) return false;
     return true;
   });
 
@@ -142,27 +108,6 @@ export default function DiscoverScreen({ navigation }: any) {
         />
       </View>
 
-      {/* Type filters */}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.filterScroll} contentContainerStyle={s.filterRow}>
-        <Pressable
-          style={[s.filterPill, !typeFilter && s.filterPillActive]}
-          onPress={() => setTypeFilter(null)}
-        >
-          <Text style={[s.filterText, !typeFilter && { color: PIXEL_COLORS.indigo }]}>All</Text>
-        </Pressable>
-        {Object.entries(CIRCLE_TYPE_COLORS).map(([type, color]) => (
-          <Pressable
-            key={type}
-            style={[s.filterPill, typeFilter === type && { backgroundColor: color + '20', borderColor: color + '50' }]}
-            onPress={() => setTypeFilter(typeFilter === type ? null : type)}
-          >
-            <Text style={[s.filterText, typeFilter === type && { color }]}>
-              {type.charAt(0).toUpperCase() + type.slice(1)}
-            </Text>
-          </Pressable>
-        ))}
-      </ScrollView>
-
       {joinError ? <Text style={s.errorText}>{joinError}</Text> : null}
 
       {/* Circle list */}
@@ -182,7 +127,7 @@ export default function DiscoverScreen({ navigation }: any) {
 
         <View style={[s.grid, isMobile && { gap: 12 }]}>
           {filtered.map(circle => {
-            const accent = circle.accent_color || CIRCLE_TYPE_COLORS[circle.circle_type || 'custom'] || PIXEL_COLORS.indigo;
+            const accent = PIXEL_COLORS.indigo;
             const initial = circle.name.charAt(0).toUpperCase();
             return (
               <View key={circle.id} style={[s.card, isMobile && { width: '100%' }]}>
@@ -193,11 +138,7 @@ export default function DiscoverScreen({ navigation }: any) {
                   </View>
                   <View style={{ flex: 1 }}>
                     <Text style={s.cardTitle} numberOfLines={1}>{circle.name}</Text>
-                    {circle.circle_type && (
-                      <Text style={[s.cardType, { color: accent }]}>
-                        {circle.circle_type.toUpperCase()}
-                      </Text>
-                    )}
+                    {circle.is_member && <Text style={[s.cardType, { color: accent }]}>MEMBER</Text>}
                   </View>
                 </View>
 
@@ -227,7 +168,7 @@ export default function DiscoverScreen({ navigation }: any) {
                   disabled={joining === circle.id}
                 >
                   <Text style={s.joinBtnText}>
-                    {joining === circle.id ? '...' : 'Join Circle'}
+                    {joining === circle.id ? '...' : circle.is_member ? 'Open Circle' : 'Join Circle'}
                   </Text>
                 </Pressable>
               </View>
@@ -257,15 +198,6 @@ const s = StyleSheet.create({
     paddingVertical: GRID.sm + 2,
     ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
   },
-
-  filterScroll: { maxHeight: 40, marginBottom: 12 },
-  filterRow: { paddingHorizontal: 24, gap: 8 },
-  filterPill: {
-    paddingHorizontal: 14, paddingVertical: 6, borderRadius: 10,
-    borderWidth: 1, borderColor: PIXEL_COLORS.border0,
-  },
-  filterPillActive: { backgroundColor: PIXEL_COLORS.indigo + '20', borderColor: PIXEL_COLORS.indigo + '50' },
-  filterText: { color: PIXEL_COLORS.text2, fontSize: 12, fontWeight: '600' },
 
   errorText: { color: PIXEL_COLORS.red, fontSize: 12, paddingHorizontal: 24, marginBottom: 8 },
 

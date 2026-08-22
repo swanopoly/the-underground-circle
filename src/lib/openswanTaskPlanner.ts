@@ -36,6 +36,10 @@ import { classifyAgentFailure, type AgentFailureAssessment } from './agentFailur
 export type OpenSwanTaskKind = 'build' | 'review' | 'debug' | 'architect' | 'research' | 'automation' | 'general';
 export type OpenSwanVerificationKind = 'typecheck' | 'tests' | 'lint' | 'preview' | 'manual_review' | 'security_review' | 'performance_review' | 'integration_review';
 export type OpenSwanToolName =
+  | 'attachments.read_source'
+  | 'desktop.open_attachment'
+  | 'run.publish_action_artifact'
+  | 'run.report_action_outcomes'
   | 'workspace.create_room'
   | 'workspace.apply_artifacts'
   | 'workspace.open_preview'
@@ -443,6 +447,29 @@ function buildRecommendedTools(kind: OpenSwanTaskKind, message: string, entities
   const tools: OpenSwanToolPlanItem[] = [
     { tool: 'code.inspect', reason: 'Inspect surrounding code and current context before acting.', priority: 'high' },
   ];
+
+  // An attachment named by the current Chat turn is an opaque, turn-scoped
+  // source. Explicit open/load/preview/show intent gets the path-free desktop
+  // gateway; content inspection stays on the private source reader. Edit
+  // intent is deliberately not recommended here because the first slice is
+  // open-only and the session runtime marks that action evidence-unavailable.
+  const mentionsCurrentAttachment = /\battachments?\b|\b(?:attached|uploaded)\b[\s\S]{0,100}\b(?:pdf|file|document|image|photo|screenshot)s?\b|\b(?:pdf|file|document|image|photo|screenshot)s?\b[\s\S]{0,100}\b(?:attached|uploaded)\b/i.test(message);
+  const attachmentEditIntent = /\b(edit|change|update|replace|resize|crop|retouch|remove|add|adjust|export|save|convert|fix|modify|overwrite|delete|rename|apply|layout|typeset|place|fill|set|unzip|compress)\b|\bextract\s+(?:the\s+)?archive\b/i.test(message);
+  const attachmentOpenIntent = /\b(open|load|preview|show)\b/i.test(message);
+  const attachmentReadIntent = /\b(read|summari[sz]e|analy[sz]e|inspect|review|describe|transcribe|contents?|what(?:'s|\s+is)\s+in|answer\s+questions?)\b|\bextract\s+(?:the\s+)?text\b/i.test(message);
+  if (mentionsCurrentAttachment && !attachmentEditIntent && attachmentOpenIntent && !attachmentReadIntent) {
+    tools.push({
+      tool: 'desktop.open_attachment',
+      reason: 'Open the exact durably linked current-turn attachment through its one-shot opaque desktop capability.',
+      priority: 'high',
+    });
+  } else if (mentionsCurrentAttachment && !attachmentEditIntent && attachmentReadIntent && !attachmentOpenIntent) {
+    tools.push({
+      tool: 'attachments.read_source',
+      reason: 'Read the exact current-turn attachment by opaque attachment id through the private source manifest.',
+      priority: 'high',
+    });
+  }
 
   if (wantsWordPressTrashPost) {
     tools.push(

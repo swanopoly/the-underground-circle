@@ -44,15 +44,8 @@ function timeAgo(dateStr: string | null): string {
   return `${Math.floor(days / 30)}mo ago`;
 }
 
-// ─── Stat Pill ──────────────────────────────────────────────────────────────
-
-function StatPill({ icon, value, color }: { icon: string; value: number; color: string }) {
-  return (
-    <View style={[styles.statPill, { borderColor: color + '30' }]}>
-      <Text style={[styles.statIcon, { color }]}>{icon}</Text>
-      <Text style={[styles.statValue, { color }]}>{value}</Text>
-    </View>
-  );
+function plural(count: number, word: string): string {
+  return `${count} ${word}${count === 1 ? '' : 's'}`;
 }
 
 // ─── Component ──────────────────────────────────────────────────────────────
@@ -90,13 +83,11 @@ function RoomCard({ room, onPress, accentColor }: Props) {
           </Text>
         ) : null}
 
-        {/* ── Stats row ── */}
-        <View style={styles.statsRow}>
-          <StatPill icon="[]" value={room.fileCount} color="#6366f1" />
-          <StatPill icon="//" value={room.taskCount} color="#f59e0b" />
-          <StatPill icon=">#" value={room.messageCount} color="#22d3ee" />
-          <StatPill icon="@" value={room.activeAgentCount} color="#22c55e" />
-        </View>
+        {/* One quiet meta line instead of four bordered multi-color pills
+            with glyph icons — same numbers, a fraction of the ink. */}
+        <Text style={styles.metaLine} numberOfLines={1}>
+          {plural(room.fileCount, 'file')} · {plural(room.taskCount, 'task')} · {plural(room.messageCount, 'msg')} · {plural(room.activeAgentCount, 'agent')}
+        </Text>
       </View>
     </Pressable>
   );
@@ -118,7 +109,6 @@ const styles = StyleSheet.create({
     ...(Platform.OS === 'web' ? {
       cursor: 'pointer',
       transition: 'all 0.2s ease',
-      boxShadow: '4px 4px 0px #050508',
     } as any : {}),
   },
   cardHover: {
@@ -159,30 +149,11 @@ const styles = StyleSheet.create({
     fontFamily: MONO,
     lineHeight: 16,
   },
-  statsRow: {
-    flexDirection: 'row',
-    gap: 6,
-    marginTop: 2,
-  },
-  statPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 7,
-    paddingVertical: 3,
-    borderRadius: 2,
-    borderWidth: 1,
-    backgroundColor: '#050508',
-  },
-  statIcon: {
-    fontSize: 9,
-    fontWeight: '900',
-    fontFamily: MONO,
-  },
-  statValue: {
+  metaLine: {
+    color: '#606075',
     fontSize: 10,
-    fontWeight: '800',
     fontFamily: MONO,
+    marginTop: 2,
   },
 });
 

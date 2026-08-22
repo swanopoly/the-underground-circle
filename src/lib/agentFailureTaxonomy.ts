@@ -187,7 +187,13 @@ const RULES: FailureRule[] = [
     retryable: true,
     userActionRequired: true,
     recommendedRecovery: 'Ask the user to connect their own marketplace/API key for this provider before using the model or integration.',
-    patterns: [/\bkey_missing\b/i, /\badd your own\b.*\bapi key\b/i, /\bmissing\b.*\b(api key|provider key|user key)\b/i],
+    patterns: [
+      /\bkey_missing\b/i,
+      /\bcredential_unreadable\b/i,
+      /\bsaved provider credential could not be read\b/i,
+      /\badd your own\b.*\bapi key\b/i,
+      /\bmissing\b.*\b(api key|provider key|user key)\b/i,
+    ],
   },
   {
     failureClass: 'model_tool_unsupported',

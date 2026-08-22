@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-type ActivationKind = 'launch_app' | 'focus_app';
+type ActivationKind = 'open_app' | 'launch_app' | 'focus_app';
 type ActivationFn = (
   kind: ActivationKind,
   appName: string,
@@ -164,7 +164,7 @@ async function main() {
     let waits = 0;
     const states = [
       appObservation({ appRunning: false, frontmost: false, windowCount: 0 }),
-      appObservation({ appRunning: true, frontmost: false, windowCount: 2 }),
+      appObservation({ appRunning: true, frontmost: true, windowCount: 2 }),
     ];
     const result = await activate('launch_app', 'Notes', {
       observeApp: async (args) => {
@@ -183,13 +183,13 @@ async function main() {
       now: fixedClock(),
     });
     const proof = result.data?.proof;
-    check(result.ok === true, 'launch succeeds only after the running state is observed');
+    check(result.ok === true, 'launch succeeds only after running and foreground state are observed');
     check(result.data?.completionVerified === true, 'launch carries explicit completion proof');
     check(launches === 1, 'launch dispatch occurs exactly once when needed');
     check(waits === 1, 'launch uses the bounded readiness barrier before final observation');
     check(observations.length === 2, 'launch takes fresh before and after observations');
     check(observations.every((args) => args.maxDepth === 1 && args.maxNodes === 1), 'activation observations request a bounded bridge projection');
-    check(proof?.requestedPostcondition === 'running', 'launch proof records the running postcondition');
+    check(proof?.requestedPostcondition === 'running_and_frontmost', 'launch proof records the foreground-safe postcondition');
     check(proof?.mutationNeeded === true && proof?.mutationPerformed === true, 'launch proof distinguishes needed and performed mutation');
     check(proof?.before?.appRunning === false && proof?.after?.appRunning === true, 'launch proof records bounded before/after state');
     const serialized = JSON.stringify(result);
@@ -220,6 +220,105 @@ async function main() {
 
   {
     let launches = 0;
+    let focuses = 0;
+    let waits = 0;
+    const states = [
+      appObservation({ appRunning: false, frontmost: false, windowCount: 0 }),
+      appObservation({ appRunning: true, frontmost: true, windowCount: 1 }),
+    ];
+    const result = await activate('open_app', 'Notes', {
+      observeApp: async () => states.shift()!,
+      launchApp: async (appName) => {
+        launches += 1;
+        return activationDispatch(appName);
+      },
+      focusApp: async (appName) => {
+        focuses += 1;
+        return activationDispatch(appName);
+      },
+      waitForApp: async () => {
+        waits += 1;
+        return { ok: true };
+      },
+      now: fixedClock(),
+    });
+    check(result.ok === true, 'open launches a stopped app and verifies it frontmost');
+    check(launches === 1 && focuses === 0, 'open uses launch as its only activation when initially stopped');
+    check(waits === 1, 'open waits only after its launch branch');
+    check(result.data?.proof?.dispatchOperation === 'launch_app', 'open proof records the mutually exclusive launch branch');
+    check(result.data?.proof?.requestedPostcondition === 'running_and_frontmost', 'open requires foreground proof, not process-only proof');
+  }
+
+  {
+    let launches = 0;
+    let focuses = 0;
+    const states = [
+      appObservation({ appRunning: true, frontmost: false, pid: 404 }),
+      appObservation({ appRunning: true, frontmost: true, pid: 404 }),
+    ];
+    const result = await activate('open_app', 'Notes', {
+      observeApp: async () => states.shift()!,
+      launchApp: async (appName) => {
+        launches += 1;
+        return activationDispatch(appName);
+      },
+      focusApp: async (appName) => {
+        focuses += 1;
+        return activationDispatch(appName);
+      },
+      now: fixedClock(),
+    });
+    check(result.ok === true, 'open focuses an already-running background app');
+    check(launches === 0 && focuses === 1, 'open uses focus as its only activation when initially running');
+    check(result.data?.proof?.dispatchOperation === 'focus_app', 'open proof records the mutually exclusive focus branch');
+  }
+
+  {
+    let mutations = 0;
+    const result = await activate('open_app', 'Notes', {
+      observeApp: async () => appObservation({ appRunning: true, frontmost: true, pid: 505 }),
+      launchApp: async (appName) => {
+        mutations += 1;
+        return activationDispatch(appName);
+      },
+      focusApp: async (appName) => {
+        mutations += 1;
+        return activationDispatch(appName);
+      },
+      now: fixedClock(),
+    });
+    check(result.ok === true, 'open is a verified no-op when the app is already frontmost');
+    check(mutations === 0, 'already-frontmost open performs no OS activation');
+    check(result.data?.proof?.dispatchOperation === 'none', 'open no-op proof records no dispatch');
+  }
+
+  {
+    let launches = 0;
+    let focuses = 0;
+    const states = [
+      appObservation({ appRunning: false, frontmost: false, windowCount: 0 }),
+      appObservation({ appRunning: true, frontmost: false, windowCount: 1 }),
+    ];
+    const result = await activate('open_app', 'Notes', {
+      observeApp: async () => states.shift()!,
+      launchApp: async (appName) => {
+        launches += 1;
+        return activationDispatch(appName);
+      },
+      focusApp: async (appName) => {
+        focuses += 1;
+        return activationDispatch(appName);
+      },
+      waitForApp: async () => ({ ok: true }),
+      now: fixedClock(),
+    });
+    check(result.ok === false, 'open fails closed when a launched app loses foreground before proof');
+    check(launches === 1 && focuses === 0, 'open never follows its launch branch with a second focus');
+    check(result.data?.proof?.outcomeUnknown === true && result.data?.proof?.replayAllowed === false, 'foreground loss after launch is non-replayable outcome-unknown');
+  }
+
+  {
+    let launches = 0;
     let observations = 0;
     const result = await activate('launch_app', 'Chrome', {
       observeApp: async (args) => {
@@ -230,7 +329,7 @@ async function main() {
           resolvedAppName: 'Google Chrome',
           pid: 202,
           appRunning: true,
-          frontmost: false,
+          frontmost: true,
           windowCount: 1,
         });
       },
@@ -241,11 +340,83 @@ async function main() {
       focusApp: async () => ({ ok: false, errorCode: 'unexpected_focus' }),
       now: fixedClock(),
     });
-    check(result.ok === true, 'already-running launch is a verified success');
-    check(launches === 0, 'already-running launch is a no-op');
+    check(result.ok === true, 'already-frontmost launch is a verified success');
+    check(launches === 0, 'already-frontmost launch is a no-op');
     check(observations === 2, 'no-op still receives a second fresh observation');
     check(result.data?.proof?.mutationNeeded === false, 'no-op proof reports mutation was unnecessary');
     check(result.data?.proof?.mutationPerformed === false, 'no-op proof reports no mutation was performed');
+  }
+
+  {
+    let launches = 0;
+    let focuses = 0;
+    const states = [
+      appObservation({
+        app: 'Google Chrome',
+        requestedAppName: 'Chrome',
+        resolvedAppName: 'Google Chrome',
+        appRunning: true,
+        frontmost: false,
+        pid: 202,
+      }),
+      appObservation({
+        app: 'Google Chrome',
+        requestedAppName: 'Google Chrome',
+        resolvedAppName: 'Google Chrome',
+        appRunning: true,
+        frontmost: true,
+        pid: 202,
+      }),
+    ];
+    const result = await activate('launch_app', 'Chrome', {
+      observeApp: async () => states.shift()!,
+      launchApp: async (appName) => {
+        launches += 1;
+        return activationDispatch(appName);
+      },
+      focusApp: async () => {
+        focuses += 1;
+        return { ok: false, errorCode: 'unexpected_focus' };
+      },
+      now: fixedClock(),
+    });
+    check(result.ok === true, 'background running launch performs one activation and requires fresh foreground proof');
+    check(launches === 1 && focuses === 0, 'background running launch never adds a second focus activation');
+    check(result.data?.proof?.before?.frontmost === false && result.data?.proof?.after?.frontmost === true, 'launch proof captures the foreground transition');
+  }
+
+  {
+    let launches = 0;
+    const states = [
+      appObservation({
+        app: 'Google Chrome',
+        requestedAppName: 'Chrome',
+        resolvedAppName: 'Google Chrome',
+        appRunning: true,
+        frontmost: false,
+        pid: 202,
+      }),
+      appObservation({
+        app: 'Google Chrome',
+        requestedAppName: 'Google Chrome',
+        resolvedAppName: 'Google Chrome',
+        appRunning: true,
+        frontmost: false,
+        pid: 202,
+      }),
+    ];
+    const result = await activate('launch_app', 'Chrome', {
+      observeApp: async () => states.shift()!,
+      launchApp: async (appName) => {
+        launches += 1;
+        return activationDispatch(appName);
+      },
+      focusApp: async () => ({ ok: false, errorCode: 'unexpected_focus' }),
+      now: fixedClock(),
+    });
+    check(result.ok === false, 'launch fails closed when another app remains frontmost');
+    check(launches === 1, 'foreground-proof failure does not replay launch');
+    check(result.data?.proof?.outcomeUnknown === true && result.data?.proof?.replayAllowed === false, 'wrong-foreground launch becomes non-replayable outcome-unknown');
   }
 
   {

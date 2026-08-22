@@ -232,7 +232,11 @@ export async function enableSkillForSoul(
       enabled_by: userId,
       enabled_at: new Date().toISOString(),
     }, { onConflict: 'circle_id,soul_key,skill_id' });
-  if (error) skillCache.delete(`${circleId}::${soulKey}`);
+  // Invalidate on SUCCESS — the cached list is stale precisely because the
+  // write landed. This read `if (error)`, the inverse of disableSkillForSoul
+  // below, so enabling a skill left the stale list in place and the skill
+  // stayed dormant until the TTL expired.
+  if (!error) skillCache.delete(`${circleId}::${soulKey}`);
   return !error;
 }
 

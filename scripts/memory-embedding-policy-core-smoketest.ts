@@ -31,6 +31,8 @@
  *   npx tsx scripts/memory-embedding-policy-core-smoketest.ts
  */
 
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   // text + identity
   normalizeEmbeddingText,
@@ -602,6 +604,54 @@ function main(): void {
   assert(REPAIR_MIN_INTERVAL_MS >= EMBEDDING_BREAKER_COOLDOWN_MS, '[bounds] sweeps cannot retry faster than the breaker heals');
   assert(REPAIR_SWEEP_INTERVAL_MS > REPAIR_MIN_INTERVAL_MS, '[bounds] idle re-sweep is rarer than the floor');
   assert(EMBEDDING_RETRY_MAX_DELAY_MS > EMBEDDING_RETRY_BASE_DELAY_MS, '[bounds] backoff cap above base');
+
+  // ══ 15. runtime wiring around credential failure + resumed cursors ═══════
+  // The decision core is pure; these source contracts cover the I/O owner that
+  // must apply those decisions without issuing another doomed proxy request or
+  // presenting cumulative persisted counters as work from the current pass.
+  const runtimeSource = readFileSync(resolve(process.cwd(), 'src/lib/memoryEmbeddings.ts'), 'utf8');
+  assert(
+    /hasUsableEmbeddingCredential\(\)[\s\S]{0,160}reason:\s*'credential_unavailable'/.test(runtimeSource),
+    '[runtime] ensure skips repair while the exact credential gate is closed',
+  );
+  assert(
+    /retryingOrphans\s*=\s*repairSchedule\.repairOwed\s*\|\|\s*repairSchedule\.orphanCount\s*>\s*0/.test(runtimeSource)
+      && runtimeSource.includes('const resume = !retryingOrphans;')
+      && /maxRows:\s*opts\?\.maxRows,\s*\n\s*resume,/.test(runtimeSource),
+    '[runtime] orphan debt forces a fresh cursor instead of skipping lower-id rows',
+  );
+  assert(
+    runtimeSource.includes('embeddedThisPass')
+      && runtimeSource.includes('failedThisPass')
+      && runtimeSource.includes('this pass —'),
+    '[runtime] repair logs current-pass deltas instead of persisted cumulative totals',
+  );
+  assert(
+    /if\s*\(credentialInterrupted\)[\s\S]{0,180}credential_unavailable[\s\S]{0,80}break;/.test(runtimeSource),
+    '[runtime] a mid-page credential failure stops before advancing the repair cursor',
+  );
+  assert(
+    runtimeSource.includes("EMBEDDING_CREDENTIAL_BLOCK_STORAGE_KEY = 'uc_memory_embedding_credential_block_v1'")
+      && /fingerprint\s*=\s*`\$\{String\(activeKey\.id\)\}:\$\{String\(activeKey\.updated_at/.test(runtimeSource)
+      && runtimeSource.includes('storage.setItem(EMBEDDING_CREDENTIAL_BLOCK_STORAGE_KEY'),
+    '[runtime] an unreadable exact key version stays blocked across reloads',
+  );
+  assert(
+    runtimeSource.indexOf("supabase.rpc('list_user_api_keys')")
+      < runtimeSource.indexOf("supabase.functions.invoke('llm-proxy'"),
+    '[runtime] credential metadata preflight occurs before the embedding proxy request',
+  );
+  assert(
+    runtimeSource.includes('subscribeUserApiKeyChanges(resetEmbeddingCredentialGateAfterKeyChange)')
+      && runtimeSource.includes('armEmbeddingCredentialRepair(EMBEDDING_COALESCE_MS)'),
+    '[runtime] a same-runtime key rotation clears the block and re-arms repair immediately',
+  );
+  assert(
+    runtimeSource.includes('let embeddingCredentialRepairTimer:')
+      && /function\s+startCredentialUnavailableCooldown[\s\S]{0,900}armEmbeddingCredentialRepair/.test(runtimeSource)
+      && !/function\s+startCredentialUnavailableCooldown[\s\S]{0,900}armTimer\s*\(/.test(runtimeSource),
+    '[runtime] credential recovery uses a separate timer and cannot wedge the write queue',
+  );
 
   if (failures > 0) {
     console.error(`\n${failures} failure(s), ${passes} passed`);

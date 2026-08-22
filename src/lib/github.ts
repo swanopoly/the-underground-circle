@@ -7,6 +7,8 @@
 
 import { supabase } from './supabase';
 import { deleteLocalSecret, readLocalSecret, writeLocalSecret } from './localSecrets';
+import { safeGetUserId } from './authSession';
+import { storage } from './storage';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -53,16 +55,65 @@ export interface GitHubFileContent {
 
 // ─── Token Storage ────────────────────────────────────────────────────────────
 
+const GITHUB_PAT_SCOPE_INDEX_PREFIX = '@github_pat_scopes_v2:';
+
+function githubPatSecretId(userId: string, circleId: string): string {
+  return `${encodeURIComponent(userId)}:${encodeURIComponent(circleId)}`;
+}
+
+async function rememberGithubPatCircle(userId: string, circleId: string): Promise<void> {
+  const key = `${GITHUB_PAT_SCOPE_INDEX_PREFIX}${encodeURIComponent(userId)}`;
+  let circles: string[] = [];
+  try {
+    const raw = await storage.getItem(key);
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (Array.isArray(parsed)) circles = parsed.filter((value): value is string => typeof value === 'string');
+  } catch {}
+  const next = [...new Set([...circles, circleId])].slice(-200);
+  await storage.setItem(key, JSON.stringify(next));
+}
+
 export async function getStoredToken(circleId: string): Promise<string | null> {
-  return (await readLocalSecret('github_pat', circleId)) || null;
+  const userId = await safeGetUserId();
+  if (!userId || !circleId) return null;
+  // Never import the historical Circle-only secret: another account on the
+  // same browser/device may have created it. Retire it fail-closed instead.
+  await deleteLocalSecret('github_pat', circleId);
+  return (await readLocalSecret('github_pat_v2', githubPatSecretId(userId, circleId))) || null;
 }
 
 export async function storeToken(circleId: string, token: string): Promise<void> {
-  await writeLocalSecret('github_pat', circleId, token);
+  const userId = await safeGetUserId();
+  if (!userId || !circleId) throw new Error('An authenticated user and Circle are required.');
+  await deleteLocalSecret('github_pat', circleId);
+  await writeLocalSecret('github_pat_v2', githubPatSecretId(userId, circleId), token);
+  await rememberGithubPatCircle(userId, circleId);
 }
 
 export async function removeToken(circleId: string): Promise<void> {
+  const userId = await safeGetUserId();
   await deleteLocalSecret('github_pat', circleId);
+  if (userId && circleId) {
+    await deleteLocalSecret('github_pat_v2', githubPatSecretId(userId, circleId));
+  }
+}
+
+/** Remove this account's device-local GitHub PATs before account replacement. */
+export async function clearLocalGitHubTokensForLogout(userId: string | null | undefined): Promise<number> {
+  const normalizedUserId = String(userId || '').trim();
+  if (!normalizedUserId) return 0;
+  const key = `${GITHUB_PAT_SCOPE_INDEX_PREFIX}${encodeURIComponent(normalizedUserId)}`;
+  let circles: string[] = [];
+  try {
+    const raw = await storage.getItem(key);
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (Array.isArray(parsed)) circles = parsed.filter((value): value is string => typeof value === 'string');
+  } catch {}
+  await Promise.all(circles.map((circleId) => (
+    deleteLocalSecret('github_pat_v2', githubPatSecretId(normalizedUserId, circleId))
+  )));
+  await storage.removeItem(key);
+  return circles.length;
 }
 
 // ─── API Helpers ──────────────────────────────────────────────────────────────
@@ -146,19 +197,30 @@ export async function getFileContent(
   owner: string,
   repo: string,
   path: string,
+  branch?: string,
 ): Promise<{ content: string; size: number; sha: string; error: string | null }> {
+  const encodedPath = path.split('/').map(encodeURIComponent).join('/');
+  const refQuery = branch ? `?ref=${encodeURIComponent(branch)}` : '';
   const { data, error } = await ghFetch<GitHubFileContent>(
-    `/repos/${owner}/${repo}/contents/${path}`,
+    `/repos/${owner}/${repo}/contents/${encodedPath}${refQuery}`,
     token,
   );
   if (error || !data) return { content: '', size: 0, sha: '', error: error || 'No data' };
 
+  // The contents endpoint can omit inline content for larger files. Treat that
+  // as an explicit readback failure instead of decoding an absent payload.
+  if (typeof data.content !== 'string' || !data.content || data.encoding !== 'base64') {
+    return { content: '', size: data.size, sha: data.sha, error: 'GitHub did not return inline base64 file content' };
+  }
+
   // Decode base64
   try {
-    const decoded = atob(data.content.replace(/\n/g, ''));
+    const binary = atob(data.content.replace(/\n/g, ''));
+    const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
+    const decoded = new TextDecoder().decode(bytes);
     return { content: decoded, size: data.size, sha: data.sha, error: null };
   } catch {
-    return { content: '[Binary file — cannot display]', size: data.size, sha: data.sha, error: null };
+    return { content: '', size: data.size, sha: data.sha, error: 'GitHub file content was not valid base64 text' };
   }
 }
 
@@ -794,6 +856,14 @@ export async function commitMultipleFiles(
     );
     if (!refData) return { success: false, error: 'Branch not found' };
     const baseSha = refData.object.sha;
+    const { data: baseCommit, error: baseCommitError } = await ghFetch<{ tree: { sha: string } }>(
+      `/repos/${owner}/${repo}/git/commits/${encodeURIComponent(baseSha)}`,
+      token,
+    );
+    if (baseCommitError || !baseCommit?.tree?.sha) {
+      return { success: false, error: baseCommitError || 'Base commit tree not found' };
+    }
+    const baseTreeSha = baseCommit.tree.sha;
 
     // 2. Create blobs for each file
     const treeItems: { path: string; mode: string; type: string; sha: string }[] = [];
@@ -820,7 +890,7 @@ export async function commitMultipleFiles(
         Accept: 'application/vnd.github.v3+json',
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ base_tree: baseSha, tree: treeItems }),
+      body: JSON.stringify({ base_tree: baseTreeSha, tree: treeItems }),
     });
     if (!treeRes.ok) return { success: false, error: 'Failed to create tree' };
     const tree = await treeRes.json();

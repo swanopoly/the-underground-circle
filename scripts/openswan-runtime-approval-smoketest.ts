@@ -459,10 +459,42 @@ assert(
     && /approvalKind:\s*readOnly \? undefined : 'publish'/.test(runtimeSource),
   'mutating WordPress runtime tools remain ask-gated',
 );
+const runtimeWrapperStart = runtimeSource.indexOf('export async function executeOpenSwanRuntimeTool');
+const runtimePolicyStart = runtimeSource.indexOf('const initialDispatchPolicy = getOpenSwanToolPolicy', runtimeWrapperStart);
+const credentialReadBlock = runtimeSource.indexOf("if (tool === 'credentials.get')", runtimeWrapperStart);
+const approvalResolveBlock = runtimeSource.indexOf("if (tool === 'approvals.resolve')", runtimeWrapperStart);
 assert(
-  runtimeSource.includes('a run cannot approve its own gated action')
-    && /status === 'approved' && context\.runId/.test(runtimeSource),
-  'a run still cannot approve its own gated action',
+  runtimeWrapperStart >= 0
+    && credentialReadBlock > runtimeWrapperStart
+    && credentialReadBlock < runtimePolicyStart
+    && runtimeSource.slice(credentialReadBlock, runtimePolicyStart).includes('no secret was fetched'),
+  'model-side credential lookup fails closed before policy lookup or secret retrieval',
+);
+assert(
+  runtimeWrapperStart >= 0
+    && approvalResolveBlock > runtimeWrapperStart
+    && approvalResolveBlock < runtimePolicyStart
+    && runtimeSource.slice(approvalResolveBlock, runtimePolicyStart).includes('signed approval UI')
+    && runtimeSource.slice(approvalResolveBlock, runtimePolicyStart).includes('No approval was changed.'),
+  'model-side approval resolution fails closed before policy lookup or mutation',
+);
+const innerApprovalResolveStart = runtimeSource.indexOf("case 'approvals.resolve':", runtimeWrapperStart);
+const innerApprovalResolveEnd = runtimeSource.indexOf("case 'desktop.launch_app':", innerApprovalResolveStart);
+assert(
+  innerApprovalResolveStart >= 0
+    && innerApprovalResolveEnd > innerApprovalResolveStart
+    && runtimeSource.slice(innerApprovalResolveStart, innerApprovalResolveEnd).indexOf('disabled at the inner model dispatcher')
+      < runtimeSource.slice(innerApprovalResolveStart, innerApprovalResolveEnd).indexOf('resolveRunApproval'),
+  'inner dispatcher blocks approvals.resolve before any approval-row mutation path',
+);
+const innerCredentialReadStart = runtimeSource.indexOf("case 'credentials.get':", runtimeWrapperStart);
+const innerCredentialReadEnd = runtimeSource.indexOf('default:', innerCredentialReadStart);
+assert(
+  innerCredentialReadStart >= 0
+    && innerCredentialReadEnd > innerCredentialReadStart
+    && runtimeSource.slice(innerCredentialReadStart, innerCredentialReadEnd).includes('disabled at the inner model dispatcher')
+    && !runtimeSource.slice(innerCredentialReadStart, innerCredentialReadEnd).includes('getCredentials'),
+  'inner dispatcher cannot retrieve credential fields',
 );
 assert(
   runtimeSource.includes("tool === 'automations.list' ||"),
@@ -470,8 +502,20 @@ assert(
 );
 assert(
   runtimeSource.includes("name: 'browser.fill_credential_field'")
-    && runtimeSource.includes('without returning raw secret values to the model'),
-  'credential fill remains cataloged with its no-secret-return policy',
+    && runtimeSource.includes('Saved credential fill is temporarily unavailable')
+    && runtimeSource.includes('no secret was fetched and nothing was filled'),
+  'credential fill is cataloged but fails closed before secret retrieval until exact target binding exists',
+);
+assert(
+  runtimeSource.includes('Plugins may tighten policy, never weaken a mandatory ask boundary')
+    && runtimeSource.includes("override === 'ask' && base.approvalMode === 'auto'")
+    && !runtimeSource.includes('return override ? { ...base, approvalMode: override } : base;'),
+  'plugin defaults cannot downgrade a mandatory ask policy to auto',
+);
+assert(
+  runtimeSource.includes('const classifiedLowRiskMutation = approvalKind === \'tool_use\'')
+    && runtimeSource.includes("approvalMode: classifiedLowRiskMutation ? 'auto' : 'ask'"),
+  'unclassified/public/file/governance coordination mutations fail closed to ask',
 );
 
 if (failures > 0) {

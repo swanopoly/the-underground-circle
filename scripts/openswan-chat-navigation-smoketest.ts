@@ -37,6 +37,25 @@ const menu = readFileSync(
   join(repoRoot, 'src/screens/circles/tabs/chat/OpenSwanServiceMenu.tsx'),
   'utf8',
 );
+const chatTab = readFileSync(
+  join(repoRoot, 'src/screens/circles/tabs/ChatTab.tsx'),
+  'utf8',
+);
+const moreOptionsStart = menu.indexOf("{moreOptionsOpen ? (\n              <View style={styles.morePanel}>");
+const moreOptionsEnd = menu.indexOf('          </ScrollView>', moreOptionsStart);
+const moreOptions = moreOptionsStart >= 0 && moreOptionsEnd > moreOptionsStart
+  ? menu.slice(moreOptionsStart, moreOptionsEnd)
+  : '';
+
+assert(
+  chatTab.includes('setCircleInitRetryToken((value) => value + 1);')
+    && chatTab.includes('void init(circleId, generation, requestedAuthority);')
+    && chatTab.includes('circleInitRetryToken,\n    isRunHistoryExactAuthorityCurrent,')
+    && chatTab.includes('runHistoryExactAuthority?.accessToken,')
+    && chatTab.includes('runHistoryExactAuthority?.generation,')
+    && chatTab.includes('runHistoryExactAuthority?.userId,'),
+  'retrying an unresolved conversation reruns circle and default-thread initialization',
+);
 
 assert(
   !header.includes('if (isCircleThread) return null')
@@ -78,12 +97,45 @@ assert(
 );
 assert(
   menu.includes('Switch mode and crew here.')
-    && menu.includes('Agent, model, approvals, and tools are in Control Panel.')
+    && menu.includes("Pick the agent from the composer's agent button. Model, approvals, and tools are in Control Panel.")
     && menu.includes('Past or blocked work is in Runs & recovery.'),
   'the service menu explains where each major control lives',
 );
 assert(
-  menu.includes('Agent · model · approvals · tools')
+  menu.includes("const [openPicker, setOpenPicker] = useState<ServicePicker>(null);")
+    && menu.includes('const [moreOptionsOpen, setMoreOptionsOpen] = useState(false);')
+    && menu.includes('setOpenPicker(null);')
+    && menu.includes('setMoreOptionsOpen(false);'),
+  'the service sheet reopens on a clean essential view instead of retaining expanded controls',
+);
+assert(
+  menu.includes("accessibilityState={{ expanded: openPicker === 'mode' }}")
+    && menu.includes("accessibilityState={{ expanded: openPicker === 'crew' }}")
+    && menu.includes("{openPicker === 'mode' ? (")
+    && menu.includes("{openPicker === 'crew' ? ("),
+  'work and crew choices live behind two compact accessible selectors',
+);
+assert(
+  menu.includes('accessibilityState={{ expanded: moreOptionsOpen }}')
+    && menu.includes('Show OpenSwan more options')
+    && moreOptions.includes('Open OpenSwan skills')
+    && moreOptions.includes('Open OpenSwan runs and recovery'),
+  'Skills, history, and recovery stay behind one accessible secondary disclosure',
+);
+assert(
+  menu.includes("import {\n  CARD_BG,")
+    && menu.includes('SWAN_PURPLE,')
+    && menu.includes("backgroundColor: CARD_BG")
+    && menu.includes('rgba(168,85,247,0.18)')
+    && menu.includes('rgba(99,102,241,0.09)'),
+  'the service sheet shares the Control Panel purple and cyan visual system',
+);
+assert(
+  !menu.includes('doneBtnText') && !menu.includes('>Done</Text>'),
+  'the redundant Done row is removed because close and backdrop already own dismissal',
+);
+assert(
+  menu.includes('Model · approvals · tools')
     && menu.includes('Runs & recovery')
     && menu.includes('accessibilityLabel="Open OpenSwan runs and recovery"'),
   'control-panel and recovery routes have explicit, accessible labels',
@@ -127,10 +179,10 @@ assert(
   'mode and crew choices retain native state while emitting direct web pressed semantics',
 );
 assert(
-  menu.includes('accessibilityHint="Choose the agent and model, review approvals, and manage tools."')
+  menu.includes('accessibilityHint="Choose the model, review approvals, and manage tools. The agent is selected from the composer."')
     && menu.includes('accessibilityHint="Review and manage OpenSwan skills for this circle."')
     && menu.includes('accessibilityHint="Review active, completed, or blocked runs and available recovery actions."')
-    && occurrences(menu, 'accessibilityHint="Close the service menu and return to Chat."') >= 2,
+    && occurrences(menu, 'accessibilityHint="Close the service menu and return to Chat."') === 1,
   'Control Panel, Skills, Runs & recovery, and close actions have descriptive hints',
 );
 assert(

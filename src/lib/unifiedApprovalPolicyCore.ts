@@ -14,24 +14,30 @@
  *      `OpenSwanToolPolicy.approvalMode` ('auto'|'ask') plus `mutatesState` /
  *      `externalSideEffect`.
  *   3. `chatComputerRequestRouter.constraintBlocksToolCall` — user "never do X"
- *      forbids (→ block) and the always-confirm floor pay/delete/login/grant
+ *      forbids (→ block) and the canonical always-exact effect floor
  *      (→ require confirmation, never auto), whose canonical value is
  *      `computerGrantGate.STICKY_FLOOR_CATEGORIES`.
  *
  * This file is the single source of truth those three fold into. `category`
- * mirrors `chatAutoApproveSettings.AutoApproveCategory`; the floor markers
- * mirror `chatComputerRequestRouter.ChatComputerConstraintCategory` /
- * `computerGrantGate.STICKY_FLOOR_CATEGORIES`. Both are typed `unknown` on the
- * input so this module stays dependency-free.
+ * mirrors `chatAutoApproveSettings.AutoApproveCategory`; the effect floor is
+ * owned by `approvalEffectPolicyCore`. Inputs stay `unknown` so the fold is
+ * total on untrusted tool metadata.
  *
- * PURITY (load-bearing): zero runtime imports (type names referenced in prose
- * only), no Date.now()/Math.random() at module scope. Every export is TOTAL —
+ * PURITY (load-bearing): the only runtime import is the dependency-free pure
+ * effect core; no Date.now()/Math.random() at module scope. Every export is TOTAL —
  * any input (null / undefined / wrong type / huge / hostile / cyclic) yields a
  * safe, bounded, fail-closed decision and never throws. Secret-safe: only the
  * normalized category label (a taxonomy enum, never a value) is echoed back.
  * Deterministic: same input → same decision. Smoke:
  * scripts/unified-approval-policy-core-smoketest.ts.
  */
+
+import {
+  ALWAYS_EXACT_APPROVAL_EFFECTS,
+  classifyApprovalEffect,
+  isApprovalCategoryAutoEligible,
+  requiresExactApproval,
+} from './approvalEffectPolicyCore';
 
 export type ApprovalDecisionKind = 'auto_approve' | 'require_approval' | 'blocked';
 
@@ -48,15 +54,17 @@ export interface ApprovalPolicyInput {
   externalSideEffect?: unknown;
   /** Auto-approve taxonomy bucket — `AutoApproveCategory` (e.g. 'memory_read'). */
   category?: unknown;
+  /** Canonical `ApprovalEffect`, when the caller has classified one explicitly. */
+  effect?: unknown;
+  /** Optional semantic action tags supplied by per-tool policy. */
+  actionTags?: unknown;
   /** The categories the user set to auto-approve — a string / string[] / Set<string>. */
   userAutoApprove?: unknown;
   /** The user forbade this action — `true`, the category, or a list/Set of forbidden categories. */
   userConstraintsBlock?: unknown;
-  /** Always-confirm floor hit — pay / delete / login / grant. `true`, a marker, or a non-empty list. */
+  /** Always-exact floor hit. `true`, a marker, or a non-empty list. */
   isFloorAction?: unknown;
-  /** The tool name (e.g. 'desktop.delete', 'browser.fill_credential_field').
-   *  Substring-matched against the floor markers as defense-in-depth so a
-   *  floor-ish tool still requires approval even without an explicit isFloorAction. */
+  /** Tool name used as a bounded canonical effect signal. */
   tool?: unknown;
 }
 
@@ -69,42 +77,19 @@ export interface ApprovalDecision {
 }
 
 /**
- * The always-confirm floor: purchases, permanent deletions, credential entry,
- * and account/authorization grants. Never auto-approved in any autonomy mode.
- * Canonical value mirrors `computerGrantGate.STICKY_FLOOR_CATEGORIES` (and its
- * re-export `chatComputerRequestRouter.ALWAYS_CONFIRM_FLOOR`); kept here as a
- * plain literal so this core needs no import. If the canonical list changes,
- * update both in lockstep.
+ * Backward-compatible export for card/gate callers. The canonical value now
+ * lives in `approvalEffectPolicyCore`; this alias cannot drift independently.
  */
-export const ALWAYS_ASK_FLOOR_MARKERS = ['pay', 'delete', 'login', 'grant'] as const;
-
-/** True iff `s` contains any always-ask floor marker as a SUBSTRING — over-ask
- *  safe (a match only ever ADDS an approval, never a block). Substring (not
- *  exact) so a variant category ('delete_file', 'paywall', 'login_flow') or a
- *  floor-ish tool name ('desktop.delete', 'browser.fill_credential_field' via
- *  'login'/'grant') still floors even when the caller forgot to set
- *  isFloorAction. Mirrors openswanApprovalBatchCore.isFloorItem. */
-function matchesFloorMarker(s: string): boolean {
-  for (const marker of ALWAYS_ASK_FLOOR_MARKERS) {
-    if (s.includes(marker)) return true;
-  }
-  return false;
-}
+export const ALWAYS_ASK_FLOOR_MARKERS = ALWAYS_EXACT_APPROVAL_EFFECTS;
 
 /**
- * Public floor probe: true iff the (normalized) input contains an always-ask
- * floor marker as a substring. Total and fail-safe in the over-ask direction:
- * non-string / hostile input reads as NOT floor (returns false) — callers use
- * a `true` result only to ADD an approval or SUPPRESS an auto-approve
- * affordance, never to skip one. Shared with `approvalCardModelCore` so the
- * banner checkboxes and the request-side gate agree on the floor vocabulary.
+ * Public exact-floor probe. Unknown/hostile input returns true so a caller can
+ * only offer standing auto-approval after positively identifying a safe
+ * effect. Shared with `approvalCardModelCore` so card affordances and the
+ * request-side gate agree on the floor vocabulary.
  */
 export function matchesAlwaysAskFloor(s: unknown): boolean {
-  try {
-    return matchesFloorMarker(norm(s));
-  } catch {
-    return false;
-  }
+  return requiresExactApproval(s);
 }
 
 // Bounds so pathological inputs can never blow up time/space.
@@ -168,26 +153,23 @@ function isForbidden(value: unknown, categoryStr: string): boolean {
 }
 
 /**
- * Is this an always-confirm floor action? Safe (over-ask) direction — a match
+ * Is this an always-exact floor action? Safe (over-ask) direction — a match
  * only ever ADDS an approval, never a hard block, so we read any positive
  * signal as floor:
  *   - `true`, a non-empty string, a non-zero finite number/bigint, or a
  *     non-empty list/Set → floor
- *   - defense-in-depth: a category that is itself a floor marker → floor
+ *   - defense-in-depth: canonical effect signals classify exact/unknown
  */
-function isFloor(value: unknown, categoryStr: string, toolStr: string): boolean {
+function isFloor(value: unknown, effectSignals: unknown): boolean {
   if (value === true) return true;
   else if (typeof value === 'string') { if (value.trim().length > 0) return true; }
   else if (typeof value === 'number') { if (Number.isFinite(value) && value !== 0) return true; }
   else if (typeof value === 'bigint') { if (value !== BigInt(0)) return true; }
   else if (Array.isArray(value)) { if (value.length > 0) return true; }
   else if (value instanceof Set) { if (value.size > 0) return true; }
-  // Defense-in-depth: substring-match the floor markers against the category AND
-  // the tool name so a variant category or floor-ish tool still floors even when
-  // the caller didn't set isFloorAction (over-ask safe — only ever ADDS approval).
-  if (categoryStr && matchesFloorMarker(categoryStr)) return true;
-  if (toolStr && matchesFloorMarker(toolStr)) return true;
-  return false;
+  // Unknown/ambiguous signals are exact too: broad category or standing grants
+  // may never waive an effect the runtime could not classify positively.
+  return requiresExactApproval(effectSignals);
 }
 
 /**
@@ -206,7 +188,7 @@ function isAutoApprovedCategory(value: unknown, categoryStr: string): boolean {
 /**
  * The single fold. Precedence, highest first:
  *   1. user-forbidden        → blocked
- *   2. always-confirm floor  → require_approval (ALWAYS; beats every auto path)
+ *   2. always-exact floor    → require_approval (ALWAYS; beats every auto path)
  *   3. tool 'auto' + provably non-mutating & non-external → auto_approve
  *   4. category the user auto-approved                    → auto_approve
  *   5. otherwise             → require_approval (fail-closed default)
@@ -220,6 +202,8 @@ export function resolveApprovalDecision(input: ApprovalPolicyInput): ApprovalDec
       input && typeof input === 'object' ? (input as Record<string, unknown>) : {};
     const categoryStr = norm(inp.category);
     const toolStr = norm(inp.tool);
+    const effectSignals = [inp.effect, inp.actionTags, categoryStr, toolStr];
+    const effect = classifyApprovalEffect(effectSignals);
     const withCat = (decision: ApprovalDecision): ApprovalDecision =>
       categoryStr ? { ...decision, category: categoryStr } : decision;
 
@@ -228,12 +212,12 @@ export function resolveApprovalDecision(input: ApprovalPolicyInput): ApprovalDec
       return withCat({ kind: 'blocked', reason: 'blocked: the user forbade this action' });
     }
 
-    // 2. Floor (pay/delete/login/grant) always requires approval — no autonomy
-    //    setting, tool 'auto' mode, or auto-approved category can waive it.
-    if (isFloor(inp.isFloorAction, categoryStr, toolStr)) {
+    // 2. The canonical exact-effect floor always requires approval — no
+    //    autonomy setting, tool mode, or category preference can waive it.
+    if (isFloor(inp.isFloorAction, effectSignals)) {
       return withCat({
         kind: 'require_approval',
-        reason: 'always-confirm floor (pay/delete/login/grant) requires approval',
+        reason: `always-exact effect (${effect}) requires approval`,
       });
     }
 
@@ -250,8 +234,14 @@ export function resolveApprovalDecision(input: ApprovalPolicyInput): ApprovalDec
       });
     }
 
-    // 4. The user opted this category into auto-approve → auto.
-    if (isAutoApprovedCategory(inp.userAutoApprove, categoryStr)) {
+    // 4. A category preference applies only to a positively classified safe
+    //    effect. Durable/external flags are additional fail-closed backstops.
+    if (
+      isAutoApprovedCategory(inp.userAutoApprove, categoryStr) &&
+      !inp.mutatesState &&
+      !inp.externalSideEffect &&
+      isApprovalCategoryAutoEligible(effectSignals)
+    ) {
       return withCat({ kind: 'auto_approve', reason: 'user auto-approved this category' });
     }
 

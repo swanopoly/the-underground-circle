@@ -65,6 +65,8 @@ import { buildEngineeringToolCaptureMetadata } from './engineeringRuntimeCapture
 import type { AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
 import { formatVerificationReceipt } from './verificationReceiptCore';
 import type { VerificationReceipt } from './verificationReceiptCore';
+import type { OpenSwanResumeLocator } from './toolLoopResume';
+import type { OpenSwanApprovalResumeDisposition } from './openSwanApprovalResumeAuthority';
 
 // ─── Shared shapes ──────────────────────────────────────────────────────────
 
@@ -72,6 +74,16 @@ import type { VerificationReceipt } from './verificationReceiptCore';
  *  (design-manifest ledger, runtimeToolActions mapping, browser plans). */
 export type LegacyToolEvent = {
   tool: string;
+  /** Exact provider-issued id for this tool call. Optional only for legacy
+   * transcript rows and deterministic runtime-generated observations. */
+  toolUseId?: string;
+  /** One-based provider/model iteration that authored this tool call. This is
+   * distinct from dispatch order: two calls in one provider response share an
+   * iteration even when their handlers run sequentially. Grounded derived
+   * artifacts use it to prove the model saw an earlier source result before it
+   * authored the artifact. Older/recovered events may omit it and fail that
+   * composite proof closed. */
+  providerIteration?: number;
   input: unknown;
   result: string;
   status: OpenSwanExecutionStatus;
@@ -125,7 +137,326 @@ export type LegacyToolLoopResult = {
    *  events. Optional/additive: the legacy loop and subagentRegistry never set
    *  it, and no consumer requires it. */
   verificationReceipt?: VerificationReceipt;
+  /** Runtime-owned, value-free truth for a bound approval continuation. */
+  approvalResumeDisposition?: OpenSwanApprovalResumeDisposition;
 };
+
+export type OpenSwanTerminalState = 'succeeded' | 'partial' | 'failed' | 'cancelled';
+
+export type OpenSwanTerminalReason =
+  | 'clean_end_turn'
+  | 'step_cap'
+  | 'runtime_guard'
+  | 'edge_failure'
+  | 'verification_failed'
+  | 'verification_blocked'
+  | 'verification_unverified'
+  | 'delegation_incomplete'
+  | 'action_coverage_incomplete'
+  | 'action_coverage_failed'
+  | 'persistence_unverified'
+  | 'user_cancelled';
+
+export type OpenSwanVerificationDisposition = 'none' | 'passed' | 'unverified' | 'blocked' | 'failed';
+export type OpenSwanPersistenceDisposition = 'verified' | 'cancelled' | 'unverified';
+export type OpenSwanDelegationDisposition = 'none' | 'completed' | 'incomplete';
+export type OpenSwanActionCoverageDisposition = 'none' | 'verified' | 'incomplete' | 'blocked' | 'failed';
+export type OpenSwanRequiredToolDisposition = 'none' | 'satisfied' | 'blocked' | 'failed';
+
+type OpenSwanTerminalToolEventLike = Readonly<{
+  /** Legacy/native loop event field. */
+  tool?: unknown;
+  /** Typed downstream action field. */
+  tool_name?: unknown;
+  status?: unknown;
+  metadata?: unknown;
+}>;
+
+function asTerminalRecord(value: unknown): Record<string, unknown> | null {
+  return value != null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function asExactTerminalToolName(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 128) return null;
+  return value.trim() === value ? value : null;
+}
+
+function terminalEventPolicyMutates(metadata: unknown): boolean {
+  const record = asTerminalRecord(metadata);
+  if (!record) return false;
+  const catalogPolicy = asTerminalRecord(record.toolPolicy);
+  const mcpPolicy = asTerminalRecord(record.policy);
+  return catalogPolicy?.mutatesState === true
+    || mcpPolicy?.mutatesState === true
+    || record.mutatesState === true;
+}
+
+/**
+ * Resolve terminal truth from attempted ordinary-turn tools without reading
+ * provider prose. `requiredToolNames` comes from the runtime-owned planner's
+ * high-priority tool items. `mutatingToolNames` is the runtime's current
+ * catalog-policy projection and closes the gap for gate-blocked events that
+ * were emitted before a policy snapshot could be attached. MCP/typed events
+ * may instead carry their trusted policy snapshot in metadata.
+ *
+ * Only attempted required work is classified: a planner recommendation that
+ * the model never called is not fabricated as a failure. Once attempted, any
+ * failure wins; blocked/manual/unknown states remain deferred; and passed or
+ * completed attempts satisfy the gate. A failed unrelated read-only
+ * exploration is deliberately ignored.
+ */
+export function resolveOpenSwanRequiredToolDisposition(input: {
+  toolEvents?: ReadonlyArray<unknown> | null;
+  requiredToolNames?: ReadonlyArray<string> | null;
+  mutatingToolNames?: ReadonlyArray<string> | null;
+}): OpenSwanRequiredToolDisposition {
+  const requiredToolNames = new Set(
+    (input.requiredToolNames || []).flatMap((value) => {
+      const name = asExactTerminalToolName(value);
+      return name ? [name] : [];
+    }),
+  );
+  const mutatingToolNames = new Set(
+    (input.mutatingToolNames || []).flatMap((value) => {
+      const name = asExactTerminalToolName(value);
+      return name ? [name] : [];
+    }),
+  );
+  let sawSatisfied = false;
+  let sawBlocked = false;
+
+  for (const candidate of input.toolEvents || []) {
+    const event = asTerminalRecord(candidate) as OpenSwanTerminalToolEventLike | null;
+    if (!event) continue;
+    const names = [
+      asExactTerminalToolName(event.tool),
+      asExactTerminalToolName(event.tool_name),
+    ].filter((value): value is string => value != null);
+    const requiredByName = names.some((name) => requiredToolNames.has(name));
+    const mutationByName = names.some((name) => mutatingToolNames.has(name));
+    const mutationByPolicy = terminalEventPolicyMutates(event.metadata);
+    if (!requiredByName && !mutationByName && !mutationByPolicy) continue;
+
+    if (event.status === 'failed') return 'failed';
+    if (event.status === 'blocked' || event.status === 'manual_required') {
+      sawBlocked = true;
+      continue;
+    }
+    if (event.status === 'passed' || event.status === 'completed') {
+      sawSatisfied = true;
+      continue;
+    }
+    // A terminal required-tool event with a future, missing, planned, or
+    // running state is not proof of success. Keep it deferred, never failed,
+    // so Chat can offer approval/input/recovery rather than claim an error.
+    sawBlocked = true;
+  }
+
+  return sawBlocked ? 'blocked' : sawSatisfied ? 'satisfied' : 'none';
+}
+
+/** Authoritative prose-independent outcome for one OpenSwan turn. */
+export type OpenSwanTerminalReceipt = Readonly<{
+  state: OpenSwanTerminalState;
+  reason: OpenSwanTerminalReason;
+  completionVerified: boolean;
+  resumable: boolean;
+  checkpoint: ToolLoopCheckpoint | null;
+  /** Value-free pointer to the exact device-local checkpoint event. */
+  resumeLocator?: OpenSwanResumeLocator | null;
+}>;
+
+export function buildOpenSwanTerminalReceipt(input: {
+  cancelled: boolean;
+  incomplete: boolean;
+  incompleteReason?: LegacyToolLoopResult['incompleteReason'] | null;
+  checkpoint?: ToolLoopCheckpoint | null;
+  resumeLocator?: OpenSwanResumeLocator | null;
+  verificationDisposition?: OpenSwanVerificationDisposition | null;
+  persistenceDisposition?: OpenSwanPersistenceDisposition | null;
+  delegationDisposition?: OpenSwanDelegationDisposition | null;
+  actionCoverageDisposition?: OpenSwanActionCoverageDisposition | null;
+  requiredToolDisposition?: OpenSwanRequiredToolDisposition | null;
+  approvalResumeDisposition?: OpenSwanApprovalResumeDisposition | null;
+}): OpenSwanTerminalReceipt {
+  const checkpoint = input.checkpoint ?? null;
+  const resumable = checkpoint != null;
+  const resumeLocator = input.resumeLocator ?? null;
+
+  if (
+    input.cancelled
+    || input.incompleteReason === 'cancelled'
+    || input.persistenceDisposition === 'cancelled'
+  ) {
+    return {
+      state: 'cancelled',
+      reason: 'user_cancelled',
+      completionVerified: false,
+      resumable,
+      checkpoint,
+      ...(resumeLocator ? { resumeLocator } : {}),
+    };
+  }
+
+  if (input.approvalResumeDisposition?.state === 'failed') {
+    return {
+      state: 'failed',
+      reason: 'action_coverage_failed',
+      completionVerified: false,
+      resumable: false,
+      checkpoint: null,
+    };
+  }
+
+  if (input.approvalResumeDisposition?.state === 'incomplete') {
+    return {
+      state: 'partial',
+      reason: 'action_coverage_incomplete',
+      completionVerified: false,
+      resumable: false,
+      checkpoint: null,
+    };
+  }
+
+  // Ordinary attempted mutations and planner-high tool calls are requested
+  // action coverage even without an explicit A1-A3 contract. Reuse the
+  // existing bounded terminal reasons so Chat/Room persistence and recovery
+  // surfaces retain one compatible vocabulary while still failing closed.
+  if (input.requiredToolDisposition === 'failed') {
+    return {
+      state: 'failed',
+      reason: 'action_coverage_failed',
+      completionVerified: false,
+      resumable: false,
+      checkpoint: null,
+    };
+  }
+
+  if (input.incompleteReason === 'cap') {
+    return {
+      state: 'partial',
+      reason: 'step_cap',
+      completionVerified: false,
+      resumable,
+      checkpoint,
+      ...(resumeLocator ? { resumeLocator } : {}),
+    };
+  }
+
+  if (input.incomplete || input.incompleteReason) {
+    return {
+      state: 'failed',
+      reason: input.incompleteReason === 'guard' ? 'runtime_guard' : 'edge_failure',
+      completionVerified: false,
+      resumable,
+      checkpoint,
+      ...(resumeLocator ? { resumeLocator } : {}),
+    };
+  }
+
+  if (input.actionCoverageDisposition === 'failed') {
+    return {
+      state: 'failed',
+      reason: 'action_coverage_failed',
+      completionVerified: false,
+      resumable: false,
+      checkpoint: null,
+    };
+  }
+
+  if (input.actionCoverageDisposition === 'blocked') {
+    return {
+      state: 'partial',
+      reason: 'action_coverage_incomplete',
+      completionVerified: false,
+      resumable: false,
+      checkpoint: null,
+    };
+  }
+
+  if (input.verificationDisposition === 'failed') {
+    return {
+      state: 'failed',
+      reason: 'verification_failed',
+      completionVerified: false,
+      resumable: false,
+      checkpoint: null,
+    };
+  }
+
+  if (input.requiredToolDisposition === 'blocked') {
+    return {
+      state: 'partial',
+      reason: 'action_coverage_incomplete',
+      completionVerified: false,
+      resumable: false,
+      checkpoint: null,
+    };
+  }
+
+  if (input.verificationDisposition === 'blocked') {
+    return {
+      state: 'partial',
+      reason: 'verification_blocked',
+      completionVerified: false,
+      resumable: false,
+      checkpoint: null,
+    };
+  }
+
+  if (input.verificationDisposition === 'unverified') {
+    return {
+      state: 'partial',
+      reason: 'verification_unverified',
+      completionVerified: false,
+      resumable: false,
+      checkpoint: null,
+    };
+  }
+
+  if (input.delegationDisposition === 'incomplete') {
+    return {
+      state: 'partial',
+      reason: 'delegation_incomplete',
+      completionVerified: false,
+      resumable: false,
+      checkpoint: null,
+    };
+  }
+
+  if (input.actionCoverageDisposition === 'incomplete') {
+    return {
+      state: 'partial',
+      reason: 'action_coverage_incomplete',
+      completionVerified: false,
+      resumable: false,
+      checkpoint: null,
+    };
+  }
+
+  // Persistence uncertainty only replaces an otherwise-successful outcome;
+  // task-specific failure/partial reasons above remain the useful truth.
+  if (input.persistenceDisposition === 'unverified') {
+    return {
+      state: 'failed',
+      reason: 'persistence_unverified',
+      completionVerified: false,
+      resumable,
+      checkpoint,
+      ...(resumeLocator ? { resumeLocator } : {}),
+    };
+  }
+
+  return {
+    state: 'succeeded',
+    reason: 'clean_end_turn',
+    completionVerified: true,
+    resumable: false,
+    checkpoint: null,
+  };
+}
 
 /** Legacy gate signature (OpenSwanRunCallbacks.onToolApproval). */
 export type LegacyToolApprovalGate = (call: { name: string; input: any }) => Promise<'approve' | 'reject'>;
@@ -260,6 +591,25 @@ function safeStringify(value: unknown): string {
   }
 }
 
+function attachmentSourceEventSummary(
+  raw: unknown,
+  status: OpenSwanExecutionStatus,
+): string {
+  const record = raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? raw as Record<string, unknown>
+    : null;
+  if (status === 'passed' && record?.sourceObserved === true) {
+    const attachmentId = typeof record.attachmentId === 'string'
+      ? record.attachmentId
+      : 'current-turn attachment';
+    return `Exact attachment source observed for ${attachmentId}; private source content is omitted from event history.`;
+  }
+  const errorCode = typeof record?.errorCode === 'string'
+    ? record.errorCode
+    : 'attachment_read_failed';
+  return `Attachment source read failed (${errorCode}); private source content is omitted from event history.`;
+}
+
 /**
  * Wraps a bridge tool handler result (`{ok, data: {raw, text}}`) into the
  * shape the typed loop + legacy consumers need:
@@ -292,6 +642,9 @@ export function shapeLegacyToolHandlerResult(args: {
   const status: OpenSwanExecutionStatus = inner.ok
     ? deriveLegacyDispatchStatus(toolName, raw, approvalRequest)
     : 'failed';
+  const eventText = toolName === 'attachments.read_source'
+    ? attachmentSourceEventSummary(raw, status)
+    : formattedText;
   const capture = inner.ok
     ? buildDesignAppRuntimeToolCaptureMetadata(toolName, raw, args.input)
     : null;
@@ -312,7 +665,7 @@ export function shapeLegacyToolHandlerResult(args: {
       ...(args.toolPolicy ? { toolPolicy: args.toolPolicy } : {}),
       approvalRequest,
       [LEGACY_RUNTIME_STATUS_KEY]: status,
-      [LEGACY_EVENT_TEXT_KEY]: formattedText,
+      [LEGACY_EVENT_TEXT_KEY]: eventText,
     },
     capture,
   );
@@ -340,13 +693,21 @@ export function shapeLegacyToolHandlerResult(args: {
  */
 export function buildLegacyToolEventFromResult(args: {
   toolName: string;
+  toolUseId?: string;
+  providerIteration?: number;
   input: unknown;
   result: AgentToolResult;
   rejectedByGate?: boolean;
 }): LegacyToolEvent {
+  const providerIteration = Number.isInteger(args.providerIteration)
+    && Number(args.providerIteration) > 0
+    ? Number(args.providerIteration)
+    : null;
   if (args.rejectedByGate) {
     return {
       tool: args.toolName,
+      ...(args.toolUseId ? { toolUseId: args.toolUseId } : {}),
+      ...(providerIteration != null ? { providerIteration } : {}),
       input: args.input,
       result: LEGACY_GATE_REJECTION_TEXT,
       status: 'blocked',
@@ -374,6 +735,8 @@ export function buildLegacyToolEventFromResult(args: {
   ) as OpenSwanExecutionStatus;
   return {
     tool: args.toolName,
+    ...(args.toolUseId ? { toolUseId: args.toolUseId } : {}),
+    ...(providerIteration != null ? { providerIteration } : {}),
     input: args.input,
     result: text,
     status,
@@ -387,6 +750,11 @@ export function buildLegacyToolEventFromResult(args: {
  *  injected by the runtime (impure dispatch stays out of this pure layer). */
 export type LegacyObservationDispatch = (
   observationTool: string,
+  context: Readonly<{
+    parentToolUseId?: string;
+    iteration: number;
+    ordinal: number;
+  }>,
 ) => Promise<{ text: string; status: string }>;
 
 /**
@@ -445,11 +813,16 @@ export function createLegacyRoundNudgeHook(args: {
       const roundEvents = args.toolEvents.slice(
         Math.max(0, args.toolEvents.length - ctx.toolResults.length),
       );
-      for (const event of roundEvents) {
+      for (let eventIndex = 0; eventIndex < roundEvents.length; eventIndex += 1) {
+        const event = roundEvents[eventIndex];
         const reobserve = planDeterministicReobserve(event.tool, String(event.status));
         if (!reobserve) continue;
         try {
-          const obs = await args.dispatchObservation(reobserve.observationTool);
+          const obs = await args.dispatchObservation(reobserve.observationTool, {
+            ...(event.toolUseId ? { parentToolUseId: event.toolUseId } : {}),
+            iteration: event.providerIteration || ctx.iteration,
+            ordinal: eventIndex + 1,
+          });
           const note = summarizeObservationForRetry(obs?.text, String(obs?.status), { maxChars: 1400 });
           if (note) {
             notes.push(note);
@@ -683,6 +1056,17 @@ export function parseSwanbotToolTurnData(data: unknown): {
     turn: { stop_reason: stop, content: blocks, ...(usage ? { usage } : {}) },
     routing,
   };
+}
+
+/**
+ * The relay reports an upstream provider failure as an HTTP-200 response so
+ * callers can preserve its user-facing recovery text. It is still a failed
+ * provider turn, not a clean assistant `end_turn`.
+ */
+export function hasSwanbotRoutingFallback(
+  routing: SwanBotRoutingInfo | null | undefined,
+): boolean {
+  return routing?.routing_fallback != null;
 }
 
 // ─── Result mapping (AgentRunResult → legacy loop result) ───────────────────

@@ -117,21 +117,88 @@ interface AgentTokenProps {
   isOwn: boolean;
   canvasW: number;
   canvasH: number;
-  onDragEnd: (agentId: string, newX: number, newY: number) => void;
+  onDragEnd: (agentId: string, newX: number, newY: number) => Promise<boolean>;
   onPress: (agent: CircleOfficeAgent) => void;
 }
 
 function AgentToken({ agent, isOwn, canvasW, canvasH, onDragEnd, onPress }: AgentTokenProps) {
-  const px = (agent.position_x ?? 0.5) * canvasW;
-  const py = (agent.position_y ?? 0.5) * canvasH;
+  const initialPosition = {
+    x: Math.max(0, Math.min(1, agent.position_x ?? 0.5)),
+    y: Math.max(0, Math.min(1, agent.position_y ?? 0.5)),
+  };
+  const px = initialPosition.x * canvasW;
+  const py = initialPosition.y * canvasH;
 
   const pan = useRef(new Animated.ValueXY({ x: px - AGENT_SIZE / 2, y: py - AGENT_SIZE / 2 })).current;
-  // Track current absolute position for drag calculations
   const currentPos = useRef({ x: px - AGENT_SIZE / 2, y: py - AGENT_SIZE / 2 });
+  const displayedPositionRef = useRef(initialPosition);
+  const authoritativePositionRef = useRef(initialPosition);
+  const lastIncomingPositionRef = useRef(initialPosition);
+  const committedPositionRef = useRef<{ x: number; y: number } | null>(null);
+  const draggingRef = useRef(false);
+  const gestureActiveRef = useRef(false);
+  const savingRef = useRef(false);
+  const dragGenerationRef = useRef(0);
+  const canvasSizeRef = useRef({ width: canvasW, height: canvasH });
+  const mountedRef = useRef(true);
+  const latestRef = useRef({ agentId: agent.id, isOwn, canvasW, canvasH, onDragEnd });
+  latestRef.current = { agentId: agent.id, isOwn, canvasW, canvasH, onDragEnd };
   const isBuilding = agent.status === 'building';
   const isOffline  = agent.status === 'offline';
   const ringColor  = STATUS_COLORS[agent.status] || STATUS_COLORS.offline;
   const sprite     = getSprite(agent.id);
+
+  const syncPan = useCallback((position: { x: number; y: number }) => {
+    const { canvasW: width, canvasH: height } = latestRef.current;
+    const left = position.x * width - AGENT_SIZE / 2;
+    const top = position.y * height - AGENT_SIZE / 2;
+    displayedPositionRef.current = position;
+    currentPos.current = { x: left, y: top };
+    pan.setOffset({ x: 0, y: 0 });
+    pan.setValue({ x: left, y: top });
+  }, [pan]);
+
+  useEffect(() => () => {
+    mountedRef.current = false;
+    dragGenerationRef.current += 1;
+  }, []);
+
+  useEffect(() => {
+    const incoming = {
+      x: Math.max(0, Math.min(1, agent.position_x ?? 0.5)),
+      y: Math.max(0, Math.min(1, agent.position_y ?? 0.5)),
+    };
+    lastIncomingPositionRef.current = incoming;
+
+    const committed = committedPositionRef.current;
+    const incomingMatchesCommit = committed
+      && Math.abs(committed.x - incoming.x) < 0.0001
+      && Math.abs(committed.y - incoming.y) < 0.0001;
+    if (incomingMatchesCommit) committedPositionRef.current = null;
+
+    if (!isOwn) {
+      committedPositionRef.current = null;
+      authoritativePositionRef.current = incoming;
+    } else if (!committed || incomingMatchesCommit) {
+      authoritativePositionRef.current = incoming;
+    }
+
+    const viewportChanged = canvasSizeRef.current.width !== canvasW
+      || canvasSizeRef.current.height !== canvasH;
+    canvasSizeRef.current = { width: canvasW, height: canvasH };
+    if ((viewportChanged || !isOwn) && draggingRef.current) {
+      gestureActiveRef.current = false;
+      draggingRef.current = false;
+      dragGenerationRef.current += 1;
+    }
+
+    if (!draggingRef.current && !savingRef.current) {
+      syncPan(committedPositionRef.current ?? authoritativePositionRef.current);
+    } else if (!draggingRef.current) {
+      // Preserve the optimistic normalized position while the viewport changes.
+      syncPan(displayedPositionRef.current);
+    }
+  }, [agent.position_x, agent.position_y, canvasH, canvasW, isOwn, syncPan]);
 
   // Inject CSS for building effects (web only)
   useEffect(() => { if (isBuilding) injectBuildingCSS(); }, [isBuilding]);
@@ -152,11 +219,50 @@ function AgentToken({ agent, isOwn, canvasW, canvasH, onDragEnd, onPress }: Agen
     }
   }, [isBuilding, pulseAnim]);
 
+  const finishDragRef = useRef<(dx: number, dy: number) => void>(() => {});
+  finishDragRef.current = (dx, dy) => {
+    if (!gestureActiveRef.current) {
+      draggingRef.current = false;
+      syncPan(authoritativePositionRef.current);
+      return;
+    }
+    gestureActiveRef.current = false;
+    const { agentId, canvasW: width, canvasH: height, onDragEnd: persist } = latestRef.current;
+    draggingRef.current = false;
+    pan.flattenOffset();
+    const rawX = currentPos.current.x + dx + AGENT_SIZE / 2;
+    const rawY = currentPos.current.y + dy + AGENT_SIZE / 2;
+    const normalized = {
+      x: Math.max(0, Math.min(1, rawX / width)),
+      y: Math.max(0, Math.min(1, rawY / height)),
+    };
+    syncPan(normalized);
+    savingRef.current = true;
+    const generation = ++dragGenerationRef.current;
+
+    void persist(agentId, normalized.x, normalized.y).then(saved => {
+      if (!mountedRef.current || generation !== dragGenerationRef.current) return;
+      savingRef.current = false;
+      if (saved) {
+        authoritativePositionRef.current = normalized;
+        committedPositionRef.current = normalized;
+        syncPan(normalized);
+      } else {
+        committedPositionRef.current = null;
+        authoritativePositionRef.current = lastIncomingPositionRef.current;
+        syncPan(authoritativePositionRef.current);
+      }
+    });
+  };
+
   const panResponder = useRef(
     PanResponder.create({
-      onStartShouldSetPanResponder: () => isOwn,
-      onMoveShouldSetPanResponder: () => isOwn,
+      onStartShouldSetPanResponder: () => latestRef.current.isOwn && !savingRef.current,
+      onMoveShouldSetPanResponder: () => latestRef.current.isOwn && !savingRef.current,
       onPanResponderGrant: () => {
+        gestureActiveRef.current = true;
+        draggingRef.current = true;
+        dragGenerationRef.current += 1;
         pan.setOffset({ x: currentPos.current.x, y: currentPos.current.y });
         pan.setValue({ x: 0, y: 0 });
       },
@@ -164,16 +270,13 @@ function AgentToken({ agent, isOwn, canvasW, canvasH, onDragEnd, onPress }: Agen
         pan.setValue({ x: gs.dx, y: gs.dy });
       },
       onPanResponderRelease: (_, gs) => {
+        finishDragRef.current(gs.dx, gs.dy);
+      },
+      onPanResponderTerminate: () => {
+        gestureActiveRef.current = false;
+        draggingRef.current = false;
         pan.flattenOffset();
-        const rawX = currentPos.current.x + gs.dx + AGENT_SIZE / 2;
-        const rawY = currentPos.current.y + gs.dy + AGENT_SIZE / 2;
-        const clampedX = Math.max(0, Math.min(canvasW, rawX));
-        const clampedY = Math.max(0, Math.min(canvasH, rawY));
-        const finalLeft = clampedX - AGENT_SIZE / 2;
-        const finalTop  = clampedY - AGENT_SIZE / 2;
-        currentPos.current = { x: finalLeft, y: finalTop };
-        pan.setValue({ x: finalLeft, y: finalTop });
-        onDragEnd(agent.id, clampedX / canvasW, clampedY / canvasH);
+        syncPan(authoritativePositionRef.current);
       },
     })
   ).current;
@@ -344,15 +447,46 @@ const DotGrid = React.memo(function DotGrid({ width, height }: { width: number; 
 export default function PixelOfficeCanvas({ agents, currentUserId, onPositionChange }: Props) {
   const { width: screenW } = useWindowDimensions();
   const isDesktop = Platform.OS === 'web' && screenW > 768;
-  const canvasW = isDesktop ? CANVAS_W : Math.min(screenW - 32, CANVAS_W);
+  const canvasW = isDesktop ? CANVAS_W : Math.max(1, Math.min(screenW - 32, CANVAS_W));
   const canvasH = isDesktop ? CANVAS_H : Math.round(canvasW * (CANVAS_H / CANVAS_W));
 
   const [selectedAgent, setSelectedAgent] = useState<CircleOfficeAgent | null>(null);
+  const [positionError, setPositionError] = useState<string | null>(null);
+  const positionGenerationRef = useRef(0);
+  const mountedRef = useRef(true);
+
+  useEffect(() => () => {
+    mountedRef.current = false;
+    positionGenerationRef.current += 1;
+  }, []);
+
+  useEffect(() => {
+    setSelectedAgent(current => current
+      ? agents.find(agent => agent.id === current.id) ?? null
+      : null);
+  }, [agents]);
 
   const handleDragEnd = useCallback(async (agentId: string, x: number, y: number) => {
-    await updateAgentPosition(agentId, x, y);
-    onPositionChange?.(agentId, x, y);
-  }, [onPositionChange]);
+    const generation = ++positionGenerationRef.current;
+    setPositionError(null);
+    try {
+      await updateAgentPosition(agentId, x, y);
+      if (!mountedRef.current) return true;
+      try {
+        onPositionChange?.(agentId, x, y);
+      } catch (callbackError) {
+        console.warn('[PixelOfficeCanvas] Position callback failed after persistence:', callbackError);
+      }
+      if (generation === positionGenerationRef.current) setPositionError(null);
+      return true;
+    } catch {
+      if (mountedRef.current && generation === positionGenerationRef.current) {
+        const agentName = agents.find(agent => agent.id === agentId)?.name ?? 'Agent';
+        setPositionError(`${agentName} could not be moved. The token was returned to its last saved position.`);
+      }
+      return false;
+    }
+  }, [agents, onPositionChange]);
 
   const onlineCount = agents.filter(a => a.status !== 'offline').length;
 
@@ -369,6 +503,26 @@ export default function PixelOfficeCanvas({ agents, currentUserId, onPositionCha
           <Text style={styles.totalText}>{agents.length} agents</Text>
         </View>
       </View>
+
+      {positionError ? (
+        <View
+          style={styles.positionError}
+          accessible
+          accessibilityRole="alert"
+          accessibilityLiveRegion="assertive"
+          accessibilityLabel={positionError}
+        >
+          <Text style={styles.positionErrorText}>{positionError}</Text>
+          <Pressable
+            onPress={() => setPositionError(null)}
+            accessibilityRole="button"
+            accessibilityLabel="Dismiss position error"
+            style={styles.positionErrorDismiss}
+          >
+            <Text style={styles.positionErrorDismissText}>DISMISS</Text>
+          </Pressable>
+        </View>
+      ) : null}
 
       {/* Canvas */}
       <ScrollView
@@ -470,6 +624,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 12,
   },
+  positionError: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    backgroundColor: '#2A1116', borderBottomWidth: 1, borderBottomColor: '#7F1D1D',
+    paddingHorizontal: 12, paddingVertical: 9,
+  },
+  positionErrorText: { color: '#FCA5A5', fontSize: 11, lineHeight: 16, flex: 1 },
+  positionErrorDismiss: {
+    minHeight: 34, justifyContent: 'center', paddingHorizontal: 8,
+    borderRadius: 5, borderWidth: 1, borderColor: '#991B1B',
+  },
+  positionErrorDismissText: { color: '#FCA5A5', fontSize: 9, fontWeight: '800' },
   onlineBadge: {
     flexDirection: 'row',
     alignItems: 'center',

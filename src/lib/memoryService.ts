@@ -2352,10 +2352,7 @@ export async function retrieveRelevantMemories(opts: {
 export async function compactConversation(
   messages: Array<{ role: string; text: string }>,
 ): Promise<{ summary: string; decisions: string[]; openQuestions: string[] }> {
-  const GEMINI_API_KEY = process.env.EXPO_PUBLIC_ALLOW_PLATFORM_MODEL_KEYS === 'true'
-    ? process.env.EXPO_PUBLIC_GEMINI_API_KEY || ''
-    : '';
-  if (!GEMINI_API_KEY || messages.length < 6) {
+  if (messages.length < 6) {
     return { summary: '', decisions: [], openQuestions: [] };
   }
 
@@ -2364,13 +2361,11 @@ export async function compactConversation(
   ).join('\n');
 
   try {
-    const resp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: `Analyze this conversation and extract:
+    const { data, error } = await supabase.functions.invoke('llm-proxy', {
+      body: {
+        provider: 'google_ai',
+        model: 'gemini-3.6-flash',
+        messages: [{ role: 'user', content: `Analyze this conversation and extract:
 1. A concise summary (2-3 sentences max)
 2. Key decisions made (array of strings)
 3. Open questions still unresolved (array of strings)
@@ -2379,15 +2374,17 @@ Conversation:
 ${transcript}
 
 Return JSON: { "summary": "...", "decisions": ["..."], "openQuestions": ["..."] }
-Return ONLY the JSON, no other text.` }] }],
-          generationConfig: { maxOutputTokens: 512, temperature: 0.1 },
-        }),
+Return ONLY the JSON, no other text.` }],
+        max_tokens: 512,
+        temperature: 0.1,
       },
-    );
+    });
 
-    if (!resp.ok) return { summary: '', decisions: [], openQuestions: [] };
-    const data = await resp.json();
-    let text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    if (error || data?.error) {
+      console.warn('[MemoryService] Server-side Google AI compaction unavailable. Connect or verify a Google AI key in Marketplace.');
+      return { summary: '', decisions: [], openQuestions: [] };
+    }
+    let text = typeof data?.response === 'string' ? data.response : '';
     text = text.replace(/^```json?\n?/i, '').replace(/\n?```$/i, '').trim();
     const parsed = JSON.parse(text);
     return {
@@ -2396,6 +2393,7 @@ Return ONLY the JSON, no other text.` }] }],
       openQuestions: Array.isArray(parsed.openQuestions) ? parsed.openQuestions : [],
     };
   } catch {
+    console.warn('[MemoryService] Server-side Google AI compaction unavailable. Connect or verify a Google AI key in Marketplace.');
     return { summary: '', decisions: [], openQuestions: [] };
   }
 }

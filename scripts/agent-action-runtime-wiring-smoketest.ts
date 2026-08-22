@@ -287,19 +287,19 @@ const canaries: Canary[] = [
     label: 'fill',
     source: fillSource,
     tool: 'browser.fill_field',
-    bridgeMutation: 'fillGuardedNonSecretField({ ...sealedArgs })',
+    bridgeMutation: 'fillGuardedNonSecretField({ ...sealedArgs,',
   },
   {
     label: 'toggle',
     source: toggleSource,
     tool: 'browser.set_toggle',
-    bridgeMutation: 'setGuardedBrowserToggleState({ ...sealedArgs })',
+    bridgeMutation: 'setGuardedBrowserToggleState({ ...sealedArgs,',
   },
   {
     label: 'select',
     source: selectSource,
     tool: 'browser.select_option',
-    bridgeMutation: 'setGuardedBrowserSelectOption({ ...sealedArgs })',
+    bridgeMutation: 'setGuardedBrowserSelectOption({ ...sealedArgs,',
   },
 ];
 

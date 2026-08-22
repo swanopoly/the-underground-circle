@@ -104,13 +104,23 @@ export function uniqueOpsLookupKeys(values: unknown[]): string[] {
 /** Every key a run node can be indexed under. */
 export function buildOpsRunNodeLookupKeys(node: OfficeRunNodeLike | null | undefined): string[] {
   if (!node) return [];
+  const exactKeys = buildOpsRunNodeExactLookupKeys(node);
+  if (exactKeys.length > 0) return exactKeys;
   return uniqueOpsLookupKeys([
     node.agentName,
-    node.subjectKey,
     node.subjectDisplayName,
+  ]);
+}
+
+/** Canonical run identity keys, excluding display-name fallbacks. */
+export function buildOpsRunNodeExactLookupKeys(node: OfficeRunNodeLike | null | undefined): string[] {
+  if (!node) return [];
+  const displayKeys = new Set(uniqueOpsLookupKeys([node.agentName, node.subjectDisplayName]));
+  return uniqueOpsLookupKeys([
+    node.subjectKey,
     node.subjectDbId,
     node.subjectAliases,
-  ]);
+  ]).filter((key) => !displayKeys.has(key));
 }
 
 /**
@@ -119,13 +129,13 @@ export function buildOpsRunNodeLookupKeys(node: OfficeRunNodeLike | null | undef
  * matters: earlier keys are the more specific match, and the getters below
  * return on the first hit.
  */
-export function buildOfficeAgentRunLookupKeys(agent: OfficeAgent | null | undefined): string[] {
+export function buildOfficeAgentExactRunLookupKeys(agent: OfficeAgent | null | undefined): string[] {
   if (!agent) return [];
   const subject = buildAgentRuntimeSubject(agent, {
     dbAgentId: isUuidLike(agent.id) ? agent.id : null,
   });
+  const displayKeys = new Set(uniqueOpsLookupKeys([agent.name, subject.displayName]));
   return uniqueOpsLookupKeys([
-    agent.name,
     agent.id,
     agent.sessionKey,
     getAgentIdentityKey(agent),
@@ -136,6 +146,18 @@ export function buildOfficeAgentRunLookupKeys(agent: OfficeAgent | null | undefi
     subject.memoryAgentAliases,
     subject.runAgentAliases,
     subject.legacyIds,
+  ]).filter((key) => !displayKeys.has(key));
+}
+
+export function buildOfficeAgentRunLookupKeys(agent: OfficeAgent | null | undefined): string[] {
+  if (!agent) return [];
+  const subject = buildAgentRuntimeSubject(agent, {
+    dbAgentId: isUuidLike(agent.id) ? agent.id : null,
+  });
+  return uniqueOpsLookupKeys([
+    buildOfficeAgentExactRunLookupKeys(agent),
+    agent.name,
+    subject.displayName,
   ]);
 }
 
@@ -147,11 +169,16 @@ export function getOpsRunNodesForAgent<T extends OfficeRunNodeLike>(
   nodesByKey: Map<string, T[]> | null | undefined,
 ): T[] {
   const out: T[] = [];
-  if (!nodesByKey) return out;
+  if (!agent || !nodesByKey) return out;
   const seen = new Set<string>();
+  const exactAgentKeys = new Set(buildOfficeAgentExactRunLookupKeys(agent));
   for (const key of buildOfficeAgentRunLookupKeys(agent)) {
     for (const node of nodesByKey.get(key) || []) {
       if (!node || seen.has(node.runId)) continue;
+      const exactNodeKeys = buildOpsRunNodeExactLookupKeys(node);
+      if (exactNodeKeys.length > 0 && !exactNodeKeys.some((nodeKey) => exactAgentKeys.has(nodeKey))) {
+        continue;
+      }
       seen.add(node.runId);
       out.push(node);
     }

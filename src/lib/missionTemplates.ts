@@ -20,7 +20,7 @@ export const MISSION_TEMPLATES: MissionTemplate[] = [
     name: 'Dev Sprint',
     description: 'Ship a feature in one week. Plan, build, review, deploy.',
     icon: '>_',
-    iconColor: '#22d3ee',
+    iconColor: '#6366f1',
     category: 'dev',
     suggestedDeadlineDays: 7,
     defaultTasks: [

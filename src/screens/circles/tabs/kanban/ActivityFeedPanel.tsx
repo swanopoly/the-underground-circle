@@ -14,7 +14,7 @@
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
-  View, Text, ScrollView, StyleSheet, Platform,
+  View, Text, ScrollView, StyleSheet, Platform, Pressable,
 } from 'react-native';
 import { supabase } from '../../../../lib/supabase';
 import RunMetadataSummary from '../../../../components/chat/RunMetadataSummary';
@@ -27,11 +27,13 @@ import {
 import {
   buildFeedTimeline,
   decideFeedLaneRetry,
+  readFeedTaskRunHandoffSnapshot,
 } from '../../../../lib/feedTimelineMergeCore';
 
 interface Props {
   circleId: string;
   agents: CircleOfficeAgent[];
+  onOpenOfficeRun?: (runId: string) => void;
 }
 
 interface ActivityItem {
@@ -78,6 +80,7 @@ interface TaskRunFeedItem {
   run_kind: string;
   status: string;
   summary: string | null;
+  output_payload: Record<string, unknown> | null;
   model_used: string | null;
   token_count: number | null;
   duration_ms: number | null;
@@ -96,7 +99,7 @@ interface ProofItem {
 type FeedLane = 'activity' | 'automationRuns' | 'taskRuns' | 'proof';
 const FEED_LANES: readonly FeedLane[] = ['activity', 'automationRuns', 'taskRuns', 'proof'];
 
-export default function ActivityFeedPanel({ circleId, agents }: Props) {
+export default function ActivityFeedPanel({ circleId, agents, onOpenOfficeRun }: Props) {
   const [items, setItems] = useState<ActivityItem[]>([]);
   const [runs, setRuns] = useState<AutomationRun[]>([]);
   const [taskRuns, setTaskRuns] = useState<TaskRunFeedItem[]>([]);
@@ -193,9 +196,9 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
       if (!laneDisabledRef.current.taskRuns) {
         const taskRunRes = await supabase
           .from('task_runs')
-          .select('id, task_id, agent_id, openswan_run_id, run_kind, status, summary, model_used, token_count, duration_ms, started_at')
+          .select('id, task_id, agent_id, openswan_run_id, run_kind, status, summary, output_payload, model_used, token_count, duration_ms, started_at')
           .eq('circle_id', circleId)
-          .in('status', ['completed', 'failed'])
+          .in('status', ['running', 'blocked', 'completed', 'failed'])
           .order('started_at', { ascending: false })
           .limit(12);
 
@@ -298,20 +301,68 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
 
   const renderTaskRun = (run: TaskRunFeedItem) => {
     const agent = agents.find(a => a.id === run.agent_id);
-    const color = run.status === 'failed' ? '#ef4444' : (agent?.color || '#22c55e');
+    const handoff = readFeedTaskRunHandoffSnapshot(run);
+    const color = run.status === 'failed'
+      ? '#ef4444'
+      : run.status === 'blocked'
+        ? '#f97316'
+        : run.status === 'running'
+          ? '#60a5fa'
+          : (agent?.color || '#22c55e');
+    const statusIcon = run.status === 'failed'
+      ? '!'
+      : run.status === 'blocked'
+        ? '?'
+        : run.status === 'running'
+          ? '…'
+          : '>';
+    let fallbackSummary = 'Completed task run';
+    if (handoff?.status === 'accepted') {
+      fallbackSummary = 'Handoff accepted · awaiting verified result';
+    } else if (handoff?.status === 'outcome_unknown') {
+      fallbackSummary = 'Dispatch outcome unknown · verify before retrying';
+    } else if (run.status === 'running') {
+      fallbackSummary = 'Task run in progress';
+    } else if (run.status === 'blocked') {
+      fallbackSummary = 'Task run blocked';
+    } else if (run.status === 'failed') {
+      fallbackSummary = 'Task run failed';
+    }
     const runMetadata = run.openswan_run_id ? taskRunMetadataByRunId[run.openswan_run_id] : null;
     return (
       <View key={`task-run-${run.id}`} style={[s.item, { borderLeftWidth: 3, borderLeftColor: color }]}>
         <View style={s.itemRow}>
           <View style={[s.iconCircle, { backgroundColor: color + '20' }]}>
-            <Text style={[s.iconText, { color }]}>{run.status === 'failed' ? '!' : '>'}</Text>
+            <Text style={[s.iconText, { color }]}>{statusIcon}</Text>
           </View>
           <View style={s.itemContent}>
             <View style={s.itemNameRow}>
               <Text style={[s.itemAgent, { color }]}>{agent?.name || run.agent_id}</Text>
               <Text style={[s.sourceBadge, { color }]}>{run.run_kind}</Text>
             </View>
-            <Text style={s.itemAction}>{run.summary || 'Completed task run'}</Text>
+            <Text style={s.itemAction}>{handoff ? fallbackSummary : (run.summary || fallbackSummary)}</Text>
+            {handoff?.providerAcknowledgement ? (
+              <Text style={s.itemDetail} numberOfLines={3}>
+                Provider acknowledgement: {handoff.providerAcknowledgement}
+              </Text>
+            ) : null}
+            {handoff ? (
+              <View style={{ flexDirection: 'row', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
+                {handoff.externalConnectionId ? <Text style={{ color: '#6f6f6f', fontSize: 11 }}>connection {handoff.externalConnectionId}</Text> : null}
+                {handoff.externalSessionId ? <Text style={{ color: '#6f6f6f', fontSize: 11 }}>session {handoff.externalSessionId}</Text> : null}
+                {handoff.externalProviderRunId ? <Text style={{ color: '#6f6f6f', fontSize: 11 }}>turn {handoff.externalProviderRunId}</Text> : null}
+              </View>
+            ) : null}
+            {handoff?.canonicalAgentRunId && onOpenOfficeRun ? (
+              <Pressable
+                onPress={() => onOpenOfficeRun(handoff.canonicalAgentRunId!)}
+                accessibilityRole="button"
+                accessibilityLabel="Open this agent run in Office"
+                style={{ alignSelf: 'flex-start', marginTop: 8, borderWidth: 1, borderColor: '#60a5fa55', borderRadius: 7, paddingHorizontal: 9, paddingVertical: 5 }}
+              >
+                <Text style={{ color: '#60a5fa', fontSize: 11, fontWeight: '700' }}>OPEN RUN IN OFFICE</Text>
+              </Pressable>
+            ) : null}
             <View style={{ flexDirection: 'row', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
               {run.model_used ? <Text style={{ color: '#6f6f6f', fontSize: 11 }}>{run.model_used}</Text> : null}
               {run.duration_ms ? <Text style={{ color: '#6f6f6f', fontSize: 11 }}>{(run.duration_ms / 1000).toFixed(1)}s</Text> : null}
@@ -408,7 +459,7 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
 
   const renderProof = (pow: ProofItem) => {
     const powColors: Record<string, string> = {
-      commit: '#22d3ee', pr: '#a855f7', deploy: '#f59e0b',
+      commit: '#6366f1', pr: '#a855f7', deploy: '#f59e0b',
       agent_run: '#22c55e', checkin: '#6366f1', manual: '#e8e8e8',
     };
     const powIcons: Record<string, string> = {

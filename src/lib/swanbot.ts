@@ -6,6 +6,7 @@
  */
 
 import { supabase } from './supabase';
+import { indexSafeProfiles, loadSafeCircleProfiles } from './safeProfiles';
 import { getFreshAccessToken, safeGetUser } from './authSession';
 import { wrapUntrusted } from './untrustedContent';
 import { annotateUntrustedHeading } from './untrustedScanAnnotate';
@@ -18,10 +19,21 @@ import { buildResearchKnowledgeBundle, buildResearchSearchResponse, buildSpiritR
 import { getAgentIdentityKey, loadAgentIdentities } from './agentIdentity';
 import type { OpenSwanExecutionStatus } from './openswanExecution';
 import type { ComputerTaskEvidenceRecoveryObservation } from './computerTaskEvidenceRecovery';
+import {
+  summarizeComputerTaskTurnEvidence,
+  type AgentTaskCompletionExpectation,
+  type ComputerTaskToolEvidenceInput,
+  type ComputerTaskTurnEvidenceSummary,
+} from './computerTaskOutcome';
 import { getStrictLocalAiModeMessage, isStrictLocalAiModeEnabled, shouldBlockExternalAiProvider } from './privacyMode';
 import type { OpenSwanMemoryStores } from './openswanMemoryStores';
 import type { OpenSwanChatMode } from './openswanModePolicy';
 import type { OpenSwanResolvedSkill } from './openswanSkillResolution';
+import type {
+  OpenSwanExactCircleAuthority,
+  OpenSwanExactCircleAuthorityFence,
+} from './openswanToolRuntime';
+import type { OpenSwanAttachmentTurnSources } from './openSwanAttachmentTurnSources';
 import type { AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
 import type { ConnectedProviderSet } from './serviceProfileSouls';
 import {
@@ -164,9 +176,12 @@ import {
   buildOpenSwanToolApprovalKey,
   buildOpenSwanToolApprovalDigest,
   createOpenSwanRuntimeApprovalReceipt,
+  findOpenSwanApprovalResumeItem,
   isOpenSwanApprovalAuditPayload,
   isOpenSwanRuntimeApprovalCallIdentity,
+  normalizeOpenSwanApprovalResumeBindingV1,
   resolveOpenSwanRuntimeApprovalDecision,
+  type OpenSwanApprovalResumeBindingV1,
   type OpenSwanRuntimeApprovalAuthority,
   type OpenSwanRuntimeApprovalCallIdentity,
   type OpenSwanRuntimeApprovalReceipt,
@@ -204,6 +219,12 @@ export type SwanBotContext = {
   agentSubjectMetadata?: AgentRuntimeSubjectMetadata;
   discordContext?: string;
   model?: string | null;
+  /**
+   * The outer Chat dispatcher already selected and generation-sealed this
+   * exact provider/model. A failed attempt must not fall through to a second
+   * provider whose readiness was never authorized for the turn.
+   */
+  modelDispatchSealed?: boolean;
   thinkingLevel?: 'fast' | 'balanced' | 'deep';
   maxTokens?: number;
   chatHistory?: string;
@@ -267,6 +288,8 @@ export type SwanBotContext = {
    * exact canonical tool handler owns the durable runtime approval boundary.
    */
   threadId?: string;
+  /** Runtime-private exact rows allowed to authorize this approval retry. */
+  approvalResumeBinding?: OpenSwanApprovalResumeBindingV1 | null;
   activePluginIds?: string[];
   signal?: AbortSignal;
   toolApprovalGate?: (call: { name: string; input: unknown }) => Promise<'approve' | 'reject'>;
@@ -278,8 +301,23 @@ export type SwanBotContext = {
    * local desktop catalog and must never become a post-failure fallback.
    */
   forceClientToolLoop?: boolean;
+  /** Outer caller's task-proof expectation; also isolates receipt caching. */
+  completionExpectation?: AgentTaskCompletionExpectation;
+  /**
+   * Immutable outer run/request identity used only by the duplicate guard.
+   * Required for receipt-bearing computer turns so one run can never consume
+   * another run's cached terminal proof.
+   */
+  turnDedupeScope?: string;
   /** Hard catalog/dispatch ceiling derived from the task capability profile. */
   executionSurfaceGuard?: TaskExecutionSurfaceGuard;
+  /**
+   * Runtime-only proof channel for parent task orchestration. Ordinary chat
+   * callers omit it and retain the string response API. Computer-task callers
+   * use it to receive bounded receipt counts/status without exposing hidden
+   * receipt metadata to the model or UI transcript.
+   */
+  onTaskExecutionSummary?: (summary: ComputerTaskTurnEvidenceSummary) => void;
 };
 
 function getContextAgentSubjectKey(context: SwanBotContext): string | undefined {
@@ -386,8 +424,9 @@ function buildOpenSwanRuntimeContextBundle(args: {
   activeSoulKey?: string | null;
   identity?: any;
   spirit?: { id: string; name: string; tagline: string } | null;
+  spiritBehaviorPrompt?: string | null;
 }): string | null {
-  const { context, data, activeSoulKey, identity, spirit } = args;
+  const { context, data, activeSoulKey, identity, spirit, spiritBehaviorPrompt } = args;
   const sections: string[] = [];
 
   sections.push([
@@ -405,7 +444,9 @@ function buildOpenSwanRuntimeContextBundle(args: {
   if (contextSubjectKey) identityLines.push(`Agent subject key: ${contextSubjectKey}`);
   const legacyIds = getContextAgentLegacyIds(context);
   if (legacyIds.length) identityLines.push(`Legacy agent ids: ${legacyIds.slice(0, 6).join(', ')}`);
-  if (identity?.customProfileName) identityLines.push(`Custom profile: ${identity.customProfileName}`);
+  // A custom profile's name is private configuration, not model context. The
+  // bounded behavior projection is injected below without exposing its label.
+  if (context.spiritId?.startsWith('custom::')) identityLines.push('Custom Spirit profile assigned.');
   if (identity?.boundAiProvider || identity?.boundModel) {
     identityLines.push(`Preferred runtime: ${identity?.boundAiProvider || 'unknown'} / ${identity?.boundModel || 'unknown'}`);
   }
@@ -433,6 +474,8 @@ function buildOpenSwanRuntimeContextBundle(args: {
     soulLines.push(identity.soulPrompt.trim().slice(0, 1200));
   }
   if (soulLines.length > 1) sections.push(soulLines.join('\n'));
+
+  if (spiritBehaviorPrompt) sections.push(spiritBehaviorPrompt);
 
   sections.push([
     '## Runtime Bundle · TOOLS.md',
@@ -717,6 +760,32 @@ function addToHistory(circleId: string, role: 'user' | 'model', text: string): b
     }).catch(() => {});
   }
   return true;
+}
+
+/**
+ * Clear device-local session context on account exit without touching durable
+ * Supabase memories. These caches are not user-keyed, so retaining them would
+ * expose one account's prompt context to the next account using the browser.
+ */
+export function clearLocalSwanBotSessionState(): void {
+  conversationHistory.clear();
+  _activeBondId = null;
+  _activeBondCircleId = null;
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const keys: string[] = [];
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const key = localStorage.key(index);
+        if (key?.startsWith(HISTORY_STORAGE_PREFIX) || key?.startsWith('uc_mem_extract_')) {
+          keys.push(key);
+        }
+      }
+      keys.forEach((key) => localStorage.removeItem(key));
+    }
+  } catch {}
+  try {
+    delete (globalThis as any).__uc_last_a11y_tree;
+  } catch {}
 }
 
 // ─── Session Persistence ────────────────────────────────────────────────────
@@ -1135,10 +1204,13 @@ async function callLlmProxy(
  * confirmed. Results then atomically consume the same claim before model
  * resume. Loop until terminal or the shared continuation cap.
  *
- * Returns `null` on failure before local client tools run so the caller can
- * fall back to v1. After a client-side tool is attempted, failures return a
- * stop message instead of falling back, avoiding repeated desktop/browser
- * side effects through the legacy path.
+ * Returns a v1-fallback-safe marker only when no mutation-capable v2 request
+ * crossed a dispatch boundary. Once the initial edge POST is attempted, total
+ * response loss is outcome-unknown: the edge may have committed a server-side
+ * write, and v1 does not share v2's turnRequestId dedupe namespace. After a
+ * client-side tool is attempted, failures likewise return a stop message
+ * instead of falling back, avoiding repeated desktop/browser side effects
+ * through the legacy path.
  * See `docs/SWANBOT_V2_MIGRATION_PLAN.md` for rollout boundaries.
  */
 /** Outcome of a v2 attempt, carrying enough for the orchestrator to make the
@@ -1147,10 +1219,22 @@ async function callLlmProxy(
  *  structured terminal body, including deliberate fail-closed 4xx outcomes —
  *  the orchestrator surfaces it but must NOT count it toward the transient
  *  transport breaker or fall through to v1. A transport failure leaves
- *  `bodyError` undefined with `text` null (the value the breaker DOES count). */
+ *  `bodyError` undefined with `text` null (the value the breaker DOES count),
+ *  but v1 fallback additionally requires explicit pre-dispatch-safe proof. */
 type V2CallResult = {
   text: string | null;
   bodyError?: V2BodyError;
+  executionSummary?: ComputerTaskTurnEvidenceSummary;
+  /**
+   * The v2 attempt provably stopped before any mutation-capable edge POST or
+   * local handler entry. Only this explicit authority permits a v1 fallback.
+   */
+  v1FallbackSafeBeforeDispatch?: true;
+  /**
+   * A mutation-capable v2 POST was attempted but no authenticated response was
+   * recovered. The edge may have committed a write; never replay in v1.
+   */
+  mutationCapablePostOutcomeUnknown?: true;
   /**
    * A non-null authenticated v2 response reached the client and represented a
    * terminal edge decision. This stays true even when its display text is
@@ -1165,6 +1249,7 @@ type V2CallResult = {
 type SwanbotV2ClientLoopContext = Pick<
   SwanBotContext,
   | 'threadId'
+  | 'approvalResumeBinding'
   | 'activePluginIds'
   | 'signal'
   | 'toolApprovalGate'
@@ -1304,7 +1389,9 @@ async function callSwanBotV2(
   agentSubject?: AgentRuntimeSubjectMetadata | null,
   clientLoopContext?: SwanbotV2ClientLoopContext,
 ): Promise<V2CallResult> {
-  if (shouldBlockExternalAiProvider('anthropic')) return { text: null };
+  if (shouldBlockExternalAiProvider('anthropic')) {
+    return projectSwanBotV2TransportFailure({ mutationCapablePostAttempted: false });
+  }
   // Resolve the user's hard constraints for BOTH v2 implementations. The
   // device-local typed loop also re-parses internally, but the default edge
   // continuation loop must not lose the exact-call approval callback or let a
@@ -1368,7 +1455,7 @@ async function callSwanBotV2(
       // agentSubject rides in the extra bag — NEVER as an 11th positional
       // (that slot IS the extra bag). SwanbotV2BatchResult is structurally
       // identical to V2CallResult, so no cast.
-      return runSwanbotV2Batch(
+      const batchResult = await runSwanbotV2Batch(
         message, circleId, userId, _discordContext, model, _wikiContext,
         conversationMessages, thinkingLevel, _maxTokens, systemDirective,
         {
@@ -1378,6 +1465,7 @@ async function callSwanBotV2(
           targetAgentName: agentSubject?.agentDisplayName,
           targetAgentSubject: agentSubject ?? null,
           threadId: clientLoopContext?.threadId,
+          approvalResumeBinding: clientLoopContext?.approvalResumeBinding || null,
           activePluginIds: clientLoopContext?.activePluginIds,
           signal: clientLoopContext?.signal,
           toolApprovalGate: clientLoopContext?.toolApprovalGate,
@@ -1387,6 +1475,12 @@ async function callSwanBotV2(
           onActivity: (row) => emitSwanBotActivity(row.label),
         },
       );
+      // The batch runtime returns null text only while its runtime-owned
+      // `anyToolExecuted` latch is still false. Preserve that proven
+      // pre-dispatch fallback without widening the edge transport path.
+      return batchResult.text === null
+        ? { ...batchResult, v1FallbackSafeBeforeDispatch: true }
+        : batchResult;
     } catch (err) {
       if (forceClientToolLoop) {
         console.warn('[SwanBot/v2] required client-loop startup failed — refusing text-only fallback:', err);
@@ -1406,6 +1500,8 @@ async function callSwanBotV2(
   const MAX_CONTINUATIONS = SWANBOT_CONTINUATION_BASE_MAX;
   let attemptedClientTools = false;
   let attemptedDispatchClaim = false;
+  let mutationCapableV2PostAttempted = false;
+  const clientToolEvidence: ComputerTaskToolEvidenceInput[] = [];
   // #12: capture a structured edge error body from ANY leg (initial or
   // continuation), whether supabase-js returned it as data or wrapped the
   // non-2xx Response in FunctionsHttpError. This lets the orchestrator
@@ -1415,7 +1511,9 @@ async function callSwanBotV2(
   const captureBodyError = (err: V2BodyError) => { bodyError = err; };
   try {
     const accessToken = await getFreshAccessToken();
-    if (!accessToken) return { text: null };
+    if (!accessToken) {
+      return projectSwanBotV2TransportFailure({ mutationCapablePostAttempted: false });
+    }
 
     // ── P2 (docs/MEMORY_V2_INTEGRATION_PLAN.md) — the memory bundle. ────────
     // P1 taught the edge to accept `body.memory`, fence it and append it to
@@ -1487,11 +1585,17 @@ async function callSwanBotV2(
     }
 
     // ── First call — initial message. ─────────────────────────────────
+    // From this point onward, an absent response is NOT evidence that nothing
+    // ran. The selected edge catalog contains server-side writers, and the
+    // request can commit one before the HTTP response is lost. Set the latch
+    // immediately before dispatch so catch/null paths cannot replay through v1.
+    mutationCapableV2PostAttempted = true;
     let response = await invokeSwanbotV2(accessToken, {
       message,
       circleId,
       userId,
       turnRequestId,
+      ...(clientLoopContext?.threadId ? { threadId: clientLoopContext.threadId } : {}),
       ...(connectivity ? { connectivity } : {}),
       // P2: OMIT the field entirely when there is nothing to send. An empty
       // `{sections: []}` is NOT falsy on the edge — its `hasPayload` test is
@@ -1511,7 +1615,12 @@ async function callSwanBotV2(
       agentSubject: agentSubject || undefined,
       legacy: { conversationMessages },
     }, captureBodyError);
-    if (!response) return { text: null, bodyError };
+    if (!response) {
+      return projectSwanBotV2TransportFailure({
+        mutationCapablePostAttempted: mutationCapableV2PostAttempted,
+        bodyError,
+      });
+    }
 
     // ── Continuation loop for clientOnly tool calls. ──────────────────
     for (let i = 0; i < MAX_CONTINUATIONS; i++) {
@@ -1564,10 +1673,38 @@ async function callSwanBotV2(
         circleId,
         userId,
         runId: response.continuationRunId,
+        threadId: clientLoopContext?.threadId,
+        approvalResumeBinding: clientLoopContext?.approvalResumeBinding || null,
         iteration: i + 1,
+        activePluginIds: clientLoopContext?.activePluginIds?.slice(0, 32),
         toolApprovalGate: clientLoopContext?.toolApprovalGate,
         userConstraints: mergedUserConstraints,
         alwaysConfirmFloor: mergedAlwaysConfirmFloor,
+      });
+      for (const toolResult of toolResults) {
+        if (clientToolEvidence.length >= 2_000) break;
+        clientToolEvidence.push({
+          toolName: pendingCalls.find((call) => call.id === toolResult.tool_use_id)?.name,
+          toolUseId: toolResult.tool_use_id,
+          mutatesState: toolResult.runtime_mutates_state,
+          dispatched: toolResult.runtime_dispatched,
+          result: {
+            ok: toolResult.is_error !== true,
+            data: {},
+            ...(toolResult.is_error === true ? { error: 'client tool failed' } : {}),
+            ...(toolResult.receipt_metadata
+              ? { metadata: toolResult.receipt_metadata }
+              : {}),
+          },
+        });
+      }
+      const wireToolResults: SwanBotV2ClientToolWireResult[] = toolResults.map((toolResult) => {
+        const {
+          runtime_dispatched: _runtimeDispatched,
+          runtime_mutates_state: _runtimeMutatesState,
+          ...wireResult
+        } = toolResult;
+        return wireResult;
       });
       response = await invokeSwanbotV2(accessToken, {
         circleId,
@@ -1576,12 +1713,20 @@ async function callSwanBotV2(
         continuationAction: 'submit_results',
         ...pendingIdentity,
         dispatchClaimId,
-        toolResults,
+        toolResults: wireToolResults,
       }, captureBodyError);
       if (!response) {
         if (attemptedClientTools) {
           console.warn('[SwanBot/v2] continuation failed after client tools; not falling back to v1.');
-          return { text: swanBotV2ClientToolStopMessage('continuation_failed'), bodyError };
+          return {
+            text: swanBotV2ClientToolStopMessage('continuation_failed'),
+            bodyError,
+            executionSummary: summarizeComputerTaskTurnEvidence({
+              toolEvidence: clientToolEvidence,
+              cleanTerminal: false,
+              runtimeFailed: true,
+            }),
+          };
         }
         return { text: null, bodyError };
       }
@@ -1589,14 +1734,46 @@ async function callSwanBotV2(
 
     if (response.pending) {
       console.warn('[SwanBot/v2] hit continuation cap; not falling back to v1.');
-      return { text: swanBotV2ClientToolStopMessage('continuation_cap'), bodyError };
+      return {
+        text: swanBotV2ClientToolStopMessage('continuation_cap'),
+        bodyError,
+        executionSummary: summarizeComputerTaskTurnEvidence({
+          toolEvidence: clientToolEvidence,
+          cleanTerminal: false,
+        }),
+      };
     }
-    return projectSwanBotV2TerminalResponse(response, bodyError);
+    const terminalCancelled = 'cancelled' in response && response.cancelled === true;
+    return {
+      ...projectSwanBotV2TerminalResponse(response, bodyError),
+      executionSummary: summarizeComputerTaskTurnEvidence({
+        toolEvidence: clientToolEvidence,
+        // The edge terminal projection does not yet return the complete
+        // server-side tool receipt ledger or authoritative loop stop reason.
+        // Client-only receipts can prove their own mutation integrity, but the
+        // aggregate coverage boundary is incomplete and must not look clean.
+        cleanTerminal: false,
+        cancelled: terminalCancelled,
+      }),
+    };
   } catch (err: any) {
     console.warn('[SwanBot/v2] call failed:', err?.message || err);
-    if (attemptedClientTools) return { text: swanBotV2ClientToolStopMessage('continuation_failed'), bodyError };
+    if (attemptedClientTools) {
+      return {
+        text: swanBotV2ClientToolStopMessage('continuation_failed'),
+        bodyError,
+        executionSummary: summarizeComputerTaskTurnEvidence({
+          toolEvidence: clientToolEvidence,
+          cleanTerminal: false,
+          runtimeFailed: true,
+        }),
+      };
+    }
     if (attemptedDispatchClaim) return { text: swanBotV2DispatchClaimStopMessage(), bodyError };
-    return { text: null, bodyError };
+    return projectSwanBotV2TransportFailure({
+      mutationCapablePostAttempted: mutationCapableV2PostAttempted,
+      bodyError,
+    });
   }
 }
 
@@ -1708,6 +1885,16 @@ type V2Response =
 const SWANBOT_V2_CANCELLED_MESSAGE =
   'Run cancelled by the user. No further actions were started. Any already-dispatched local action remains recorded and will not be replayed automatically.';
 
+function projectSwanBotV2TransportFailure(input: {
+  mutationCapablePostAttempted: boolean;
+  bodyError?: V2BodyError;
+}): V2CallResult {
+  if (input.bodyError) return { text: null, bodyError: input.bodyError };
+  return input.mutationCapablePostAttempted
+    ? { text: null, mutationCapablePostOutcomeUnknown: true }
+    : { text: null, v1FallbackSafeBeforeDispatch: true };
+}
+
 function projectSwanBotV2TerminalResponse(
   response: { cancelled?: unknown; text?: unknown; response?: unknown },
   bodyError?: V2BodyError,
@@ -1746,7 +1933,9 @@ function classifySwanBotV2CallDisposition(
 }
 
 function shouldFallbackSwanBotV2ToV1(result: V2CallResult): boolean {
-  return classifySwanBotV2CallDisposition(result) === 'transport_failure';
+  return classifySwanBotV2CallDisposition(result) === 'transport_failure'
+    && result.v1FallbackSafeBeforeDispatch === true
+    && result.mutationCapablePostOutcomeUnknown !== true;
 }
 // SWANBOT_V2_CLIENT_TERMINAL_CORE_END
 
@@ -1831,32 +2020,114 @@ type SwanBotV2EdgeClientToolContext = {
   circleId: string;
   userId: string;
   runId: string;
+  threadId?: string;
+  approvalResumeBinding?: OpenSwanApprovalResumeBindingV1 | null;
   iteration?: number;
+  /** 1-indexed position in this edge provider tool-call batch. */
+  sourceCallOrdinal?: number;
+  activePluginIds?: SwanbotV2ClientLoopContext['activePluginIds'];
   toolApprovalGate?: SwanbotV2ClientLoopContext['toolApprovalGate'];
   userConstraints?: SwanbotV2ClientLoopContext['userConstraints'];
   alwaysConfirmFloor?: SwanbotV2ClientLoopContext['alwaysConfirmFloor'];
 };
 
-async function executeClientToolCalls(
-  calls: Array<{ id: string; name: string; input: unknown }>,
-  context?: SwanBotV2EdgeClientToolContext,
-): Promise<Array<{
+/**
+ * Client-delegated tools whose final dispatcher owns the canonical exact-call
+ * policy/approval boundary. The default edge continuation must not put a
+ * second generic review prompt in front of these calls. Keep this set in
+ * lockstep with dispatchOneClientTool's runtime-gateway switch and the
+ * WordPress helpers that consume their own bound approvals.
+ */
+const SWANBOT_V2_EDGE_CANONICAL_APPROVAL_TOOL_NAMES = new Set([
+  'desktop.edit_file',
+  'local.run_shell',
+  'git.run',
+  'codebase.search',
+  'todo.write',
+  'coordination.file_status',
+  'browser.open_url',
+  'browser.fill_field',
+  'browser.fill_credential_field',
+  'browser.set_toggle',
+  'browser.select_option',
+  'browser.click_role',
+  'browser.press_key',
+  'browser.wait_for',
+  'browser.scroll',
+  'desktop.launch_app',
+  'desktop.focus_app',
+  'desktop.type_text',
+  'desktop.paste_text',
+  'desktop.press_keys',
+  'desktop.menu_click',
+  'desktop.run_applescript',
+  'desktop.convert_image',
+  'desktop.open_url',
+  'desktop.open_path',
+  'desktop.click_at',
+  'desktop.mouse_move',
+  'desktop.mouse_click',
+  'desktop.mouse_down',
+  'desktop.mouse_up',
+  'desktop.mouse_drag',
+  'desktop.mouse_scroll',
+  'desktop.click_element',
+  'desktop.set_element_value',
+  'wp.upload_media',
+  'wp.create_slide',
+  'wp.update_post',
+  'wp.trash_post',
+]);
+
+const SWANBOT_V2_EDGE_DISABLED_MODEL_TOOL_NAMES = new Set([
+  'credentials.get',
+  'browser.fill_credential_field',
+  'approvals.resolve',
+]);
+
+type SwanBotV2ClientToolWireResult = {
   tool_use_id: string;
   content: string;
   is_error?: boolean;
   receipt_metadata?: SwanBotClientToolReceiptMetadata;
-}>> {
+};
+
+type SwanBotV2ClientToolExecutionResult = SwanBotV2ClientToolWireResult & {
+  /** Client-only terminal-evidence fields; stripped before edge submission. */
+  runtime_dispatched: boolean;
+  runtime_mutates_state: boolean;
+};
+
+async function executeClientToolCalls(
+  calls: Array<{ id: string; name: string; input: unknown }>,
+  context?: SwanBotV2EdgeClientToolContext,
+): Promise<SwanBotV2ClientToolExecutionResult[]> {
   if (calls.length === 0) return [];
   const bridge = await import('./desktopBridge');
   const { appendAppActionVerificationGate } = await import('./appActionVerificationGate');
+  const sourceCallOrdinalByToolUseId = new Map<string, number>();
+  calls.forEach((call, index) => {
+    sourceCallOrdinalByToolUseId.set(
+      call.id,
+      sourceCallOrdinalByToolUseId.has(call.id) ? 0 : index + 1,
+    );
+  });
 
   // Catalog side-effect policy lookup for the replay-safety gate below.
   // Best-effort: a missing provider degrades to the core's conservative
   // 'unknown' class (never widens what replays without a verdict).
   let toolPolicyLookup: ((toolName: string) => unknown) | null = null;
   try {
-    const { createOpenSwanToolParallelPolicyProvider } = await import('./openswanBridge');
-    toolPolicyLookup = createOpenSwanToolParallelPolicyProvider();
+    const { getOpenSwanToolPolicy } = await import('./openswanToolRuntime');
+    // Completion/replay classification uses the current catalog policy,
+    // including plugin tightening, not the parallel scheduler's synthetic
+    // `mutatesState: true` barrier bit.
+    // Semantic waits and viewport scrolls are serial ordering primitives but
+    // remain non-mutating task evidence.
+    toolPolicyLookup = (toolName) => getOpenSwanToolPolicy(
+      toolName as never,
+      context?.activePluginIds,
+    );
   } catch { toolPolicyLookup = null; }
 
   // Failed client tools get a classified recovery hint (bridge offline /
@@ -1895,11 +2166,7 @@ async function executeClientToolCalls(
   const buildPreDispatchBlockResult = (
     call: { id: string; name: string },
     reason: string,
-  ): {
-    tool_use_id: string;
-    content: string;
-    is_error: true;
-  } => ({
+  ): SwanBotV2ClientToolExecutionResult => ({
     tool_use_id: call.id,
     content: appendAppActionVerificationGate(
       serializeSwanBotClientToolResult({ ok: false, error: reason }),
@@ -1907,24 +2174,37 @@ async function executeClientToolCalls(
       'error',
     ),
     is_error: true,
+    runtime_dispatched: false,
+    runtime_mutates_state: true,
   });
 
   // One call's full dispatch (bridge call + a11y cache + recording observer +
   // verification-gate framing), unchanged from the legacy loop body.
   const runOne = async (
     call: { id: string; name: string; input: unknown },
-  ): Promise<{
-    tool_use_id: string;
-    content: string;
-    is_error?: boolean;
-    receipt_metadata?: SwanBotClientToolReceiptMetadata;
-  }> => {
+  ): Promise<SwanBotV2ClientToolExecutionResult> => {
+    let handlerEntered = false;
     try {
+      let toolApprovalMode: 'auto' | 'ask' | 'blocked' | 'unknown' = 'unknown';
+      if (SWANBOT_V2_EDGE_DISABLED_MODEL_TOOL_NAMES.has(call.name)) {
+        toolApprovalMode = 'blocked';
+      } else if (toolPolicyLookup) {
+        try {
+          const policy = toolPolicyLookup(call.name) as { approvalMode?: unknown } | null;
+          if (policy?.approvalMode === 'auto' || policy?.approvalMode === 'ask') {
+            toolApprovalMode = policy.approvalMode;
+          }
+        } catch {
+          toolApprovalMode = 'unknown';
+        }
+      }
       const authorization = await authorizeSwanbotV2EdgeClientToolCall(
         {
           userConstraints: context?.userConstraints || null,
           alwaysConfirmFloor: context?.alwaysConfirmFloor || [],
           toolApprovalGate: context?.toolApprovalGate,
+          toolApprovalMode,
+          runtimeApprovalToolNames: SWANBOT_V2_EDGE_CANONICAL_APPROVAL_TOOL_NAMES,
         },
         {
           toolName: call.name,
@@ -1951,10 +2231,16 @@ async function executeClientToolCalls(
           'A cryptographically strong mutation receipt was unavailable, so the client mutation was not dispatched.',
         );
       }
+      handlerEntered = true;
       const result = await dispatchOneClientTool(
         bridge,
         call,
-        context,
+        context
+          ? {
+              ...context,
+              sourceCallOrdinal: sourceCallOrdinalByToolUseId.get(call.id) || undefined,
+            }
+          : undefined,
         directMutationReceipt?.markDispatched,
       );
       if (
@@ -1993,14 +2279,17 @@ async function executeClientToolCalls(
       // tool flow — recording is a best-effort observer.
       try {
         const rec = await import('./chatRecording');
-        if (rec.isRecordable(call.name) && rec.getActiveSession()) {
+        const recordingScope = context
+          ? { userId: context.userId, circleId: context.circleId }
+          : null;
+        if (recordingScope && rec.isRecordable(call.name) && rec.getActiveSession(recordingScope)) {
           const target = extractA11yTarget(call, result);
           rec.appendStep(rec.buildStep({
             tool: call.name,
             input: (call.input || {}) as Record<string, unknown>,
             result: { ok: result.ok, data: result.data, error: result.error },
             a11yTarget: target,
-          }));
+          }), recordingScope);
         }
       } catch { /* observer failures must never break tool flow */ }
       return {
@@ -2022,6 +2311,9 @@ async function executeClientToolCalls(
         // to the exact pending tool call; it is deliberately never serialized
         // into model-visible `content`.
         ...durableReceiptProjection,
+        runtime_dispatched: true,
+        // Filled from the canonical catalog after ordering is restored.
+        runtime_mutates_state: true,
       };
     } catch (err: any) {
       return {
@@ -2032,6 +2324,8 @@ async function executeClientToolCalls(
           'error',
         ),
         is_error: true,
+        runtime_dispatched: handlerEntered,
+        runtime_mutates_state: true,
       };
     }
   };
@@ -2042,17 +2336,27 @@ async function executeClientToolCalls(
   // original call order — so write ordering is byte-for-byte preserved.
   // The partitioner is pure + smoke-pinned (clientToolBatchCore).
   const partition = partitionClientToolBatch(calls);
-  // A live approval surface is inherently sequential: concurrent prompts can
-  // reorder decisions and make it unclear which exact call the user reviewed.
-  const groups = context?.toolApprovalGate
+  // Only calls that can actually reach the surface review callback force the
+  // batch sequential. Merely having a callback must not serialize or prompt
+  // canonical auto/read tools, nor duplicate a runtime-owned approval.
+  const hasSurfaceReviewedCall = Boolean(context?.toolApprovalGate) && (
+    Boolean(context?.userConstraints?.approvalBefore.length)
+    || Boolean(context?.alwaysConfirmFloor?.length)
+    || calls.some((call) => {
+      if (SWANBOT_V2_EDGE_CANONICAL_APPROVAL_TOOL_NAMES.has(call.name)) return false;
+      if (SWANBOT_V2_EDGE_DISABLED_MODEL_TOOL_NAMES.has(call.name)) return false;
+      try {
+        const policy = toolPolicyLookup?.(call.name) as { approvalMode?: unknown } | null;
+        return policy?.approvalMode === 'ask';
+      } catch {
+        return true;
+      }
+    })
+  );
+  const groups = hasSurfaceReviewedCall
     ? partition.groups.flat().map((call) => [call])
     : partition.groups;
-  const byId = new Map<string, {
-    tool_use_id: string;
-    content: string;
-    is_error?: boolean;
-    receipt_metadata?: SwanBotClientToolReceiptMetadata;
-  }>();
+  const byId = new Map<string, SwanBotV2ClientToolExecutionResult>();
   for (const group of groups) {
     // Live progress label so the user sees "Reading the screen…" / "Running
     // tests…" instead of a static spinner during a multi-tool loop.
@@ -2070,12 +2374,25 @@ async function executeClientToolCalls(
   }
   // Return in the ORIGINAL call order (edge fn matches tool_result by id, but
   // stable order keeps transcripts/telemetry faithful).
-  return calls.map((c) => byId.get(c.id)).filter(Boolean) as Array<{
-    tool_use_id: string;
-    content: string;
-    is_error?: boolean;
-    receipt_metadata?: SwanBotClientToolReceiptMetadata;
-  }>;
+  return calls.map((call) => {
+    const result = byId.get(call.id);
+    if (!result) return null;
+    let policy: { mutatesState?: boolean; externalSideEffect?: boolean } | null = null;
+    try {
+      policy = toolPolicyLookup
+        ? toolPolicyLookup(call.name) as { mutatesState?: boolean; externalSideEffect?: boolean } | null
+        : null;
+    } catch {
+      policy = null;
+    }
+    return {
+      ...result,
+      // Unknown policy fails closed as mutation-capable for task completion.
+      runtime_mutates_state: !policy
+        || policy.mutatesState === true
+        || policy.externalSideEffect === true,
+    };
+  }).filter(Boolean) as SwanBotV2ClientToolExecutionResult[];
 }
 
 // SWANBOT_DIRECT_CLIENT_MUTATION_RECEIPT_CORE_START
@@ -2280,6 +2597,8 @@ async function dispatchOneClientTool(
     case 'browser.select_option':
     case 'browser.click_role':
     case 'browser.press_key':
+    case 'browser.wait_for':
+    case 'browser.scroll':
     case 'desktop.launch_app':
     case 'desktop.focus_app':
     case 'desktop.type_text':
@@ -2382,10 +2701,14 @@ async function dispatchCodingClientTool(
         circleId: context?.circleId || '',
         userId: context?.userId || '',
         runId: context?.runId || undefined,
+        threadId: context?.threadId,
+        approvalResumeBinding: context?.approvalResumeBinding || null,
         surface: 'main_chat',
         toolName: call.name,
         toolUseId: call.id,
         iteration: context?.iteration,
+        sourceCallOrdinal: context?.sourceCallOrdinal,
+        activePluginIds: context?.activePluginIds,
         // Keep both non-erasable turn policy inputs attached at the final
         // runtime chokepoint. `userConstraints` is enforced there today;
         // `alwaysConfirmFloor` also remains available to the runtime context
@@ -2473,6 +2796,8 @@ type SwanBotClientToolApprovalContext = {
   circleId: string;
   userId: string;
   runId: string;
+  threadId?: string;
+  approvalResumeBinding?: OpenSwanApprovalResumeBindingV1 | null;
   toolUseId: string;
   iteration: number;
 };
@@ -2608,6 +2933,19 @@ async function consumeSwanBotApprovalAuthority(input: {
 
   const exactDigest = await buildOpenSwanToolApprovalDigest(input.tool, input.args);
   if (!exactDigest || exactDigest !== input.authority.approvalDigest) return null;
+  if (
+    input.source === 'cross_run'
+    && input.context.approvalResumeBinding != null
+    && !findOpenSwanApprovalResumeItem(input.context.approvalResumeBinding, {
+      approvalId: input.authority.approvalId,
+      sourceRunId: approvalRunId,
+      toolName: input.tool,
+      digest: exactDigest,
+      userId: input.context.userId,
+      circleId: input.context.circleId,
+      threadId: String(input.context.threadId || ''),
+    })
+  ) return null;
   const approvalKey = buildOpenSwanToolApprovalKey(input.tool, input.args);
   const authorityBindingDigest = await buildOpenSwanApprovalAuthorityBindingDigest({
     approvalId: input.authority.approvalId,
@@ -2708,30 +3046,108 @@ async function findCrossRunApprovedToolPass(
   },
 ): Promise<SwanBotApprovalGateOutcome | { kind: 'none' }> {
   try {
-    const { data, error } = await supabase
+    const bindingWasProvided = input.context.approvalResumeBinding != null;
+    const resumeBinding = bindingWasProvided
+      ? normalizeOpenSwanApprovalResumeBindingV1(input.context.approvalResumeBinding)
+      : null;
+    if (bindingWasProvided && !resumeBinding) {
+      return { kind: 'blocked', reason: 'The bound approval continuation was malformed.' };
+    }
+    if (
+      resumeBinding
+      && (
+        resumeBinding.sourceRunId === input.context.runId
+        || resumeBinding.userId !== input.context.userId
+        || resumeBinding.circleId !== input.context.circleId
+        || resumeBinding.threadId !== input.context.threadId
+      )
+    ) {
+      return { kind: 'blocked', reason: 'The bound approval continuation scope did not match this run.' };
+    }
+    const matchingBoundItems = resumeBinding
+      ? resumeBinding.approvals.filter((item) => (
+          item.toolName === input.tool
+          && item.toolApprovalDigest === input.approvalDigest
+        ))
+      : [];
+    if (resumeBinding && matchingBoundItems.length === 0) {
+      return { kind: 'blocked', reason: 'The resumed call did not match an exact approval selected for this continuation.' };
+    }
+    const allowedApprovalIds = new Set(matchingBoundItems.map((item) => item.approvalId));
+
+    let approvalQuery = supabase
       .from('agent_run_approvals')
       .select('id,run_id,circle_id,requested_by,requested_at,timeout_seconds,status,payload')
       .eq('circle_id', input.context.circleId)
-      .eq('requested_by', input.context.userId)
-      .eq('title', input.title)
-      .in('status', ['approved', 'auto_approved', 'expired'])
-      .gte('requested_at', new Date(Date.now() - 15 * 60 * 1000).toISOString())
+      .eq('requested_by', input.context.userId);
+    approvalQuery = resumeBinding
+      ? approvalQuery
+          .eq('run_id', resumeBinding.sourceRunId)
+          .in('id', matchingBoundItems.map((item) => item.approvalId))
+          .in('status', ['approved', 'auto_approved', 'pending', 'rejected', 'expired'])
+      : approvalQuery
+          .eq('title', input.title)
+          .in('status', ['approved', 'auto_approved', 'expired'])
+          .gte('requested_at', new Date(Date.now() - 15 * 60 * 1000).toISOString());
+    const { data, error } = await approvalQuery
       .order('requested_at', { ascending: false })
       .limit(8);
     if (error || !Array.isArray(data)) {
       return { kind: 'blocked', reason: 'Cross-run approval lookup failed closed.' };
     }
+    const decisionRows = resumeBinding
+      ? (data as OpenSwanRuntimeApprovalRow[]).filter((row) => (
+          typeof row.id === 'string'
+          && allowedApprovalIds.has(row.id)
+          && row.run_id === resumeBinding.sourceRunId
+          && row.circle_id === resumeBinding.circleId
+          && row.requested_by === resumeBinding.userId
+        ))
+      : data as OpenSwanRuntimeApprovalRow[];
+    if (resumeBinding && decisionRows.length === 0) {
+      return {
+        kind: 'blocked',
+        approvalId: matchingBoundItems[0]?.approvalId,
+        reason: 'The exact approval row selected for this continuation was unavailable.',
+      };
+    }
     const decision = resolveOpenSwanRuntimeApprovalDecision({
       tool: input.tool,
       approvalDigest: input.approvalDigest,
-      rows: data as OpenSwanRuntimeApprovalRow[],
+      rows: decisionRows,
     });
-    if (decision.kind === 'new') return { kind: 'none' };
+    if (decision.kind === 'new') {
+      return resumeBinding
+        ? {
+            kind: 'blocked',
+            approvalId: matchingBoundItems[0]?.approvalId,
+            reason: 'The exact bound approval row no longer matched its approved tool digest.',
+          }
+        : { kind: 'none' };
+    }
     if (decision.kind !== 'pass') {
       return {
         kind: 'blocked',
         approvalId: decision.approvalId,
         reason: decision.message,
+      };
+    }
+    if (
+      resumeBinding
+      && !findOpenSwanApprovalResumeItem(resumeBinding, {
+        approvalId: decision.authority.approvalId,
+        sourceRunId: String(decision.authority.row.run_id || ''),
+        toolName: input.tool,
+        digest: input.approvalDigest,
+        userId: input.context.userId,
+        circleId: input.context.circleId,
+        threadId: String(input.context.threadId || ''),
+      })
+    ) {
+      return {
+        kind: 'blocked',
+        approvalId: decision.authority.approvalId,
+        reason: 'Approval was not one of the exact rows selected for this continuation.',
       };
     }
     if (decision.authority.row.run_id === input.context.runId) {
@@ -2922,6 +3338,8 @@ async function withSwanBotClientWordPressApproval(
         circleId: context.circleId,
         userId: context.userId,
         runId: context.runId,
+        threadId: context.threadId,
+        approvalResumeBinding: context.approvalResumeBinding || null,
         toolUseId,
         iteration: Number(context.iteration),
       }
@@ -2966,8 +3384,11 @@ type SwanBotFloorApprovalContext = {
   circleId?: string;
   userId?: string;
   runId?: string;
+  threadId?: string;
+  approvalResumeBinding?: OpenSwanApprovalResumeBindingV1 | null;
   toolUseId?: string;
   iteration?: number;
+  sourceCallOrdinal?: number;
 };
 
 async function resolveSwanBotFloorApproval(input: {
@@ -3000,6 +3421,8 @@ async function resolveSwanBotFloorApproval(input: {
       circleId: context.circleId,
       userId: context.userId,
       runId: context.runId,
+      threadId: context.threadId,
+      approvalResumeBinding: context.approvalResumeBinding || null,
       toolUseId: context.toolUseId,
       iteration: Number(context.iteration),
     },
@@ -3820,24 +4243,11 @@ async function dispatchBrowserScreenshot(input: Record<string, any>): Promise<{ 
 }
 
 async function dispatchCredentialsGet(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
-  const item = String(input?.item || '').trim();
-  if (!item) return { ok: false, error: 'item required' };
-  const vault = typeof input?.vault === 'string' ? input.vault.trim() : undefined;
-  const fields = Array.isArray(input?.fields)
-    ? (input.fields as unknown[]).map((f) => String(f)).filter(Boolean)
-    : undefined;
-  try {
-    const { getCredentials } = await import('./credentialService');
-    const r = await getCredentials({ item, vault, fields });
-    if (!r.ok) return { ok: false, error: r.error || 'credential fetch failed' };
-    // Return the fields map verbatim. The caller is responsible for not
-    // echoing these to chat / other tools. The tool description warns
-    // the model; we don't strip or mask here because callers like
-    // `wp.create_slide` legitimately need the raw values.
-    return { ok: true, data: { item, vault: vault || null, fields: r.fields } };
-  } catch (e: any) {
-    return { ok: false, error: e?.message || String(e) };
-  }
+  void input;
+  return {
+    ok: false,
+    error: 'credentials.get is disabled for model-side tools because raw secret values must never enter model-visible tool results. Use a target-bound saved-credential fill after fresh browser verification, or ask the user to enter the credential manually.',
+  };
 }
 
 async function dispatchVerification(
@@ -3875,6 +4285,7 @@ async function dispatchVerification(
 
 interface SwanBotEdgeCallResult {
   response: string | null;
+  executionSummary?: ComputerTaskTurnEvidenceSummary;
   error?: {
     code?: string;
     message: string;
@@ -3981,25 +4392,45 @@ async function callSwanBotAI(
           recordSwanbotV2Outcome(outcome.kind === 'success');
         }
         if (disposition === 'cancelled') {
-          return { response: v2.text || SWANBOT_V2_CANCELLED_MESSAGE };
+          return {
+            response: v2.text || SWANBOT_V2_CANCELLED_MESSAGE,
+            ...(v2.executionSummary ? { executionSummary: v2.executionSummary } : {}),
+          };
         }
         if (v2.bodyError) {
           console.warn('[SwanBot] v2 returned a terminal edge body (not counted toward the breaker or v1 fallback):', v2.bodyError.code || v2.bodyError.message);
-          return { response: null, error: v2.bodyError };
-        }
-        if (v2.text) return { response: v2.text };
-        if (!mayFallbackToV1) {
           return {
             response: null,
+            error: v2.bodyError,
+            ...(v2.executionSummary ? { executionSummary: v2.executionSummary } : {}),
+          };
+        }
+        if (v2.text) {
+          return {
+            response: v2.text,
+            ...(v2.executionSummary ? { executionSummary: v2.executionSummary } : {}),
+          };
+        }
+        if (!mayFallbackToV1) {
+          const mutationCapablePostOutcomeUnknown =
+            v2.mutationCapablePostOutcomeUnknown === true;
+          return {
+            response: null,
+            ...(v2.executionSummary ? { executionSummary: v2.executionSummary } : {}),
             error: {
-              code: 'v2_terminal_without_payload',
-              message: 'The v2 run reached a terminal state without a displayable result. It was not replayed through v1.',
+              code: mutationCapablePostOutcomeUnknown
+                ? 'v2_transport_outcome_unknown'
+                : 'v2_terminal_without_payload',
+              message: mutationCapablePostOutcomeUnknown
+                ? 'The mutation-capable v2 request returned no authenticated response, so its outcome is unknown. It was not replayed through v1; inspect the existing run and current app/data state before starting fresh.'
+                : 'The v2 run reached a terminal state without a displayable result. It was not replayed through v1.',
             },
           };
         }
         if (forceClientToolLoop) {
           return {
             response: null,
+            ...(v2.executionSummary ? { executionSummary: v2.executionSummary } : {}),
             error: {
               code: 'client_tool_loop_unavailable',
               message: 'The required local typed tool loop returned no result. It was not replayed through the text-only fallback.',
@@ -4048,6 +4479,7 @@ async function callSwanBotAI(
           message,
           circleId,
           userId,
+          ...(clientLoopContext?.threadId ? { threadId: clientLoopContext.threadId } : {}),
           discordContext,
           wikiContext,
           conversationMessages,
@@ -4330,14 +4762,60 @@ async function buildSystemPromptAsync(
   // runtime bundle (built AFTER the wave), so they live in outer scope.
   let identity: any = null;
   let spirit: { id: string; name: string; tagline: string } | null = null;
+  let spiritBehaviorPrompt: string | null = null;
 
   const contextTasks: Array<Promise<void>> = [];
   const addContextTask = (fn: () => Promise<void>): void => { contextTasks.push(fn()); };
 
+  // Only an explicit turn-scoped Spirit assignment may affect model behavior.
+  // `contextSpiritIdResolved` can fall back to an ambient local identity cache,
+  // which is useful for presentation/retrieval but is not prompt authority.
+  addContextTask(async () => {
+    try {
+      const explicitAssignedSpiritId = typeof context.spiritId === 'string'
+        ? context.spiritId
+        : null;
+      if (!explicitAssignedSpiritId) return;
+      const { buildAssignedAgentSpiritPrompt } = await import('./agentSpiritPromptCore');
+      if (!explicitAssignedSpiritId.startsWith('custom::')) {
+        const built = buildAssignedAgentSpiritPrompt({ spiritId: explicitAssignedSpiritId });
+        if (built.ok) spiritBehaviorPrompt = built.prompt;
+        return;
+      }
+
+      const profileId = explicitAssignedSpiritId.slice('custom::'.length);
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(profileId)) return;
+      // Client-side prompt construction may read only the authenticated user's
+      // exact explicitly assigned profile. The edge also defaults custom
+      // behavior to owner-only unless a future explicit shared contract proves
+      // otherwise.
+      const profileResult = await withTimeout(Promise.resolve(
+        supabase
+          .from('custom_agent_profiles')
+          .select('id,user_id,system_prompt,skill_bundle,risk_tier,action_posture,evidence_posture,communication_density,skepticism,escalation_trigger')
+          .eq('id', profileId)
+          .eq('user_id', context.userId)
+          .maybeSingle(),
+      ));
+      if (profileResult && !profileResult.error && profileResult.data) {
+        const built = buildAssignedAgentSpiritPrompt({
+          spiritId: explicitAssignedSpiritId,
+          customProfile: profileResult.data,
+          expectedCustomProfileId: profileId,
+          expectedOwnerId: context.userId,
+        });
+        if (built.ok) spiritBehaviorPrompt = built.prompt;
+      }
+    } catch (e) { console.warn('[SwanBot] Explicit Spirit behavior failed:', e); }
+  });
+
   if (loadProfile) addContextTask(async () => {
     try {
       const { loadUserProfile, generateProfileContext } = await import('./userChatProfile');
-      const profile = await withTimeout(loadUserProfile());
+      const profile = await withTimeout(loadUserProfile({
+        userId: context.userId,
+        circleId: context.circleId,
+      }));
       const profileCtx = profile ? generateProfileContext(profile) : null;
       if (profileCtx) sections.push({ key: 'user_chat_profile', body: profileCtx });
     } catch (e) { console.warn('[SwanBot] Profile load failed:', e); }
@@ -4520,7 +4998,14 @@ async function buildSystemPromptAsync(
         });
         identity = identities.get(identityKey);
         if (identity) {
-          spirit = identity.spiritId ? (getSpiritById(identity.spiritId) || null) : null;
+          // Explicit turn identity wins over ambient presentation so the label
+          // cannot contradict the exact behavior prompt. With no explicit
+          // assignment, preserve the existing presentation-only fallback.
+          spirit = context.spiritId
+            ? (getSpiritById(context.spiritId) || null)
+            : identity.spiritId
+              ? (getSpiritById(identity.spiritId) || null)
+              : null;
           const identityLines = ['## Agent Identity'];
           if (spirit) {
             identityLines.push(`Spirit: ${spirit.name} (${spirit.id})`);
@@ -4607,6 +5092,7 @@ async function buildSystemPromptAsync(
     try {
       const resourcesBlock = await withTimeout(import('./connectedResourcesRuntime').then(({ buildConnectedResourcesContextBlock }) => buildConnectedResourcesContextBlock({
         circleId: context.circleId,
+        userId: context.userId,
         connectedProviders: context.connectedProviders,
       })));
       if (resourcesBlock) sections.push({ key: 'connected_resources', body: resourcesBlock });
@@ -4667,6 +5153,7 @@ async function buildSystemPromptAsync(
     activeSoulKey,
     identity,
     spirit,
+    spiritBehaviorPrompt,
   });
   if (runtimeBundle) sections.push({ key: 'runtime_bundle', body: runtimeBundle });
 
@@ -4890,9 +5377,9 @@ async function getUserProfile(userId: string) {
 async function getCircleMembers(circleId: string) {
   const { data } = await supabase
     .from('circle_members')
-    .select('user:profiles(id, username, display_name, current_streak, longest_streak)')
+    .select('user_id')
     .eq('circle_id', circleId);
-  return (data || []).map((d: any) => d.user).filter(Boolean);
+  return loadSafeCircleProfiles({ circleId, userIds: (data || []).map((row: any) => row.user_id) });
 }
 
 async function getUserTasks(circleId: string, userId: string) {
@@ -4911,10 +5398,14 @@ async function getTodayCheckIns(circleId: string) {
   const today = new Date().toISOString().split('T')[0];
   const { data } = await supabase
     .from('check_ins')
-    .select('*, user:profiles(username, display_name)')
+    .select('*')
     .eq('circle_id', circleId)
     .gte('created_at', today);
-  return data || [];
+  const profileById = indexSafeProfiles(await loadSafeCircleProfiles({
+    circleId,
+    userIds: (data || []).map((row: any) => row.user_id),
+  }));
+  return (data || []).map((row: any) => ({ ...row, user: profileById.get(row.user_id) || null }));
 }
 
 async function getCircleContextData(ctx: SwanBotContext): Promise<CircleContextData> {
@@ -5075,7 +5566,7 @@ const localCommands: CmdHandler[] = [
     },
   },
   {
-    match: /^(who.*check|checked in)\s*[?]?$/i,
+    match: /^(who(?: has|'s)? checked in|checked in)\s*[?]?$/i,
     handler: async (ctx) => {
       if (!ctx.circleId) return "Need a circle for that.";
       const ci = await getTodayCheckIns(ctx.circleId);
@@ -5118,6 +5609,20 @@ const localCommands: CmdHandler[] = [
     },
   },
 ];
+
+/**
+ * Pure ownership check shared with Chat's hosted-model readiness gate. It uses
+ * the exact same model-status, capability-question, and local-command matchers
+ * as the downstream handler so a local reply cannot be blocked by a missing
+ * model API—or bypass model readiness after falling through a copied regex.
+ */
+export function isLocalSwanBotCommandMessage(message: string): boolean {
+  const cleaned = String(message || '').replace(/@(agent|blackswan|swanbot|swan)\b/gi, '').trim();
+  if (!cleaned) return false;
+  return isModelStatusQuestion(cleaned)
+    || isCreativeAppCapabilityQuestion(cleaned)
+    || localCommands.some((command) => command.match.test(cleaned));
+}
 
 export async function tryHandleLocalSwanBotCommand(
   message: string,
@@ -5191,24 +5696,72 @@ async function resolveBudgetDownshift(
   }
 }
 
-export async function getSwanBotResponse(
+export type SwanBotTurnResult = {
+  text: string;
+  executionSummary?: ComputerTaskTurnEvidenceSummary;
+};
+
+/**
+ * A generation-sealed Chat model was the only authorized model for this
+ * provider boundary and did not return a response. Callers may cool down that
+ * exact provider for the next turn, but must never replay this turn elsewhere.
+ */
+export class SealedModelDispatchError extends Error {
+  readonly code = 'sealed_model_dispatch_failed';
+
+  constructor(modelId: string | null | undefined) {
+    super(
+      `The selected connected model (${String(modelId || 'provider')}) did not complete the request. Its API was not replayed through another provider.`,
+    );
+    this.name = 'SealedModelDispatchError';
+  }
+}
+
+/**
+ * Detailed turn result for orchestration callers. The duplicate guard owns the
+ * complete object, so concurrent callers receive the same proof summary rather
+ * than one caller winning a callback race. Ordinary chat keeps using the
+ * string compatibility wrapper below.
+ */
+export async function getSwanBotTurnResult(
   message: string,
-  context: SwanBotContext
-): Promise<string> {
+  context: SwanBotContext,
+): Promise<SwanBotTurnResult> {
   const cleaned = message.replace(/@(agent|blackswan|swanbot|swan)\b/gi, '').trim();
 
   if (!cleaned) {
-    return "What's good? 🦢";
+    return { text: "What's good? 🦢" };
   }
 
   return runSwanBotTurnWithDuplicateGuard('text', cleaned, context, () =>
-    getSwanBotResponseImpl(cleaned, context),
+    (async () => {
+      let executionSummary: ComputerTaskTurnEvidenceSummary | undefined;
+      const text = await getSwanBotResponseImpl(cleaned, {
+        ...context,
+        onTaskExecutionSummary: (summary) => {
+          executionSummary = summary;
+          try { context.onTaskExecutionSummary?.(summary); } catch {}
+        },
+      }, message);
+      return {
+        text,
+        ...(executionSummary ? { executionSummary } : {}),
+      };
+    })(),
   );
+}
+
+export async function getSwanBotResponse(
+  message: string,
+  context: SwanBotContext,
+): Promise<string> {
+  return (await getSwanBotTurnResult(message, context)).text;
 }
 
 async function getSwanBotResponseImpl(
   cleaned: string,
   context: SwanBotContext,
+  originalUserTaskText: string,
 ): Promise<string> {
   // Track in conversation history
   if (context.circleId) {
@@ -5402,6 +5955,7 @@ async function getSwanBotResponseImpl(
   // a MiniMax model, or another non-Anthropic model, route through llm-proxy
   // instead of going to swanbot-ai (which only knows Claude).
   const customModelProvider = pickProviderForModel(enrichedContext.model);
+  let sealedCustomModelAttemptFailed = false;
   if (customModelProvider && !shouldBlockExternalAiProvider(customModelProvider)) {
     try {
       const circleData = await getCircleContextData(enrichedContext);
@@ -5422,6 +5976,9 @@ async function getSwanBotResponseImpl(
         modelId: enrichedContext.model || '',
         message: cleaned,
       });
+      if (enrichedContext.modelDispatchSealed && marketplaceToolTier.tier === 'delegate_executor') {
+        throw new SealedModelDispatchError(enrichedContext.model);
+      }
       if (marketplaceToolTier.tier !== 'plain_text' && enrichedContext.circleId && enrichedContext.userId) {
         try {
           const loopModel = marketplaceToolTier.tier === 'delegate_executor'
@@ -5431,14 +5988,20 @@ async function getSwanBotResponseImpl(
           const loop = await executeToolUseLoop({
             systemPrompt,
             userMessage: cleaned,
+            originalUserTaskText,
             model: loopModel,
             circleId: enrichedContext.circleId,
             userId: enrichedContext.userId,
+            threadId: enrichedContext.threadId,
+            approvalResumeBinding: enrichedContext.approvalResumeBinding || null,
             surface: 'main_chat',
             mode: typeof enrichedContext.modeKey === 'string' ? enrichedContext.modeKey : null,
             executionSurfaceGuard: enrichedContext.executionSurfaceGuard,
             agentSubject: agentSubjectPayload,
           });
+          if (enrichedContext.modelDispatchSealed && loop.routing?.routing_fallback) {
+            throw new SealedModelDispatchError(enrichedContext.model);
+          }
           // An incomplete loop with ZERO tool events means the edge call itself
           // failed (e.g. relay 400 marketplace_provider_unavailable) — fall
           // through to today's plain-text proxy tier instead of surfacing the
@@ -5453,6 +6016,7 @@ async function getSwanBotResponseImpl(
           }
           console.warn('[SwanBot] Tier 1.5: marketplace tool loop unusable — falling back to plain-text proxy tier.');
         } catch (loopErr) {
+          if (loopErr instanceof SealedModelDispatchError) throw loopErr;
           console.warn('[SwanBot] Tier 1.5: marketplace tool loop error — falling back to plain-text proxy tier:', loopErr);
         }
       }
@@ -5493,9 +6057,12 @@ async function getSwanBotResponseImpl(
             },
             systemPrompt,
             userMessage: cleaned,
+            originalUserTaskText,
             model: enrichedContext.model!,
             circleId: enrichedContext.circleId,
             userId: enrichedContext.userId,
+            threadId: enrichedContext.threadId,
+            approvalResumeBinding: enrichedContext.approvalResumeBinding || null,
             surface: 'main_chat',
             mode: typeof enrichedContext.modeKey === 'string' ? enrichedContext.modeKey : null,
             executionSurfaceGuard: enrichedContext.executionSurfaceGuard,
@@ -5518,13 +6085,22 @@ async function getSwanBotResponseImpl(
       }
       console.warn(`[SwanBot] Tier 1.5: ${customModelProvider} returned empty — falling through to Claude.`);
       lastFailureReason = `your selected model (${enrichedContext.model}) via ${customModelProvider} returned nothing — its key may be missing or it's rate-limited`;
+      sealedCustomModelAttemptFailed = true;
     } catch (err) {
       console.warn(`[SwanBot] Tier 1.5: ${customModelProvider} error — falling through:`, err);
       lastFailureReason = `your selected model (${customModelProvider}) errored: ${err instanceof Error ? err.message : String(err)}`;
+      sealedCustomModelAttemptFailed = true;
     }
   }
 
+  if (sealedCustomModelAttemptFailed && enrichedContext.modelDispatchSealed) {
+    throw new SealedModelDispatchError(enrichedContext.model || customModelProvider);
+  }
+
   // Tier 2: Try AI Edge Function (Claude Haiku — primary for web)
+  const sealedDirectAnthropicModel = enrichedContext.modelDispatchSealed
+    && !customModelProvider
+    && /^claude-/i.test(String(enrichedContext.model || '').trim());
   if (enrichedContext.circleId && !shouldBlockExternalAiProvider('anthropic')) {
     console.log('[SwanBot] Tier 2: Calling swanbot-ai edge function...');
     // Before the swanbot-v2 hop (inside callSwanBotAI), collapse any bare
@@ -5566,6 +6142,7 @@ async function getSwanBotResponseImpl(
       agentSubjectPayload,
       {
         threadId: enrichedContext.threadId,
+        approvalResumeBinding: enrichedContext.approvalResumeBinding || null,
         activePluginIds: enrichedContext.activePluginIds,
         signal: enrichedContext.signal,
         toolApprovalGate: enrichedContext.toolApprovalGate,
@@ -5575,6 +6152,9 @@ async function getSwanBotResponseImpl(
         executionSurfaceGuard: enrichedContext.executionSurfaceGuard,
       },
     );
+    if (aiResult?.executionSummary) {
+      try { enrichedContext.onTaskExecutionSummary?.(aiResult.executionSummary); } catch {}
+    }
     const aiResponse = aiResult?.response || null;
     if (aiResponse) {
       console.log('[SwanBot] Tier 2: Got response from edge function');
@@ -5628,6 +6208,7 @@ async function getSwanBotResponseImpl(
             agentSubjectPayload,
             {
               threadId: enrichedContext.threadId,
+              approvalResumeBinding: enrichedContext.approvalResumeBinding || null,
               activePluginIds: enrichedContext.activePluginIds,
               signal: enrichedContext.signal,
               toolApprovalGate: enrichedContext.toolApprovalGate,
@@ -5637,6 +6218,9 @@ async function getSwanBotResponseImpl(
               executionSurfaceGuard: enrichedContext.executionSurfaceGuard,
             },
           );
+          if (failoverResult?.executionSummary) {
+            try { enrichedContext.onTaskExecutionSummary?.(failoverResult.executionSummary); } catch {}
+          }
           const failoverText = failoverResult?.response || null;
           if (failoverText) {
             const noticedResponse = `${failoverPlan.userNotice}\n\n${failoverText}`;
@@ -5653,6 +6237,9 @@ async function getSwanBotResponseImpl(
     } else {
       console.warn('[SwanBot] Tier 2: Edge function returned null');
       lastFailureReason = 'the Claude edge function returned nothing — the Anthropic key may be missing or the service is rate-limited';
+    }
+    if (sealedDirectAnthropicModel) {
+      throw new SealedModelDispatchError(enrichedContext.model);
     }
   } else if (!enrichedContext.circleId) {
     lastFailureReason = 'no circle context was available to route this request';
@@ -5686,7 +6273,7 @@ async function getSwanBotResponseImpl(
       ];
       // Normalize the picked legacy id (e.g. `gemini-pro`, `gemini-1.5-flash`)
       // to a current google_ai model via the shared, tested alias resolver.
-      const geminiModel = findAliasKey(enrichedContext.model || '') || 'gemini-2.5-flash';
+      const geminiModel = findAliasKey(enrichedContext.model || '') || 'gemini-3.6-flash';
       const geminiResult = await callLlmProxy(
         'google_ai',
         geminiModel,
@@ -5839,6 +6426,21 @@ type ToolLoopEvent = {
   metadata?: Record<string, unknown>;
 };
 
+function transientToolEventResult(
+  toolName: string,
+  dispatched: { text: string; status: OpenSwanExecutionStatus; metadata?: Record<string, unknown> },
+): string {
+  if (toolName !== 'attachments.read_source') return dispatched.text;
+  const receipt = dispatched.metadata?.openSwanAttachmentSourceReceipt;
+  const attachmentId = receipt && typeof receipt === 'object' && !Array.isArray(receipt)
+    && typeof (receipt as Record<string, unknown>).attachmentId === 'string'
+      ? (receipt as Record<string, unknown>).attachmentId as string
+      : 'current-turn attachment';
+  return dispatched.status === 'passed'
+    ? `Exact attachment source observed for ${attachmentId}; private source content is omitted from event history.`
+    : 'Attachment source read failed; private source content is omitted from event history.';
+}
+
 /** A tool event is treated as an OBSERVATION for evidence-recovery purposes when
  *  it re-grounded state without mutating anything: the loop's deterministic
  *  auto_reobserve reads, plus any successful read/observe tool the model itself
@@ -5900,13 +6502,26 @@ function harvestToolLoopObservations(
 export async function executeToolUseLoop(opts: {
   systemPrompt: string;
   userMessage: string;
+  /** Exact user-authored task before prompt/context augmentation. Omit when a
+   * caller cannot prove that boundary; attachment egress then fails closed. */
+  originalUserTaskText?: string | null;
   model: string;
   circleId: string;
   userId: string;
+  /** Runtime-private exact authority for owner/circle Office preferences. */
+  exactCircleAuthority?: OpenSwanExactCircleAuthority | null;
+  /** Live UI fence; never enters provider input or persisted metadata. */
+  isExactCircleAuthorityCurrent?: OpenSwanExactCircleAuthorityFence;
   threadId?: string;
   runId?: string;
+  /** Runtime-private exact approval authority for a single retry turn. */
+  approvalResumeBinding?: OpenSwanApprovalResumeBindingV1 | null;
+  /** Exact persisted source user-message UUID for sealed approval lineage. */
+  approvalResumeSourceMessageId?: string | null;
   activeSoulKey?: string;
   activePluginIds?: string[];
+  /** Runtime-private attachment manifest and opaque source map for this turn. */
+  attachmentTurnSources?: OpenSwanAttachmentTurnSources | null;
   allowedToolNames?: string[];
   /** Hard per-turn catalog/dispatch ceiling from the task profile. */
   executionSurfaceGuard?: TaskExecutionSurfaceGuard;
@@ -5929,6 +6544,8 @@ export async function executeToolUseLoop(opts: {
   mode?: string | null;
   /** Optional tighter cap for cost-sensitive OpenSwan surfaces. */
   maxToolRounds?: number;
+  /** Preserve exact provider order for dependency-bearing A-ledgers. */
+  forceSequentialToolDispatch?: boolean;
   /** Optional compact subject metadata forwarded to swanbot-ai relay usage. */
   targetAgentName?: string | null;
   targetAgentSubjectKey?: string | null;
@@ -5947,7 +6564,7 @@ export async function executeToolUseLoop(opts: {
   toolApprovalGate?: (call: { name: string; input: any }) => Promise<'approve' | 'reject'>;
 }): Promise<{
   response: string;
-  toolEvents: Array<{ tool: string; input: unknown; result: string; status: OpenSwanExecutionStatus; metadata?: Record<string, unknown> }>;
+  toolEvents: Array<{ tool: string; toolUseId?: string; providerIteration?: number; input: unknown; result: string; status: OpenSwanExecutionStatus; metadata?: Record<string, unknown> }>;
   routing?: SwanBotStructuredResponse['routing'];
   /** True when the loop hit its tool-round cap before the model produced a
    *  final answer — the response may be partial and can be continued. */
@@ -5966,7 +6583,14 @@ export async function executeToolUseLoop(opts: {
   if (shouldBlockExternalAiProvider('anthropic')) {
     return { response: getStrictLocalAiModeMessage('anthropic'), toolEvents: [] };
   }
-  const { MAX_TOOL_ROUNDS, getToolDefinitions, dispatchToolDetailed, getToolParallelPolicy } = await import('./openswanTools/index');
+  const {
+    MAX_TOOL_ROUNDS,
+    bindOpenSwanToolCallContext,
+    buildOpenSwanAutoObservationToolUseId,
+    getToolDefinitions,
+    dispatchToolDetailed,
+    getToolParallelPolicy,
+  } = await import('./openswanTools/index');
   const { appendAppActionVerificationGate } = await import('./appActionVerificationGate');
   const { summarizeToolLoopProgress, buildToolLoopCheckpoint, extractAssistantText } = await import('./toolLoopProgress');
   const { canParallelizeToolBatch } = await import('./toolBatchParallelism');
@@ -6001,10 +6625,18 @@ export async function executeToolUseLoop(opts: {
   const toolCtx = {
     circleId: opts.circleId,
     userId: opts.userId,
+    exactCircleAuthority: opts.exactCircleAuthority,
+    isExactCircleAuthorityCurrent: opts.isExactCircleAuthorityCurrent,
     threadId: opts.threadId,
     runId: opts.runId,
+    approvalResumeBinding: opts.approvalResumeBinding || null,
+    approvalResumeSourceMessageId: opts.approvalResumeSourceMessageId || null,
     activeSoulKey: opts.activeSoulKey,
     activePluginIds: opts.activePluginIds,
+    attachmentTurnSources: opts.attachmentTurnSources,
+    originalUserTaskText: typeof opts.originalUserTaskText === 'string'
+      ? opts.originalUserTaskText
+      : null,
     surface: opts.surface || 'main_chat',
   };
 
@@ -6101,7 +6733,7 @@ export async function executeToolUseLoop(opts: {
     { role: 'user', content: opts.userMessage },
   ];
 
-  const toolEvents: Array<{ tool: string; input: unknown; result: string; status: OpenSwanExecutionStatus; metadata?: Record<string, unknown> }> = [];
+  const toolEvents: Array<{ tool: string; toolUseId?: string; providerIteration?: number; input: unknown; result: string; status: OpenSwanExecutionStatus; metadata?: Record<string, unknown> }> = [];
   // The edge function sets `provider_routed` / `routing_fallback` on every
   // round, but they only need to be captured once: the model id is fixed
   // for a turn, so the routing outcome is also fixed. We grab whatever
@@ -6146,6 +6778,7 @@ export async function executeToolUseLoop(opts: {
           message: opts.userMessage,
           circleId: opts.circleId,
           userId: opts.userId,
+          ...(opts.threadId ? { threadId: opts.threadId } : {}),
           model: loopModel,
           tools: anthropicTools,
           tool_messages: messages.length > 1 ? messages : undefined,
@@ -6292,6 +6925,7 @@ export async function executeToolUseLoop(opts: {
     // gate. `canParallelizeToolBatch` already bars mutating/side-effect tools;
     // this closes the gap where a read-only tool name matches a floor verb.
     const canPreDispatchBatch = allToolCallsInsideExecutionSurface
+      && !opts.forceSequentialToolDispatch
       && !enforceConstraints
       && canParallelizeToolBatch(batchPolicies, { hasApprovalGate: !!opts.toolApprovalGate });
     // Live activity label for the parallel batch (mirrors the v2 pattern
@@ -6301,8 +6935,20 @@ export async function executeToolUseLoop(opts: {
         ? `Running ${toolUseBlocks.length} steps…`
         : toolActivityLabel(toolUseBlocks[0].name, toolUseBlocks[0].input));
     }
+    const dispatchRequestedTool = (block: any, sourceCallOrdinal: number) => dispatchToolDetailed(
+      block.name,
+      block.input || {},
+      bindOpenSwanToolCallContext(toolCtx, {
+        toolName: block.name,
+        toolUseId: block.id,
+        iteration: round + 1,
+        sourceCallOrdinal,
+      }),
+    );
     const preDispatched = canPreDispatchBatch
-      ? await Promise.all(toolUseBlocks.map((b: any) => dispatchToolDetailed(b.name, b.input || {}, toolCtx)))
+      ? await Promise.all(toolUseBlocks.map((block: any, index: number) => (
+          dispatchRequestedTool(block, index + 1)
+        )))
       : null;
     // Layer-8 auto-grounding (deterministic re-observe) is suppressed only in
     // per-STEP REVIEW mode, where the model can request the read as its next
@@ -6330,6 +6976,8 @@ export async function executeToolUseLoop(opts: {
         const blockedText = executionSurfaceVerdict.reason;
         toolEvents.push({
           tool: String(block.name || 'unknown'),
+          toolUseId: block.id,
+          providerIteration: round + 1,
           input: block.input,
           result: blockedText,
           status: 'blocked' as OpenSwanExecutionStatus,
@@ -6357,6 +7005,8 @@ export async function executeToolUseLoop(opts: {
           const rejectionText = 'User declined this tool call. Try a different approach or ask the user how to proceed.';
           toolEvents.push({
             tool: block.name,
+            toolUseId: block.id,
+            providerIteration: round + 1,
             input: block.input,
             result: rejectionText,
             status: 'blocked' as OpenSwanExecutionStatus,
@@ -6384,6 +7034,8 @@ export async function executeToolUseLoop(opts: {
             || `The user forbade "${verdict.category}" actions for this task. It was not performed. Stop and report instead.`;
           toolEvents.push({
             tool: block.name,
+            toolUseId: block.id,
+            providerIteration: round + 1,
             input: block.input,
             result: blockedText,
             status: 'blocked' as OpenSwanExecutionStatus,
@@ -6408,13 +7060,18 @@ export async function executeToolUseLoop(opts: {
               circleId: opts.circleId,
               userId: opts.userId,
               runId: opts.runId,
+              threadId: opts.threadId,
+              approvalResumeBinding: opts.approvalResumeBinding || null,
               toolUseId: block.id,
               iteration: round + 1,
+              sourceCallOrdinal: bi + 1,
             },
           });
           if (!floor.passed) {
             toolEvents.push({
               tool: block.name,
+              toolUseId: block.id,
+              providerIteration: round + 1,
               input: block.input,
               result: floor.message,
               status: 'blocked' as OpenSwanExecutionStatus,
@@ -6454,6 +7111,8 @@ export async function executeToolUseLoop(opts: {
             const gateText = `Fresh-evidence gate: "${block.name}" already failed this turn and nothing has re-observed current state since. Capture fresh ground truth first (re-read the a11y tree / DOM, re-check the target), then retry the mutating action once. It was not performed.`;
             toolEvents.push({
               tool: block.name,
+              toolUseId: block.id,
+              providerIteration: round + 1,
               input: block.input,
               result: gateText,
               status: 'blocked' as OpenSwanExecutionStatus,
@@ -6468,7 +7127,7 @@ export async function executeToolUseLoop(opts: {
       // approval/constraint/floor gates above so an approval wait is never
       // mislabeled as tool activity. Fail-soft sink; no loop behavior change.
       if (!preDispatched) emitSwanBotActivity(toolActivityLabel(block.name, block.input));
-      const dispatched = preDispatched ? preDispatched[bi] : await dispatchToolDetailed(block.name, block.input || {}, toolCtx);
+      const dispatched = preDispatched ? preDispatched[bi] : await dispatchRequestedTool(block, bi + 1);
       // Enforce observe→act→VERIFY on multi-step app/desktop/browser tasks:
       // attach a re-observe/verify (or retry-ladder) reminder to mutating app
       // actions so the model can't silently assume a click/type worked.
@@ -6481,7 +7140,15 @@ export async function executeToolUseLoop(opts: {
       resultContent = appendStuckBreaker(resultContent, toolEvents, { tool: block.name, input: block.input, status: String(dispatched.status) });
       // Stamp capture time (QW4) so a harvested read/observe carries a real
       // freshness timestamp for the evidence-recovery readiness window.
-      toolEvents.push({ tool: block.name, input: block.input, result: dispatched.text, status: dispatched.status, metadata: { ...(dispatched.metadata || {}), observed_at: Date.now() } });
+      toolEvents.push({
+        tool: block.name,
+        toolUseId: block.id,
+        providerIteration: round + 1,
+        input: block.input,
+        result: transientToolEventResult(block.name, dispatched),
+        status: dispatched.status,
+        metadata: { ...(dispatched.metadata || {}), observed_at: Date.now() },
+      });
       // P59: record into the progress-based stuck ring (real dispatches only —
       // gate/floor-blocked calls stay out, keeping detection conservative).
       {
@@ -6507,11 +7174,20 @@ export async function executeToolUseLoop(opts: {
         const reobserve = planDeterministicReobserve(block.name, String(dispatched.status));
         if (reobserve) {
           try {
-            const obs = await dispatchToolDetailed(reobserve.observationTool, {}, toolCtx);
+            const obs = await dispatchToolDetailed(
+              reobserve.observationTool,
+              {},
+              bindOpenSwanToolCallContext(toolCtx, {
+                toolName: reobserve.observationTool,
+                toolUseId: buildOpenSwanAutoObservationToolUseId(block.id, round + 1, bi + 1),
+                iteration: round + 1,
+                sourceCallOrdinal: bi + 1,
+              }),
+            );
             const note = summarizeObservationForRetry(obs?.text, String(obs?.status), { maxChars: 1400 });
             if (note) {
               resultContent = `${resultContent}${note}`;
-              toolEvents.push({ tool: reobserve.observationTool, input: {}, result: obs.text, status: obs.status, metadata: { auto_reobserve: true, observed_at: Date.now() } });
+              toolEvents.push({ tool: reobserve.observationTool, providerIteration: round + 1, input: {}, result: obs.text, status: obs.status, metadata: { auto_reobserve: true, observed_at: Date.now() } });
             }
           } catch { /* observation is best-effort; never break the loop */ }
         }
@@ -6638,6 +7314,7 @@ export async function executeToolUseLoop(opts: {
           message: opts.userMessage,
           circleId: opts.circleId,
           userId: opts.userId,
+          ...(opts.threadId ? { threadId: opts.threadId } : {}),
           // `loopModel`, not `opts.model`: after a visible BlackSwan failover
           // the finalization must not re-hit the dead BlackSwan route.
           model: loopModel,
@@ -6753,11 +7430,15 @@ export async function maybeEscalateStreamedTurnToToolLoop(opts: {
   streamedTurn: { stopReason?: string | null; content?: unknown };
   systemPrompt: string;
   userMessage: string;
+  /** Exact unaugmented caller text. Omit rather than substituting model or
+   * prompt-ladder text when the caller did not retain it. */
+  originalUserTaskText?: string | null;
   model: string;
   circleId: string;
   userId: string;
   threadId?: string;
   runId?: string;
+  approvalResumeBinding?: OpenSwanApprovalResumeBindingV1 | null;
   activeSoulKey?: string;
   activePluginIds?: string[];
   surface?: 'main_chat' | 'room_chat' | 'office' | 'task_run';
@@ -6794,11 +7475,13 @@ export async function maybeEscalateStreamedTurnToToolLoop(opts: {
   const loop = await executeToolUseLoop({
     systemPrompt: opts.systemPrompt,
     userMessage: opts.userMessage,
+    originalUserTaskText: opts.originalUserTaskText,
     model: opts.model,
     circleId: opts.circleId,
     userId: opts.userId,
     threadId: opts.threadId,
     runId: opts.runId,
+    approvalResumeBinding: opts.approvalResumeBinding || null,
     activeSoulKey: opts.activeSoulKey,
     activePluginIds: opts.activePluginIds,
     allowedToolNames,

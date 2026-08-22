@@ -127,7 +127,7 @@ export default function ComputerUseConsole({
     setTask(initialTask || '');
     setNeedsInputTemplate(null);
     setTemplateQuery('');
-    setSavedTemplates(loadSavedTemplates());
+    setSavedTemplates(loadSavedTemplates(userId));
     setRecipeStatus('idle');
     setRecipeMessage('');
     setScheduleDraft('');
@@ -139,7 +139,7 @@ export default function ComputerUseConsole({
       setStickyScopes(active);
       setStickyHistory(history);
     });
-  }, [visible, initialTask]);
+  }, [visible, initialTask, userId]);
 
   // L2: when a completed task is on screen, look up the recipe-name health
   // from device-stored run outcomes (skillLifecycle). Failing/stale recipes
@@ -186,6 +186,7 @@ export default function ComputerUseConsole({
 
   const trimmed = task.trim();
   const canSubmit = trimmed.length > 0;
+  const standingGrantCreationAvailable = STICKY_GRANTABLE_CATEGORIES.length > 0;
 
   const refreshStickyScopes = useCallback((result: { active: StickyAllowScope[]; history: StickyAllowScope[] }) => {
     setStickyScopes(result.active);
@@ -221,10 +222,9 @@ export default function ComputerUseConsole({
     });
   }, [permCategoriesDraft, permKeyDraft, permKindDraft, refreshStickyScopes, userId]);
 
-  // One-tap post-task offer: a COMPLETED task that needed approval suggests
-  // "always allow <non-floor categories> on <site/app>". Floor categories
-  // (pay/delete/login/grant) are never offered, and the offer is skipped
-  // when an existing active scope already covers the target.
+  // Future one-tap post-task offer: only a positively safe category from the
+  // canonical effect policy can produce it. The current grantable set is empty,
+  // so completed exact-effect tasks never show a broad standing-grant action.
   const stickyOffer = useMemo(() => {
     if (!taskState || taskState.phase !== 'completed') return null;
     const hadApproval = taskState.steps.some((step) => step.id === 'approval' && step.status === 'completed')
@@ -948,8 +948,8 @@ export default function ComputerUseConsole({
                   </Pressable>
                   <Pressable
                     onPress={() => {
-                      deleteSavedTemplate(s.id);
-                      setSavedTemplates(loadSavedTemplates());
+                      deleteSavedTemplate(s.id, userId);
+                      setSavedTemplates(loadSavedTemplates(userId));
                     }}
                     style={styles.savedDeleteBtn}
                   >
@@ -961,14 +961,15 @@ export default function ComputerUseConsole({
           </View>
         )}
 
-        {/* ── Permissions: sticky "always allow" scopes (T7 UX) ─────────── */}
+        {/* ── Permissions: reviewable standing-grant compatibility ───────── */}
         <View style={styles.section}>
           <Text style={styles.label}>
             PERMISSIONS{stickyScopes.length > 0 ? ` (${stickyScopes.length})` : ''}
           </Text>
           <Text style={styles.statusMeta}>
-            Standing grants auto-approve non-destructive actions on a site or
-            app. Pay, delete, login, and account-grant steps always ask.
+            {standingGrantCreationAvailable
+              ? 'Standing grants cover only positively safe categories on one site or app. Exact outcome boundaries always ask.'
+              : 'Broad standing grants are paused. Every current computer mutation category requires exact outcome approval; legacy broad grants are ignored.'}
           </Text>
           <ScrollView style={{ maxHeight: 320 }}>
             {stickyScopes.map((scope) => (
@@ -997,8 +998,9 @@ export default function ComputerUseConsole({
             ))}
             {stickyScopes.length === 0 ? (
               <Text style={[styles.statusMeta, { paddingVertical: 4 }]}>
-                No standing grants. Add one below, or accept the offer after a
-                completed task that needed approval.
+                {standingGrantCreationAvailable
+                  ? 'No active standing grants. Add one below or accept a safe-category offer after a completed task.'
+                  : 'No active standing grants. Reads and reversible lifecycle actions keep their existing narrow policy; mutations still use their exact approval boundary.'}
               </Text>
             ) : null}
             {stickyHistory.slice(0, 10).map((scope) => (
@@ -1015,55 +1017,59 @@ export default function ComputerUseConsole({
               </View>
             ))}
           </ScrollView>
-          {/* Add form: site/app + non-floor category checkboxes. Floor
-              categories (pay/delete/login/grant) are not offered, ever. */}
-          <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center' }}>
-            {(['site', 'app'] as StickyAllowScopeKind[]).map((kind) => (
-              <Pressable
-                key={kind}
-                onPress={() => setPermKindDraft(kind)}
-                style={[styles.chip, { borderColor: permKindDraft === kind ? accentColor : CARD_BORDER }]}
-              >
-                <Text style={[styles.chipText, permKindDraft === kind ? { color: accentColor, fontWeight: '700' } : null]}>
-                  {kind.toUpperCase()}
-                </Text>
-              </Pressable>
-            ))}
-            <TextInput
-              value={permKeyDraft}
-              onChangeText={setPermKeyDraft}
-              placeholder={permKindDraft === 'site' ? 'acme.com' : 'app name (e.g. notion)'}
-              placeholderTextColor={MUTED}
-              style={[styles.input, { flex: 1, minHeight: 34, maxHeight: 34, paddingVertical: 6, paddingHorizontal: 10 }]}
-            />
-          </View>
-          <View style={styles.chipRow}>
-            {STICKY_GRANTABLE_CATEGORIES.map((category) => (
-              <Pressable
-                key={category}
-                onPress={() => togglePermCategory(category)}
-                style={[styles.chip, { borderColor: permCategoriesDraft.includes(category) ? accentColor : CARD_BORDER }]}
-              >
-                <Text style={[styles.chipText, permCategoriesDraft.includes(category) ? { color: accentColor, fontWeight: '700' } : null]}>
-                  {permCategoriesDraft.includes(category) ? '✓ ' : ''}{category}
-                </Text>
-              </Pressable>
-            ))}
-            <Pressable
-              onPress={handleGrantStickyScope}
-              disabled={!permKeyDraft.trim() || permCategoriesDraft.length === 0}
-              style={[
-                styles.fillBtn,
-                { paddingVertical: 6, backgroundColor: permKeyDraft.trim() && permCategoriesDraft.length > 0 ? accentColor : '#1e293b' },
-              ]}
-              accessibilityRole="button"
-              accessibilityLabel="Add standing grant"
-            >
-              <Text style={[styles.fillBtnText, { color: permKeyDraft.trim() && permCategoriesDraft.length > 0 ? '#020617' : MUTED }]}>
-                GRANT 30D
-              </Text>
-            </Pressable>
-          </View>
+          {/* The add form exists only when the canonical effect policy exposes
+              at least one positively safe standing-grant category. */}
+          {standingGrantCreationAvailable ? (
+            <>
+              <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center' }}>
+                {(['site', 'app'] as StickyAllowScopeKind[]).map((kind) => (
+                  <Pressable
+                    key={kind}
+                    onPress={() => setPermKindDraft(kind)}
+                    style={[styles.chip, { borderColor: permKindDraft === kind ? accentColor : CARD_BORDER }]}
+                  >
+                    <Text style={[styles.chipText, permKindDraft === kind ? { color: accentColor, fontWeight: '700' } : null]}>
+                      {kind.toUpperCase()}
+                    </Text>
+                  </Pressable>
+                ))}
+                <TextInput
+                  value={permKeyDraft}
+                  onChangeText={setPermKeyDraft}
+                  placeholder={permKindDraft === 'site' ? 'acme.com' : 'app name (e.g. notion)'}
+                  placeholderTextColor={MUTED}
+                  style={[styles.input, { flex: 1, minHeight: 34, maxHeight: 34, paddingVertical: 6, paddingHorizontal: 10 }]}
+                />
+              </View>
+              <View style={styles.chipRow}>
+                {STICKY_GRANTABLE_CATEGORIES.map((category) => (
+                  <Pressable
+                    key={category}
+                    onPress={() => togglePermCategory(category)}
+                    style={[styles.chip, { borderColor: permCategoriesDraft.includes(category) ? accentColor : CARD_BORDER }]}
+                  >
+                    <Text style={[styles.chipText, permCategoriesDraft.includes(category) ? { color: accentColor, fontWeight: '700' } : null]}>
+                      {permCategoriesDraft.includes(category) ? '✓ ' : ''}{category}
+                    </Text>
+                  </Pressable>
+                ))}
+                <Pressable
+                  onPress={handleGrantStickyScope}
+                  disabled={!permKeyDraft.trim() || permCategoriesDraft.length === 0}
+                  style={[
+                    styles.fillBtn,
+                    { paddingVertical: 6, backgroundColor: permKeyDraft.trim() && permCategoriesDraft.length > 0 ? accentColor : '#1e293b' },
+                  ]}
+                  accessibilityRole="button"
+                  accessibilityLabel="Add standing grant"
+                >
+                  <Text style={[styles.fillBtnText, { color: permKeyDraft.trim() && permCategoriesDraft.length > 0 ? '#020617' : MUTED }]}>
+                    GRANT 30D
+                  </Text>
+                </Pressable>
+              </View>
+            </>
+          ) : null}
           {permMessage ? (
             <Text style={[styles.statusMeta, { color: permMessage.startsWith('Standing grant added') ? '#4ade80' : '#f87171' }]} numberOfLines={2}>
               {permMessage}

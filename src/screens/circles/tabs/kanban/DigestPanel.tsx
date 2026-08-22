@@ -6,6 +6,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { View, Text, Pressable, StyleSheet, Platform } from 'react-native';
 import { supabase } from '../../../../lib/supabase';
 import { generateNudge, getProgressInsight } from '../../../../lib/coach';
+import { indexSafeProfiles, loadSafeCircleProfiles } from '../../../../lib/safeProfiles';
 
 interface Props {
   circleId: string;
@@ -31,31 +32,39 @@ export default function DigestPanel({ circleId }: Props) {
     if (!user) return;
     try {
       const [checkInRes, memberRes, taskRes] = await Promise.all([
-        supabase.from('check_ins').select('user_id, content, created_at, profiles(username, display_name)')
+        supabase.from('check_ins').select('user_id, content, created_at')
           .eq('circle_id', circleId).gte('created_at', today + 'T00:00:00').order('created_at', { ascending: false }).limit(20),
         supabase.from('circle_members').select('user_id').eq('circle_id', circleId).limit(50),
         supabase.from('tasks').select('id').eq('circle_id', circleId).eq('status', 'done').gte('completed_at', today + 'T00:00:00'),
       ]);
       const todayCheckIns = checkInRes.data || [];
+      const checkInProfiles = indexSafeProfiles(await loadSafeCircleProfiles({
+        circleId,
+        userIds: todayCheckIns.map((row: any) => row.user_id),
+      }));
+      const hydratedCheckIns = todayCheckIns.map((row: any) => ({
+        ...row,
+        profiles: checkInProfiles.get(row.user_id) || null,
+      }));
       const activeMembers = new Set(todayCheckIns.map((c: any) => c.user_id)).size;
 
       const memberIds = (memberRes.data || []).map((m: any) => m.user_id);
       let mvp: { name: string; xp: number } | null = null;
       if (memberIds.length > 0) {
-        const [xpRes, profileRes] = await Promise.all([
+        const [xpRes, profiles] = await Promise.all([
           supabase.from('user_points').select('user_id, lifetime_points')
             .in('user_id', memberIds).order('lifetime_points', { ascending: false }).limit(1),
-          supabase.from('profiles').select('id, username, display_name').in('id', memberIds),
+          loadSafeCircleProfiles({ circleId, userIds: memberIds }),
         ]);
         const topXp = xpRes.data?.[0];
         if (topXp) {
-          const prof = (profileRes.data || []).find((p: any) => p.id === topXp.user_id);
+          const prof = profiles.find((p: any) => p.id === topXp.user_id);
           mvp = { name: prof?.display_name || prof?.username || 'Unknown', xp: topXp.lifetime_points };
         }
       }
       const nudge = await generateNudge(user.id).catch(() => null);
       const insight = await getProgressInsight(user.id).catch(() => '');
-      setDigest({ todayCheckIns, activeMembers, tasksCompleted: taskRes.data?.length || 0, mvp, nudge, insight });
+      setDigest({ todayCheckIns: hydratedCheckIns, activeMembers, tasksCompleted: taskRes.data?.length || 0, mvp, nudge, insight });
     } catch {}
   }, [circleId, today]);
 

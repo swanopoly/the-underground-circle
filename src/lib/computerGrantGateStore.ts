@@ -7,7 +7,10 @@
  * to a circle-settings JSONB blob if cross-device sync is demanded.
  *
  * Every load/save re-hydrates the in-memory registry in `computerGrantGate`
- * so the synchronous chat router sees the current active scopes.
+ * so the synchronous chat router sees the current active scopes. The canonical
+ * effect policy currently exposes no grantable router mutation category, so
+ * legacy broad scopes sanitize to an empty registry until a future positively
+ * safe category is added there.
  */
 
 import { storage } from './storage';
@@ -87,4 +90,20 @@ export async function revokeStickyAllowScope(
 export async function recordStickyAllowScopeUse(usedScopeIds: string[]): Promise<StickyScopePruneResult> {
   const existing = await readAll();
   return writeAll(markStickyScopesUsed(existing, usedScopeIds));
+}
+
+/**
+ * Fail closed on account exit: preserve the reviewable history but revoke every
+ * currently active device grant. Grants are not re-used across accounts, even
+ * when an older row predates the `grantedByUserId` field.
+ */
+export async function revokeAllActiveStickyAllowScopes(
+  byUserId?: string | null,
+): Promise<StickyScopePruneResult> {
+  const existing = await readAll();
+  let next = existing;
+  for (const scope of existing) {
+    if (!scope.revoked) next = revokeStickyScope(next, scope.id, byUserId);
+  }
+  return writeAll(next);
 }

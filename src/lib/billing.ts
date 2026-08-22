@@ -143,7 +143,7 @@ export async function getUsageSummary(orgId: string) {
     { data: org },
   ] = await Promise.all([
     supabase.from('org_members').select('*', { count: 'exact', head: true }).eq('org_id', orgId),
-    supabase.from('circles').select('*', { count: 'exact', head: true }).eq('org_id', orgId),
+    supabase.from('circles').select('id', { count: 'exact', head: true }).eq('org_id', orgId),
     supabase.from('organizations').select('plan, seat_count').eq('id', orgId).single(),
   ]);
 

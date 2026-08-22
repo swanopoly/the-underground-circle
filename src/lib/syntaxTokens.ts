@@ -313,12 +313,12 @@ export class StreamTokenizer {
 export const TOKEN_COLORS: Record<TokenKind, string> = {
   text:     '#d8e1ef',
   tag:      '#60a5fa',   // blue
-  attr:     '#22d3ee',   // cyan
+  attr:     '#6366f1',   // cyan
   string:   '#86efac',   // green
   comment:  '#64748b',   // gray
   keyword:  '#c084fc',   // violet
   number:   '#facc15',   // yellow
   punct:    '#94a3b8',   // slate
   selector: '#f472b6',   // pink
-  prop:     '#22d3ee',   // cyan (same as attrs)
+  prop:     '#6366f1',   // cyan (same as attrs)
 };

@@ -16,6 +16,8 @@ import {
   parseWaitForSpec,
   describeWaitForSpec,
   normalizeScrollDelta,
+  normalizeBrowserSemanticWait,
+  normalizeBrowserSemanticScroll,
   MAX_TRACKED_TABS,
   SCROLL_DELTA_MAX,
   WAIT_FOR_MAX_TIMEOUT_MS,
@@ -29,6 +31,13 @@ function pass(m: string) { console.log('pass:', m); }
 function assert(cond: unknown, name: string, detail?: string) {
   if (cond) pass(name); else fail(`${name}${detail ? ' — ' + detail : ''}`);
 }
+
+const exactSemanticPageIdentity = {
+  expectedBrowserProcessId: `uc_browser_process_${'a'.repeat(32)}`,
+  expectedBrowserContextId: `uc_browser_context_${'b'.repeat(32)}`,
+  expectedPageId: `uc_browser_page_${'c'.repeat(32)}`,
+  expectedUrl: `uc_browser_url_${'d'.repeat(64)}`,
+};
 
 async function main() {
   // ─── normalizeTabList ──────────────────────────────────────────────
@@ -226,6 +235,70 @@ async function main() {
     assert(/waited \d+ms/.test(describeWaitForSpec(parseWaitForSpec({ timeoutMs: 500 }))), 'wait: describe names delay');
   }
 
+  // ─── strict semantic wait ─────────────────────────────────────────
+  {
+    const page = normalizeBrowserSemanticWait({
+      ...exactSemanticPageIdentity,
+      condition: 'page_loaded',
+    });
+    assert(
+      page.ok
+        && page.value.mode === 'state'
+        && page.value.state === 'load'
+        && page.value.timeoutMs === 15_000
+        && page.value.expectedPageId === exactSemanticPageIdentity.expectedPageId,
+      'semantic wait: page_loaded retains exact identity and maps to a bounded load-state wait',
+    );
+    const element = normalizeBrowserSemanticWait({
+      ...exactSemanticPageIdentity,
+      condition: 'element_visible',
+      role: 'Button',
+      name: 'Continue',
+      timeoutMs: 2_000,
+    });
+    assert(
+      element.ok
+        && element.value.mode === 'element'
+        && element.value.role === 'button'
+        && element.value.name === 'Continue'
+        && element.value.exact === true
+        && element.value.state === 'visible',
+      'semantic wait: element conditions require an exact role/name target',
+    );
+    const cssLookingAccessibleName = normalizeBrowserSemanticWait({
+      ...exactSemanticPageIdentity,
+      condition: 'element_visible',
+      role: 'button',
+      name: '#save',
+    });
+    assert(
+      cssLookingAccessibleName.ok
+        && cssLookingAccessibleName.value.mode === 'element'
+        && cssLookingAccessibleName.value.name === '#save'
+        && cssLookingAccessibleName.value.exact === true,
+      'semantic wait: CSS-looking accessible names remain exact ARIA names',
+    );
+    const delay = normalizeBrowserSemanticWait({
+      ...exactSemanticPageIdentity,
+      condition: 'delay',
+      timeoutMs: 250,
+    });
+    assert(delay.ok && delay.value.mode === 'delay' && delay.value.timeoutMs === 250, 'semantic wait: explicit bounded delay is accepted');
+  }
+  for (const [label, value] of [
+    ['missing identity', { condition: 'page_loaded' }],
+    ['partial identity', { ...exactSemanticPageIdentity, expectedPageId: '', condition: 'page_loaded' }],
+    ['raw URL instead of opaque URL identity', { ...exactSemanticPageIdentity, expectedUrl: 'https://private.example/account?token=secret', condition: 'page_loaded' }],
+    ['raw selector', { ...exactSemanticPageIdentity, condition: 'element_visible', selector: '#secret' }],
+    ['missing condition', { ...exactSemanticPageIdentity, timeoutMs: 1000 }],
+    ['incomplete element target', { ...exactSemanticPageIdentity, condition: 'element_visible', role: 'button' }],
+    ['fuzzy element match', { ...exactSemanticPageIdentity, condition: 'element_visible', role: 'button', name: 'Continue', exact: false }],
+    ['unbounded lifecycle timeout', { ...exactSemanticPageIdentity, condition: 'network_idle', timeoutMs: 0 }],
+    ['ignored page target', { ...exactSemanticPageIdentity, condition: 'dom_ready', role: 'main', name: 'Page' }],
+  ] as const) {
+    assert(!normalizeBrowserSemanticWait(value).ok, `semantic wait: rejects ${label}`);
+  }
+
   // ─── normalizeScrollDelta ──────────────────────────────────────────
   {
     const s = normalizeScrollDelta({ dx: 0, dy: 400 });
@@ -250,6 +323,44 @@ async function main() {
     // rounds floats.
     const f = normalizeScrollDelta({ dx: 12.7, dy: 33.2 });
     assert(f.dx === 13 && f.dy === 33, 'scroll: floats rounded');
+  }
+
+
+  // ─── strict semantic scroll ───────────────────────────────────────
+  {
+    const down = normalizeBrowserSemanticScroll({
+      ...exactSemanticPageIdentity,
+      direction: 'down',
+    });
+    assert(
+      down.ok
+        && down.value.amount === 'medium'
+        && down.value.dx === 0
+        && down.value.dy === 600
+        && down.value.expectedUrl === exactSemanticPageIdentity.expectedUrl,
+      'semantic scroll: retains exact identity and defaults to one medium downward gesture',
+    );
+    const left = normalizeBrowserSemanticScroll({
+      ...exactSemanticPageIdentity,
+      direction: 'left',
+      amount: 'large',
+    });
+    assert(
+      left.ok && left.value.dx === -1200 && left.value.dy === 0,
+      'semantic scroll: left/large maps to one bounded horizontal gesture',
+    );
+  }
+  for (const [label, value] of [
+    ['missing identity', { direction: 'down' }],
+    ['partial identity', { ...exactSemanticPageIdentity, expectedBrowserContextId: '', direction: 'down' }],
+    ['raw URL instead of opaque URL identity', { ...exactSemanticPageIdentity, expectedUrl: 'https://private.example/path', direction: 'down' }],
+    ['raw deltas', { ...exactSemanticPageIdentity, direction: 'down', dx: 0, dy: 600 }],
+    ['missing direction', { ...exactSemanticPageIdentity, amount: 'small' }],
+    ['unknown direction', { ...exactSemanticPageIdentity, direction: 'diagonal' }],
+    ['unknown amount', { ...exactSemanticPageIdentity, direction: 'down', amount: 'huge' }],
+    ['extra action field', { ...exactSemanticPageIdentity, direction: 'down', click: true }],
+  ] as const) {
+    assert(!normalizeBrowserSemanticScroll(value).ok, `semantic scroll: rejects ${label}`);
   }
 
   // ─── Bridge/client parity ──────────────────────────────────────────
@@ -289,6 +400,204 @@ async function main() {
       for (const fn of ['handleTabsList', 'handleTabSwitch', 'handleTabClose', 'handleDownload', 'handleWaitFor', 'handleScroll']) {
         assert(typeof bridge[fn] === 'function', `parity: bridge exports ${fn}`);
       }
+      assert(
+        typeof bridge._normalizeBridgeSemanticWait === 'function'
+          && typeof bridge._normalizeBridgeSemanticScroll === 'function'
+          && typeof bridge._normalizeBrowserViewportScrollPosition === 'function'
+          && typeof bridge._browserSemanticScrollMovementVerified === 'function'
+          && typeof bridge._performVerifiedBrowserSemanticScroll === 'function',
+        'parity: bridge exports strict semantic wait/scroll and scroll-proof helpers',
+      );
+      if (
+        typeof bridge._normalizeBridgeSemanticWait === 'function'
+        && typeof bridge._normalizeBridgeSemanticScroll === 'function'
+      ) {
+        const waitInput = {
+          ...exactSemanticPageIdentity,
+          condition: 'element_hidden',
+          role: 'status',
+          name: 'Loading',
+          timeoutMs: 4_000,
+        };
+        assert(
+          JSON.stringify(bridge._normalizeBridgeSemanticWait(waitInput))
+            === JSON.stringify(normalizeBrowserSemanticWait(waitInput)),
+          'parity: semantic wait normalization matches bridge/client pure core',
+        );
+        const scrollInput = {
+          ...exactSemanticPageIdentity,
+          direction: 'right',
+          amount: 'small',
+        };
+        assert(
+          JSON.stringify(bridge._normalizeBridgeSemanticScroll(scrollInput))
+            === JSON.stringify(normalizeBrowserSemanticScroll(scrollInput)),
+          'parity: semantic scroll normalization matches bridge/client pure core',
+        );
+        assert(
+          bridge._normalizeBridgeSemanticWait({
+            ...exactSemanticPageIdentity,
+            condition: 'element_visible',
+            selector: '#private',
+          }).ok === false,
+          'parity: bridge rejects raw selector waits',
+        );
+        assert(
+          bridge._normalizeBridgeSemanticScroll({
+            ...exactSemanticPageIdentity,
+            direction: 'down',
+            dx: 0,
+            dy: 600,
+          }).ok === false,
+          'parity: bridge rejects raw scroll deltas',
+        );
+      }
+
+      // A wheel-dispatch acknowledgement is not scroll proof. Exercise the
+      // bridge's production helper with a fake page so the smoke verifies the
+      // requested-axis before/after comparison, exactly-one gesture, bounded
+      // verification polling, and fail-closed behavior at a scroll boundary.
+      if (
+        typeof bridge._normalizeBrowserViewportScrollPosition === 'function'
+        && typeof bridge._browserSemanticScrollMovementVerified === 'function'
+        && typeof bridge._performVerifiedBrowserSemanticScroll === 'function'
+      ) {
+        const normalizedPosition = bridge._normalizeBrowserViewportScrollPosition({
+          x: 12,
+          y: 34,
+          maxX: 500,
+          maxY: 900,
+        });
+        assert(
+          normalizedPosition?.x === 12
+            && normalizedPosition?.y === 34
+            && normalizedPosition?.maxX === 500
+            && normalizedPosition?.maxY === 900,
+          'scroll proof: viewport position normalization retains bounded finite geometry',
+        );
+        for (const invalidPosition of [
+          null,
+          { x: Number.NaN, y: 0, maxX: 0, maxY: 0 },
+          { x: 0, y: Number.POSITIVE_INFINITY, maxX: 0, maxY: 0 },
+          { x: 0, y: 0, maxX: -1, maxY: 0 },
+        ]) {
+          assert(
+            bridge._normalizeBrowserViewportScrollPosition(invalidPosition) === null,
+            'scroll proof: invalid or unbounded viewport geometry fails closed',
+          );
+        }
+
+        const origin = { x: 100, y: 100, maxX: 1_000, maxY: 1_000 };
+        assert(
+          bridge._browserSemanticScrollMovementVerified('down', origin, { ...origin, y: 101 }) === true,
+          'scroll proof: down requires increasing vertical position',
+        );
+        assert(
+          bridge._browserSemanticScrollMovementVerified('up', origin, { ...origin, y: 99 }) === true,
+          'scroll proof: up requires decreasing vertical position',
+        );
+        assert(
+          bridge._browserSemanticScrollMovementVerified('right', origin, { ...origin, x: 101 }) === true,
+          'scroll proof: right requires increasing horizontal position',
+        );
+        assert(
+          bridge._browserSemanticScrollMovementVerified('left', origin, { ...origin, x: 99 }) === true,
+          'scroll proof: left requires decreasing horizontal position',
+        );
+        assert(
+          bridge._browserSemanticScrollMovementVerified('down', origin, { ...origin, x: 200 }) === false,
+          'scroll proof: movement on the wrong axis is not accepted',
+        );
+        assert(
+          bridge._browserSemanticScrollMovementVerified('down', origin, { ...origin }) === false,
+          'scroll proof: an unchanged viewport is not accepted',
+        );
+        assert(
+          bridge._browserSemanticScrollMovementVerified('diagonal', origin, { ...origin, x: 200, y: 200 }) === false,
+          'scroll proof: an unknown direction fails closed',
+        );
+
+        function makeFakeScrollPage(positions: Array<Record<string, number>>) {
+          let positionReadCount = 0;
+          let wheelCallCount = 0;
+          let waitCallCount = 0;
+          const wheelArgs: Array<[number, number]> = [];
+          return {
+            page: {
+              evaluate: async () => {
+                const position = positions[Math.min(positionReadCount, positions.length - 1)];
+                positionReadCount += 1;
+                return position;
+              },
+              mouse: {
+                wheel: async (dx: number, dy: number) => {
+                  wheelCallCount += 1;
+                  wheelArgs.push([dx, dy]);
+                },
+              },
+              waitForTimeout: async () => {
+                waitCallCount += 1;
+              },
+            },
+            stats: () => ({ positionReadCount, wheelCallCount, waitCallCount, wheelArgs }),
+          };
+        }
+
+        const movingPage = makeFakeScrollPage([
+          { x: 0, y: 100, maxX: 0, maxY: 1_000 },
+          { x: 0, y: 700, maxX: 0, maxY: 1_000 },
+        ]);
+        const movingResult = await bridge._performVerifiedBrowserSemanticScroll(movingPage.page, {
+          direction: 'down',
+          amount: 'medium',
+          dx: 0,
+          dy: 600,
+        });
+        const movingStats = movingPage.stats();
+        assert(
+          movingResult?.ok === true && movingResult?.movementVerified === true,
+          'scroll proof: requested-axis movement produces a verified success receipt',
+        );
+        assert(
+          movingStats.wheelCallCount === 1
+            && JSON.stringify(movingStats.wheelArgs) === JSON.stringify([[0, 600]]),
+          'scroll proof: verified success dispatches exactly one bounded wheel gesture',
+        );
+        assert(
+          movingStats.positionReadCount >= 2 && movingStats.positionReadCount <= 4,
+          'scroll proof: verified success captures one before position and at most three after samples',
+        );
+        assert(
+          movingStats.waitCallCount >= 1 && movingStats.waitCallCount <= 3,
+          'scroll proof: verified success uses only bounded read-after-gesture waits',
+        );
+
+        const stationaryPage = makeFakeScrollPage([
+          { x: 0, y: 1_000, maxX: 0, maxY: 1_000 },
+        ]);
+        const stationaryResult = await bridge._performVerifiedBrowserSemanticScroll(stationaryPage.page, {
+          direction: 'down',
+          amount: 'large',
+          dx: 0,
+          dy: 1_200,
+        });
+        const stationaryStats = stationaryPage.stats();
+        assert(
+          stationaryResult?.ok === false
+            && stationaryResult?.errorCode === 'browser_scroll_verification_failed'
+            && stationaryResult?.movementVerified !== true,
+          'scroll proof: no movement at a boundary fails closed instead of claiming completion',
+        );
+        assert(
+          stationaryStats.wheelCallCount === 1,
+          'scroll proof: verification failure never replays the wheel gesture',
+        );
+        assert(
+          stationaryStats.positionReadCount >= 2 && stationaryStats.positionReadCount <= 4
+            && stationaryStats.waitCallCount >= 1 && stationaryStats.waitCallCount <= 3,
+          'scroll proof: no-movement verification remains bounded to three after samples',
+        );
+      }
 
       // Bridge-issued browser identity registry: ids are opaque/stable for
       // live objects, unique across contexts/pages/evidence, and retired page
@@ -323,9 +632,56 @@ async function main() {
         expectedPageId: observationA.pageId,
         expectedUrl: observationA.url,
       };
+      const semanticExact = {
+        expectedBrowserProcessId: observationA.browserProcessId,
+        expectedBrowserContextId: observationA.browserContextId,
+        expectedPageId: observationA.pageId,
+        expectedUrl: bridge._buildBrowserUrlIdentity(observationA.url),
+      };
       assert(
         bridge._checkExpectedBrowserFillIdentity(registry, contextA, pageA, exact, pageA).ok === true,
         'fill identity: exact live context/page/url passes at handler entry',
+      );
+      assert(
+        bridge._checkExpectedBrowserSemanticPageIdentity(
+          registry,
+          contextA,
+          pageA,
+          semanticExact,
+          pageA,
+        ).ok === true,
+        'semantic primitive identity: exact opaque process/context/page/URL passes',
+      );
+      const semanticReceipt = bridge._captureBrowserSemanticPageIdentityReceipt(
+        registry,
+        contextA,
+        pageA,
+        semanticExact,
+        pageA,
+      );
+      assert(
+        semanticReceipt.ok === true
+          && semanticReceipt.receipt.browserProcessId === semanticExact.expectedBrowserProcessId
+          && semanticReceipt.receipt.browserContextId === semanticExact.expectedBrowserContextId
+          && semanticReceipt.receipt.pageId === semanticExact.expectedPageId
+          && semanticReceipt.receipt.urlMatchesExpected === true,
+        'semantic primitive identity: after-proof binds the same exact live page',
+      );
+      assert(
+        semanticReceipt.ok === true
+          && !Object.prototype.hasOwnProperty.call(semanticReceipt.receipt, 'url')
+          && !Object.prototype.hasOwnProperty.call(semanticReceipt.receipt, 'title'),
+        'semantic primitive identity: after-proof omits raw URL and title',
+      );
+      assert(
+        bridge._checkExpectedBrowserSemanticPageIdentity(
+          registry,
+          contextA,
+          pageA,
+          { ...semanticExact, expectedUrl: observationA.url },
+          pageA,
+        ).code === 'browser_identity_required',
+        'semantic primitive identity: raw URL authority fails closed',
       );
       assert(
         bridge._checkExpectedBrowserFillIdentity(
@@ -343,16 +699,46 @@ async function main() {
       if (mismatch.ok) fillCalls += 1;
       assert(mismatch.ok === false && mismatch.code === 'browser_identity_mismatch', 'fill identity: URL mismatch fails closed');
       assert(fillCalls === 0, 'fill identity: mismatch is rejected before the fill callback');
+      assert(
+        bridge._checkExpectedBrowserSemanticPageIdentity(
+          registry,
+          contextA,
+          pageA,
+          semanticExact,
+          pageA,
+        ).code === 'browser_identity_mismatch',
+        'semantic primitive identity: exact URL drift fails closed',
+      );
       pageA.currentUrl = observationA.url;
       assert(
         bridge._checkExpectedBrowserFillIdentity(registry, contextA, pageA, exact, pageB).ok === false,
         'fill identity: active-page switch fails closed before fill',
+      );
+      assert(
+        bridge._checkExpectedBrowserSemanticPageIdentity(
+          registry,
+          contextA,
+          pageA,
+          semanticExact,
+          pageB,
+        ).code === 'browser_identity_mismatch',
+        'semantic primitive identity: active-page switch fails closed before dispatch',
       );
       const navigatedPageId = registry.advancePageDocument(pageA);
       assert(navigatedPageId !== pageAId, 'identity: main-frame navigation rotates the page document id');
       assert(
         bridge._checkExpectedBrowserFillIdentity(registry, contextA, pageA, exact, pageA).ok === false,
         'fill identity: same-URL reload/document replacement invalidates prior page identity',
+      );
+      assert(
+        bridge._captureBrowserSemanticPageIdentityReceipt(
+          registry,
+          contextA,
+          pageA,
+          semanticExact,
+          pageA,
+        ).code === 'browser_identity_mismatch',
+        'semantic primitive identity: navigation/reload invalidates post-operation proof',
       );
 
       registry.retirePage(pageA);
@@ -529,7 +915,7 @@ async function main() {
       assert(bridge._isCredentialFillSemantics({ name: 'Email address' }) === true, 'fill canary: email/login identity field is credential semantics');
       assert(bridge._isCredentialFillSemantics({ name: 'Search query' }) === false, 'fill canary: ordinary non-secret draft field remains eligible');
       for (const [text, label] of [
-        ['sk-proj-AbCdEf1234567890_XYZ', 'provider API token'],
+        [['sk', 'proj', 'AbCdEf1234567890_XYZ'].join('-'), 'provider API token'],
         ['Bearer eyJhbGciOiJIUzI1NiJ9.payloadsignature', 'bearer token'],
         ['eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123', 'JWT'],
         ['client_secret=R4nd0mSecretMaterial987654', 'labeled client secret'],

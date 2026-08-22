@@ -299,15 +299,18 @@ export function buildChatComputerTaskPlanPreview(
 ): ChatComputerTaskPlanPreviewCard {
   const resolvedAutonomy = autonomy ?? buildChatComputerTaskAutonomy(route);
   const exactPhotoshopBlankDocument = isExactPhotoshopBlankDocumentRoute(route);
+  const requestedActionSteps = route.requestedActionContract?.actions.map((action) => `${action.id}. ${action.text}`) || [];
   const steps = uniqueCompact(
     exactPhotoshopBlankDocument
       ? route.designExecutionPipeline!.phases.map((phase) => phase.label)
+      : requestedActionSteps.length >= 2
+      ? requestedActionSteps
       : route.actionItems && route.actionItems.length >= 2
       ? route.actionItems.map((item) => item.label)
       : route.designExecutionPipeline
       ? route.designExecutionPipeline.phases.map((phase) => String(phase.id).replace(/_/g, ' '))
       : route.selectedPipeline?.solutionSteps || [],
-    6,
+    requestedActionSteps.length >= 2 ? 8 : 6,
   );
   const surfaces = uniqueCompact(
     exactPhotoshopBlankDocument

@@ -8,13 +8,39 @@
  *   - Evolution path to next unlock
  */
 
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
-  View, Text, StyleSheet, Animated, Easing, Platform,
+  View, Text, StyleSheet, Animated, Easing, Platform, AccessibilityInfo,
 } from 'react-native';
 import { BOND_UNLOCKS, BOND_LEVELS } from '../../lib/mastery';
 
 const MONO = Platform.OS === 'web' ? 'monospace' : undefined;
+
+function useReducedMotionPreference(): boolean {
+  // Fail static until the async preference read resolves so a user who has
+  // requested reduced motion never sees a one-frame entrance animation.
+  const [reduceMotion, setReduceMotion] = useState(true);
+
+  useEffect(() => {
+    let mounted = true;
+    void AccessibilityInfo.isReduceMotionEnabled()
+      .then(enabled => {
+        if (mounted) setReduceMotion(enabled);
+      })
+      .catch(() => {
+        // Motion is decorative; if the preference cannot be read, fail to the
+        // fully visible static state rather than guessing that motion is safe.
+        if (mounted) setReduceMotion(true);
+      });
+    const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', setReduceMotion);
+    return () => {
+      mounted = false;
+      subscription.remove();
+    };
+  }, []);
+
+  return reduceMotion;
+}
 
 interface Props {
   agentName: string;
@@ -37,7 +63,7 @@ interface Props {
 
 // ─── Animated XP Bar ────────────────────────────────────────────────────────
 
-function RPGBar({ progress, color, level, xp, title, label, nextXp, nextTitle }: {
+function RPGBar({ progress, color, level, xp, title, label, nextXp, nextTitle, reduceMotion }: {
   progress: number;
   color: string;
   level: number;
@@ -49,26 +75,25 @@ function RPGBar({ progress, color, level, xp, title, label, nextXp, nextTitle }:
   // from a percentage.
   nextXp?: number;
   nextTitle?: string;
+  reduceMotion: boolean;
 }) {
   const fillAnim = useRef(new Animated.Value(0)).current;
-  const shimmer = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    Animated.timing(fillAnim, {
+    fillAnim.stopAnimation();
+    if (reduceMotion) {
+      fillAnim.setValue(progress);
+      return;
+    }
+    const fillAnimation = Animated.timing(fillAnim, {
       toValue: progress,
       duration: 900,
       easing: Easing.out(Easing.cubic),
       useNativeDriver: false,
-    }).start();
-    Animated.loop(
-      Animated.timing(shimmer, {
-        toValue: 1,
-        duration: 2000,
-        easing: Easing.linear,
-        useNativeDriver: false,
-      })
-    ).start();
-  }, [progress]);
+    });
+    fillAnimation.start();
+    return () => fillAnimation.stop();
+  }, [fillAnim, progress, reduceMotion]);
 
   return (
     <View style={barStyles.container}>
@@ -303,15 +328,24 @@ export default function AgentEvolutionCard({
   spirit, unlocks, accentColor,
 }: Props) {
   const entranceAnim = useRef(new Animated.Value(0)).current;
+  const reduceMotion = useReducedMotionPreference();
 
   useEffect(() => {
-    Animated.timing(entranceAnim, {
+    entranceAnim.stopAnimation();
+    if (reduceMotion) {
+      entranceAnim.setValue(1);
+      return;
+    }
+    entranceAnim.setValue(0);
+    const entranceAnimation = Animated.timing(entranceAnim, {
       toValue: 1,
       duration: 400,
       easing: Easing.out(Easing.cubic),
       useNativeDriver: false,
-    }).start();
-  }, []);
+    });
+    entranceAnimation.start();
+    return () => entranceAnimation.stop();
+  }, [entranceAnim, reduceMotion]);
 
   // Determine next unlock
   const allUnlockLevels = Object.keys(BOND_UNLOCKS).map(Number).sort((a, b) => a - b);
@@ -368,6 +402,7 @@ export default function AgentEvolutionCard({
           label="BOND"
           nextXp={bondNextXp}
           nextTitle={bondNextTitle}
+          reduceMotion={reduceMotion}
         />
         <View style={styles.barDivider} />
         <RPGBar
@@ -379,6 +414,7 @@ export default function AgentEvolutionCard({
           label="MASTERY"
           nextXp={masteryNextXp}
           nextTitle={masteryNextTitle}
+          reduceMotion={reduceMotion}
         />
       </View>
 

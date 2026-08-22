@@ -6,28 +6,33 @@
 
 ## Core finding
 
-This is a "shipped but unwired" backlog, not a "missing features" one. Many
-pure, smoke-tested libraries exist but are not connected to the live path.
-Three structural seams gate the cascade:
+This began as a "shipped but unwired" backlog. Status reconciled 2026-08-06:
 
-1. **Two tool loops coexist** — legacy `executeToolUseLoop` (`swanbot.ts` /
-   `swanbot-ai`) and `agentExecutionCore.runAgent`. The unification adapter
-   (`getOpenSwanToolsForSurface`) exists but `openswanSessionRuntime` still runs
-   the old loop.
-2. **v2 edge function is done but not default** — `swanbot-v2-ai` currently has
-   82 source-derived tools (57 client-delegated) and a readiness gate
-   (`swanbotOpenSwanReadiness.ts`), but v1 is still primary.
-3. **Chat still has six sequential routers** — Phase 1b
-   (`ChatTab.sendMessage` -> `buildChatAutomationPlan` + single executor) hasn't
-   landed, and >=5 finished features are blocked on it.
+1. **The typed parent/child loop is the OpenSwan default.** The legacy loop is a
+   manual rollback, while the v1 edge relay remains load-bearing until M5.
+2. **SwanBot v2 is source-default but not production-signed-off.** Its current
+   source has 84 source-derived tools (59 client-delegated) and a readiness
+   gate. The 2026-08-05
+   live report verified deployed function/JWT/CORS metadata, not code parity
+   with this newer 84-tool snapshot; current-source deploy/re-verification and
+   fresh telemetry remain pending.
+3. **Chat admission now builds one canonical automation plan.** The exact
+   Photoshop canary additionally preserves its origin-message/program identity
+   through approval/capability re-entry and fails closed if that identity is
+   missing or drifts. Remaining work is universal durable task identity and
+   outer task acceptance, catalog-wide mutation authority, durable resume, live
+   contention/fault injection, and broader browser/native capability—not
+   another sequential router.
 
 Highest leverage = integrations, not net-new libraries. No new parallel modules;
 extend canonical owners per roadmap §6.
 
 ## SwanBot
 
-- **S1** Deploy `swanbot-v2-ai`, route a traffic %, measure, flip default via
-  `buildSwanBotOpenSwanReadinessSnapshot(...)`, then retire v1. (Roadmap 1c)
+- **S1** Deploy/re-verify current `swanbot-v2-ai`, measure the source-default
+  path with `buildSwanBotOpenSwanReadinessSnapshot(...)`, keep or roll back the
+  default from evidence, then retire the v1 tool loop only through M5. (Roadmap
+  1c)
 - **S2** Rate-limit session-memory extraction (1x/day boundary + content-hash
   dedup). `swanbot.ts:~354`.
 - **S3** Route Gemini fallback through `llm-proxy` instead of hardcoded direct
@@ -943,11 +948,12 @@ Pre-S1 gates + Phase 3 maturity items, per "build SwanBot as best as possible":
   `deriveSwanbotV2ToolParityFromSource()` in `swanbotOpenSwanReadiness.ts`
   parses the `swanbot-v2-ai` TOOLS array (Deno edge fn can't be imported
   from tsx) and the readiness smoke asserts EXACT match both directions.
-  Real counts re-pinned: **82 total / 57 client-delegated / 25 server** (2026-07-14: +6 coding-agent client tools; 2026-07-25: +1 guarded browser-toggle client tool; 2026-07-26: +1 sealed native-select client tool; 2026-07-27: +1 read-only advisory `browser.locator_actionability` tool, which does not authorize or bind a later mutation).
+  Real counts re-pinned: **84 total / 59 client-delegated / 25 server** (2026-07-14: +6 coding-agent client tools; 2026-07-25: +1 guarded browser-toggle client tool; 2026-07-26: +1 sealed native-select client tool; 2026-07-27: +1 read-only advisory `browser.locator_actionability` tool, which does not authorize or bind a later mutation; 2026-08-05: +2 bounded semantic `browser.wait_for` / `browser.scroll` tools).
   Catalog growth or shrink now fails `smoke:swanbot-openswan-readiness`
   until the constants are re-pinned deliberately. The focused locator
   actionability smoke also runs once in both SwanBot/Chat daily and release
-  gates, `smoke:all`, and canonical readiness.
+  gates and `smoke:all`. The bounded semantic wait/scroll reachability smoke is
+  also required by canonical readiness and both release gates.
 - **R15 VERIFIED ALREADY SHIPPED** (was unrecorded) — `swanbot-v2-ai`
   already splits frozen/volatile: frozen block (identity, tool discipline,
   focused tool list, mode contract) carries `cache_control: ephemeral`;
@@ -988,10 +994,13 @@ Pre-S1 gates + Phase 3 maturity items, per "build SwanBot as best as possible":
 around this (lib-level stream filter instead of a card edit), but future
 passes touching those components will need the chown first.
 
-**SwanBot next:** S1 is now unblocked code-side — deploy `swanbot-v2-ai`,
-route a traffic %, watch `buildSwanBotOpenSwanReadinessSnapshot` telemetry
-(50-run minimum), flip default, retire v1 (which also retires S5 + the v1
-all-or-nothing parallel rule). Then O7 (agentPromptBuilder unification)
+**SwanBot next:** S1 is now unblocked code-side — deploy the current
+`swanbot-v2-ai` source, verify its catalog against the 84-tool readiness
+snapshot, route a bounded traffic cohort, and watch
+`buildSwanBotOpenSwanReadinessSnapshot` telemetry (50-run minimum). The client
+default is already source-shipped; production sign-off and v1 retirement (which
+also retires S5 + the v1 all-or-nothing parallel rule) remain. Then O7
+(agentPromptBuilder unification)
 and the remaining C1 family cutovers (live-verified, R6 approval-posture
 decision per family).
 

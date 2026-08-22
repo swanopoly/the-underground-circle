@@ -11,7 +11,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const { exec, execSync, execFile, execFileSync, spawn } = require('child_process');
+const { fileURLToPath } = require('url');
+const { exec, execSync, execFile, execFileSync, spawn, spawnSync } = require('child_process');
 const {
   appendOpenSwanWorktreeConfigPrompt,
   clampLaunchCount,
@@ -52,6 +53,603 @@ catch (e) { console.warn('[bridge] playwright unavailable — /browser/* will 50
 
 const PORT = Number.parseInt(process.env.UC_CLAUDE_BRIDGE_PORT || '', 10) || 7778;
 const BRIDGE_BIND_HOST = '127.0.0.1';
+const DESKTOP_BRIDGE_SAFE_REFRESH_EXIT_CODE = 75;
+const DESKTOP_BRIDGE_SAFE_REFRESH_CONFIRM = 'restart_stale_bridge_if_idle';
+// Only a recognized direct supervisor advertises this after loading the
+// parent-owned immutable snapshot implementation. A manual process or forged
+// environment still fails the authenticated IPC/direct-parent gates below.
+const DESKTOP_BRIDGE_IMMUTABLE_SOURCE_HANDOFF_AVAILABLE =
+  process.env.UC_BRIDGE_SUPERVISOR_IMMUTABLE_HANDOFF_V1 === '1';
+const desktopBridgeImmutableStartupManifestCandidate =
+  String(process.env.UC_BRIDGE_IMMUTABLE_STARTUP_MANIFEST_SHA256 || '');
+const desktopBridgeImmutableSourceSnapshotCandidate =
+  String(process.env.UC_BRIDGE_IMMUTABLE_SOURCE_SNAPSHOT_ID || '');
+const DESKTOP_BRIDGE_IMMUTABLE_STARTUP_MANIFEST_SHA256 =
+  DESKTOP_BRIDGE_IMMUTABLE_SOURCE_HANDOFF_AVAILABLE
+  && /^[0-9a-f]{64}$/u.test(desktopBridgeImmutableStartupManifestCandidate)
+  && /^[0-9a-f]{32}$/u.test(desktopBridgeImmutableSourceSnapshotCandidate)
+    ? desktopBridgeImmutableStartupManifestCandidate
+    : null;
+const DESKTOP_BRIDGE_IMMUTABLE_SOURCE_SNAPSHOT_ID =
+  DESKTOP_BRIDGE_IMMUTABLE_STARTUP_MANIFEST_SHA256
+    ? desktopBridgeImmutableSourceSnapshotCandidate
+    : null;
+delete process.env.UC_BRIDGE_IMMUTABLE_STARTUP_MANIFEST_SHA256;
+delete process.env.UC_BRIDGE_IMMUTABLE_SOURCE_SNAPSHOT_ID;
+const DESKTOP_BRIDGE_TEST_MODE = process.env.UC_DESKTOP_ATTACHMENT_OPEN_TEST_MODE === '1';
+const DESKTOP_BRIDGE_REPLACEMENT_LOAD_PROBE = process.env.UC_BRIDGE_REPLACEMENT_LOAD_PROBE === '1';
+const DESKTOP_BRIDGE_REPLACEMENT_LOAD_PROBE_MARKER = 'UC_BRIDGE_REPLACEMENT_LOAD_PROBE_OK_V1';
+const DESKTOP_BRIDGE_SAFE_REFRESH_EXIT_DELAY_MS = DESKTOP_BRIDGE_TEST_MODE
+  ? Math.max(25, Math.min(1000, Number.parseInt(process.env.UC_BRIDGE_TEST_REFRESH_EXIT_DELAY_MS || '', 10) || 50))
+  : 50;
+const DESKTOP_BRIDGE_SOURCE_QUIET_MS = DESKTOP_BRIDGE_TEST_MODE
+  ? Math.max(50, Math.min(2000, Number.parseInt(process.env.UC_BRIDGE_TEST_SOURCE_QUIET_MS || '', 10) || 150))
+  : 2_000;
+const DESKTOP_BRIDGE_SOURCE_CHECK_TIMEOUT_MS = 3_000;
+const DESKTOP_BRIDGE_DEPENDENCY_LOAD_PROBE_TIMEOUT_MS = 10_000;
+const DESKTOP_BRIDGE_MAIN_LOAD_PROBE_TIMEOUT_MS = 45_000;
+const MAX_DESKTOP_EXEC_TIMEOUT_MS = 10 * 60_000;
+const DESKTOP_BRIDGE_ABORTED_WORK_MARGIN_MS = 60_000;
+const DESKTOP_BRIDGE_ABORTED_WORK_UNCERTAINTY_MS = DESKTOP_BRIDGE_TEST_MODE
+  ? Math.max(100, Math.min(2000, Number.parseInt(process.env.UC_BRIDGE_TEST_ABORT_UNCERTAINTY_MS || '', 10) || 350))
+  : MAX_DESKTOP_EXEC_TIMEOUT_MS + DESKTOP_BRIDGE_ABORTED_WORK_MARGIN_MS;
+const DESKTOP_BRIDGE_SOURCE_PATH = __filename;
+const DESKTOP_BRIDGE_STARTED_AT = new Date().toISOString();
+const DESKTOP_BRIDGE_SUPERVISOR_IPC_PROTOCOL = 'uc-desktop-bridge-safe-refresh-v2';
+const DESKTOP_BRIDGE_SUPERVISOR_RESERVATION_ACK_MAX_MS = DESKTOP_BRIDGE_TEST_MODE ? 5_000 : 45_000;
+const DESKTOP_BRIDGE_SUPERVISOR_RESERVATION_RENEW_MS = DESKTOP_BRIDGE_TEST_MODE ? 500 : 10_000;
+const DESKTOP_BRIDGE_SUPERVISOR_CONSUME_TIMEOUT_MS = DESKTOP_BRIDGE_TEST_MODE ? 1_000 : 3_000;
+const DESKTOP_BRIDGE_SUPERVISOR_IPC_SECRET = String(process.env.UC_BRIDGE_SUPERVISOR_IPC_SECRET || '');
+const DESKTOP_BRIDGE_SUPERVISOR_DECLARATION = Object.freeze({
+  kind: String(process.env.UC_BRIDGE_SUPERVISOR_KIND || '').trim(),
+  ownerPid: Number(process.env.UC_BRIDGE_SUPERVISOR_PID),
+  generation: Number(process.env.UC_BRIDGE_SUPERVISOR_GENERATION),
+});
+// The per-generation IPC key authenticates only the inherited direct channel.
+// It is never returned from health and must not reach terminals or helpers.
+delete process.env.UC_BRIDGE_SUPERVISOR_IPC_SECRET;
+delete process.env.UC_BRIDGE_SUPERVISOR_LEASE;
+
+const DESKTOP_BRIDGE_SOURCE_MANIFEST_FILES = Object.freeze([
+  Object.freeze({ name: 'claude-bridge.js', path: DESKTOP_BRIDGE_SOURCE_PATH, required: true }),
+  Object.freeze({ name: 'terminal-launch-utils.js', path: path.join(__dirname, 'terminal-launch-utils.js'), required: true }),
+  Object.freeze({ name: 'desktop-bridge-security.js', path: path.join(__dirname, 'desktop-bridge-security.js'), required: true }),
+  Object.freeze({ name: 'codex-session-summary.js', path: path.join(__dirname, 'codex-session-summary.js'), required: true }),
+  Object.freeze({ name: 'browser-bridge.js', path: path.join(__dirname, 'browser-bridge.js'), required: true }),
+]);
+
+function desktopBridgeSourceStatFingerprint(stat) {
+  return [
+    stat.dev,
+    stat.ino,
+    stat.mode,
+    stat.nlink,
+    stat.uid,
+    stat.gid,
+    stat.size,
+    stat.mtimeMs,
+    stat.ctimeMs,
+  ].join(':');
+}
+
+/**
+ * Establish that the exact source a supervisor would execute is a stable,
+ * regular file and parses under this exact Node runtime. The before/after
+ * identity+hash guard prevents accepting a partially-written edit that races
+ * the syntax check. No command is resolved through PATH.
+ */
+function inspectClaudeBridgeSourceManifest(options = {}) {
+  const requireQuiet = options.requireQuiet !== false;
+  const executeValidation = options.executeValidation === true;
+  const before = new Map();
+  const files = [];
+  let unknown = false;
+
+  // Snapshot every path before checking any syntax so no earlier file can
+  // change unnoticed while a later dependency is parsed.
+  for (const descriptor of DESKTOP_BRIDGE_SOURCE_MANIFEST_FILES) {
+    const sourcePath = path.resolve(descriptor.path);
+    try {
+      const stat = fs.lstatSync(sourcePath);
+      const regularFile = stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1;
+      const exactPath = regularFile && fs.realpathSync(sourcePath) === sourcePath;
+      const bytes = regularFile && exactPath ? fs.readFileSync(sourcePath) : null;
+      before.set(descriptor.name, {
+        descriptor,
+        sourcePath,
+        stat,
+        statFingerprint: desktopBridgeSourceStatFingerprint(stat),
+        regularFile,
+        exactPath,
+        sha256: bytes ? crypto.createHash('sha256').update(bytes).digest('hex') : null,
+        missing: false,
+      });
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        before.set(descriptor.name, { descriptor, sourcePath, missing: true });
+      } else {
+        before.set(descriptor.name, { descriptor, sourcePath, missing: false, unknown: true });
+        unknown = true;
+      }
+    }
+  }
+
+  const syntaxByName = new Map();
+  if (executeValidation) {
+    for (const descriptor of DESKTOP_BRIDGE_SOURCE_MANIFEST_FILES) {
+      const initial = before.get(descriptor.name);
+      if (!initial || initial.missing || initial.unknown || !initial.regularFile || !initial.exactPath) {
+        syntaxByName.set(descriptor.name, false);
+        continue;
+      }
+      const syntax = spawnSync(process.execPath, ['--check', initial.sourcePath], {
+        encoding: 'utf8',
+        timeout: DESKTOP_BRIDGE_SOURCE_CHECK_TIMEOUT_MS,
+        maxBuffer: 256 * 1024,
+        windowsHide: true,
+        env: {},
+      });
+      syntaxByName.set(
+        descriptor.name,
+        !syntax.error && syntax.status === 0 && syntax.signal === null,
+      );
+    }
+  }
+
+  const aggregate = crypto.createHash('sha256');
+  for (const descriptor of DESKTOP_BRIDGE_SOURCE_MANIFEST_FILES) {
+    const initial = before.get(descriptor.name);
+    const observed = {
+      name: descriptor.name,
+      required: descriptor.required,
+      present: false,
+      regularFile: false,
+      exactPath: false,
+      quiet: false,
+      stable: false,
+      syntaxValid: null,
+      ready: false,
+      sha256: null,
+      unknown: Boolean(initial?.unknown),
+    };
+    try {
+      if (initial?.missing) {
+        try {
+          fs.lstatSync(initial.sourcePath);
+          observed.stable = false;
+        } catch (error) {
+          if (error?.code === 'ENOENT') observed.stable = true;
+          else observed.unknown = true;
+        }
+        observed.ready = !descriptor.required && observed.stable && !observed.unknown;
+      } else if (initial && !initial.unknown) {
+        const afterStat = fs.lstatSync(initial.sourcePath);
+        const afterRegular = afterStat.isFile() && !afterStat.isSymbolicLink() && afterStat.nlink === 1;
+        const afterExact = afterRegular && fs.realpathSync(initial.sourcePath) === initial.sourcePath;
+        const afterBytes = afterRegular && afterExact ? fs.readFileSync(initial.sourcePath) : null;
+        const afterHash = afterBytes ? crypto.createHash('sha256').update(afterBytes).digest('hex') : null;
+        observed.present = true;
+        observed.regularFile = initial.regularFile && afterRegular;
+        observed.exactPath = initial.exactPath && afterExact;
+        observed.quiet = Date.now() - Math.max(initial.stat.mtimeMs, initial.stat.ctimeMs, afterStat.mtimeMs, afterStat.ctimeMs)
+          >= DESKTOP_BRIDGE_SOURCE_QUIET_MS;
+        observed.stable = initial.statFingerprint === desktopBridgeSourceStatFingerprint(afterStat)
+          && initial.sha256 === afterHash;
+        observed.syntaxValid = executeValidation
+          ? syntaxByName.get(descriptor.name) === true
+          : null;
+        observed.sha256 = observed.stable ? afterHash : null;
+        observed.ready = observed.regularFile
+          && observed.exactPath
+          && (!requireQuiet || observed.quiet)
+          && observed.stable
+          && (!executeValidation || observed.syntaxValid === true);
+      }
+    } catch {
+      observed.unknown = true;
+    }
+    if (observed.unknown) unknown = true;
+    aggregate.update(JSON.stringify([
+      observed.name,
+      observed.required,
+      observed.present,
+      observed.regularFile,
+      observed.exactPath,
+      observed.stable,
+      observed.sha256,
+      observed.unknown,
+    ]));
+    aggregate.update('\0');
+    files.push(observed);
+  }
+
+  const requiredReady = files.every((file) => file.ready);
+  let dependenciesLoadable = null;
+  let dependencyLoadUnknown = false;
+  if (executeValidation && requiredReady && !unknown) try {
+    const loadPaths = DESKTOP_BRIDGE_SOURCE_MANIFEST_FILES
+      .filter((descriptor) => descriptor.name !== 'claude-bridge.js')
+      .filter((descriptor) => descriptor.required || before.get(descriptor.name)?.missing === false)
+      .map((descriptor) => descriptor.path);
+    const loadProbe = spawnSync(
+      process.execPath,
+      ['-e', `
+const paths = JSON.parse(process.argv[1]);
+for (const candidate of paths) {
+  const loaded = require(candidate);
+  if (!loaded || (typeof loaded !== 'object' && typeof loaded !== 'function')) process.exit(41);
+}
+`, JSON.stringify(loadPaths)],
+      {
+        cwd: path.dirname(DESKTOP_BRIDGE_SOURCE_PATH),
+        encoding: 'utf8',
+        timeout: DESKTOP_BRIDGE_DEPENDENCY_LOAD_PROBE_TIMEOUT_MS,
+        maxBuffer: 256 * 1024,
+        windowsHide: true,
+        env: { UC_BRIDGE_REPLACEMENT_LOAD_PROBE: '1' },
+      },
+    );
+    dependenciesLoadable = !loadProbe.error && loadProbe.status === 0 && loadProbe.signal === null;
+  } catch {
+    dependencyLoadUnknown = true;
+  }
+  if (dependencyLoadUnknown) unknown = true;
+  let mainLoadable = executeValidation ? DESKTOP_BRIDGE_REPLACEMENT_LOAD_PROBE : null;
+  let mainLoadUnknown = false;
+  if (executeValidation && requiredReady && dependenciesLoadable === true && !DESKTOP_BRIDGE_REPLACEMENT_LOAD_PROBE) {
+    try {
+      const mainProbe = spawnSync(process.execPath, [DESKTOP_BRIDGE_SOURCE_PATH], {
+        cwd: path.dirname(DESKTOP_BRIDGE_SOURCE_PATH),
+        encoding: 'utf8',
+        timeout: DESKTOP_BRIDGE_MAIN_LOAD_PROBE_TIMEOUT_MS,
+        maxBuffer: 256 * 1024,
+        windowsHide: true,
+        env: { UC_BRIDGE_REPLACEMENT_LOAD_PROBE: '1' },
+      });
+      mainLoadable = !mainProbe.error
+        && mainProbe.status === 0
+        && mainProbe.signal === null
+        && String(mainProbe.stdout || '').split(/\r?\n/u).includes(DESKTOP_BRIDGE_REPLACEMENT_LOAD_PROBE_MARKER);
+    } catch {
+      mainLoadUnknown = true;
+    }
+  }
+  if (mainLoadUnknown) unknown = true;
+  const manifestSha256 = files.every((file) => file.stable && !file.unknown)
+    ? aggregate.digest('hex')
+    : null;
+  return {
+    ready: requiredReady && !unknown,
+    unknown,
+    manifestSha256,
+    files,
+    fileCount: files.filter((file) => file.present).length,
+    dependenciesLoadable,
+    dependencyLoadUnknown,
+    mainLoadable,
+    mainLoadUnknown,
+  };
+}
+
+const DESKTOP_BRIDGE_STARTUP_SOURCE_MANIFEST = inspectClaudeBridgeSourceManifest({ requireQuiet: false });
+const DESKTOP_BRIDGE_STARTUP_SOURCE_SHA256 =
+  DESKTOP_BRIDGE_IMMUTABLE_STARTUP_MANIFEST_SHA256
+  || DESKTOP_BRIDGE_STARTUP_SOURCE_MANIFEST.manifestSha256;
+// Per-process, non-secret identity used to bind a task and its later
+// read-only recovery observation to the same local bridge instance. A restart
+// intentionally changes this value so stale cards fail closed.
+const DESKTOP_BRIDGE_INSTANCE_ID = crypto.randomBytes(16).toString('hex');
+const DESKTOP_BRIDGE_SOURCE_VALIDATION_RECEIPT_TTL_MS = DESKTOP_BRIDGE_TEST_MODE ? 5_000 : 30_000;
+let desktopBridgeSourceValidationReceipt = null;
+
+function validateClaudeBridgeReplacementSource() {
+  const validated = inspectClaudeBridgeSourceManifest({ executeValidation: true });
+  const valid = validated.ready
+    && validated.dependenciesLoadable === true
+    && validated.mainLoadable === true
+    && validated.files
+      .filter((file) => file.present)
+      .every((file) => file.syntaxValid === true);
+  desktopBridgeSourceValidationReceipt = validated.manifestSha256
+    ? {
+        manifestSha256: validated.manifestSha256,
+        validatedAtMs: Date.now(),
+        expiresAtMs: Date.now() + DESKTOP_BRIDGE_SOURCE_VALIDATION_RECEIPT_TTL_MS,
+        valid,
+        syntaxValid: validated.files
+          .filter((file) => file.present)
+          .every((file) => file.syntaxValid === true),
+        dependenciesLoadable: validated.dependenciesLoadable === true,
+        mainLoadable: validated.mainLoadable === true,
+      }
+    : null;
+  return { valid, manifest: validated };
+}
+
+function desktopBridgeSupervisorIpcMac(type, fields) {
+  if (!/^[0-9a-f]{64}$/u.test(DESKTOP_BRIDGE_SUPERVISOR_IPC_SECRET)) return null;
+  return crypto
+    .createHmac('sha256', DESKTOP_BRIDGE_SUPERVISOR_IPC_SECRET)
+    .update(JSON.stringify([DESKTOP_BRIDGE_SUPERVISOR_IPC_PROTOCOL, type, ...fields]))
+    .digest('hex');
+}
+
+function desktopBridgeSupervisorIpcMacMatches(type, fields, supplied) {
+  if (!/^[0-9a-f]{64}$/u.test(String(supplied || ''))) return false;
+  const expectedMac = desktopBridgeSupervisorIpcMac(type, fields);
+  if (!expectedMac) return false;
+  const expected = Buffer.from(expectedMac, 'hex');
+  const actual = Buffer.from(supplied, 'hex');
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+}
+
+const desktopBridgeSupervisorIpc = {
+  readyAckAtMs: 0,
+  readyExpiresAtMs: 0,
+  pending: new Map(),
+  disconnected: typeof process.send !== 'function' || process.connected !== true,
+};
+
+function desktopBridgeSupervisorCommonFields(manifestSha256) {
+  return [
+    DESKTOP_BRIDGE_SUPERVISOR_DECLARATION.kind,
+    DESKTOP_BRIDGE_SUPERVISOR_DECLARATION.ownerPid,
+    process.pid,
+    DESKTOP_BRIDGE_SUPERVISOR_DECLARATION.generation,
+    DESKTOP_BRIDGE_INSTANCE_ID,
+    manifestSha256,
+  ];
+}
+
+function sendDesktopBridgeSupervisorIpc(message) {
+  if (
+    desktopBridgeSupervisorIpc.disconnected
+    || typeof process.send !== 'function'
+    || process.connected !== true
+  ) return false;
+  try {
+    process.send(message, (error) => {
+      if (error) desktopBridgeSupervisorIpc.disconnected = true;
+    });
+    return true;
+  } catch {
+    desktopBridgeSupervisorIpc.disconnected = true;
+    return false;
+  }
+}
+
+function requestDesktopBridgeSupervisorIpc(type, expectedType, extra = {}, timeoutMs = 2_000) {
+  return new Promise((resolve) => {
+    const manifestSha256 = String(extra.manifestSha256 || '');
+    const requestNonce = String(extra.requestNonce || crypto.randomBytes(32).toString('hex'));
+    const reservationId = String(extra.reservationId || '');
+    const requestTail = type === 'hello'
+      ? [requestNonce]
+      : type === 'reserve'
+        ? [requestNonce]
+        : [requestNonce, reservationId];
+    const mac = desktopBridgeSupervisorIpcMac(
+      type,
+      [...desktopBridgeSupervisorCommonFields(manifestSha256), ...requestTail],
+    );
+    if (!mac || !/^[0-9a-f]{64}$/u.test(manifestSha256)) {
+      resolve(null);
+      return;
+    }
+    const key = `${expectedType}:${requestNonce}`;
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      desktopBridgeSupervisorIpc.pending.delete(key);
+      resolve(null);
+    }, timeoutMs);
+    timer.unref?.();
+    desktopBridgeSupervisorIpc.pending.set(key, (message) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      desktopBridgeSupervisorIpc.pending.delete(key);
+      resolve(message);
+    });
+    const sent = sendDesktopBridgeSupervisorIpc({
+      protocol: DESKTOP_BRIDGE_SUPERVISOR_IPC_PROTOCOL,
+      type,
+      supervisorKind: DESKTOP_BRIDGE_SUPERVISOR_DECLARATION.kind,
+      parentPid: DESKTOP_BRIDGE_SUPERVISOR_DECLARATION.ownerPid,
+      childPid: process.pid,
+      generation: DESKTOP_BRIDGE_SUPERVISOR_DECLARATION.generation,
+      instanceId: DESKTOP_BRIDGE_INSTANCE_ID,
+      manifestSha256,
+      requestNonce,
+      ...(reservationId ? { reservationId } : {}),
+      mac,
+    });
+    if (!sent && !settled) {
+      settled = true;
+      clearTimeout(timer);
+      desktopBridgeSupervisorIpc.pending.delete(key);
+      resolve(null);
+    }
+  });
+}
+
+function validateDesktopBridgeSupervisorIpcAck(message, type, manifestSha256, requestNonce, reservationId = '') {
+  if (
+    !message
+    || message.protocol !== DESKTOP_BRIDGE_SUPERVISOR_IPC_PROTOCOL
+    || message.type !== type
+    || message.supervisorKind !== DESKTOP_BRIDGE_SUPERVISOR_DECLARATION.kind
+    || message.parentPid !== DESKTOP_BRIDGE_SUPERVISOR_DECLARATION.ownerPid
+    || message.childPid !== process.pid
+    || message.generation !== DESKTOP_BRIDGE_SUPERVISOR_DECLARATION.generation
+    || message.instanceId !== DESKTOP_BRIDGE_INSTANCE_ID
+    || message.manifestSha256 !== manifestSha256
+    || message.requestNonce !== requestNonce
+    || (reservationId && message.reservationId !== reservationId)
+    || !Number.isFinite(message.expiresAtMs)
+    || message.expiresAtMs <= Date.now()
+  ) return false;
+  const tail = type === 'ready'
+    ? [requestNonce, message.expiresAtMs]
+    : [requestNonce, message.reservationId, message.expiresAtMs];
+  return desktopBridgeSupervisorIpcMacMatches(
+    type,
+    [...desktopBridgeSupervisorCommonFields(manifestSha256), ...tail],
+    message.mac,
+  );
+}
+
+process.on('message', (message) => {
+  if (!message || typeof message !== 'object') return;
+  const requestNonce = String(message.requestNonce || '');
+  const handler = desktopBridgeSupervisorIpc.pending.get(`${message.type}:${requestNonce}`);
+  if (handler) handler(message);
+});
+process.on('disconnect', () => {
+  desktopBridgeSupervisorIpc.disconnected = true;
+  desktopBridgeSupervisorIpc.readyExpiresAtMs = 0;
+  desktopBridgeCommittedExitReservation = null;
+  desktopBridgeRefreshDrainActive = false;
+  desktopBridgeRefreshExitScheduled = false;
+  for (const handler of desktopBridgeSupervisorIpc.pending.values()) handler(null);
+  desktopBridgeSupervisorIpc.pending.clear();
+});
+
+async function refreshDesktopBridgeSupervisorReadiness() {
+  const manifestSha256 = DESKTOP_BRIDGE_STARTUP_SOURCE_SHA256;
+  if (
+    desktopBridgeSupervisorIpc.disconnected
+    || !manifestSha256
+    || DESKTOP_BRIDGE_SUPERVISOR_DECLARATION.ownerPid !== process.ppid
+    || !Number.isSafeInteger(DESKTOP_BRIDGE_SUPERVISOR_DECLARATION.generation)
+    || DESKTOP_BRIDGE_SUPERVISOR_DECLARATION.generation < 1
+  ) return false;
+  const requestNonce = crypto.randomBytes(32).toString('hex');
+  const ack = await requestDesktopBridgeSupervisorIpc(
+    'hello',
+    'ready',
+    { manifestSha256, requestNonce },
+    2_000,
+  );
+  if (!validateDesktopBridgeSupervisorIpcAck(ack, 'ready', manifestSha256, requestNonce)) return false;
+  desktopBridgeSupervisorIpc.readyAckAtMs = Date.now();
+  desktopBridgeSupervisorIpc.readyExpiresAtMs = Math.min(
+    ack.expiresAtMs,
+    Date.now() + DESKTOP_BRIDGE_SUPERVISOR_RESERVATION_ACK_MAX_MS,
+  );
+  return true;
+}
+
+function notifyDesktopBridgeSupervisorOnline() {
+  const manifestSha256 = DESKTOP_BRIDGE_STARTUP_SOURCE_SHA256;
+  const requestNonce = crypto.randomBytes(32).toString('hex');
+  const host = BRIDGE_BIND_HOST;
+  const port = PORT;
+  const snapshotId = DESKTOP_BRIDGE_IMMUTABLE_SOURCE_SNAPSHOT_ID || '';
+  const mac = desktopBridgeSupervisorIpcMac(
+    'online',
+    [...desktopBridgeSupervisorCommonFields(manifestSha256), requestNonce, host, port, snapshotId],
+  );
+  if (!mac) return false;
+  return sendDesktopBridgeSupervisorIpc({
+    protocol: DESKTOP_BRIDGE_SUPERVISOR_IPC_PROTOCOL,
+    type: 'online',
+    supervisorKind: DESKTOP_BRIDGE_SUPERVISOR_DECLARATION.kind,
+    parentPid: DESKTOP_BRIDGE_SUPERVISOR_DECLARATION.ownerPid,
+    childPid: process.pid,
+    generation: DESKTOP_BRIDGE_SUPERVISOR_DECLARATION.generation,
+    instanceId: DESKTOP_BRIDGE_INSTANCE_ID,
+    manifestSha256,
+    requestNonce,
+    host,
+    port,
+    snapshotId,
+    mac,
+  });
+}
+
+refreshDesktopBridgeSupervisorReadiness().catch(() => {});
+const supervisorReadinessTimer = setInterval(
+  () => refreshDesktopBridgeSupervisorReadiness().catch(() => {}),
+  DESKTOP_BRIDGE_SUPERVISOR_RESERVATION_RENEW_MS,
+);
+supervisorReadinessTimer.unref?.();
+
+async function reserveDesktopBridgeSupervisorReplacement(manifestSha256) {
+  const requestNonce = crypto.randomBytes(32).toString('hex');
+  const ack = await requestDesktopBridgeSupervisorIpc(
+    'reserve',
+    'reserved',
+    { manifestSha256, requestNonce },
+    DESKTOP_BRIDGE_SUPERVISOR_CONSUME_TIMEOUT_MS,
+  );
+  if (
+    !validateDesktopBridgeSupervisorIpcAck(
+      ack,
+      'reserved',
+      manifestSha256,
+      requestNonce,
+    )
+    || !/^[0-9a-f]{64}$/u.test(String(ack.reservationId || ''))
+  ) return null;
+  return {
+    manifestSha256,
+    requestNonce,
+    reservationId: ack.reservationId,
+    expiresAtMs: ack.expiresAtMs,
+    committed: false,
+  };
+}
+
+async function commitDesktopBridgeSupervisorReplacement(reservation) {
+  if (
+    !reservation
+    || reservation.committed
+    || reservation.expiresAtMs <= Date.now()
+    || desktopBridgeSupervisorIpc.disconnected
+  ) return false;
+  const ack = await requestDesktopBridgeSupervisorIpc(
+    'commit',
+    'committed',
+    reservation,
+    DESKTOP_BRIDGE_SUPERVISOR_CONSUME_TIMEOUT_MS,
+  );
+  if (!validateDesktopBridgeSupervisorIpcAck(
+    ack,
+    'committed',
+    reservation.manifestSha256,
+    reservation.requestNonce,
+    reservation.reservationId,
+  )) return false;
+  reservation.committed = true;
+  reservation.expiresAtMs = ack.expiresAtMs;
+  return true;
+}
+
+function cancelDesktopBridgeSupervisorReplacement(reservation) {
+  if (!reservation) return;
+  const fields = [
+    ...desktopBridgeSupervisorCommonFields(reservation.manifestSha256),
+    reservation.requestNonce,
+    reservation.reservationId,
+  ];
+  const mac = desktopBridgeSupervisorIpcMac('cancel', fields);
+  if (!mac) return;
+  sendDesktopBridgeSupervisorIpc({
+    protocol: DESKTOP_BRIDGE_SUPERVISOR_IPC_PROTOCOL,
+    type: 'cancel',
+    supervisorKind: DESKTOP_BRIDGE_SUPERVISOR_DECLARATION.kind,
+    parentPid: DESKTOP_BRIDGE_SUPERVISOR_DECLARATION.ownerPid,
+    childPid: process.pid,
+    generation: DESKTOP_BRIDGE_SUPERVISOR_DECLARATION.generation,
+    instanceId: DESKTOP_BRIDGE_INSTANCE_ID,
+    manifestSha256: reservation.manifestSha256,
+    requestNonce: reservation.requestNonce,
+    reservationId: reservation.reservationId,
+    mac,
+  });
+}
 const CLAUDE_DIR = path.join(os.homedir(), '.claude', 'projects');
 // Also scan Windows-side Claude sessions when running in WSL
 const CLAUDE_DIRS = [CLAUDE_DIR];
@@ -69,7 +667,9 @@ if (fs.existsSync('/mnt/c/Users')) {
 const ACTIVE_THRESHOLD = 120_000;    // 2min → active (was 30s — too aggressive)
 const IDLE_THRESHOLD = 3_600_000;    // 1h → still show session (was 5min — missed live sessions)
 const TAIL_BYTES = 2 * 1024 * 1024; // Read last 2MB of each JSONL (was 16KB — way too small for token counting)
-const SCAN_INTERVAL = 5000;        // Scan filesystem every 5s
+const SCAN_INTERVAL = process.env.UC_DESKTOP_ATTACHMENT_OPEN_TEST_MODE === '1'
+  ? Math.max(50, Math.min(5000, Number.parseInt(process.env.UC_BRIDGE_TEST_SCAN_INTERVAL_MS || '', 10) || 5000))
+  : 5000;                         // Production scan interval is fixed at 5s
 const LAUNCHED_SESSION_TTL = 12 * 60 * 60_000;
 const APP_CAPABILITY_RESULT_MAX_CHARS = 8_000;
 const CLAUDE_MANAGED_SESSION_MARKER_RE = /^\s*\[UC-CLAUDE-CODE:([A-Za-z0-9][A-Za-z0-9._-]{7,199})\]\s*(?:\n|$)/;
@@ -83,7 +683,7 @@ const CORS = {
   // after the bridge was running + paired, because every authed call
   // died silently at the preflight layer. If you add another custom
   // request header on the client side, list it here too.
-  'Access-Control-Allow-Headers': 'Content-Type, X-UC-Desktop-Token, X-UC-File-Session-Token',
+  'Access-Control-Allow-Headers': 'Content-Type, X-UC-Desktop-Token, X-UC-File-Session-Token, X-UC-Attachment-Open-Capability',
   // Private Network Access (Chrome 116+). When the page is at
   // https://app.chrisswanson.xyz (a public-network origin) and tries
   // to fetch http://localhost:7778 (a private-network address),
@@ -212,17 +812,111 @@ function buildCorsHeaders(req) {
 
 let cachedSessions = [];
 let lastScanTime = '';
+let lastSessionScanAttemptAt = '';
+let lastSessionScanSucceededAt = '';
+let lastSessionScanFailed = true;
 let launchedSessions = loadManagedTerminalSessions('claude-code');
 
 const LOCAL_FILE_GRANT_DEFAULT_TTL_MS = 4 * 60 * 60 * 1000;
 const LOCAL_FILE_GRANT_MAX_TTL_MS = 12 * 60 * 60 * 1000;
 const localFileAccessGrants = new Map();
+// Opaque, one-shot Chat-upload -> native-open capabilities. The raw bearer is
+// generated by desktopBridge.ts and crosses only the dedicated request header;
+// this process retains only an HMAC lookup key. Neither paths nor bearers are
+// returned from any endpoint in this lane.
+const DESKTOP_ATTACHMENT_OPEN_MAX_BYTES = 100 * 1024 * 1024;
+const DESKTOP_ATTACHMENT_OPEN_DEFAULT_TTL_MS = 5 * 60 * 1000;
+const DESKTOP_ATTACHMENT_OPEN_MIN_TTL_MS = process.env.UC_DESKTOP_ATTACHMENT_OPEN_TEST_MODE === '1'
+  ? 50
+  : 30 * 1000;
+const DESKTOP_ATTACHMENT_OPEN_MAX_TTL_MS = 10 * 60 * 1000;
+const DESKTOP_ATTACHMENT_OPEN_CLEANUP_INTERVAL_MS = process.env.UC_DESKTOP_ATTACHMENT_OPEN_TEST_MODE === '1'
+  ? 25
+  : 15 * 1000;
+const DESKTOP_ATTACHMENT_OPEN_CAPACITY = Math.max(
+  1,
+  Math.min(
+    64,
+    Number.parseInt(process.env.UC_DESKTOP_ATTACHMENT_OPEN_CAPACITY || '', 10) || 24,
+  ),
+);
+const DESKTOP_ATTACHMENT_OPEN_OWNER_UID = typeof process.getuid === 'function'
+  ? process.getuid()
+  : null;
+const DESKTOP_ATTACHMENT_OPEN_LEGACY_SHARED_ROOT = path.join(os.tmpdir(), 'uc-desktop-attachment-open');
+const DESKTOP_ATTACHMENT_OPEN_PRODUCTION_ROOT = path.join(
+  os.tmpdir(),
+  `uc-desktop-attachment-open-uid-${DESKTOP_ATTACHMENT_OPEN_OWNER_UID ?? 'unknown'}`,
+);
+const DESKTOP_ATTACHMENT_OPEN_ROOT = resolveDesktopAttachmentOpenRoot();
+const DESKTOP_ATTACHMENT_OPEN_PROCESS_ROOT = path.join(
+  DESKTOP_ATTACHMENT_OPEN_ROOT,
+  `instance-${DESKTOP_BRIDGE_INSTANCE_ID}`,
+);
+const DESKTOP_ATTACHMENT_OPEN_SECRET = crypto.randomBytes(32);
+const desktopAttachmentOpenCapabilities = new Map();
+const DESKTOP_ATTACHMENT_OPEN_INSTANCE_MARKER = '.instance-owner.json';
+const DESKTOP_ATTACHMENT_OPEN_INSTANCE_NAME_RE = /^instance-([0-9a-f]{32})$/;
+const DESKTOP_ATTACHMENT_OPEN_CAPABILITY_DIRECTORY_RE = /^cap-[0-9a-f]{32}$/;
+const DESKTOP_ATTACHMENT_OPEN_STAGED_FILE_RE = /^document-[0-9a-f]{32}\.[a-z0-9]{1,20}$/;
+let desktopAttachmentOpenCleanupTimer = null;
 const desktopPairingChallenges = createPairingChallengeStore({
   ttlMs: 30_000,
   maxEntries: 64,
 });
+
+function resolveDesktopAttachmentOpenRoot() {
+  const override = String(process.env.UC_DESKTOP_ATTACHMENT_OPEN_TEST_ROOT || '').trim();
+  if (!override) return DESKTOP_ATTACHMENT_OPEN_PRODUCTION_ROOT;
+  if (process.env.UC_DESKTOP_ATTACHMENT_OPEN_TEST_MODE !== '1') {
+    throw new Error('Attachment-open root override is test-only.');
+  }
+  if (!path.isAbsolute(override) || /[\u0000-\u001f\u007f]/.test(override)) {
+    throw new Error('Attachment-open test root must be an absolute temporary path.');
+  }
+  const declaredTmp = path.resolve(os.tmpdir());
+  const realTmp = fs.realpathSync(declaredTmp);
+  const requested = path.resolve(override);
+  let relative = path.relative(declaredTmp, requested);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+    relative = path.relative(realTmp, requested);
+  }
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error('Attachment-open test root must be below the system temporary directory.');
+  }
+  const candidate = path.join(realTmp, relative);
+  const forbidden = [
+    path.resolve(realTmp, path.basename(DESKTOP_ATTACHMENT_OPEN_PRODUCTION_ROOT)),
+    path.resolve(realTmp, path.basename(DESKTOP_ATTACHMENT_OPEN_LEGACY_SHARED_ROOT)),
+  ];
+  if (forbidden.includes(candidate)) {
+    throw new Error('Attachment-open tests cannot use a production or legacy shared root.');
+  }
+  let current = realTmp;
+  for (const part of relative.split(path.sep).filter(Boolean)) {
+    current = path.join(current, part);
+    let stat;
+    try {
+      stat = fs.lstatSync(current);
+    } catch (error) {
+      if (error?.code === 'ENOENT') break;
+      throw error;
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error('Attachment-open test root has an unsafe existing ancestor.');
+    }
+  }
+  return candidate;
+}
 const CLAUDE_SPAWN_LOG_ROOT = path.join(os.tmpdir(), 'uc-claude-spawns');
 const spawnedClaudeProcesses = new Map();
+let desktopBridgeRefreshDrainActive = false;
+let desktopBridgeRefreshExitScheduled = false;
+let desktopBridgeCommittedExitReservation = null;
+let inFlightBridgeWorkRequests = 0;
+let inFlightDesktopAttachmentOpenRequests = 0;
+let inFlightSessionMutationRequests = 0;
+let abortedBridgeWorkUncertainUntilMs = 0;
 
 // ── Device discovery cache (10s TTL) ────────────────────────────────────────
 const deviceCache = { data: null, timestamp: 0 };
@@ -673,9 +1367,21 @@ function fullTokenScan(filePath, sessionId) {
 // ── Scan ~/.claude/projects/ for active sessions ────────────────────────────
 
 function scanSessions() {
+  if (DESKTOP_BRIDGE_TEST_MODE && process.env.UC_BRIDGE_TEST_SESSION_SCAN_FAILURE === '1') {
+    throw new Error('Injected session scan failure.');
+  }
   const transcriptSessions = [];
   for (const claudeDir of CLAUDE_DIRS) {
-    if (!fs.existsSync(claudeDir)) continue;
+    let rootStat;
+    try {
+      rootStat = fs.lstatSync(claudeDir);
+    } catch (error) {
+      if (error?.code === 'ENOENT') continue;
+      throw error;
+    }
+    if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+      throw new Error('Configured Claude projects root is not a directly-scannable directory.');
+    }
     const scanned = scanDirectory(claudeDir);
     transcriptSessions.push(...scanned);
   }
@@ -697,26 +1403,28 @@ function scanSessions() {
 }
 
 function scanDirectory(claudeDir) {
-  if (!fs.existsSync(claudeDir)) return [];
   const sessions = [];
-
-  let projectDirs;
-  try { projectDirs = fs.readdirSync(claudeDir); } catch { return []; }
+  // This function is an authority input for safe refresh. Never turn an I/O
+  // failure into an authoritative empty set: callers retain the previous UI
+  // cache, mark the scan failed, and block refresh.
+  const projectDirs = fs.readdirSync(claudeDir);
 
   for (const projHash of projectDirs) {
     const projPath = path.join(claudeDir, projHash);
-    let projStat;
-    try { projStat = fs.statSync(projPath); } catch { continue; }
+    const projStat = fs.lstatSync(projPath);
+    if (projStat.isSymbolicLink()) {
+      throw new Error('Claude project scan encountered a symbolic link.');
+    }
     if (!projStat.isDirectory()) continue;
-
-    let files;
-    try { files = fs.readdirSync(projPath); } catch { continue; }
+    const files = fs.readdirSync(projPath);
 
     for (const file of files) {
       if (!file.endsWith('.jsonl')) continue;
       const filePath = path.join(projPath, file);
-      let fstat;
-      try { fstat = fs.statSync(filePath); } catch { continue; }
+      const fstat = fs.lstatSync(filePath);
+      if (fstat.isSymbolicLink() || !fstat.isFile()) {
+        throw new Error('Claude transcript scan encountered a non-regular transcript.');
+      }
 
       const age = Date.now() - fstat.mtimeMs;
 
@@ -1020,13 +1728,9 @@ async function launchClaudeCodeSessions(data) {
 }
 
 function findLaunchedClaudeSession(sessionId) {
-  const key = String(sessionId || '').trim().toLowerCase();
-  if (!key) return null;
-  return cachedSessions.find((s) =>
-    String(s.sessionId || '').toLowerCase() === key
-    || String(s.displayName || s.slug || '').toLowerCase() === key
-    || String(s.sessionId || '').toLowerCase().startsWith(key)
-  ) || null;
+  if (typeof sessionId !== 'string' || !sessionId) return null;
+  const matches = cachedSessions.filter((session) => session.sessionId === sessionId);
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function buildClaudeFollowupPrompt(message) {
@@ -1038,8 +1742,8 @@ function buildClaudeFollowupPrompt(message) {
 }
 
 async function sendToLaunchedClaudeSession(data) {
-  const session = findLaunchedClaudeSession(data.sessionId || data.target || data.displayName);
-  if (!session) return { ok: false, error: 'Claude Code session not found.' };
+  const session = findLaunchedClaudeSession(data.sessionId);
+  if (!session) return { ok: false, error: 'An exact Claude Code session id is required.' };
   if (!session.terminalTitle) {
     return {
       ok: false,
@@ -1077,17 +1781,395 @@ async function sendToLaunchedClaudeSession(data) {
 
 // ── Periodic scan ───────────────────────────────────────────────────────────
 
-function doScan() {
+function conservativeProcessState(rawPid) {
+  const pid = Number(rawPid);
+  if (!Number.isSafeInteger(pid) || pid < 1) return null;
   try {
-    cachedSessions = scanSessions();
-    lastScanTime = new Date().toISOString();
-  } catch (err) {
-    console.error('[bridge] Scan error:', err.message);
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false;
+    if (error?.code === 'EPERM') return true;
+    return null;
   }
 }
 
-doScan();
-setInterval(doScan, SCAN_INTERVAL);
+function inspectDesktopBridgeSupervisor() {
+  const rawKind = DESKTOP_BRIDGE_SUPERVISOR_DECLARATION.kind;
+  const allowedKinds = new Set(['dev-stack-keepalive', 'start-dev']);
+  if (!rawKind) return { kind: 'manual', alive: false, replacementReady: false };
+  if (!allowedKinds.has(rawKind)) return { kind: 'unknown', alive: null, replacementReady: null };
+
+  const ownerPid = DESKTOP_BRIDGE_SUPERVISOR_DECLARATION.ownerPid;
+  const ownerState = conservativeProcessState(ownerPid);
+  const parentBound = Number.isSafeInteger(ownerPid) && ownerPid === process.ppid;
+  const processAlive = ownerState === null
+    ? null
+    : ownerState === true && parentBound;
+  const ipcConnected = desktopBridgeSupervisorIpc.disconnected === false
+    && typeof process.send === 'function'
+    && process.connected === true;
+  const acknowledgementFresh = desktopBridgeSupervisorIpc.readyAckAtMs > 0
+    && desktopBridgeSupervisorIpc.readyExpiresAtMs > Date.now()
+    && Date.now() - desktopBridgeSupervisorIpc.readyAckAtMs <= DESKTOP_BRIDGE_SUPERVISOR_RESERVATION_ACK_MAX_MS;
+  return {
+    kind: rawKind,
+    alive: processAlive,
+    ipcConnected,
+    acknowledgementFresh,
+    // Readiness requires a live authenticated direct-parent IPC exchange, not
+    // merely environment variables shaped like supervisor declarations.
+    replacementReady: processAlive === true && ipcConnected && acknowledgementFresh,
+  };
+}
+
+function inspectSpawnedClaudeProcesses() {
+  let live = 0;
+  let unknown = 0;
+  for (const record of spawnedClaudeProcesses.values()) {
+    const state = conservativeProcessState(record?.pid);
+    if (state === true) live += 1;
+    else if (state === null) unknown += 1;
+  }
+  return { live, unknown };
+}
+
+function inspectActiveClaudeSessions() {
+  const counts = { total: 0, active: 0, idle: 0, transcript: 0, managed: 0, subagent: 0, unknown: 0 };
+  if (!Array.isArray(cachedSessions)) {
+    counts.unknown = 1;
+    return counts;
+  }
+  for (const session of cachedSessions) {
+    if (!session || typeof session !== 'object' || !['active', 'idle'].includes(session.status)) {
+      counts.unknown += 1;
+      continue;
+    }
+    counts.total += 1;
+    counts[session.status] += 1;
+    if (session.kind === 'subagent') counts.subagent += 1;
+    else if (session.manageable === true || session.projectHash === 'manual-launch') counts.managed += 1;
+    else counts.transcript += 1;
+  }
+  return counts;
+}
+
+function inspectBrowserRuntimeRestartSafety() {
+  if (!browserBridge) {
+    return { available: false, contextOpen: false, launchInProgress: false, livePages: 0, unknown: false };
+  }
+  if (typeof browserBridge.inspectRestartSafety !== 'function') {
+    return { available: true, contextOpen: null, launchInProgress: null, livePages: null, unknown: true };
+  }
+  try {
+    const snapshot = browserBridge.inspectRestartSafety();
+    if (
+      !snapshot
+      || typeof snapshot.contextOpen !== 'boolean'
+      || typeof snapshot.launchInProgress !== 'boolean'
+      || !Number.isSafeInteger(snapshot.livePages)
+      || snapshot.livePages < 0
+      || typeof snapshot.unknown !== 'boolean'
+    ) {
+      return { available: true, contextOpen: null, launchInProgress: null, livePages: null, unknown: true };
+    }
+    return { available: true, ...snapshot };
+  } catch {
+    return { available: true, contextOpen: null, launchInProgress: null, livePages: null, unknown: true };
+  }
+}
+
+function inspectPendingDesktopAttachmentOpenCapabilities() {
+  let count = 0;
+  let expired = 0;
+  let unknown = 0;
+  const now = Date.now();
+  for (const record of desktopAttachmentOpenCapabilities.values()) {
+    if (!record || !['active', 'dispatching', 'dispatched'].includes(record.status)) {
+      unknown += 1;
+      continue;
+    }
+    if (!Number.isFinite(record.expiresAtMs)) {
+      unknown += 1;
+      continue;
+    }
+    if (record.expiresAtMs <= now) expired += 1;
+    count += 1;
+  }
+  return { count, expired, unknown };
+}
+
+function buildDesktopBridgeRestartSafety(options = {}) {
+  const now = Date.now();
+  const currentSource = inspectClaudeBridgeSourceManifest();
+  const currentSourceSha256 = currentSource.manifestSha256;
+  const matchingSourceValidationReceipt = (
+    desktopBridgeSourceValidationReceipt
+    && desktopBridgeSourceValidationReceipt.manifestSha256 === currentSourceSha256
+    && desktopBridgeSourceValidationReceipt.validatedAtMs <= now
+    && desktopBridgeSourceValidationReceipt.expiresAtMs > now
+  ) ? desktopBridgeSourceValidationReceipt : null;
+  const sourceValidationFresh = Boolean(
+    matchingSourceValidationReceipt?.valid,
+  );
+  const sourceChanged = DESKTOP_BRIDGE_STARTUP_SOURCE_SHA256 && currentSourceSha256
+    ? DESKTOP_BRIDGE_STARTUP_SOURCE_SHA256 !== currentSourceSha256
+    : null;
+  const scanSucceededAtMs = Date.parse(lastSessionScanSucceededAt || '');
+  const scanAgeMs = Number.isFinite(scanSucceededAtMs) ? now - scanSucceededAtMs : null;
+  const sessionScanFresh = scanAgeMs !== null
+    && scanAgeMs >= 0
+    && scanAgeMs <= SCAN_INTERVAL * 3
+    && lastSessionScanFailed === false;
+  const activeSessions = inspectActiveClaudeSessions();
+  const spawnedChildren = inspectSpawnedClaudeProcesses();
+  const pendingPrivateCapabilities = inspectPendingDesktopAttachmentOpenCapabilities();
+  const browserRuntime = inspectBrowserRuntimeRestartSafety();
+  const supervisor = inspectDesktopBridgeSupervisor();
+  const abortedWorkOutcomeUnknown = now < abortedBridgeWorkUncertainUntilMs;
+  const blockers = [];
+
+  if (sourceChanged === null) blockers.push('source_hash_unknown');
+  else if (!sourceChanged) blockers.push('source_not_changed');
+  if (currentSource.unknown) blockers.push('current_source_manifest_unknown');
+  if (!sourceValidationFresh && options.ignoreSourceValidation !== true) blockers.push('current_source_validation_required');
+  if (matchingSourceValidationReceipt?.syntaxValid === false) blockers.push('current_source_syntax_invalid');
+  if (matchingSourceValidationReceipt?.dependenciesLoadable === false) blockers.push('current_source_dependency_load_failed');
+  if (matchingSourceValidationReceipt?.mainLoadable === false) blockers.push('current_source_main_load_failed');
+  const presentSourceFiles = currentSource.files.filter((file) => file.present);
+  if (currentSource.files.some((file) => file.required && !file.present)) blockers.push('current_source_dependency_missing');
+  if (presentSourceFiles.some((file) => !file.regularFile || !file.exactPath)) blockers.push('current_source_invalid');
+  if (presentSourceFiles.some((file) => !file.quiet)) blockers.push('current_source_not_quiet');
+  if (currentSource.files.some((file) => !file.stable)) blockers.push('current_source_unstable');
+  if (lastSessionScanFailed) blockers.push('session_scan_failed');
+  if (!sessionScanFresh) blockers.push('session_scan_stale');
+  if (activeSessions.total > 0) blockers.push('possibly_active_sessions');
+  if (activeSessions.unknown > 0) blockers.push('session_state_unknown');
+  if (spawnedChildren.live > 0) blockers.push('live_spawned_children');
+  if (spawnedChildren.unknown > 0) blockers.push('spawned_child_state_unknown');
+  if (pendingPrivateCapabilities.count === null || pendingPrivateCapabilities.unknown > 0) {
+    blockers.push('private_capability_state_unknown');
+  } else if (pendingPrivateCapabilities.count > 0) {
+    blockers.push('pending_private_capabilities');
+  }
+  if (inFlightDesktopAttachmentOpenRequests > 0) blockers.push('private_capability_request_in_flight');
+  if (inFlightSessionMutationRequests > 0) blockers.push('session_mutation_request_in_flight');
+  if (inFlightBridgeWorkRequests > 0) blockers.push('bridge_work_request_in_flight');
+  if (abortedWorkOutcomeUnknown) blockers.push('aborted_bridge_work_outcome_unknown');
+  if (browserRuntime.unknown) blockers.push('browser_runtime_state_unknown');
+  else if (!browserRuntime.available) blockers.push('browser_runtime_unavailable');
+  else if (browserRuntime.contextOpen || browserRuntime.launchInProgress || browserRuntime.livePages > 0) {
+    blockers.push('browser_runtime_active');
+  }
+  if (supervisor.kind === 'manual') blockers.push('manual_process_owner');
+  else if (supervisor.kind === 'unknown' || supervisor.alive === null) blockers.push('supervisor_state_unknown');
+  else if (!supervisor.alive) blockers.push('supervisor_not_alive');
+  else if (!supervisor.ipcConnected) blockers.push('supervisor_ipc_unavailable');
+  else if (!supervisor.acknowledgementFresh) blockers.push('supervisor_ack_stale');
+  else if (!supervisor.replacementReady) blockers.push('supervisor_replacement_not_ready');
+  if (desktopBridgeRefreshDrainActive && options.ignoreDrain !== true) blockers.push('refresh_drain_active');
+  if (!DESKTOP_BRIDGE_IMMUTABLE_SOURCE_HANDOFF_AVAILABLE) {
+    blockers.push('immutable_source_handoff_unavailable');
+  }
+
+  return {
+    schemaVersion: 1,
+    safeToRefresh: blockers.length === 0,
+    blockers,
+    startedAt: DESKTOP_BRIDGE_STARTED_AT,
+    startupSourceSha256: DESKTOP_BRIDGE_STARTUP_SOURCE_SHA256,
+    startupSourceSnapshotId: DESKTOP_BRIDGE_IMMUTABLE_SOURCE_SNAPSHOT_ID,
+    currentSourceSha256,
+    sourceChanged,
+    currentSource: {
+      ready: currentSource.ready && sourceValidationFresh,
+      unknown: currentSource.unknown,
+      fileCount: currentSource.fileCount,
+      validationFresh: sourceValidationFresh,
+      dependenciesLoadable: matchingSourceValidationReceipt?.dependenciesLoadable ?? null,
+      mainLoadable: matchingSourceValidationReceipt?.mainLoadable ?? null,
+      files: currentSource.files.map((file) => ({
+        name: file.name,
+        required: file.required,
+        present: file.present,
+        regularFile: file.regularFile,
+        exactPath: file.exactPath,
+        quiet: file.quiet,
+        stable: file.stable,
+        syntaxValid: matchingSourceValidationReceipt?.syntaxValid ?? null,
+        ready: file.ready && sourceValidationFresh,
+        unknown: file.unknown,
+      })),
+    },
+    opaqueAttachmentCapabilityPresent: process.platform === 'darwin',
+    sessionScan: {
+      fresh: sessionScanFresh,
+      failed: lastSessionScanFailed,
+      lastAttemptAt: lastSessionScanAttemptAt || null,
+      lastSucceededAt: lastSessionScanSucceededAt || null,
+    },
+    activeSessions,
+    spawnedChildren,
+    pendingPrivateCapabilities,
+    inFlightWorkRequests: inFlightBridgeWorkRequests,
+    inFlightPrivateCapabilityRequests: inFlightDesktopAttachmentOpenRequests,
+    inFlightSessionMutationRequests,
+    abortedWorkOutcomeUnknown,
+    browserRuntime,
+    supervisor,
+    drainActive: desktopBridgeRefreshDrainActive,
+    exitScheduled: desktopBridgeRefreshExitScheduled,
+  };
+}
+
+function trackBridgeRequest(res, counterName) {
+  if (counterName === 'private') inFlightDesktopAttachmentOpenRequests += 1;
+  else if (counterName === 'session') inFlightSessionMutationRequests += 1;
+  else inFlightBridgeWorkRequests += 1;
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    if (counterName === 'private') {
+      inFlightDesktopAttachmentOpenRequests = Math.max(0, inFlightDesktopAttachmentOpenRequests - 1);
+    } else if (counterName === 'session') {
+      inFlightSessionMutationRequests = Math.max(0, inFlightSessionMutationRequests - 1);
+    } else {
+      inFlightBridgeWorkRequests = Math.max(0, inFlightBridgeWorkRequests - 1);
+    }
+  };
+  let responseFinished = false;
+  res.once('finish', () => {
+    responseFinished = true;
+    release();
+  });
+  res.once('close', () => {
+    if (!responseFinished && !res.writableFinished) {
+      // A disconnected client does not prove that its async OS/browser/device
+      // callback stopped. Keep an outcome-unknown latch for the bounded work
+      // lifetime instead of falsely reporting the bridge idle.
+      abortedBridgeWorkUncertainUntilMs = Math.max(
+        abortedBridgeWorkUncertainUntilMs,
+        Date.now() + DESKTOP_BRIDGE_ABORTED_WORK_UNCERTAINTY_MS,
+      );
+    }
+    release();
+  });
+}
+
+function writeDesktopBridgeDrainRefusal(res, headers) {
+  res.writeHead(409, headers);
+  res.end(JSON.stringify({
+    ok: false,
+    code: 'desktop_bridge_refresh_draining',
+    error: 'The local bridge is draining for a safe refresh. Retry after bridge health returns.',
+  }));
+}
+
+function scheduleDesktopBridgeSafeRefreshExit(res, reservation) {
+  let scheduled = false;
+  const beginExit = () => {
+    if (scheduled) return;
+    scheduled = true;
+    setTimeout(async () => {
+      // External Claude/browser activity is not governed by the HTTP drain.
+      // Rebuild every authority input after the 202 flush, then commit the
+      // parent reservation only immediately before the owned exit.
+      doScan();
+      validateClaudeBridgeReplacementSource();
+      doScan();
+      const finalSafety = buildDesktopBridgeRestartSafety({ ignoreDrain: true });
+      if (
+        !finalSafety.safeToRefresh
+        || finalSafety.currentSourceSha256 !== reservation?.manifestSha256
+        || reservation.expiresAtMs <= Date.now()
+        || desktopBridgeSupervisorIpc.disconnected
+        || process.connected !== true
+      ) {
+        cancelDesktopBridgeSupervisorReplacement(reservation);
+        desktopBridgeRefreshDrainActive = false;
+        desktopBridgeRefreshExitScheduled = false;
+        console.warn(`[bridge] Safe refresh cancelled after response: ${finalSafety.blockers.join(', ')}`);
+        return;
+      }
+      if (!await commitDesktopBridgeSupervisorReplacement(reservation)) {
+        cancelDesktopBridgeSupervisorReplacement(reservation);
+        desktopBridgeRefreshDrainActive = false;
+        desktopBridgeRefreshExitScheduled = false;
+        console.warn('[bridge] Safe refresh cancelled because supervisor commit failed.');
+        return;
+      }
+      // The commit ACK establishes parent custody, but it does not freeze
+      // external Claude/session/browser state. Force one final observation
+      // beneath the still-active global drain immediately after that ACK. A
+      // session or browser that appeared during the commit round trip keeps
+      // the current generation alive and cancels the committed snapshot.
+      doScan();
+      const postCommitSafety = buildDesktopBridgeRestartSafety({ ignoreDrain: true });
+      if (
+        !postCommitSafety.safeToRefresh
+        || postCommitSafety.currentSourceSha256 !== reservation.manifestSha256
+        || reservation.expiresAtMs <= Date.now()
+      ) {
+        cancelDesktopBridgeSupervisorReplacement(reservation);
+        desktopBridgeCommittedExitReservation = null;
+        desktopBridgeRefreshDrainActive = false;
+        desktopBridgeRefreshExitScheduled = false;
+        console.warn(`[bridge] Safe refresh cancelled after supervisor commit: ${postCommitSafety.blockers.join(', ')}`);
+        return;
+      }
+      desktopBridgeCommittedExitReservation = reservation;
+      const parentState = conservativeProcessState(DESKTOP_BRIDGE_SUPERVISOR_DECLARATION.ownerPid);
+      if (
+        desktopBridgeCommittedExitReservation !== reservation
+        || !reservation.committed
+        || reservation.expiresAtMs <= Date.now()
+        || desktopBridgeSupervisorIpc.disconnected
+        || process.connected !== true
+        || DESKTOP_BRIDGE_SUPERVISOR_DECLARATION.ownerPid !== process.ppid
+        || parentState !== true
+      ) {
+        cancelDesktopBridgeSupervisorReplacement(reservation);
+        desktopBridgeCommittedExitReservation = null;
+        desktopBridgeRefreshDrainActive = false;
+        desktopBridgeRefreshExitScheduled = false;
+        return;
+      }
+      // The response has flushed and the parent has atomically committed its
+      // exact-child reservation. Exit in this same event-loop turn: there is
+      // no delayed close window in which an orphaned bridge can later decide
+      // to terminate after IPC custody disappears.
+      process.exit(DESKTOP_BRIDGE_SAFE_REFRESH_EXIT_CODE);
+    }, DESKTOP_BRIDGE_SAFE_REFRESH_EXIT_DELAY_MS);
+  };
+  res.once('finish', beginExit);
+  res.once('close', () => {
+    if (res.writableFinished) return;
+    cancelDesktopBridgeSupervisorReplacement(reservation);
+    desktopBridgeRefreshDrainActive = false;
+    desktopBridgeRefreshExitScheduled = false;
+  });
+}
+
+function doScan() {
+  lastSessionScanAttemptAt = new Date().toISOString();
+  try {
+    cachedSessions = scanSessions();
+    lastScanTime = new Date().toISOString();
+    lastSessionScanSucceededAt = lastScanTime;
+    lastSessionScanFailed = false;
+    return true;
+  } catch (err) {
+    lastSessionScanFailed = true;
+    console.error('[bridge] Scan error:', err.message);
+    return false;
+  }
+}
+
+if (!DESKTOP_BRIDGE_REPLACEMENT_LOAD_PROBE) {
+  doScan();
+  setInterval(doScan, SCAN_INTERVAL);
+}
 
 // ── HTTP server ─────────────────────────────────────────────────────────────
 
@@ -1140,6 +2222,30 @@ const server = http.createServer(async (req, res) => {
       }));
       return;
     }
+  }
+
+  const refreshWorkExempt = url === '/desktop/health'
+    || url === '/browser/health'
+    || url === '/desktop/pair'
+    || url === '/desktop/refresh_if_idle';
+  if (!refreshWorkExempt) {
+    if (desktopBridgeRefreshDrainActive) {
+      writeDesktopBridgeDrainRefusal(res, CORS);
+      return;
+    }
+    // Account at the HTTP boundary, before any handler can read a request
+    // body, launch a helper/browser/app, or mutate bridge-owned state.
+    trackBridgeRequest(res, 'work');
+  }
+
+  const isSessionMutationRequest = req.method === 'POST'
+    && (url === '/launch' || url === '/terminal/send' || url === '/spawn');
+  if (isSessionMutationRequest) {
+    if (desktopBridgeRefreshDrainActive) {
+      writeDesktopBridgeDrainRefusal(res, CORS);
+      return;
+    }
+    trackBridgeRequest(res, 'session');
   }
 
   if (url === '/sessions') {
@@ -2084,7 +3190,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      const { target, command, apiKey, port } = parsed;
+      const { target, command, apiKey, port, serviceUrl } = parsed;
       if (!target || !command) {
         res.writeHead(400, CORS);
         res.end(JSON.stringify({ ok: false, error: 'Missing "target" or "command"' }));
@@ -2098,6 +3204,19 @@ const server = http.createServer(async (req, res) => {
       if (apiKey != null && (typeof apiKey !== 'string' || apiKey.length > 512 || /[\x00-\x1f]/.test(apiKey))) {
         res.writeHead(400, CORS);
         res.end(JSON.stringify({ ok: false, error: 'Invalid printer API key' }));
+        return;
+      }
+      const expectedServiceUrl = target === 'octoprint'
+        ? 'http://localhost:5000'
+        : target === 'klipper'
+          ? 'http://localhost:7125'
+          : null;
+      if (expectedServiceUrl && serviceUrl !== expectedServiceUrl) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({
+          ok: false,
+          error: `The requested ${target} service URL does not match the bridge-detected target`,
+        }));
         return;
       }
 
@@ -2669,6 +3788,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, CORS);
     res.end(JSON.stringify({
       ok: true,
+      instanceId: DESKTOP_BRIDGE_INSTANCE_ID,
       platform: process.platform,
       supported: process.platform === 'darwin',
       tools: process.platform === 'darwin'
@@ -2680,7 +3800,7 @@ const server = http.createServer(async (req, res) => {
            'photoshop_apply_adjustment_layer', 'photoshop_apply_selection_or_mask', 'photoshop_resize_canvas_or_image',
            'photoshop_manage_layers', 'photoshop_transform_layer', 'photoshop_convert_color_mode',
            'illustrator_document_status', 'illustrator_export_proof', 'illustrator_text_inventory', 'illustrator_set_layer_state', 'illustrator_update_text_layer',
-           'screenshot', 'wait_for_app', 'open_url', 'open_path', 'stage_attachment', 'stage_attachment_manifest', 'click_at', 'screen_size',
+           'screenshot', 'wait_for_app', 'open_url', 'open_path', 'attachment_open_capability', 'stage_attachment', 'stage_attachment_manifest', 'click_at', 'screen_size',
            ...(fs.existsSync(path.join(__dirname, 'bin', 'uc-ax-helper'))
              ? ['a11y_tree', 'click_element', 'set_element_value', 'semantic_action_target', 'semantic_action', 'semantic_value_target', 'semantic_value']
              : [])]
@@ -2692,6 +3812,10 @@ const server = http.createServer(async (req, res) => {
         input_helper: fs.existsSync(path.join(__dirname, 'bin', 'uc-input-helper')),
         ax_helper: fs.existsSync(path.join(__dirname, 'bin', 'uc-ax-helper')),
       },
+      // Secret-free, conservative refresh state. This never includes the
+      // supervisor lease, session ids, file paths, capability bearers, or
+      // private attachment metadata.
+      restartSafety: buildDesktopBridgeRestartSafety(),
     }));
     return;
   }
@@ -2776,6 +3900,158 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(401, CORS);
       res.end(JSON.stringify({ ok: false, error: 'Missing or invalid desktop token. Pair first via POST /desktop/pair.' }));
       return;
+    }
+
+    if (url === '/desktop/refresh_if_idle' && req.method === 'POST') {
+      readJsonBody(req, 2048, async (parsed, bodyErr) => {
+        let refreshRequestAborted = false;
+        let refreshCustodyTransferred = false;
+        let heldReservation = null;
+        const markRefreshRequestAborted = () => {
+          if (res.writableFinished || refreshCustodyTransferred) return;
+          refreshRequestAborted = true;
+          cancelDesktopBridgeSupervisorReplacement(heldReservation);
+          desktopBridgeRefreshDrainActive = false;
+          desktopBridgeRefreshExitScheduled = false;
+        };
+        req.once('aborted', markRefreshRequestAborted);
+        res.once('close', markRefreshRequestAborted);
+        const exactKeys = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+          ? Object.keys(parsed).sort()
+          : [];
+        if (
+          bodyErr
+          || exactKeys.length !== 1
+          || exactKeys[0] !== 'confirm'
+          || parsed.confirm !== DESKTOP_BRIDGE_SAFE_REFRESH_CONFIRM
+        ) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({
+            ok: false,
+            code: 'desktop_bridge_refresh_confirmation_required',
+            error: `Exact confirmation ${DESKTOP_BRIDGE_SAFE_REFRESH_CONFIRM} is required.`,
+          }));
+          return;
+        }
+        if (desktopBridgeRefreshDrainActive || desktopBridgeRefreshExitScheduled) {
+          writeDesktopBridgeDrainRefusal(res, CORS);
+          return;
+        }
+
+        // This authenticated, explicitly confirmed mutation endpoint may
+        // perform the same guarded expiry cleanup as the idle timer. Public
+        // GET /desktop/health remains observation-only.
+        cleanupExpiredDesktopAttachmentOpenCapabilities();
+        // Cached UI sessions are never restart authority. A complete scan is
+        // forced immediately before each decision so a transcript created
+        // after the periodic poll cannot disappear from the predicate.
+        doScan();
+        const preValidationSafety = buildDesktopBridgeRestartSafety({ ignoreSourceValidation: true });
+        if (!preValidationSafety.safeToRefresh) {
+          res.writeHead(409, CORS);
+          res.end(JSON.stringify({
+            ok: false,
+            accepted: false,
+            code: 'desktop_bridge_refresh_unsafe',
+            restartSafety: preValidationSafety,
+          }));
+          return;
+        }
+        validateClaudeBridgeReplacementSource();
+        doScan();
+        const beforeFence = buildDesktopBridgeRestartSafety();
+        if (!beforeFence.safeToRefresh) {
+          res.writeHead(409, CORS);
+          res.end(JSON.stringify({
+            ok: false,
+            accepted: false,
+            code: 'desktop_bridge_refresh_unsafe',
+            restartSafety: beforeFence,
+          }));
+          return;
+        }
+
+        // Enter the global fence synchronously before awaiting IPC. Every new
+        // bridge work request now fails typed-409 while the direct parent
+        // atomically reserves the next child generation.
+        desktopBridgeRefreshDrainActive = true;
+        doScan();
+        validateClaudeBridgeReplacementSource();
+        doScan();
+        const afterFence = buildDesktopBridgeRestartSafety({ ignoreDrain: true });
+        if (!afterFence.safeToRefresh) {
+          desktopBridgeRefreshDrainActive = false;
+          res.writeHead(409, CORS);
+          res.end(JSON.stringify({
+            ok: false,
+            accepted: false,
+            code: 'desktop_bridge_refresh_state_changed',
+            restartSafety: afterFence,
+          }));
+          return;
+        }
+
+        const reservation = await reserveDesktopBridgeSupervisorReplacement(
+          afterFence.currentSourceSha256,
+        );
+        heldReservation = reservation;
+        if (!reservation || refreshRequestAborted || res.destroyed || res.writableEnded) {
+          cancelDesktopBridgeSupervisorReplacement(reservation);
+          desktopBridgeRefreshDrainActive = false;
+          if (!res.destroyed && !res.writableEnded) {
+            res.writeHead(409, CORS);
+            res.end(JSON.stringify({
+              ok: false,
+              accepted: false,
+              code: 'desktop_bridge_refresh_supervisor_reservation_unavailable',
+              restartSafety: buildDesktopBridgeRestartSafety(),
+            }));
+          }
+          return;
+        }
+
+        // Re-run the complete filesystem scan and five-file source manifest
+        // beneath both the HTTP drain and the parent reservation. The exact
+        // manifest reserved above must remain unchanged.
+        doScan();
+        const finalFence = buildDesktopBridgeRestartSafety({ ignoreDrain: true });
+        if (
+          !finalFence.safeToRefresh
+          || finalFence.currentSourceSha256 !== reservation.manifestSha256
+          || reservation.expiresAtMs <= Date.now()
+        ) {
+          cancelDesktopBridgeSupervisorReplacement(reservation);
+          desktopBridgeRefreshDrainActive = false;
+          res.writeHead(409, CORS);
+          res.end(JSON.stringify({
+            ok: false,
+            accepted: false,
+            code: 'desktop_bridge_refresh_state_changed',
+            restartSafety: finalFence,
+          }));
+          return;
+        }
+
+        desktopBridgeRefreshExitScheduled = true;
+        refreshCustodyTransferred = true;
+        scheduleDesktopBridgeSafeRefreshExit(res, reservation);
+        res.writeHead(202, CORS);
+        res.end(JSON.stringify({
+          ok: true,
+          accepted: true,
+          restartScheduled: true,
+          instanceId: DESKTOP_BRIDGE_INSTANCE_ID,
+        }));
+      });
+      return;
+    }
+
+    if (req.method === 'POST' && url.startsWith('/desktop/attachment_open/')) {
+      if (desktopBridgeRefreshDrainActive) {
+        writeDesktopBridgeDrainRefusal(res, CORS);
+        return;
+      }
+      trackBridgeRequest(res, 'private');
     }
 
     if (url === '/desktop/running-apps' && req.method === 'GET') {
@@ -3307,7 +4583,7 @@ end tell`;
           return { name: entry.name, path: full, kind: entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : 'other', size, modifiedAt };
         });
         res.writeHead(200, CORS);
-        res.end(JSON.stringify({ ok: true, path: dir, entries, truncated: entries.length >= 250 }));
+        res.end(JSON.stringify({ ok: true, requestPath: validated.path, path: dir, entries, truncated: entries.length >= 250 }));
       } catch (err) {
         res.writeHead(400, CORS);
         res.end(JSON.stringify({ ok: false, error: err.message || String(err) }));
@@ -3334,7 +4610,7 @@ end tell`;
         const content = buffer.toString('utf8');
         if (content.includes('\u0000')) throw new Error('binary file preview refused');
         res.writeHead(200, CORS);
-        res.end(JSON.stringify({ ok: true, path: filePath, content, size: stat.size, truncated: stat.size > maxBytes }));
+        res.end(JSON.stringify({ ok: true, requestPath: validated.path, path: filePath, content, size: stat.size, truncated: stat.size > maxBytes }));
       } catch (err) {
         res.writeHead(400, CORS);
         res.end(JSON.stringify({ ok: false, error: err.message || String(err) }));
@@ -3394,7 +4670,7 @@ end tell`;
           extensions: parsed.searchParams.get('extensions'),
         });
         res.writeHead(200, CORS);
-        res.end(JSON.stringify({ ok: true, rootPath, query, ...result }));
+        res.end(JSON.stringify({ ok: true, requestRootPath: rootValidated.path, requestQuery: query, rootPath, query, ...result }));
       } catch (err) {
         res.writeHead(400, CORS);
         res.end(JSON.stringify({ ok: false, error: err.message || String(err) }));
@@ -3416,7 +4692,7 @@ end tell`;
         } catch (err) {
           if (err && err.code === 'ENOENT') {
             res.writeHead(200, CORS);
-            res.end(JSON.stringify({ ok: true, path: targetPath, exists: false }));
+            res.end(JSON.stringify({ ok: true, requestPath: validated.path, path: targetPath, exists: false }));
             return;
           }
           throw err;
@@ -3425,6 +4701,7 @@ end tell`;
         res.writeHead(200, CORS);
         res.end(JSON.stringify({
           ok: true,
+          requestPath: validated.path,
           path: targetPath,
           exists: true,
           kind,
@@ -3583,7 +4860,7 @@ end tell`;
             res.end(JSON.stringify({ ok: false, code: invocation.code, error: invocation.error }));
             return;
           }
-          const timeoutMs = Math.max(1000, Math.min(600000, Number(parsed?.timeoutMs) || 120000));
+          const timeoutMs = Math.max(1000, Math.min(MAX_DESKTOP_EXEC_TIMEOUT_MS, Number(parsed?.timeoutMs) || 120000));
           const startedAt = Date.now();
           execFile(invocation.binary, invocation.args, {
             cwd,
@@ -5187,6 +6464,14 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: 'background must be white, transparent, or background.' }));
           return;
         }
+        const targetGuardSupplied = parsed?.targetGuard !== undefined && parsed?.targetGuard !== null;
+        const guarded = targetGuardSupplied
+          ? parseDesktopNativeTargetGuardServer(parsed.targetGuard)
+          : null;
+        if (guarded && !guarded.ok) {
+          writeDesktopNativeTargetGuardFailure(res, CORS, guarded);
+          return;
+        }
         const built = buildPhotoshopCreateDocumentScript({
           appName,
           widthPx: parsed.widthPx,
@@ -5201,10 +6486,32 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: 'Could not resolve Photoshop app.' }));
           return;
         }
-        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 30000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+        if (guarded?.ok && built.appName !== guarded.guard.appName) {
+          writeDesktopNativeTargetGuardFailure(res, CORS, {
+            error: 'Photoshop app identity no longer matches the sealed native target guard.',
+            errorCode: 'uncertain_ui_target',
+          });
+          return;
+        }
+        // Correlation-only receipt metadata. This is deliberately generated by
+        // the local bridge (never accepted from the caller) but is not signed
+        // and must not be treated as authorization or production trust.
+        const operationId = `photoshop-create-${crypto.randomBytes(16).toString('hex')}`;
+        const observedAt = new Date().toISOString();
+        const invokeCreateDocument = () => {
+          const startedAt = new Date().toISOString();
+          exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 30000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          const completedAt = new Date().toISOString();
           if (err) {
             res.writeHead(400, CORS);
-            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Photoshop create document failed').toString().slice(0, 1000) }));
+            res.end(JSON.stringify({
+              ok: false,
+              operationId,
+              observedAt,
+              startedAt,
+              completedAt,
+              error: (stderr || err.message || 'Photoshop create document failed').toString().slice(0, 1000),
+            }));
             return;
           }
           let result = null;
@@ -5214,11 +6521,76 @@ end tell`;
             res.end(JSON.stringify({
               ok: false,
               appName: built.appName,
-              appRunning: result?.appRunning !== false,
+              appRunning: result?.appRunning === true,
               created: false,
+              operationId,
+              observedAt,
+              startedAt,
+              completedAt,
               error: result?.error ? String(result.error).slice(0, 500)
                 : result?.status === 'not_running' ? 'Photoshop is not running.'
                   : 'Photoshop did not confirm document creation.',
+            }));
+            return;
+          }
+          const documentName = typeof result.documentName === 'string'
+            ? result.documentName.slice(0, 260)
+            : '';
+          const documentCountBefore = Number.isInteger(result.documentCountBefore) && result.documentCountBefore >= 0
+            ? result.documentCountBefore
+            : -1;
+          const documentCountAfter = Number.isInteger(result.documentCountAfter) && result.documentCountAfter >= 1
+            ? result.documentCountAfter
+            : -1;
+          const documentCount = Number.isInteger(result.documentCount) && result.documentCount >= 1
+            ? result.documentCount
+            : -1;
+          const activeDocumentNameBefore = result.activeDocumentNameBefore == null
+            ? null
+            : typeof result.activeDocumentNameBefore === 'string'
+              ? result.activeDocumentNameBefore.slice(0, 260)
+              : undefined;
+          const createdDocumentId = result.createdDocumentId == null
+            ? null
+            : Number.isInteger(result.createdDocumentId) && result.createdDocumentId > 0
+              ? result.createdDocumentId
+              : undefined;
+          const widthPx = Number.isInteger(result.widthPx) ? result.widthPx : 0;
+          const heightPx = Number.isInteger(result.heightPx) ? result.heightPx : 0;
+          const resolution = typeof result.resolution === 'number' && Number.isFinite(result.resolution) && result.resolution > 0
+            ? result.resolution
+            : 0;
+          const resultMode = typeof result.mode === 'string' && result.mode.trim()
+            ? result.mode.slice(0, 40)
+            : null;
+          const receiptMalformed = result.appRunning !== true
+            || !documentName
+            || (name && documentName !== name)
+            || documentCountBefore < 0
+            || documentCountAfter !== documentCountBefore + 1
+            || documentCount !== documentCountAfter
+            || !Object.prototype.hasOwnProperty.call(result, 'activeDocumentNameBefore')
+            || activeDocumentNameBefore === undefined
+            || (documentCountBefore === 0 && activeDocumentNameBefore !== null)
+            || (documentCountBefore > 0 && !activeDocumentNameBefore)
+            || !Object.prototype.hasOwnProperty.call(result, 'createdDocumentId')
+            || createdDocumentId === undefined
+            || widthPx !== parsed.widthPx
+            || heightPx !== parsed.heightPx
+            || !(resolution > 0)
+            || !resultMode;
+          if (receiptMalformed) {
+            res.writeHead(200, CORS);
+            res.end(JSON.stringify({
+              ok: false,
+              appName: built.appName,
+              appRunning: result.appRunning === true,
+              created: false,
+              operationId,
+              observedAt,
+              startedAt,
+              completedAt,
+              error: 'Photoshop returned malformed create-document correlation evidence.',
             }));
             return;
           }
@@ -5226,15 +6598,41 @@ end tell`;
           res.end(JSON.stringify({
             ok: true,
             appName: built.appName,
+            appRunning: true,
             created: true,
-            documentName: result.documentName ? String(result.documentName).slice(0, 260) : null,
-            widthPx: Number.isFinite(Number(result.widthPx)) ? Number(result.widthPx) : 0,
-            heightPx: Number.isFinite(Number(result.heightPx)) ? Number(result.heightPx) : 0,
-            resolution: Number.isFinite(Number(result.resolution)) ? Number(result.resolution) : 0,
-            mode: result.mode ? String(result.mode).slice(0, 40) : null,
-            documentCount: Number.isFinite(Number(result.documentCount)) ? Number(result.documentCount) : 0,
+            operationId,
+            observedAt,
+            startedAt,
+            completedAt,
+            documentCountBefore,
+            documentCountAfter,
+            activeDocumentNameBefore,
+            createdDocumentId,
+            documentName,
+            widthPx,
+            heightPx,
+            resolution,
+            mode: resultMode,
+            documentCount,
+            error: null,
           }));
-        });
+          });
+        };
+        if (guarded?.ok) {
+          // Read-only window-proof immediately precedes the one JSX mutation.
+          // This never focuses, raises, or activates Photoshop.
+          verifyDesktopNativeTargetGuardServer(guarded.guard, (guardError) => {
+            if (guardError) {
+              writeDesktopNativeTargetGuardFailure(res, CORS, guardError);
+              return;
+            }
+            invokeCreateDocument();
+          });
+        } else {
+          // Legacy callers remain supported. The durable canary requires the
+          // optional guard before it enters this endpoint.
+          invokeCreateDocument();
+        }
       });
       return;
     }
@@ -5297,6 +6695,9 @@ end tell`;
             status: result?.status ? String(result.status).slice(0, 80) : 'unknown',
             documentCount: Number.isFinite(Number(result?.documentCount)) ? Number(result.documentCount) : 0,
             activeDocumentName: result?.activeDocumentName ? String(result.activeDocumentName).slice(0, 260) : null,
+            activeDocumentId: Number.isInteger(result?.activeDocumentId) && result.activeDocumentId > 0
+              ? result.activeDocumentId
+              : null,
             activeDocumentPath: result?.activeDocumentPath ? String(result.activeDocumentPath).slice(0, 1024) : null,
             activeDocumentModified: result?.activeDocumentModified === true,
             activeDocumentSaved: result?.activeDocumentSaved === true,
@@ -7203,6 +8604,661 @@ end tell`;
       return;
     }
 
+    // Opaque Chat-upload -> native-open lane. Unlike the legacy staging
+    // helpers below, these endpoints never return a path, directory, filename,
+    // app identity, storage URL, raw bytes, or bearer. The exact bearer lives
+    // only in desktopBridge.ts's WeakMap and this request header; this process
+    // stores only its HMAC lookup key.
+    if (url === '/desktop/attachment_open/stage' && req.method === 'POST') {
+      readJsonBody(req, 140 * 1024 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) {
+          writeDesktopAttachmentOpenFailure(res, CORS, 400, 'attachment_open_invalid_input', bodyErr);
+          return;
+        }
+        const capabilityKey = desktopAttachmentOpenCapabilityKey(req);
+        if (!capabilityKey) {
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            400,
+            'attachment_open_invalid_capability',
+            'A private attachment-open capability is required.',
+          );
+          return;
+        }
+        cleanupExpiredDesktopAttachmentOpenCapabilities();
+        if (desktopAttachmentOpenCapabilities.has(capabilityKey)) {
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            409,
+            'attachment_open_capability_collision',
+            'Attachment-open capability already exists.',
+          );
+          return;
+        }
+        if (desktopAttachmentOpenCapabilities.size >= DESKTOP_ATTACHMENT_OPEN_CAPACITY) {
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            409,
+            'attachment_open_capacity_reached',
+            'Attachment-open capability capacity is temporarily full.',
+          );
+          return;
+        }
+        const normalized = parseDesktopAttachmentOpenStageBody(parsed);
+        if (!normalized.ok) {
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            400,
+            'attachment_open_invalid_input',
+            normalized.error,
+          );
+          return;
+        }
+        const requestedAppName = desktopAttachmentOpenRequestedAppName(
+          normalized.filename,
+          normalized.preferredAppName,
+        );
+        const resolvedApp = requestedAppName
+          ? resolveDesktopAttachmentOpenInstalledApp(requestedAppName)
+          : null;
+        if (!requestedAppName || !resolvedApp) {
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            409,
+            'attachment_open_app_unavailable',
+            'No exact installed desktop app could be privately bound for this attachment.',
+          );
+          return;
+        }
+        let appIdentity;
+        try {
+          appIdentity = captureDesktopAttachmentOpenAppIdentity(resolvedApp);
+        } catch {
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            409,
+            'attachment_open_app_unavailable',
+            'No exact installed desktop app could be privately bound for this attachment.',
+          );
+          return;
+        }
+        let record = null;
+        let partialDirectoryPath = '';
+        let partialFilePath = '';
+        try {
+          const processRoot = ensureDesktopAttachmentOpenRoot();
+          let directoryPath = '';
+          for (let attempt = 0; attempt < 4 && !directoryPath; attempt += 1) {
+            const candidate = path.join(processRoot, `cap-${crypto.randomBytes(16).toString('hex')}`);
+            try {
+              fs.mkdirSync(candidate, { recursive: false, mode: 0o700 });
+              fs.chmodSync(candidate, 0o700);
+              directoryPath = fs.realpathSync(candidate);
+            } catch (error) {
+              if (error?.code !== 'EEXIST') throw error;
+            }
+          }
+          if (!directoryPath) throw new Error('Could not allocate a private attachment directory.');
+          partialDirectoryPath = directoryPath;
+          const extension = path.extname(normalized.filename).toLowerCase();
+          const stagedName = extension && /^[.][a-z0-9]{1,20}$/.test(extension)
+            ? `document-${crypto.randomBytes(16).toString('hex')}${extension}`
+            : `document-${crypto.randomBytes(16).toString('hex')}.bin`;
+          const filePath = path.join(directoryPath, stagedName);
+          partialFilePath = filePath;
+          const openFlags = fs.constants.O_WRONLY
+            | fs.constants.O_CREAT
+            | fs.constants.O_EXCL
+            | (fs.constants.O_NOFOLLOW || 0);
+          const descriptor = fs.openSync(filePath, openFlags, 0o600);
+          try {
+            fs.writeFileSync(descriptor, normalized.bytes);
+            fs.fsyncSync(descriptor);
+          } finally {
+            fs.closeSync(descriptor);
+          }
+          fs.chmodSync(filePath, 0o600);
+          const stagedIdentity = captureDesktopAttachmentOpenStagedIdentity({
+            processRoot,
+            directoryPath,
+            filePath,
+          });
+          record = {
+            directoryPath,
+            filePath,
+            stagedIdentity,
+            scope: normalized.scope,
+            scopeFingerprint: normalized.scopeFingerprint,
+            attachmentFingerprint: crypto
+              .createHmac('sha256', DESKTOP_ATTACHMENT_OPEN_SECRET)
+              .update(`attachment:${normalized.scope.attachmentId}`, 'utf8')
+              .digest('hex'),
+            requestedAppName,
+            resolvedAppName: resolvedApp.name,
+            resolvedAppPath: appIdentity.bundleRealPath,
+            appIdentity,
+            requestedAppFingerprint: desktopAttachmentOpenPrivateFingerprint(
+              'requested-app',
+              requestedAppName,
+            ),
+            resolvedAppFingerprint: desktopAttachmentOpenPrivateFingerprint(
+              'resolved-app',
+              `${resolvedApp.name}\n${desktopAttachmentOpenAppIdentityCanonical(appIdentity)}`,
+            ),
+            documentFingerprint: desktopAttachmentOpenPrivateFingerprint(
+              'document',
+              `${stagedName}\n${normalized.sha256}\n${normalized.scopeFingerprint}\n${stagedIdentity.file.dev}:${stagedIdentity.file.ino}`,
+            ),
+            sha256: normalized.sha256,
+            sizeBytes: normalized.sizeBytes,
+            mimeType: normalized.mimeType,
+            status: 'active',
+            expiresAtMs: Date.now() + normalized.ttlMs,
+          };
+          const verified = validateDesktopAttachmentOpenRecord(record);
+          const appVerified = validateDesktopAttachmentOpenAppIdentity(record);
+          if (!verified.ok || !appVerified.ok) {
+            throw new Error('Staged attachment did not pass private identity verification.');
+          }
+          desktopAttachmentOpenCapabilities.set(capabilityKey, record);
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({ ok: true, ...desktopAttachmentOpenSafeProjection(record) }));
+        } catch {
+          deleteDesktopAttachmentOpenFiles(record || {
+            directoryPath: partialDirectoryPath,
+            filePath: partialFilePath,
+          });
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            500,
+            'attachment_open_stage_failed',
+            'Attachment could not be staged into the private open capability.',
+          );
+        }
+      });
+      return;
+    }
+
+    if (url === '/desktop/attachment_open/inspect' && req.method === 'POST') {
+      readJsonBody(req, 4096, (parsed, bodyErr) => {
+        const capabilityKey = desktopAttachmentOpenCapabilityKey(req);
+        if (bodyErr || !capabilityKey) {
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            400,
+            'attachment_open_invalid_input',
+            'A valid capability and scope are required.',
+          );
+          return;
+        }
+        cleanupExpiredDesktopAttachmentOpenCapabilities(Date.now(), capabilityKey);
+        const record = desktopAttachmentOpenCapabilities.get(capabilityKey);
+        if (!record) {
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            404,
+            'attachment_open_capability_unavailable',
+            'Attachment-open capability is unavailable.',
+          );
+          return;
+        }
+        if (record.status !== 'active') {
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            409,
+            'attachment_open_capability_unavailable',
+            'Attachment-open inspection is unavailable after dispatch.',
+          );
+          return;
+        }
+        if (record.expiresAtMs <= Date.now()) {
+          desktopAttachmentOpenCapabilities.delete(capabilityKey);
+          deleteDesktopAttachmentOpenFiles(record);
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            409,
+            'attachment_open_capability_expired',
+            'Attachment-open capability expired.',
+          );
+          return;
+        }
+        const scopeResult = parseDesktopAttachmentOpenScopeBody(parsed);
+        if (
+          !scopeResult.ok
+          || !desktopAttachmentOpenSafeEqual(scopeResult.fingerprint, record.scopeFingerprint)
+        ) {
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            403,
+            'attachment_open_scope_mismatch',
+            'Attachment-open capability scope does not match.',
+          );
+          return;
+        }
+        const verified = validateDesktopAttachmentOpenRecord(record);
+        if (!verified.ok) {
+          desktopAttachmentOpenCapabilities.delete(capabilityKey);
+          deleteDesktopAttachmentOpenFiles(record);
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            409,
+            verified.code,
+            'Attachment-open capability failed private-file verification.',
+          );
+          return;
+        }
+        const appVerified = validateDesktopAttachmentOpenAppIdentity(record);
+        if (!appVerified.ok) {
+          desktopAttachmentOpenCapabilities.delete(capabilityKey);
+          deleteDesktopAttachmentOpenFiles(record);
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            409,
+            appVerified.code,
+            'Attachment-open capability failed private-app verification.',
+          );
+          return;
+        }
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({
+          ok: true,
+          available: true,
+          ...desktopAttachmentOpenSafeProjection(record),
+        }));
+      });
+      return;
+    }
+
+    if (url === '/desktop/attachment_open/observe' && req.method === 'POST') {
+      readJsonBody(req, 4096, (parsed, bodyErr) => {
+        const capabilityKey = desktopAttachmentOpenCapabilityKey(req);
+        if (bodyErr || !capabilityKey) {
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            400,
+            'attachment_open_invalid_input',
+            'A valid capability and scope are required.',
+          );
+          return;
+        }
+        cleanupExpiredDesktopAttachmentOpenCapabilities(Date.now(), capabilityKey);
+        const record = desktopAttachmentOpenCapabilities.get(capabilityKey);
+        if (!record || (record.status !== 'active' && record.status !== 'dispatched')) {
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            404,
+            'attachment_open_capability_unavailable',
+            'Attachment-open observation is unavailable.',
+          );
+          return;
+        }
+        if (record.expiresAtMs <= Date.now()) {
+          desktopAttachmentOpenCapabilities.delete(capabilityKey);
+          deleteDesktopAttachmentOpenFiles(record);
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            409,
+            'attachment_open_capability_expired',
+            'Attachment-open capability expired.',
+          );
+          return;
+        }
+        const scopeResult = parseDesktopAttachmentOpenScopeBody(parsed);
+        if (
+          !scopeResult.ok
+          || !desktopAttachmentOpenSafeEqual(scopeResult.fingerprint, record.scopeFingerprint)
+        ) {
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            403,
+            'attachment_open_scope_mismatch',
+            'Attachment-open capability scope does not match.',
+          );
+          return;
+        }
+        const verified = validateDesktopAttachmentOpenRecord(record);
+        if (!verified.ok) {
+          desktopAttachmentOpenCapabilities.delete(capabilityKey);
+          deleteDesktopAttachmentOpenFiles(record);
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            409,
+            verified.code,
+            'Attachment-open capability failed private-file verification.',
+          );
+          return;
+        }
+        const appVerified = validateDesktopAttachmentOpenAppIdentity(record);
+        if (!appVerified.ok) {
+          desktopAttachmentOpenCapabilities.delete(capabilityKey);
+          deleteDesktopAttachmentOpenFiles(record);
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            409,
+            appVerified.code,
+            'Attachment-open capability failed private-app verification.',
+          );
+          return;
+        }
+        observeDesktopAttachmentOpenRecord(record, (observed) => {
+          if (!observed.ok || !observed.observation) {
+            writeDesktopAttachmentOpenFailure(
+              res,
+              CORS,
+              409,
+              observed.code || 'attachment_open_observation_unavailable',
+              'Exact private app and document observation was unavailable.',
+            );
+            return;
+          }
+          const postObservationVerified = validateDesktopAttachmentOpenRecord(record);
+          const postObservationAppVerified = validateDesktopAttachmentOpenAppIdentity(record);
+          if (!postObservationVerified.ok || !postObservationAppVerified.ok) {
+            desktopAttachmentOpenCapabilities.delete(capabilityKey);
+            deleteDesktopAttachmentOpenFiles(record);
+            writeDesktopAttachmentOpenFailure(
+              res,
+              CORS,
+              409,
+              postObservationVerified.ok
+                ? postObservationAppVerified.code
+                : postObservationVerified.code,
+              'Attachment-open capability failed private identity verification.',
+            );
+            return;
+          }
+          const response = {
+            ok: true,
+            ...desktopAttachmentOpenSafeProjection(record),
+            ...observed.observation,
+          };
+          const completed = record.status === 'dispatched'
+            && observed.observation.documentOpen === true;
+          if (completed) {
+            desktopAttachmentOpenCapabilities.delete(capabilityKey);
+            deleteDesktopAttachmentOpenFiles(record);
+          }
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify(response));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/attachment_open/revoke' && req.method === 'POST') {
+      readJsonBody(req, 4096, (parsed, bodyErr) => {
+        const capabilityKey = desktopAttachmentOpenCapabilityKey(req);
+        if (bodyErr || !capabilityKey) {
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            400,
+            'attachment_open_invalid_input',
+            'A valid capability and scope are required.',
+          );
+          return;
+        }
+        cleanupExpiredDesktopAttachmentOpenCapabilities(Date.now(), capabilityKey);
+        const record = desktopAttachmentOpenCapabilities.get(capabilityKey);
+        if (!record) {
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            404,
+            'attachment_open_capability_unavailable',
+            'Attachment-open capability is unavailable.',
+          );
+          return;
+        }
+        if (record.status !== 'active' && record.status !== 'dispatched') {
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            409,
+            'attachment_open_capability_unavailable',
+            'Attachment-open revocation is unavailable during dispatch.',
+          );
+          return;
+        }
+        if (record.expiresAtMs <= Date.now()) {
+          desktopAttachmentOpenCapabilities.delete(capabilityKey);
+          deleteDesktopAttachmentOpenFiles(record);
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            409,
+            'attachment_open_capability_expired',
+            'Attachment-open capability expired.',
+          );
+          return;
+        }
+        const scopeResult = parseDesktopAttachmentOpenScopeBody(parsed);
+        if (
+          !scopeResult.ok
+          || !desktopAttachmentOpenSafeEqual(scopeResult.fingerprint, record.scopeFingerprint)
+        ) {
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            403,
+            'attachment_open_scope_mismatch',
+            'Attachment-open capability scope does not match.',
+          );
+          return;
+        }
+        desktopAttachmentOpenCapabilities.delete(capabilityKey);
+        deleteDesktopAttachmentOpenFiles(record);
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({
+          ok: true,
+          revoked: true,
+          ...desktopAttachmentOpenSafeProjection(record),
+        }));
+      });
+      return;
+    }
+
+    if (url === '/desktop/attachment_open/consume' && req.method === 'POST') {
+      readJsonBody(req, 4096, (parsed, bodyErr) => {
+        const capabilityKey = desktopAttachmentOpenCapabilityKey(req);
+        if (bodyErr || !capabilityKey) {
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            400,
+            'attachment_open_invalid_input',
+            'A valid capability and scope are required.',
+          );
+          return;
+        }
+        cleanupExpiredDesktopAttachmentOpenCapabilities(Date.now(), capabilityKey);
+        const record = desktopAttachmentOpenCapabilities.get(capabilityKey);
+        if (!record) {
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            404,
+            'attachment_open_capability_unavailable',
+            'Attachment-open capability is unavailable.',
+          );
+          return;
+        }
+        if (record.status !== 'active') {
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            409,
+            'attachment_open_capability_unavailable',
+            'Attachment-open dispatch authority has already been spent.',
+          );
+          return;
+        }
+        // One-shot/no-replay invariant: spend dispatch authority before
+        // validating scope, touching the file again, or calling `open`.
+        // The record remains read/revoke-only after an acknowledged dispatch
+        // so exact app/document proof can finish before private bytes vanish.
+        record.status = 'dispatching';
+        if (record.expiresAtMs <= Date.now()) {
+          desktopAttachmentOpenCapabilities.delete(capabilityKey);
+          deleteDesktopAttachmentOpenFiles(record);
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            409,
+            'attachment_open_capability_expired',
+            'Attachment-open capability expired.',
+          );
+          return;
+        }
+        const scopeResult = parseDesktopAttachmentOpenScopeBody(parsed);
+        if (
+          !scopeResult.ok
+          || !desktopAttachmentOpenSafeEqual(scopeResult.fingerprint, record.scopeFingerprint)
+        ) {
+          desktopAttachmentOpenCapabilities.delete(capabilityKey);
+          deleteDesktopAttachmentOpenFiles(record);
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            403,
+            'attachment_open_scope_mismatch',
+            'Attachment-open capability scope does not match.',
+          );
+          return;
+        }
+        const verified = validateDesktopAttachmentOpenRecord(record);
+        if (!verified.ok) {
+          desktopAttachmentOpenCapabilities.delete(capabilityKey);
+          deleteDesktopAttachmentOpenFiles(record);
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            409,
+            verified.code,
+            'Attachment-open capability failed private-file verification.',
+          );
+          return;
+        }
+        const resolvedApp = resolveDesktopAttachmentOpenInstalledApp(record.requestedAppName);
+        let resolvedAppRealPath = '';
+        try { resolvedAppRealPath = resolvedApp ? fs.realpathSync(resolvedApp.appPath) : ''; } catch {}
+        const appVerified = validateDesktopAttachmentOpenAppIdentity(record);
+        if (
+          !resolvedApp
+          || resolvedApp.name !== record.resolvedAppName
+          || resolvedAppRealPath !== record.resolvedAppPath
+          || !appVerified.ok
+        ) {
+          desktopAttachmentOpenCapabilities.delete(capabilityKey);
+          deleteDesktopAttachmentOpenFiles(record);
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            409,
+            'attachment_open_app_unavailable',
+            'The privately bound desktop app is unavailable.',
+          );
+          return;
+        }
+        // Close the approval/app-resolution TOCTOU window as far as a pathname
+        // dispatch permits: the exact stage-time inode is checked again
+        // immediately before `open`, and again before acknowledging it.
+        const immediatelyBeforeDispatch = validateDesktopAttachmentOpenRecord(record);
+        const appImmediatelyBeforeDispatch = validateDesktopAttachmentOpenAppIdentity(record);
+        if (!immediatelyBeforeDispatch.ok || !appImmediatelyBeforeDispatch.ok) {
+          desktopAttachmentOpenCapabilities.delete(capabilityKey);
+          deleteDesktopAttachmentOpenFiles(record);
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            409,
+            immediatelyBeforeDispatch.ok
+              ? appImmediatelyBeforeDispatch.code
+              : immediatelyBeforeDispatch.code,
+            'Attachment-open capability failed private identity verification.',
+          );
+          return;
+        }
+        const openArgs = ['-a', record.resolvedAppPath, immediatelyBeforeDispatch.filePath];
+        const openBinary = resolveDesktopAttachmentOpenDispatchBinary();
+        if (!openBinary) {
+          desktopAttachmentOpenCapabilities.delete(capabilityKey);
+          deleteDesktopAttachmentOpenFiles(record);
+          writeDesktopAttachmentOpenFailure(
+            res,
+            CORS,
+            409,
+            'attachment_open_dispatch_unavailable',
+            'The fixed native-open binary is unavailable.',
+          );
+          return;
+        }
+        const dispatchedAt = new Date().toISOString();
+        execFile(openBinary, openArgs, { timeout: 5000, maxBuffer: 64 * 1024 }, (error) => {
+          if (error) {
+            desktopAttachmentOpenCapabilities.delete(capabilityKey);
+            deleteDesktopAttachmentOpenFiles(record);
+            writeDesktopAttachmentOpenFailure(
+              res,
+              CORS,
+              409,
+              'attachment_open_dispatch_failed',
+              'The native open request was not accepted.',
+            );
+            return;
+          }
+          const immediatelyAfterDispatch = validateDesktopAttachmentOpenRecord(record);
+          const appImmediatelyAfterDispatch = validateDesktopAttachmentOpenAppIdentity(record);
+          if (!immediatelyAfterDispatch.ok || !appImmediatelyAfterDispatch.ok) {
+            desktopAttachmentOpenCapabilities.delete(capabilityKey);
+            deleteDesktopAttachmentOpenFiles(record);
+            writeDesktopAttachmentOpenFailure(
+              res,
+              CORS,
+              409,
+              immediatelyAfterDispatch.ok
+                ? appImmediatelyAfterDispatch.code
+                : immediatelyAfterDispatch.code,
+              'Attachment-open capability failed private identity verification.',
+            );
+            return;
+          }
+          record.status = 'dispatched';
+          record.dispatchedAtMs = Date.parse(dispatchedAt);
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: true,
+            dispatched: true,
+            dispatchAcknowledged: true,
+            completionVerified: false,
+            dispatchedAt,
+            ...desktopAttachmentOpenSafeProjection(record),
+          }));
+        });
+      });
+      return;
+    }
+
     if (url === '/desktop/stage_attachment' && req.method === 'POST') {
       readJsonBody(req, 140 * 1024 * 1024, (parsed, bodyErr) => {
         void (async () => {
@@ -8561,6 +10617,8 @@ end tell
       if (p === '/browser/select' && req.method === 'POST') return browserBridge.handleSelect(req, res, CORS);
       if (p === '/browser/upload_file' && req.method === 'POST') return browserBridge.handleUploadFile(req, res, CORS);
       if (p === '/browser/press' && req.method === 'POST') return browserBridge.handlePress(req, res, CORS);
+      if (p === '/browser/wait_for' && req.method === 'POST') return browserBridge.handleWaitFor(req, res, CORS);
+      if (p === '/browser/scroll' && req.method === 'POST') return browserBridge.handleScroll(req, res, CORS);
       if (p === '/browser/screenshot' && req.method === 'POST') return browserBridge.handleScreenshot(req, res, CORS);
       if (p === '/browser/close' && req.method === 'POST') return browserBridge.handleClose(req, res, CORS);
     } catch (err) {
@@ -8778,6 +10836,18 @@ function runDesktopInputHelper(args, options, callback) {
   }
 }
 
+function desktopNativeTargetProofMatchesGuard(guard, proof) {
+  return (
+    String(proof?.appName || '') === guard.appName
+    && Number(proof?.pid) === guard.pid
+    && Number(proof?.windowId) === guard.window.id
+    && Number(proof?.x) === guard.window.x
+    && Number(proof?.y) === guard.window.y
+    && Number(proof?.width) === guard.window.width
+    && Number(proof?.height) === guard.window.height
+  );
+}
+
 /** Verify non-input System Events mutations immediately before dispatch. */
 function verifyDesktopNativeTargetGuardServer(guard, callback) {
   runDesktopInputHelper(
@@ -8785,15 +10855,7 @@ function verifyDesktopNativeTargetGuardServer(guard, callback) {
     { timeout: 3000, fallbackError: 'Native target proof failed.' },
     (helperError, proof) => {
       if (helperError) { callback(helperError); return; }
-      const matches = (
-        String(proof.appName || '') === guard.appName
-        && Number(proof.pid) === guard.pid
-        && Number(proof.windowId) === guard.window.id
-        && Number(proof.x) === guard.window.x
-        && Number(proof.y) === guard.window.y
-        && Number(proof.width) === guard.window.width
-        && Number(proof.height) === guard.window.height
-      );
+      const matches = desktopNativeTargetProofMatchesGuard(guard, proof);
       callback(matches ? null : {
         error: 'Native target proof no longer matches the sealed app window.',
         errorCode: 'uncertain_ui_target',
@@ -10055,6 +12117,25 @@ function scoreMacAppCandidate(query, candidateName) {
   return 0;
 }
 
+function rankMacAppCandidate(query, candidate) {
+  const candidateName = String(candidate?.name || '');
+  const candidatePath = String(candidate?.appPath || '');
+  let score = scoreMacAppCandidate(query, candidateName);
+  const requestedVersionRank = macAppVersionRank(query);
+  // Some Adobe releases keep the year only in the containing directory
+  // (`Adobe Illustrator 2026/Adobe Illustrator.app`). Bind an explicitly
+  // requested year to that full path; for an unversioned request, retain the
+  // existing latest-version tie-break.
+  const versionRank = Math.max(
+    macAppVersionRank(candidateName),
+    macAppVersionRank(candidatePath),
+  );
+  if (score > 0 && requestedVersionRank > 0 && versionRank > 0) {
+    score += requestedVersionRank === versionRank ? 16 : -16;
+  }
+  return { score, versionRank };
+}
+
 function resolveInstalledMacApp(appName) {
   if (process.platform !== 'darwin') return null;
   const query = String(appName || '').trim();
@@ -10069,9 +12150,8 @@ function resolveInstalledMacApp(appName) {
   }
   let best = null;
   for (const candidate of candidates) {
-    const score = scoreMacAppCandidate(query, candidate.name);
+    const { score, versionRank } = rankMacAppCandidate(query, candidate);
     if (score < 70) continue;
-    const versionRank = macAppVersionRank(candidate.name);
     if (!best || score > best.score || (score === best.score && versionRank > best.versionRank)) {
       best = { ...candidate, score, versionRank };
     }
@@ -10374,8 +12454,14 @@ function validateDesktopUrlServer(raw) {
   let parsed;
   try { parsed = new URL(trimmed); } catch { return { ok: false, error: 'url does not parse' }; }
   const scheme = String(parsed.protocol || '').replace(/:$/, '').toLowerCase();
-  if (!['http', 'https', 'file', 'mailto'].includes(scheme)) {
-    return { ok: false, error: `url scheme "${scheme}:" not allowed — use http, https, file, or mailto` };
+  // `file:` is deliberately NOT allowed here. `open file:///…` launches apps
+  // and opens documents in their default handler — the same effect as
+  // desktop.open_path, which the runtime gates with fresh stat/path digests,
+  // exact approval, a §26 claim, and frontmost-app proof. Allowing it on the
+  // URL route was a way around every one of those. Local paths must go
+  // through open_path.
+  if (!['http', 'https', 'mailto'].includes(scheme)) {
+    return { ok: false, error: `url scheme "${scheme}:" not allowed — use http, https, or mailto (local paths go through open_path)` };
   }
   if (/[\x00-\x1f\u2028\u2029]/.test(trimmed)) return { ok: false, error: 'url contains control characters' };
   return { ok: true, url: trimmed, scheme };
@@ -10590,6 +12676,1331 @@ function uniqueAttachmentPath(filename, groupId) {
   return candidate;
 }
 
+const DESKTOP_ATTACHMENT_OPEN_SCOPE_KEYS = Object.freeze([
+  'userId',
+  'circleId',
+  'threadId',
+  'messageId',
+  'attachmentId',
+]);
+const DESKTOP_ATTACHMENT_OPEN_BODY_KEYS = new Set([
+  'scope',
+  'filename',
+  'mimeType',
+  'base64',
+  'sizeBytes',
+  'sha256',
+  'preferredAppName',
+  'ttlMs',
+]);
+const DESKTOP_ATTACHMENT_OPEN_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const DESKTOP_ATTACHMENT_OPEN_SHA256_RE = /^[0-9a-f]{64}$/;
+const DESKTOP_ATTACHMENT_OPEN_MIME_RE = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/;
+const DESKTOP_ATTACHMENT_OPEN_BEARER_RE = /^[0-9a-f]{64}$/;
+
+function desktopAttachmentOpenSafeEqual(left, right) {
+  const a = Buffer.from(String(left || ''), 'utf8');
+  const b = Buffer.from(String(right || ''), 'utf8');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function desktopAttachmentOpenSha256(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function desktopAttachmentOpenPrivateFingerprint(label, value) {
+  return crypto
+    .createHmac('sha256', DESKTOP_ATTACHMENT_OPEN_SECRET)
+    .update(`${label}:${String(value || '')}`, 'utf8')
+    .digest('hex');
+}
+
+const DESKTOP_ATTACHMENT_OPEN_DEFAULT_APP_BY_EXTENSION = Object.freeze({
+  pdf: 'Preview',
+  txt: 'Preview', md: 'Preview',
+  jpg: 'Preview', jpeg: 'Preview', png: 'Preview', gif: 'Preview', webp: 'Preview',
+  heic: 'Preview', heif: 'Preview', bmp: 'Preview', tif: 'Preview', tiff: 'Preview',
+  doc: 'Microsoft Word', docx: 'Microsoft Word', odt: 'Microsoft Word', rtf: 'Microsoft Word', pages: 'Pages',
+  xls: 'Microsoft Excel', xlsx: 'Microsoft Excel', ods: 'Microsoft Excel', csv: 'Microsoft Excel', numbers: 'Numbers',
+  ppt: 'Microsoft PowerPoint', pptx: 'Microsoft PowerPoint', odp: 'Microsoft PowerPoint', key: 'Keynote',
+  psd: 'Adobe Photoshop', psb: 'Adobe Photoshop',
+  ai: 'Adobe Illustrator', eps: 'Adobe Illustrator',
+  indd: 'Adobe InDesign', idml: 'Adobe InDesign', indt: 'Adobe InDesign',
+  fig: 'Figma', sketch: 'Sketch', xd: 'Adobe XD',
+  dwg: 'AutoCAD', dwt: 'AutoCAD', dws: 'AutoCAD', dxf: 'AutoCAD',
+  f3d: 'Fusion 360', f3z: 'Fusion 360',
+  fcstd: 'FreeCAD',
+  sldprt: 'SOLIDWORKS', sldasm: 'SOLIDWORKS', slddrw: 'SOLIDWORKS',
+  rvt: 'Revit', rfa: 'Revit', rte: 'Revit',
+  skp: 'SketchUp', '3dm': 'Rhinoceros',
+  ipt: 'Autodesk Inventor', iam: 'Autodesk Inventor', idw: 'Autodesk Inventor',
+  blend: 'Blender', ma: 'Autodesk Maya', mb: 'Autodesk Maya',
+  c4d: 'Cinema 4D', max: 'Autodesk 3ds Max',
+  stl: 'Fusion 360', step: 'Fusion 360', stp: 'Fusion 360',
+  iges: 'Fusion 360', igs: 'Fusion 360',
+  obj: 'Blender', fbx: 'Blender', glb: 'Blender', gltf: 'Blender',
+  usd: 'Blender', usdz: 'Preview',
+});
+
+function desktopAttachmentOpenRequestedAppName(filename, preferredAppName) {
+  if (preferredAppName) return preferredAppName;
+  const extension = path.extname(String(filename || '')).toLowerCase().replace(/^\./, '');
+  return DESKTOP_ATTACHMENT_OPEN_DEFAULT_APP_BY_EXTENSION[extension] || null;
+}
+
+function resolveDesktopAttachmentOpenInstalledApp(appName) {
+  if (process.env.UC_DESKTOP_ATTACHMENT_OPEN_TEST_MODE !== '1') {
+    return resolveInstalledMacApp(appName);
+  }
+  const allowed = String(process.env.UC_ATTACHMENT_OPEN_TEST_INSTALLED_APPS || '')
+    .split('|')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const exact = allowed.find((value) => value === appName);
+  if (!exact) return null;
+  const testAppRoot = String(process.env.UC_ATTACHMENT_OPEN_TEST_APP_ROOT || '').trim();
+  if (!testAppRoot || !path.isAbsolute(testAppRoot)) return null;
+  try {
+    const realTmp = fs.realpathSync(os.tmpdir());
+    const realRoot = fs.realpathSync(testAppRoot);
+    const relative = path.relative(realTmp, realRoot);
+    const rootStat = fs.lstatSync(realRoot);
+    if (
+      !relative
+      || relative.startsWith('..')
+      || path.isAbsolute(relative)
+      || !rootStat.isDirectory()
+      || rootStat.isSymbolicLink()
+    ) return null;
+    const appPath = path.join(realRoot, `${exact}.app`);
+    return { name: exact, appPath, score: 120, versionRank: 0 };
+  } catch {
+    return null;
+  }
+}
+
+function desktopAttachmentOpenSpawnIdentityCommand(command, args, timeout = 7000) {
+  const result = spawnSync(command, args, {
+    encoding: 'utf8',
+    timeout,
+    maxBuffer: 256 * 1024,
+  });
+  return {
+    ok: !result.error && result.status === 0,
+    stdout: String(result.stdout || '').slice(0, 128 * 1024),
+    stderr: String(result.stderr || '').slice(0, 128 * 1024),
+  };
+}
+
+function resolveDesktopAttachmentOpenDispatchBinary() {
+  if (process.env.UC_DESKTOP_ATTACHMENT_OPEN_TEST_MODE !== '1') return '/usr/bin/open';
+  const supplied = String(process.env.UC_ATTACHMENT_OPEN_TEST_OPEN_BINARY || '').trim();
+  if (!supplied || !path.isAbsolute(supplied) || /[\u0000-\u001f\u007f]/.test(supplied)) return null;
+  try {
+    const realTmp = fs.realpathSync(os.tmpdir());
+    const realBinary = fs.realpathSync(supplied);
+    const relative = path.relative(realTmp, realBinary);
+    const stat = fs.lstatSync(realBinary);
+    if (
+      !relative
+      || relative.startsWith('..')
+      || path.isAbsolute(relative)
+      || realBinary !== supplied
+      || !stat.isFile()
+      || stat.isSymbolicLink()
+      || stat.nlink !== 1
+      || (stat.mode & 0o111) === 0
+      || (DESKTOP_ATTACHMENT_OPEN_OWNER_UID !== null && stat.uid !== DESKTOP_ATTACHMENT_OPEN_OWNER_UID)
+    ) return null;
+    return realBinary;
+  } catch {
+    return null;
+  }
+}
+
+function desktopAttachmentOpenReadPinnedFile(filePath) {
+  let descriptor = null;
+  try {
+    const realPath = fs.realpathSync(filePath);
+    if (realPath !== filePath) throw new Error('Pinned bundle file path changed.');
+    const pathStat = fs.lstatSync(realPath, { bigint: true });
+    if (!pathStat.isFile() || pathStat.isSymbolicLink() || pathStat.nlink !== 1n) {
+      throw new Error('Pinned bundle file is unsafe.');
+    }
+    descriptor = fs.openSync(realPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    const openedBefore = fs.fstatSync(descriptor, { bigint: true });
+    if (
+      openedBefore.dev !== pathStat.dev
+      || openedBefore.ino !== pathStat.ino
+      || !openedBefore.isFile()
+      || openedBefore.nlink !== 1n
+    ) throw new Error('Pinned bundle file identity changed while opening.');
+    const bytes = fs.readFileSync(descriptor);
+    const openedAfter = fs.fstatSync(descriptor, { bigint: true });
+    const pathAfter = fs.lstatSync(realPath, { bigint: true });
+    if (
+      openedAfter.dev !== pathStat.dev
+      || openedAfter.ino !== pathStat.ino
+      || pathAfter.dev !== pathStat.dev
+      || pathAfter.ino !== pathStat.ino
+      || openedAfter.size !== pathStat.size
+      || pathAfter.size !== pathStat.size
+    ) throw new Error('Pinned bundle file identity changed while reading.');
+    return Object.freeze({
+      realPath,
+      stat: desktopAttachmentOpenPinnedStat(pathStat),
+      sha256: desktopAttachmentOpenSha256(bytes),
+    });
+  } finally {
+    if (descriptor !== null) {
+      try { fs.closeSync(descriptor); } catch {}
+    }
+  }
+}
+
+function desktopAttachmentOpenCodeIdentity(bundleRealPath, bundleIdentifier) {
+  const verified = desktopAttachmentOpenSpawnIdentityCommand(
+    '/usr/bin/codesign',
+    ['--verify', '--strict', '--', bundleRealPath],
+  );
+  if (!verified.ok) return null;
+  const details = desktopAttachmentOpenSpawnIdentityCommand(
+    '/usr/bin/codesign',
+    ['-d', '--verbose=4', '--', bundleRealPath],
+  );
+  const requirement = desktopAttachmentOpenSpawnIdentityCommand(
+    '/usr/bin/codesign',
+    ['-d', '-r-', '--', bundleRealPath],
+  );
+  if (!details.ok || !requirement.ok) return null;
+  const detailText = `${details.stdout}\n${details.stderr}`;
+  const signingIdentifier = detailText.match(/^Identifier=([^\r\n]{1,512})$/m)?.[1]?.trim() || '';
+  const cdHash = detailText.match(/^CDHash=([0-9a-f]{40,64})$/mi)?.[1]?.toLowerCase() || '';
+  const designatedRequirement = `${requirement.stdout}\n${requirement.stderr}`
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.startsWith('designated => ')) || '';
+  if (
+    signingIdentifier !== bundleIdentifier
+    || !/^[0-9a-f]{40,64}$/.test(cdHash)
+    || !designatedRequirement
+    || designatedRequirement.length > 4096
+    || /[\u0000-\u001f\u007f]/.test(designatedRequirement)
+  ) return null;
+  return Object.freeze({ signingIdentifier, cdHash, designatedRequirement });
+}
+
+function desktopAttachmentOpenProductionBundleLocationSafe(bundleRealPath) {
+  if (DESKTOP_BRIDGE_TEST_MODE) return true;
+  const allowedRoots = ['/System/Applications', '/Applications'];
+  const root = allowedRoots.find((candidate) => {
+    const relative = path.relative(candidate, bundleRealPath);
+    return relative && !relative.startsWith('..') && !path.isAbsolute(relative);
+  });
+  if (!root) return false;
+  try {
+    const relativeParts = path.relative(root, bundleRealPath).split(path.sep).filter(Boolean);
+    let current = root;
+    for (const part of ['', ...relativeParts]) {
+      if (part) current = path.join(current, part);
+      const stat = fs.lstatSync(current);
+      if (
+        stat.isSymbolicLink()
+        || !stat.isDirectory()
+        || fs.realpathSync(current) !== current
+        || stat.uid !== 0
+        || (stat.mode & 0o022) !== 0
+      ) return false;
+    }
+    return current === bundleRealPath;
+  } catch {
+    return false;
+  }
+}
+
+function desktopAttachmentOpenTestBundleClosure(bundleRealPath) {
+  if (process.env.UC_DESKTOP_ATTACHMENT_OPEN_TEST_MODE !== '1') return null;
+  const realTmp = fs.realpathSync(os.tmpdir());
+  const relativeRoot = path.relative(realTmp, bundleRealPath);
+  if (!relativeRoot || relativeRoot.startsWith('..') || path.isAbsolute(relativeRoot)) return null;
+
+  const aggregate = crypto.createHash('sha256');
+  let entryCount = 0;
+  let totalBytes = 0;
+  const visit = (absolutePath, relativePath) => {
+    entryCount += 1;
+    if (entryCount > 4096) throw new Error('Test application bundle closure is too large.');
+    const stat = fs.lstatSync(absolutePath, { bigint: true });
+    if (stat.isSymbolicLink() || fs.realpathSync(absolutePath) !== absolutePath) {
+      throw new Error('Test application bundle closure contains a link.');
+    }
+    const mode = Number(stat.mode & 0o777n);
+    if (stat.isDirectory()) {
+      aggregate.update(`directory\0${relativePath}\0${mode}\0`);
+      for (const name of fs.readdirSync(absolutePath).sort()) {
+        visit(path.join(absolutePath, name), relativePath ? `${relativePath}/${name}` : name);
+      }
+      return;
+    }
+    if (!stat.isFile() || stat.nlink !== 1n) {
+      throw new Error('Test application bundle closure contains an unsupported entry.');
+    }
+    totalBytes += Number(stat.size);
+    if (!Number.isSafeInteger(totalBytes) || totalBytes > 256 * 1024 * 1024) {
+      throw new Error('Test application bundle closure exceeds its byte bound.');
+    }
+    const bytes = fs.readFileSync(absolutePath);
+    aggregate.update(`file\0${relativePath}\0${mode}\0${bytes.length}\0`);
+    aggregate.update(desktopAttachmentOpenSha256(bytes));
+    aggregate.update('\0');
+  };
+  visit(bundleRealPath, '');
+  return Object.freeze({
+    kind: 'test_bundle_closure_v1',
+    sha256: aggregate.digest('hex'),
+    entryCount,
+    totalBytes,
+  });
+}
+
+function captureDesktopAttachmentOpenAppIdentity(resolvedApp) {
+  const suppliedPath = String(resolvedApp?.appPath || '');
+  const bundleRealPath = fs.realpathSync(suppliedPath);
+  const relativeExtension = path.extname(bundleRealPath).toLowerCase();
+  const bundleStat = fs.lstatSync(bundleRealPath, { bigint: true });
+  if (
+    relativeExtension !== '.app'
+    || !bundleStat.isDirectory()
+    || bundleStat.isSymbolicLink()
+  ) throw new Error('Resolved application bundle identity is unavailable.');
+  // Production cannot bind a running PID's already-loaded CDHash using a
+  // reliable built-in API. Close that swap-and-restore boundary by accepting
+  // only sealed system-location paths whose bundle and every parent are
+  // root-owned and non-group/world-writable, then revalidate the exact signed
+  // bundle both at dispatch and observation. Test-mode fake apps stay isolated
+  // under the temporary test root and use the explicit closure identity.
+  if (!desktopAttachmentOpenProductionBundleLocationSafe(bundleRealPath)) {
+    throw new Error('Resolved production application location is not immutable enough for opaque dispatch.');
+  }
+  const infoPlistPath = path.join(bundleRealPath, 'Contents', 'Info.plist');
+  const infoPlist = desktopAttachmentOpenReadPinnedFile(infoPlistPath);
+  if (
+    infoPlist.realPath !== infoPlistPath
+    || path.relative(bundleRealPath, infoPlist.realPath).startsWith('..')
+  ) throw new Error('Resolved application Info.plist is outside its bundle.');
+  const identifierResult = desktopAttachmentOpenSpawnIdentityCommand(
+    '/usr/bin/plutil',
+    ['-extract', 'CFBundleIdentifier', 'raw', '--', infoPlist.realPath],
+    3000,
+  );
+  const bundleIdentifier = identifierResult.stdout.trim();
+  if (
+    !identifierResult.ok
+    || !/^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$/.test(bundleIdentifier)
+  ) throw new Error('Resolved application bundle identifier is unavailable.');
+  const signedCodeIdentity = desktopAttachmentOpenCodeIdentity(bundleRealPath, bundleIdentifier);
+  const codeIdentity = signedCodeIdentity || desktopAttachmentOpenTestBundleClosure(bundleRealPath);
+  if (!codeIdentity) {
+    throw new Error('Resolved application has no verifiable production code identity.');
+  }
+  return Object.freeze({
+    schemaVersion: 1,
+    bundleRealPath,
+    bundleStat: desktopAttachmentOpenPinnedStat(bundleStat),
+    infoPlist,
+    bundleIdentifier,
+    codeIdentity,
+  });
+}
+
+function desktopAttachmentOpenAppIdentityCanonical(identity) {
+  return JSON.stringify(identity);
+}
+
+function validateDesktopAttachmentOpenAppIdentity(record) {
+  try {
+    const current = captureDesktopAttachmentOpenAppIdentity({ appPath: record.resolvedAppPath });
+    return desktopAttachmentOpenSafeEqual(
+      desktopAttachmentOpenAppIdentityCanonical(current),
+      desktopAttachmentOpenAppIdentityCanonical(record.appIdentity),
+    )
+      ? { ok: true }
+      : { ok: false, code: 'attachment_open_app_unavailable' };
+  } catch {
+    return { ok: false, code: 'attachment_open_app_unavailable' };
+  }
+}
+
+function desktopAttachmentOpenCapabilityKey(req) {
+  const bearer = String(req?.headers?.['x-uc-attachment-open-capability'] || '').trim();
+  if (!DESKTOP_ATTACHMENT_OPEN_BEARER_RE.test(bearer)) return null;
+  return crypto
+    .createHmac('sha256', DESKTOP_ATTACHMENT_OPEN_SECRET)
+    .update(bearer, 'utf8')
+    .digest('hex');
+}
+
+function parseDesktopAttachmentOpenScope(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, error: 'A strict attachment scope is required.' };
+  }
+  const keys = Object.keys(raw).sort();
+  const expected = [...DESKTOP_ATTACHMENT_OPEN_SCOPE_KEYS].sort();
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+    return { ok: false, error: 'Attachment scope fields are invalid.' };
+  }
+  const scope = {};
+  for (const key of DESKTOP_ATTACHMENT_OPEN_SCOPE_KEYS) {
+    const value = typeof raw[key] === 'string' ? raw[key].trim().toLowerCase() : '';
+    if (!DESKTOP_ATTACHMENT_OPEN_UUID_RE.test(value)) {
+      return { ok: false, error: 'Attachment scope identities must be persisted UUIDs.' };
+    }
+    scope[key] = value;
+  }
+  const canonical = DESKTOP_ATTACHMENT_OPEN_SCOPE_KEYS.map((key) => `${key}:${scope[key]}`).join('\n');
+  return {
+    ok: true,
+    scope,
+    canonical,
+    fingerprint: desktopAttachmentOpenSha256(canonical),
+  };
+}
+
+function parseDesktopAttachmentOpenScopeBody(raw) {
+  if (
+    !raw
+    || typeof raw !== 'object'
+    || Array.isArray(raw)
+    || Object.keys(raw).length !== 1
+    || !Object.prototype.hasOwnProperty.call(raw, 'scope')
+  ) {
+    return { ok: false, error: 'Only the exact attachment scope is accepted.' };
+  }
+  return parseDesktopAttachmentOpenScope(raw.scope);
+}
+
+function decodeCanonicalDesktopAttachmentBase64(raw) {
+  if (typeof raw !== 'string' || raw.length === 0 || raw.length % 4 !== 0) {
+    return { ok: false, error: 'Attachment bytes must use canonical base64.' };
+  }
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(raw)) {
+    return { ok: false, error: 'Attachment bytes must use canonical base64.' };
+  }
+  const estimatedBytes = Math.floor(raw.length * 3 / 4) - (raw.endsWith('==') ? 2 : raw.endsWith('=') ? 1 : 0);
+  if (estimatedBytes < 1 || estimatedBytes > DESKTOP_ATTACHMENT_OPEN_MAX_BYTES) {
+    return { ok: false, error: 'Attachment bytes exceed the open-capability limit.' };
+  }
+  const buffer = Buffer.from(raw, 'base64');
+  if (buffer.length !== estimatedBytes || buffer.toString('base64') !== raw) {
+    return { ok: false, error: 'Attachment bytes must use canonical base64.' };
+  }
+  return { ok: true, buffer };
+}
+
+function ensureDesktopAttachmentOpenDirectory(directoryPath) {
+  fs.mkdirSync(directoryPath, { recursive: true, mode: 0o700 });
+  const stat = fs.lstatSync(directoryPath);
+  if (
+    !stat.isDirectory()
+    || stat.isSymbolicLink()
+    || (DESKTOP_ATTACHMENT_OPEN_OWNER_UID !== null && stat.uid !== DESKTOP_ATTACHMENT_OPEN_OWNER_UID)
+  ) {
+    throw new Error('Attachment capability root is not a private directory.');
+  }
+  fs.chmodSync(directoryPath, 0o700);
+  const after = fs.lstatSync(directoryPath);
+  if (
+    !after.isDirectory()
+    || after.isSymbolicLink()
+    || (after.mode & 0o777) !== 0o700
+    || (DESKTOP_ATTACHMENT_OPEN_OWNER_UID !== null && after.uid !== DESKTOP_ATTACHMENT_OPEN_OWNER_UID)
+  ) {
+    throw new Error('Attachment capability root permissions are unsafe.');
+  }
+  const real = fs.realpathSync(directoryPath);
+  const parentReal = fs.realpathSync(path.dirname(directoryPath));
+  if (real !== path.join(parentReal, path.basename(directoryPath))) {
+    throw new Error('Attachment capability root path is unsafe.');
+  }
+  return real;
+}
+
+function desktopAttachmentOpenInstanceMarker(instanceId) {
+  return JSON.stringify({
+    schemaVersion: 1,
+    kind: 'uc_desktop_attachment_open_instance',
+    instanceId,
+    ownerUid: DESKTOP_ATTACHMENT_OPEN_OWNER_UID,
+    pid: process.pid,
+  });
+}
+
+function parseDesktopAttachmentOpenInstanceMarker(raw, expectedInstanceId) {
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const keys = Object.keys(parsed).sort();
+    const expectedKeys = ['instanceId', 'kind', 'ownerUid', 'pid', 'schemaVersion'];
+    if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) return null;
+    if (
+      parsed.schemaVersion !== 1
+      || parsed.kind !== 'uc_desktop_attachment_open_instance'
+      || parsed.instanceId !== expectedInstanceId
+      || parsed.ownerUid !== DESKTOP_ATTACHMENT_OPEN_OWNER_UID
+      || !Number.isSafeInteger(parsed.pid)
+      || parsed.pid < 1
+    ) return null;
+    const canonical = JSON.stringify({
+      schemaVersion: 1,
+      kind: 'uc_desktop_attachment_open_instance',
+      instanceId: expectedInstanceId,
+      ownerUid: DESKTOP_ATTACHMENT_OPEN_OWNER_UID,
+      pid: parsed.pid,
+    });
+    return desktopAttachmentOpenSafeEqual(raw, canonical)
+      ? { pid: parsed.pid }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function desktopAttachmentOpenProcessIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM still proves that a process owns the PID. Only ESRCH is safe to
+    // treat as a crashed bridge; every other state fails closed as live.
+    return error?.code !== 'ESRCH';
+  }
+}
+
+function readDesktopAttachmentOpenInstanceMarkerFile(markerPath, expectedParentReal) {
+  let descriptor = null;
+  try {
+    const markerStat = fs.lstatSync(markerPath);
+    if (
+      !markerStat.isFile()
+      || markerStat.isSymbolicLink()
+      || markerStat.nlink !== 1
+      || (markerStat.mode & 0o777) !== 0o600
+      || markerStat.size < 1
+      || markerStat.size > 512
+      || (DESKTOP_ATTACHMENT_OPEN_OWNER_UID !== null && markerStat.uid !== DESKTOP_ATTACHMENT_OPEN_OWNER_UID)
+      || fs.realpathSync(markerPath) !== path.join(expectedParentReal, DESKTOP_ATTACHMENT_OPEN_INSTANCE_MARKER)
+    ) return null;
+    descriptor = fs.openSync(markerPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    const openedStat = fs.fstatSync(descriptor);
+    if (
+      openedStat.dev !== markerStat.dev
+      || openedStat.ino !== markerStat.ino
+      || !openedStat.isFile()
+      || openedStat.nlink !== 1
+      || openedStat.mode !== markerStat.mode
+      || openedStat.uid !== markerStat.uid
+      || openedStat.size !== markerStat.size
+    ) return null;
+    const raw = fs.readFileSync(descriptor, 'utf8');
+    if (Buffer.byteLength(raw) !== markerStat.size) return null;
+    return { raw, stat: markerStat };
+  } catch {
+    return null;
+  } finally {
+    if (descriptor !== null) {
+      try { fs.closeSync(descriptor); } catch {}
+    }
+  }
+}
+
+function ensureDesktopAttachmentOpenInstanceMarker(processRoot) {
+  const markerPath = path.join(processRoot, DESKTOP_ATTACHMENT_OPEN_INSTANCE_MARKER);
+  const expected = desktopAttachmentOpenInstanceMarker(DESKTOP_BRIDGE_INSTANCE_ID);
+  try {
+    const descriptor = fs.openSync(
+      markerPath,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0),
+      0o600,
+    );
+    try {
+      fs.writeFileSync(descriptor, expected, 'utf8');
+      fs.fsyncSync(descriptor);
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  } catch (error) {
+    if (error?.code !== 'EEXIST') throw error;
+  }
+  const marker = readDesktopAttachmentOpenInstanceMarkerFile(markerPath, processRoot);
+  if (!marker || !desktopAttachmentOpenSafeEqual(marker.raw, expected)) {
+    throw new Error('Attachment capability instance marker is unsafe.');
+  }
+}
+
+function ensureDesktopAttachmentOpenRoot() {
+  ensureDesktopAttachmentOpenDirectory(DESKTOP_ATTACHMENT_OPEN_ROOT);
+  const processRoot = ensureDesktopAttachmentOpenDirectory(DESKTOP_ATTACHMENT_OPEN_PROCESS_ROOT);
+  ensureDesktopAttachmentOpenInstanceMarker(processRoot);
+  return processRoot;
+}
+
+function inspectStaleDesktopAttachmentOpenInstance(rootReal, entryName) {
+  const instanceMatch = DESKTOP_ATTACHMENT_OPEN_INSTANCE_NAME_RE.exec(entryName);
+  if (!instanceMatch || instanceMatch[1] === DESKTOP_BRIDGE_INSTANCE_ID) return null;
+  const instancePath = path.join(rootReal, entryName);
+  if (path.dirname(instancePath) !== rootReal) return null;
+  const instanceStat = fs.lstatSync(instancePath);
+  if (
+    !instanceStat.isDirectory()
+    || instanceStat.isSymbolicLink()
+    || (instanceStat.mode & 0o777) !== 0o700
+    || (DESKTOP_ATTACHMENT_OPEN_OWNER_UID !== null && instanceStat.uid !== DESKTOP_ATTACHMENT_OPEN_OWNER_UID)
+    || fs.realpathSync(instancePath) !== path.join(rootReal, entryName)
+  ) return null;
+
+  const markerPath = path.join(instancePath, DESKTOP_ATTACHMENT_OPEN_INSTANCE_MARKER);
+  const markerFile = readDesktopAttachmentOpenInstanceMarkerFile(markerPath, instancePath);
+  if (!markerFile) return null;
+  const marker = parseDesktopAttachmentOpenInstanceMarker(markerFile.raw, instanceMatch[1]);
+  if (!marker) return null;
+  if (desktopAttachmentOpenProcessIsAlive(marker.pid)) return null;
+
+  const capabilityDirectories = [];
+  for (const childName of fs.readdirSync(instancePath)) {
+    if (childName === DESKTOP_ATTACHMENT_OPEN_INSTANCE_MARKER) continue;
+    if (!DESKTOP_ATTACHMENT_OPEN_CAPABILITY_DIRECTORY_RE.test(childName)) return null;
+    const directoryPath = path.join(instancePath, childName);
+    if (path.dirname(directoryPath) !== instancePath) return null;
+    const directoryStat = fs.lstatSync(directoryPath);
+    if (
+      !directoryStat.isDirectory()
+      || directoryStat.isSymbolicLink()
+      || (directoryStat.mode & 0o777) !== 0o700
+      || (DESKTOP_ATTACHMENT_OPEN_OWNER_UID !== null && directoryStat.uid !== DESKTOP_ATTACHMENT_OPEN_OWNER_UID)
+      || fs.realpathSync(directoryPath) !== path.join(instancePath, childName)
+    ) return null;
+    const childEntries = fs.readdirSync(directoryPath);
+    if (childEntries.length !== 1 || !DESKTOP_ATTACHMENT_OPEN_STAGED_FILE_RE.test(childEntries[0])) return null;
+    const filePath = path.join(directoryPath, childEntries[0]);
+    if (path.dirname(filePath) !== directoryPath) return null;
+    const fileStat = fs.lstatSync(filePath);
+    if (
+      !fileStat.isFile()
+      || fileStat.isSymbolicLink()
+      || fileStat.nlink !== 1
+      || (fileStat.mode & 0o777) !== 0o600
+      || (DESKTOP_ATTACHMENT_OPEN_OWNER_UID !== null && fileStat.uid !== DESKTOP_ATTACHMENT_OPEN_OWNER_UID)
+      || fs.realpathSync(filePath) !== path.join(directoryPath, childEntries[0])
+    ) return null;
+    capabilityDirectories.push({ directoryPath, directoryStat, filePath, fileStat });
+  }
+  return { instancePath, instanceStat, markerPath, markerStat: markerFile.stat, capabilityDirectories };
+}
+
+function sameDesktopAttachmentOpenFileIdentity(filePath, expectedStat, kind) {
+  try {
+    const current = fs.lstatSync(filePath);
+    return current.dev === expectedStat.dev
+      && current.ino === expectedStat.ino
+      && current.uid === expectedStat.uid
+      && current.mode === expectedStat.mode
+      && current.nlink === expectedStat.nlink
+      && (kind === 'file'
+        ? current.isFile() && !current.isSymbolicLink()
+        : current.isDirectory() && !current.isSymbolicLink());
+  } catch {
+    return false;
+  }
+}
+
+function deleteInspectedStaleDesktopAttachmentOpenInstance(inspected) {
+  // Recheck inode/device/type before every unlink/rmdir. A suspicious race is
+  // left untouched rather than traversed or recursively removed.
+  for (const item of inspected.capabilityDirectories) {
+    if (
+      !sameDesktopAttachmentOpenFileIdentity(item.filePath, item.fileStat, 'file')
+      || !sameDesktopAttachmentOpenFileIdentity(item.directoryPath, item.directoryStat, 'directory')
+    ) return false;
+  }
+  if (
+    !sameDesktopAttachmentOpenFileIdentity(inspected.markerPath, inspected.markerStat, 'file')
+    || !sameDesktopAttachmentOpenFileIdentity(inspected.instancePath, inspected.instanceStat, 'directory')
+  ) return false;
+  try {
+    for (const item of inspected.capabilityDirectories) {
+      fs.unlinkSync(item.filePath);
+      fs.rmdirSync(item.directoryPath);
+    }
+    fs.unlinkSync(inspected.markerPath);
+    fs.rmdirSync(inspected.instancePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function scavengeStaleDesktopAttachmentOpenInstances() {
+  let rootReal;
+  try {
+    rootReal = ensureDesktopAttachmentOpenDirectory(DESKTOP_ATTACHMENT_OPEN_ROOT);
+  } catch {
+    return;
+  }
+  let entries;
+  try { entries = fs.readdirSync(rootReal); } catch { return; }
+  for (const entryName of entries) {
+    try {
+      const inspected = inspectStaleDesktopAttachmentOpenInstance(rootReal, entryName);
+      if (inspected) deleteInspectedStaleDesktopAttachmentOpenInstance(inspected);
+    } catch {
+      // A malformed, foreign-owned, or concurrently changed entry is never
+      // followed and never removed by the crash-recovery scavenger.
+    }
+  }
+}
+
+function deleteDesktopAttachmentOpenFiles(record) {
+  if (!record) return;
+  let safeDirectory = false;
+  try {
+    const directoryStat = fs.lstatSync(record.directoryPath);
+    // Never traverse a substituted parent symlink while cleaning up. Removing
+    // the link itself is safe; touching `record.filePath` through it is not.
+    if (directoryStat.isSymbolicLink()) {
+      fs.unlinkSync(record.directoryPath);
+      return;
+    }
+    if (
+      !directoryStat.isDirectory()
+      || (directoryStat.mode & 0o777) !== 0o700
+      || (DESKTOP_ATTACHMENT_OPEN_OWNER_UID !== null && directoryStat.uid !== DESKTOP_ATTACHMENT_OPEN_OWNER_UID)
+    ) return;
+    safeDirectory = true;
+  } catch { return; }
+  if (!safeDirectory) return;
+  try {
+    const fileStat = fs.lstatSync(record.filePath);
+    if (
+      fileStat.isFile()
+      && !fileStat.isSymbolicLink()
+      && fileStat.nlink === 1
+      && (fileStat.mode & 0o777) === 0o600
+      && (DESKTOP_ATTACHMENT_OPEN_OWNER_UID === null || fileStat.uid === DESKTOP_ATTACHMENT_OPEN_OWNER_UID)
+    ) fs.unlinkSync(record.filePath);
+    else if (fileStat.isSymbolicLink()) fs.unlinkSync(record.filePath);
+  } catch {}
+  try { fs.rmdirSync(record.directoryPath); } catch {}
+}
+
+function cleanupExpiredDesktopAttachmentOpenCapabilities(now = Date.now(), skipKey = null) {
+  for (const [key, record] of desktopAttachmentOpenCapabilities.entries()) {
+    if (key === skipKey || !record || record.expiresAtMs > now) continue;
+    desktopAttachmentOpenCapabilities.delete(key);
+    deleteDesktopAttachmentOpenFiles(record);
+  }
+}
+
+function startDesktopAttachmentOpenCleanupTimer() {
+  if (desktopAttachmentOpenCleanupTimer) return;
+  desktopAttachmentOpenCleanupTimer = setInterval(
+    () => {
+      cleanupExpiredDesktopAttachmentOpenCapabilities();
+      // A just-crashed process may briefly remain as a zombie (or its PID may
+      // be reused), so retry the same guarded stale-instance scan periodically.
+      scavengeStaleDesktopAttachmentOpenInstances();
+    },
+    DESKTOP_ATTACHMENT_OPEN_CLEANUP_INTERVAL_MS,
+  );
+  desktopAttachmentOpenCleanupTimer.unref?.();
+}
+
+function cleanupAllDesktopAttachmentOpenCapabilities() {
+  if (desktopAttachmentOpenCleanupTimer) {
+    clearInterval(desktopAttachmentOpenCleanupTimer);
+    desktopAttachmentOpenCleanupTimer = null;
+  }
+  for (const [key, record] of desktopAttachmentOpenCapabilities.entries()) {
+    desktopAttachmentOpenCapabilities.delete(key);
+    deleteDesktopAttachmentOpenFiles(record);
+  }
+  try { fs.unlinkSync(path.join(DESKTOP_ATTACHMENT_OPEN_PROCESS_ROOT, DESKTOP_ATTACHMENT_OPEN_INSTANCE_MARKER)); } catch {}
+  try { fs.rmdirSync(DESKTOP_ATTACHMENT_OPEN_PROCESS_ROOT); } catch {}
+}
+
+function desktopAttachmentOpenSafeProjection(record) {
+  return {
+    kind: 'desktop_attachment_open',
+    attachmentFingerprint: record.attachmentFingerprint,
+    scopeFingerprint: record.scopeFingerprint,
+    requestedAppFingerprint: record.requestedAppFingerprint,
+    resolvedAppFingerprint: record.resolvedAppFingerprint,
+    documentFingerprint: record.documentFingerprint,
+    sha256: record.sha256,
+    sizeBytes: record.sizeBytes,
+    bridgeInstanceId: DESKTOP_BRIDGE_INSTANCE_ID,
+    expiresAt: new Date(record.expiresAtMs).toISOString(),
+  };
+}
+
+function buildDesktopAttachmentOpenObservation(record, state) {
+  const observedAtMs = Math.max(
+    Date.now(),
+    Number.isFinite(record?.dispatchedAtMs) ? record.dispatchedAtMs + 1 : 0,
+  );
+  const observedAt = new Date(observedAtMs).toISOString();
+  const pid = Number.isSafeInteger(state.pid) && state.pid > 0 ? state.pid : 0;
+  const windowId = Number.isSafeInteger(state.windowId) && state.windowId > 0
+    ? state.windowId
+    : 0;
+  const appRunning = state.appRunning === true && pid > 0;
+  const frontmost = appRunning && state.frontmost === true && windowId > 0;
+  const documentOpen = frontmost
+    && state.exactDocumentIdentityVerified === true;
+  const appProcessFingerprint = desktopAttachmentOpenPrivateFingerprint(
+    'app-process',
+    `${record.resolvedAppFingerprint}\n${appRunning ? pid : 'not-running'}`,
+  );
+  const windowFingerprint = desktopAttachmentOpenPrivateFingerprint(
+    'window',
+    `${appProcessFingerprint}\n${frontmost ? windowId : 'no-exact-window'}`,
+  );
+  const observationFingerprint = desktopAttachmentOpenPrivateFingerprint(
+    'observation',
+    `${record.documentFingerprint}\n${observedAt}\n${crypto.randomBytes(16).toString('hex')}\n${appRunning}\n${frontmost}\n${documentOpen}\n${appProcessFingerprint}\n${windowFingerprint}`,
+  );
+  return {
+    observedAt,
+    appRunning,
+    frontmost,
+    documentOpen,
+    appProcessFingerprint,
+    windowFingerprint,
+    observationFingerprint,
+  };
+}
+
+function normalizeDesktopAttachmentOpenNativeDocumentPath(rawValue) {
+  const value = String(rawValue || '').trim();
+  if (!value || value.length > 8192 || /[\u0000-\u001f\u007f]/.test(value)) return null;
+  let candidate = value;
+  try {
+    if (/^file:/i.test(value)) {
+      const fileUrl = new URL(value);
+      if (
+        fileUrl.protocol !== 'file:'
+        || fileUrl.username
+        || fileUrl.password
+        || fileUrl.search
+        || fileUrl.hash
+        || (fileUrl.hostname && fileUrl.hostname !== 'localhost')
+      ) return null;
+      candidate = fileURLToPath(fileUrl);
+    }
+    if (!path.isAbsolute(candidate)) return null;
+    return fs.realpathSync(candidate);
+  } catch {
+    return null;
+  }
+}
+
+function desktopAttachmentOpenFocusedDocumentPath(record, pid, callback) {
+  if (!(Number.isSafeInteger(pid) && pid > 0)) {
+    callback(null);
+    return;
+  }
+  const script = `
+tell application "System Events"
+  try
+    set targetProc to first application process whose unix id is ${pid}
+    if frontmost of targetProc is false then return ""
+    tell targetProc
+      set focusedWindow to value of attribute "AXFocusedWindow"
+      set documentValue to value of attribute "AXDocument" of focusedWindow
+      if documentValue is missing value then return ""
+      return documentValue as text
+    end tell
+  on error
+    return ""
+  end try
+end tell
+`;
+  execFile('/usr/bin/osascript', ['-e', script], { timeout: 3000, maxBuffer: 32 * 1024 }, (error, stdout) => {
+    if (error) {
+      callback(null);
+      return;
+    }
+    const documentPath = normalizeDesktopAttachmentOpenNativeDocumentPath(stdout);
+    callback(
+      documentPath
+      && documentPath === record.stagedIdentity?.fileRealPath
+        ? documentPath
+        : null,
+    );
+  });
+}
+
+function desktopAttachmentOpenProcessHasPinnedFile(record, pid, callback) {
+  const identity = record?.stagedIdentity?.file;
+  if (
+    process.platform !== 'darwin'
+    || !(Number.isSafeInteger(pid) && pid > 0)
+    || !identity
+  ) {
+    callback(false);
+    return;
+  }
+  execFile(
+    '/usr/sbin/lsof',
+    ['-nP', '-a', '-p', String(pid), '-F0pDfi', '--', record.filePath],
+    { timeout: 3000, maxBuffer: 64 * 1024 },
+    (error, stdout) => {
+      if (error) {
+        callback(false);
+        return;
+      }
+      const fields = String(stdout || '')
+        .split(/[\0\r\n]+/)
+        .map((field) => field.trim())
+        .filter(Boolean);
+      const pidMatched = fields.includes(`p${pid}`);
+      const inodeMatched = fields.includes(`i${identity.ino}`);
+      const deviceMatched = fields.some((field) => {
+        if (!/^D(?:0x[0-9a-f]+|[0-9]+)$/i.test(field)) return false;
+        try { return BigInt(field.slice(1)).toString() === identity.dev; } catch { return false; }
+      });
+      const descriptorPresent = fields.some((field) => /^f.+/.test(field));
+      callback(pidMatched && deviceMatched && inodeMatched && descriptorPresent);
+    },
+  );
+}
+
+function desktopAttachmentOpenProcessMatchesPinnedApp(record, pid, callback) {
+  if (process.platform !== 'darwin' || !(Number.isSafeInteger(pid) && pid > 0)) {
+    callback(false);
+    return;
+  }
+  const script = `
+ObjC.import("AppKit")
+function run(argv) {
+  const pid = Number(argv[0])
+  const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(pid)
+  if (!app) return ""
+  const bundleURL = app.bundleURL
+  const bundleIdentifier = app.bundleIdentifier
+  if (!bundleURL || !bundleIdentifier) return ""
+  return JSON.stringify({
+    path: ObjC.unwrap(bundleURL.path),
+    bundleIdentifier: ObjC.unwrap(bundleIdentifier),
+  })
+}
+`;
+  execFile(
+    '/usr/bin/osascript',
+    ['-l', 'JavaScript', '-e', script, String(pid)],
+    { timeout: 3000, maxBuffer: 32 * 1024 },
+    (error, stdout) => {
+      if (error) {
+        callback(false);
+        return;
+      }
+      try {
+        const parsed = JSON.parse(String(stdout || ''));
+        const processBundlePath = fs.realpathSync(String(parsed?.path || ''));
+        callback(
+          processBundlePath === record.appIdentity?.bundleRealPath
+          && parsed?.bundleIdentifier === record.appIdentity?.bundleIdentifier
+          && validateDesktopAttachmentOpenAppIdentity(record).ok,
+        );
+      } catch {
+        callback(false);
+      }
+    },
+  );
+}
+
+function observeDesktopAttachmentOpenRecord(record, callback) {
+  const currentResolution = resolveDesktopAttachmentOpenInstalledApp(record.requestedAppName);
+  let currentResolutionRealPath = '';
+  try {
+    currentResolutionRealPath = currentResolution
+      ? fs.realpathSync(currentResolution.appPath)
+      : '';
+  } catch {}
+  if (
+    !currentResolution
+    || currentResolution.name !== record.resolvedAppName
+    || currentResolutionRealPath !== record.resolvedAppPath
+    || !validateDesktopAttachmentOpenAppIdentity(record).ok
+  ) {
+    callback({ ok: false, code: 'attachment_open_app_unavailable' });
+    return;
+  }
+  if (process.env.UC_DESKTOP_ATTACHMENT_OPEN_TEST_MODE === '1') {
+    const dispatched = record.status === 'dispatched';
+    const observedApp = String(
+      process.env.UC_ATTACHMENT_OPEN_TEST_OBSERVED_APP || record.resolvedAppName,
+    );
+    const exactApp = observedApp === record.resolvedAppName;
+    const documentState = String(process.env.UC_ATTACHMENT_OPEN_TEST_DOCUMENT_STATE || 'loaded');
+    const observedDocumentPath = documentState === 'loaded'
+      ? record.stagedIdentity?.fileRealPath
+      : documentState === 'same_basename_other'
+        ? path.join(`${record.directoryPath}-other`, path.basename(record.filePath))
+        : null;
+    const exactDocumentIdentity = observedDocumentPath === record.stagedIdentity?.fileRealPath
+      && validateDesktopAttachmentOpenRecord(record).ok;
+    callback({
+      ok: true,
+      observation: buildDesktopAttachmentOpenObservation(record, {
+        pid: dispatched && exactApp ? 4242 : 0,
+        windowId: dispatched && exactApp ? 9001 : 0,
+        appRunning: dispatched && exactApp,
+        frontmost: dispatched && exactApp,
+        exactDocumentIdentityVerified: dispatched && exactApp && exactDocumentIdentity,
+      }),
+    });
+    return;
+  }
+  if (process.platform !== 'darwin') {
+    callback({ ok: false, code: 'attachment_open_observation_unavailable' });
+    return;
+  }
+  const processScript = `
+tell application "System Events"
+  set frontApp to ""
+  try
+    set frontApp to name of first application process whose frontmost is true
+  end try
+  set targetName to "${escapeAppleScriptString(record.resolvedAppName)}"
+  set procPid to 0
+  try
+    set targetProc to first application process whose background only is false and name is targetName
+    set procPid to unix id of targetProc
+  end try
+  return frontApp & linefeed & (procPid as text)
+end tell
+`;
+  execFile('/usr/bin/osascript', ['-e', processScript], { timeout: 5000, maxBuffer: 32 * 1024 }, (processError, stdout) => {
+    if (processError) {
+      callback({ ok: false, code: 'attachment_open_observation_unavailable' });
+      return;
+    }
+    const lines = String(stdout || '').split(/\r?\n/);
+    const frontApp = String(lines[0] || '').trim();
+    const pid = Math.max(0, Math.trunc(Number(lines[1] || 0)));
+    if (!pid) {
+      callback({
+        ok: true,
+        observation: buildDesktopAttachmentOpenObservation(record, {
+          pid: 0,
+          windowId: 0,
+          appRunning: false,
+          frontmost: false,
+          exactDocumentIdentityVerified: false,
+        }),
+      });
+      return;
+    }
+    const exactFrontmost = frontApp === record.resolvedAppName;
+    if (!exactFrontmost) {
+      callback({
+        ok: true,
+        observation: buildDesktopAttachmentOpenObservation(record, {
+          pid,
+          windowId: 0,
+          appRunning: true,
+          frontmost: false,
+          exactDocumentIdentityVerified: false,
+        }),
+      });
+      return;
+    }
+    // Bind the observed PID back to the exact pinned bundle before reading the
+    // focused AXDocument. Titles, labels, and basenames are deliberately absent
+    // from this completion path.
+    desktopAttachmentOpenProcessMatchesPinnedApp(record, pid, (processMatchesPinnedApp) => {
+      if (!processMatchesPinnedApp) {
+        callback({
+          ok: true,
+          observation: buildDesktopAttachmentOpenObservation(record, {
+            pid,
+            windowId: 0,
+            appRunning: true,
+            frontmost: false,
+            exactDocumentIdentityVerified: false,
+          }),
+        });
+        return;
+      }
+      // Read the focused AXDocument on both sides of CGWindow proof, then
+      // require the exact PID to hold the pinned device+inode open.
+      desktopAttachmentOpenFocusedDocumentPath(record, pid, (beforeDocumentPath) => {
+      runDesktopInputHelper(
+        ['window-proof', '--pid', String(pid)],
+        { timeout: 3000, fallbackError: 'Exact native window proof unavailable.' },
+        (proofError, proof) => {
+          const exactWindow = !proofError
+            && proof?.ok === true
+            && String(proof.appName || '') === record.resolvedAppName
+            && Number(proof.pid) === pid
+            && Number.isSafeInteger(Number(proof.windowId))
+            && Number(proof.windowId) > 0;
+          if (!exactWindow || !beforeDocumentPath) {
+            callback({
+              ok: true,
+              observation: buildDesktopAttachmentOpenObservation(record, {
+                pid,
+                windowId: exactWindow ? Number(proof.windowId) : 0,
+                appRunning: true,
+                frontmost: exactWindow,
+                exactDocumentIdentityVerified: false,
+              }),
+            });
+            return;
+          }
+          desktopAttachmentOpenFocusedDocumentPath(record, pid, (afterDocumentPath) => {
+            if (!afterDocumentPath || afterDocumentPath !== beforeDocumentPath) {
+              callback({
+                ok: true,
+                observation: buildDesktopAttachmentOpenObservation(record, {
+                  pid,
+                  windowId: Number(proof.windowId),
+                  appRunning: true,
+                  frontmost: true,
+                  exactDocumentIdentityVerified: false,
+                }),
+              });
+              return;
+            }
+            desktopAttachmentOpenProcessHasPinnedFile(record, pid, (processHasPinnedFile) => {
+              const exactDocumentIdentityVerified = processHasPinnedFile
+                && validateDesktopAttachmentOpenRecord(record).ok
+                && validateDesktopAttachmentOpenAppIdentity(record).ok;
+              callback({
+                ok: true,
+                observation: buildDesktopAttachmentOpenObservation(record, {
+                  pid,
+                  windowId: Number(proof.windowId),
+                  appRunning: true,
+                  frontmost: true,
+                  exactDocumentIdentityVerified,
+                }),
+              });
+            });
+          });
+        },
+      );
+      });
+    });
+  });
+}
+
+function desktopAttachmentOpenStatNanoseconds(stat, field, fallbackField) {
+  const exact = stat?.[field];
+  if (typeof exact === 'bigint') return exact.toString();
+  const fallback = Number(stat?.[fallbackField]);
+  return Number.isFinite(fallback) ? String(Math.trunc(fallback * 1_000_000)) : '';
+}
+
+function desktopAttachmentOpenPinnedStat(stat) {
+  return Object.freeze({
+    dev: String(stat.dev),
+    ino: String(stat.ino),
+    uid: String(stat.uid),
+    gid: String(stat.gid),
+    mode: String(stat.mode),
+    nlink: String(stat.nlink),
+    size: String(stat.size),
+    mtimeNs: desktopAttachmentOpenStatNanoseconds(stat, 'mtimeNs', 'mtimeMs'),
+    birthtimeNs: desktopAttachmentOpenStatNanoseconds(stat, 'birthtimeNs', 'birthtimeMs'),
+  });
+}
+
+function desktopAttachmentOpenPinnedStatMatches(stat, expected, kind, contentStable) {
+  if (!stat || !expected) return false;
+  const typeMatches = kind === 'file'
+    ? stat.isFile() && !stat.isSymbolicLink()
+    : stat.isDirectory() && !stat.isSymbolicLink();
+  if (!typeMatches) return false;
+  const current = desktopAttachmentOpenPinnedStat(stat);
+  if (
+    current.dev !== expected.dev
+    || current.ino !== expected.ino
+    || current.uid !== expected.uid
+    || current.gid !== expected.gid
+    || current.mode !== expected.mode
+  ) return false;
+  return !contentStable || (
+    current.nlink === expected.nlink
+    && current.size === expected.size
+    && current.mtimeNs === expected.mtimeNs
+    && current.birthtimeNs === expected.birthtimeNs
+  );
+}
+
+function captureDesktopAttachmentOpenStagedIdentity({ processRoot, directoryPath, filePath }) {
+  const processRootRealPath = fs.realpathSync(processRoot);
+  const directoryRealPath = fs.realpathSync(directoryPath);
+  const fileRealPath = fs.realpathSync(filePath);
+  const processRootStat = fs.lstatSync(processRootRealPath, { bigint: true });
+  const directoryStat = fs.lstatSync(directoryRealPath, { bigint: true });
+  const fileStat = fs.lstatSync(fileRealPath, { bigint: true });
+  if (
+    processRootRealPath !== processRoot
+    || directoryRealPath !== directoryPath
+    || fileRealPath !== filePath
+    || path.dirname(directoryRealPath) !== processRootRealPath
+    || path.dirname(fileRealPath) !== directoryRealPath
+    || !processRootStat.isDirectory()
+    || processRootStat.isSymbolicLink()
+    || !directoryStat.isDirectory()
+    || directoryStat.isSymbolicLink()
+    || !fileStat.isFile()
+    || fileStat.isSymbolicLink()
+    || fileStat.nlink !== 1n
+    || Number(processRootStat.mode & 0o777n) !== 0o700
+    || Number(directoryStat.mode & 0o777n) !== 0o700
+    || Number(fileStat.mode & 0o777n) !== 0o600
+    || (DESKTOP_ATTACHMENT_OPEN_OWNER_UID !== null && (
+      String(processRootStat.uid) !== String(DESKTOP_ATTACHMENT_OPEN_OWNER_UID)
+      || String(directoryStat.uid) !== String(DESKTOP_ATTACHMENT_OPEN_OWNER_UID)
+      || String(fileStat.uid) !== String(DESKTOP_ATTACHMENT_OPEN_OWNER_UID)
+    ))
+  ) throw new Error('Staged attachment identity is unsafe.');
+  return Object.freeze({
+    processRootRealPath,
+    directoryRealPath,
+    fileRealPath,
+    processRoot: desktopAttachmentOpenPinnedStat(processRootStat),
+    directory: desktopAttachmentOpenPinnedStat(directoryStat),
+    file: desktopAttachmentOpenPinnedStat(fileStat),
+  });
+}
+
+function validateDesktopAttachmentOpenRecord(record) {
+  let descriptor = null;
+  try {
+    const pinned = record?.stagedIdentity;
+    if (!pinned || pinned.fileRealPath !== record.filePath || pinned.directoryRealPath !== record.directoryPath) {
+      return { ok: false, code: 'attachment_open_file_tampered' };
+    }
+    const processRoot = ensureDesktopAttachmentOpenRoot();
+    if (processRoot !== pinned.processRootRealPath) {
+      return { ok: false, code: 'attachment_open_file_tampered' };
+    }
+    const processRootStat = fs.lstatSync(processRoot, { bigint: true });
+    const directoryStat = fs.lstatSync(record.directoryPath, { bigint: true });
+    const fileStat = fs.lstatSync(record.filePath, { bigint: true });
+    if (
+      !desktopAttachmentOpenPinnedStatMatches(processRootStat, pinned.processRoot, 'directory', false)
+      || !desktopAttachmentOpenPinnedStatMatches(directoryStat, pinned.directory, 'directory', true)
+      || !desktopAttachmentOpenPinnedStatMatches(fileStat, pinned.file, 'file', true)
+      || Number(fileStat.size) !== record.sizeBytes
+      || fs.realpathSync(record.directoryPath) !== pinned.directoryRealPath
+      || fs.realpathSync(record.filePath) !== pinned.fileRealPath
+      || path.dirname(pinned.directoryRealPath) !== pinned.processRootRealPath
+      || path.dirname(pinned.fileRealPath) !== pinned.directoryRealPath
+    ) {
+      return { ok: false, code: 'attachment_open_file_tampered' };
+    }
+    descriptor = fs.openSync(
+      pinned.fileRealPath,
+      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0),
+    );
+    const openedBefore = fs.fstatSync(descriptor, { bigint: true });
+    if (!desktopAttachmentOpenPinnedStatMatches(openedBefore, pinned.file, 'file', true)) {
+      return { ok: false, code: 'attachment_open_file_tampered' };
+    }
+    const bytes = fs.readFileSync(descriptor);
+    const openedAfter = fs.fstatSync(descriptor, { bigint: true });
+    const pathAfter = fs.lstatSync(record.filePath, { bigint: true });
+    if (
+      !desktopAttachmentOpenPinnedStatMatches(openedAfter, pinned.file, 'file', true)
+      || !desktopAttachmentOpenPinnedStatMatches(pathAfter, pinned.file, 'file', true)
+      || fs.realpathSync(record.filePath) !== pinned.fileRealPath
+      || !desktopAttachmentOpenSafeEqual(desktopAttachmentOpenSha256(bytes), record.sha256)
+    ) {
+      return { ok: false, code: 'attachment_open_file_tampered' };
+    }
+    return { ok: true, filePath: pinned.fileRealPath };
+  } catch {
+    return { ok: false, code: 'attachment_open_file_tampered' };
+  } finally {
+    if (descriptor !== null) {
+      try { fs.closeSync(descriptor); } catch {}
+    }
+  }
+}
+
+function writeDesktopAttachmentOpenFailure(res, corsHeaders, status, errorCode, error) {
+  res.writeHead(status, corsHeaders);
+  res.end(JSON.stringify({ ok: false, errorCode, error }));
+}
+
+function parseDesktopAttachmentOpenStageBody(parsed) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, error: 'Attachment capability body is invalid.' };
+  }
+  if (Object.keys(parsed).some((key) => !DESKTOP_ATTACHMENT_OPEN_BODY_KEYS.has(key))) {
+    return { ok: false, error: 'Attachment capability body contains unsupported fields.' };
+  }
+  const scopeResult = parseDesktopAttachmentOpenScope(parsed.scope);
+  if (!scopeResult.ok) return scopeResult;
+  const filename = typeof parsed.filename === 'string' ? parsed.filename.trim() : '';
+  if (
+    !filename
+    || filename.length > 160
+    || filename !== path.basename(filename)
+    || filename !== safeAttachmentFilename(filename)
+  ) {
+    return { ok: false, error: 'Attachment filename is unsafe.' };
+  }
+  const mimeType = typeof parsed.mimeType === 'string' ? parsed.mimeType.trim().toLowerCase() : '';
+  if (!DESKTOP_ATTACHMENT_OPEN_MIME_RE.test(mimeType) || mimeType.length > 120) {
+    return { ok: false, error: 'Attachment MIME type is invalid.' };
+  }
+  const sizeBytes = Number(parsed.sizeBytes);
+  if (!Number.isInteger(sizeBytes) || sizeBytes < 1 || sizeBytes > DESKTOP_ATTACHMENT_OPEN_MAX_BYTES) {
+    return { ok: false, error: 'Attachment byte count is invalid.' };
+  }
+  const sha256 = typeof parsed.sha256 === 'string' ? parsed.sha256.trim().toLowerCase() : '';
+  if (!DESKTOP_ATTACHMENT_OPEN_SHA256_RE.test(sha256)) {
+    return { ok: false, error: 'Attachment SHA-256 is invalid.' };
+  }
+  const decoded = decodeCanonicalDesktopAttachmentBase64(parsed.base64);
+  if (!decoded.ok) return decoded;
+  if (decoded.buffer.length !== sizeBytes || !desktopAttachmentOpenSafeEqual(desktopAttachmentOpenSha256(decoded.buffer), sha256)) {
+    return { ok: false, error: 'Attachment bytes do not match their exact binding.' };
+  }
+  const preferredAppName = typeof parsed.preferredAppName === 'string'
+    ? parsed.preferredAppName.trim()
+    : '';
+  if (
+    preferredAppName
+    && (preferredAppName.length > 120 || !/^[A-Za-z0-9 .\-_()]+$/.test(preferredAppName))
+  ) {
+    return { ok: false, error: 'Preferred app identity is invalid.' };
+  }
+  const ttlMs = clampInt(
+    parsed.ttlMs,
+    DESKTOP_ATTACHMENT_OPEN_DEFAULT_TTL_MS,
+    DESKTOP_ATTACHMENT_OPEN_MIN_TTL_MS,
+    DESKTOP_ATTACHMENT_OPEN_MAX_TTL_MS,
+  );
+  return {
+    ok: true,
+    scope: scopeResult.scope,
+    scopeFingerprint: scopeResult.fingerprint,
+    filename,
+    mimeType,
+    sizeBytes,
+    sha256,
+    bytes: decoded.buffer,
+    preferredAppName: preferredAppName || null,
+    ttlMs,
+  };
+}
+
 async function bufferFromAttachmentSource(parsed) {
   const maxBytes = 100 * 1024 * 1024;
   const sourceUrl = String(parsed?.sourceUrl || '').trim();
@@ -10668,6 +14079,17 @@ function finalizeGrantRoot(candidate, kind = 'directory') {
     return {
       ok: false,
       error: 'filesystem-root local file grants are refused; request exact project, folder, or file paths',
+    };
+  }
+  // A grant on any ANCESTOR of $HOME (/Users, /Users/../Users, /System/Volumes/
+  // Data/Users, …) recursively covers the whole home directory — ~/.ssh,
+  // ~/.aws, ~/.uc-desktop-token — which is exactly what the home-wide refusal
+  // above exists to prevent. Refusing the exact home path while allowing its
+  // parent was a one-word bypass.
+  if (home && (home === root || isPathInsideRoot(home, root))) {
+    return {
+      ok: false,
+      error: 'local file grants covering the home directory (or a parent of it) are refused; request exact project, folder, or file paths',
     };
   }
   return { ok: true, root, kind };
@@ -14268,6 +17690,7 @@ function photoshopNotRunningJson(targetName, kind) {
     status: 'not_running',
     documentCount: 0,
     activeDocumentName: null,
+    activeDocumentId: null,
     activeDocumentPath: null,
     activeDocumentModified: false,
     activeDocumentSaved: false,
@@ -14440,6 +17863,14 @@ ${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
     };
   }
 
+  function documentSessionId(doc) {
+    try {
+      var value = Number(doc.id);
+      return isFinite(value) && value > 0 && Math.floor(value) === value ? value : null;
+    } catch (_) {}
+    return null;
+  }
+
   function stringifyPhotoshopStatus(value) {
     var docs = [];
     try {
@@ -14451,6 +17882,7 @@ ${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
       "\\"status\\":" + jsonString(value.status),
       "\\"documentCount\\":" + jsonNumber(value.documentCount),
       "\\"activeDocumentName\\":" + jsonNullableString(value.activeDocumentName),
+      "\\"activeDocumentId\\":" + (value.activeDocumentId === null ? "null" : jsonNumber(value.activeDocumentId)),
       "\\"activeDocumentPath\\":" + jsonNullableString(value.activeDocumentPath),
       "\\"activeDocumentModified\\":" + jsonBoolean(value.activeDocumentModified),
       "\\"activeDocumentSaved\\":" + jsonBoolean(value.activeDocumentSaved),
@@ -14478,6 +17910,7 @@ ${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
     status: "unknown",
     documentCount: collectionLength(app.documents),
     activeDocumentName: null,
+    activeDocumentId: null,
     activeDocumentPath: null,
     activeDocumentModified: false,
     activeDocumentSaved: false,
@@ -14508,16 +17941,21 @@ ${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
     return stringifyPhotoshopStatus(out);
   }
 
-  var doc = findTargetDocument();
-  if (!doc) {
+  // Status is a read-only endpoint. Inspect only the document that is already
+  // active; never activate a different open document to satisfy an expected
+  // name/path because that changes visible app state and focus.
+  var doc = null;
+  try { doc = app.activeDocument; } catch (_) {}
+  if (!doc || !documentMatches(doc)) {
     out.status = "document_mismatch";
     try { out.activeDocumentName = String(app.activeDocument.name || ""); } catch (_) {}
-    out.error = "Expected Photoshop document is not active or open.";
+    try { out.activeDocumentId = documentSessionId(app.activeDocument); } catch (_) {}
+    out.error = "Expected Photoshop document is not active.";
     return stringifyPhotoshopStatus(out);
   }
-  try { app.activeDocument = doc; } catch (_) {}
 
   out.activeDocumentName = String(doc.name || "");
+  out.activeDocumentId = documentSessionId(doc);
   out.activeDocumentPath = documentPath(doc);
   try { out.activeDocumentModified = doc.saved !== true; } catch (_) {}
   try { out.activeDocumentSaved = doc.saved === true; } catch (_) {}
@@ -15518,8 +18956,34 @@ function buildPhotoshopCreateDocumentScript({ appName, widthPx, heightPx, resolu
 (function () {
 ${photoshopJsxPrelude({ expectedDocumentName: '', sourceDocumentPath: '' })}
 
-  var out = { ok: false, created: false, documentName: null, widthPx: 0, heightPx: 0, resolution: 0, mode: null, documentCount: 0, error: null };
+  function documentSessionId(doc) {
+    try {
+      var value = Number(doc.id);
+      return isFinite(value) && value > 0 && Math.floor(value) === value ? value : null;
+    } catch (_) {}
+    return null;
+  }
+
+  var out = {
+    ok: false,
+    appRunning: true,
+    created: false,
+    documentCountBefore: collectionLength(app.documents),
+    documentCountAfter: 0,
+    activeDocumentNameBefore: null,
+    createdDocumentId: null,
+    documentName: null,
+    widthPx: 0,
+    heightPx: 0,
+    resolution: 0,
+    mode: null,
+    documentCount: 0,
+    error: null
+  };
   try {
+    if (out.documentCountBefore > 0) {
+      try { out.activeDocumentNameBefore = String(app.activeDocument.name || ""); } catch (_) {}
+    }
     var docName = ${jsxLiteral(String(name || ''))};
     var doc = app.documents.add(
       UnitValue(${Number(widthPx)}, "px"),
@@ -15531,18 +18995,25 @@ ${photoshopJsxPrelude({ expectedDocumentName: '', sourceDocumentPath: '' })}
     );
     out.ok = true;
     out.created = true;
+    out.createdDocumentId = documentSessionId(doc);
     out.documentName = String(doc.name || "");
     out.widthPx = unitPx(doc.width);
     out.heightPx = unitPx(doc.height);
     out.resolution = (function () { try { return Math.round(Number(doc.resolution)); } catch (_) { return 0; } }());
     out.mode = (function () { try { return String(doc.mode); } catch (_) { return null; } }());
-    out.documentCount = collectionLength(app.documents);
+    out.documentCountAfter = collectionLength(app.documents);
+    out.documentCount = out.documentCountAfter;
   } catch (e) {
     out.error = String(e && e.message ? e.message : e);
   }
   return "{" + [
     "\\"ok\\":" + jsonBoolean(out.ok),
+    "\\"appRunning\\":" + jsonBoolean(out.appRunning),
     "\\"created\\":" + jsonBoolean(out.created),
+    "\\"documentCountBefore\\":" + jsonNumber(out.documentCountBefore),
+    "\\"documentCountAfter\\":" + jsonNumber(out.documentCountAfter),
+    "\\"activeDocumentNameBefore\\":" + jsonNullableString(out.activeDocumentNameBefore),
+    "\\"createdDocumentId\\":" + (out.createdDocumentId === null ? "null" : jsonNumber(out.createdDocumentId)),
     "\\"documentName\\":" + jsonNullableString(out.documentName),
     "\\"widthPx\\":" + jsonNumber(out.widthPx),
     "\\"heightPx\\":" + jsonNumber(out.heightPx),
@@ -16882,6 +20353,17 @@ server.on('error', (err) => {
   console.error('[bridge] Server error:', err.message);
 });
 
+server.on('close', cleanupAllDesktopAttachmentOpenCapabilities);
+process.on('exit', cleanupAllDesktopAttachmentOpenCapabilities);
+
+// Crash remnants carry no live bearer after a restart. Remove only exact
+// bridge-owned, marker-authenticated instance trees, then keep abandoned live
+// capabilities on their promised TTL even when no later endpoint is called.
+if (!DESKTOP_BRIDGE_REPLACEMENT_LOAD_PROBE) {
+  scavengeStaleDesktopAttachmentOpenInstances();
+  startDesktopAttachmentOpenCleanupTimer();
+}
+
 process.on('uncaughtException', (err) => console.error('[bridge] Uncaught:', err.message));
 
 /**
@@ -16915,7 +20397,7 @@ function ensureAxHelper() {
     console.warn('[bridge] Install Xcode command-line tools: xcode-select --install');
   }
 }
-ensureAxHelper();
+if (!DESKTOP_BRIDGE_REPLACEMENT_LOAD_PROBE) ensureAxHelper();
 
 function ensureInputHelper() {
   if (process.platform !== 'darwin') return;
@@ -16938,9 +20420,15 @@ function ensureInputHelper() {
     console.warn('[bridge] Install Xcode command-line tools: xcode-select --install');
   }
 }
-ensureInputHelper();
+if (!DESKTOP_BRIDGE_REPLACEMENT_LOAD_PROBE) ensureInputHelper();
 
-server.listen(PORT, BRIDGE_BIND_HOST, () => {
+if (DESKTOP_BRIDGE_REPLACEMENT_LOAD_PROBE) {
+  process.stdout.write(`${DESKTOP_BRIDGE_REPLACEMENT_LOAD_PROBE_MARKER}\n`);
+} else server.listen(PORT, BRIDGE_BIND_HOST, () => {
+  // Safe-refresh supervisors consume their bounded replacement entitlement
+  // only after this signed, exact-instance online notice and a matching health
+  // read. ChildProcess `spawn` and the earlier IPC HELLO are not readiness.
+  notifyDesktopBridgeSupervisorOnline();
   console.log(`\n  Claude Code Bridge`);
   console.log(`  Serving on http://${BRIDGE_BIND_HOST}:${PORT} (loopback only)`);
   console.log(`  Scanning ${CLAUDE_DIRS.join(", ")}`);

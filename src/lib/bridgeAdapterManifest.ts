@@ -26,11 +26,11 @@
  *     ('browser', 'desktop', 'desktop:design', 'vault').
  *   - `evidenceBefore` / `proofAfter` phrasing echoes
  *     `computerTaskEvidenceContract` (observe-before / proof-after).
- *   - `floorCategories` are `ChatComputerConstraintCategory` values, and the
- *     always-confirm floor (pay/delete/login/grant) is enforced through
- *     `computerGrantGate`'s canonical `STICKY_FLOOR_CATEGORIES` /
- *     `STICKY_GRANTABLE_CATEGORIES` so this manifest can never drift from or
- *     weaken the floor.
+ *   - `floorCategories` are `ChatComputerConstraintCategory` values. The
+ *     canonical effect policy currently classifies every router mutation
+ *     category as exact, projected through `computerGrantGate`'s
+ *     `STICKY_FLOOR_CATEGORIES` / `STICKY_GRANTABLE_CATEGORIES`, so this
+ *     manifest can never drift from or weaken the floor.
  *
  * HARD INVARIANT: a data-provided entry can NEVER downgrade a floor category or
  * set `requiresApproval=false` on a gated / floor-bearing endpoint. `validate`

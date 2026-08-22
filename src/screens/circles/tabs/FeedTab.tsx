@@ -28,29 +28,96 @@ import { useProjectRooms } from '../../../services/projectRooms';
 import type { CircleIntegrationGroupKey } from '../../../lib/circleIntegrationCatalog';
 
 import { supabase } from '../../../lib/supabase';
-import CircleStoriesRail from '../../../components/stories/CircleStoriesRail.web';
-import AgentTopBar from './kanban/AgentTopBar';
-import OrchestraPanel from './kanban/OrchestraPanel';
-import GoalsPanel from './kanban/GoalsPanel';
-import ActivityFeedPanel from './kanban/ActivityFeedPanel';
-import KanbanBoard from './kanban/KanbanBoard';
-import TaskDetailModal from './kanban/TaskDetailModal';
-import GoalDetailModal from './kanban/GoalDetailModal';
-import TaskCalendar from '../../../components/TaskCalendar';
-import TaskTable from '../../../components/TaskTable';
-import MemberCardModal from '../../../components/MemberCardModal';
-
 // ─── Loading Animation (uses shared circle loader) ──────────────────────
 
 import { LoadingScreen as FeedLoadingAnimation } from '../../../components/LoadingWave';
-import MissionsTab from './MissionsTab';
 import { useMissions, useMissionDetail, missionProgress, isOverdue, type Mission } from '../../../lib/missions';
 import SuggestedTaskChips from '../../../components/SuggestedTaskChips';
 import { getEmptyStateSuggestions, type EmptyStateSuggestionAction } from '../../../lib/emptyStateSuggestions';
 import { classifyRunFreshness, runEmptyStateModel, freshnessRank } from '../../../lib/runFreshnessCore';
-import NeedsAttentionPanel from '../../../components/feed/NeedsAttentionPanel';
 import { buildNeedsAttention } from '../../../lib/accountabilityNagCore';
 import { SEED_EVENT_NAME, buildComposerSeedDetail } from '../../../lib/chatComposerSeedCore';
+import { isAwaitingConnectedAgentResultMetadata } from '../../../lib/officeOpsBoard';
+import { bucketRunForHistory } from '../../../lib/runHistoryFilterCore';
+
+// Feed's first interaction is reading and organizing work. Editors, detail
+// modals, activity telemetry, and the full Missions surface are deferred so
+// the tab shell does not download every secondary dashboard before it paints.
+const loadCircleStoriesRail = () => import('../../../components/stories/CircleStoriesRail.web');
+const loadAgentTopBar = () => import('./kanban/AgentTopBar');
+const loadOrchestraPanel = () => import('./kanban/OrchestraPanel');
+const loadGoalsPanel = () => import('./kanban/GoalsPanel');
+const loadActivityFeedPanel = () => import('./kanban/ActivityFeedPanel');
+const loadKanbanBoard = () => import('./kanban/KanbanBoard');
+
+const CircleStoriesRail = React.lazy(loadCircleStoriesRail);
+const AgentTopBar = React.lazy(loadAgentTopBar);
+const OrchestraPanel = React.lazy(loadOrchestraPanel);
+const GoalsPanel = React.lazy(loadGoalsPanel);
+const ActivityFeedPanel = React.lazy(loadActivityFeedPanel);
+const KanbanBoard = React.lazy(loadKanbanBoard);
+const TaskDetailModal = React.lazy(() => import('./kanban/TaskDetailModal'));
+const GoalDetailModal = React.lazy(() => import('./kanban/GoalDetailModal'));
+const TaskCalendar = React.lazy(() => import('../../../components/TaskCalendar'));
+const TaskTable = React.lazy(() => import('../../../components/TaskTable'));
+const MemberCardModal = React.lazy(() => import('../../../components/MemberCardModal'));
+const MissionsTab = React.lazy(() => import('./MissionsTab'));
+const NeedsAttentionPanel = React.lazy(() => import('../../../components/feed/NeedsAttentionPanel'));
+
+/** Warm only the panels used by the default Feed layouts. Editors, alternate
+ * task projections, Missions, and detail modals remain interaction-deferred. */
+export function preloadFeedDashboardPanels(): Promise<void> {
+  return Promise.allSettled([
+    loadCircleStoriesRail(),
+    loadAgentTopBar(),
+    loadOrchestraPanel(),
+    loadGoalsPanel(),
+    loadActivityFeedPanel(),
+    loadKanbanBoard(),
+  ]).then(() => undefined);
+}
+
+function DeferredFeedPanel({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <React.Suspense
+      fallback={(
+        <View
+          style={deferredPanelStyles.shell}
+          accessibilityRole="progressbar"
+          accessibilityLabel={`Loading ${label}`}
+        >
+          <View style={deferredPanelStyles.bar} />
+          <Text style={deferredPanelStyles.text}>Loading {label}…</Text>
+        </View>
+      )}
+    >
+      {children}
+    </React.Suspense>
+  );
+}
+
+const deferredPanelStyles = StyleSheet.create({
+  shell: {
+    minHeight: 120,
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    backgroundColor: '#0d1117',
+  },
+  bar: {
+    width: 72,
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: '#6366f1',
+    opacity: 0.75,
+  },
+  text: {
+    color: '#8b949e',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+});
 
 // ─── Task Search Bar (rendered in FeedTab, right under OrchestraPanel) ────
 
@@ -149,7 +216,7 @@ function parseAgentTaskMeta(task: KanbanTask): {
   tokens: string;
   prompt: string;
   response: string;
-  status: 'processing' | 'done' | 'failed';
+  status: 'processing' | 'accepted' | 'outcome_unknown' | 'done' | 'failed';
 } {
   const desc = task.description || '';
   const agentMatch = desc.match(/\*\*Agent:\*\*\s*(.+)/);
@@ -164,7 +231,10 @@ function parseAgentTaskMeta(task: KanbanTask): {
   const responseMatch = desc.match(/\*\*Response\*\*\s*```\s*([\s\S]*?)```/);
 
   const isProcessing = desc.includes('*Processing...*');
-  const isFailed = statusMatch?.[1]?.includes('Failed') || task.status === 'review';
+  const statusText = statusMatch?.[1]?.trim().toLowerCase() || '';
+  const isAccepted = statusText.startsWith('accepted') && statusText.includes('awaiting verified result');
+  const isOutcomeUnknown = statusText.startsWith('outcome unknown');
+  const isFailed = statusText.startsWith('failed') || (task.status === 'review' && !isOutcomeUnknown);
 
   return {
     agentName: agentMatch?.[1] || 'Agent',
@@ -173,7 +243,15 @@ function parseAgentTaskMeta(task: KanbanTask): {
     tokens: tokensMatch?.[1] || '',
     prompt: promptMatch?.[1]?.trim() || '',
     response: responseMatch?.[1]?.trim() || '',
-    status: isProcessing ? 'processing' : isFailed ? 'failed' : 'done',
+    status: isAccepted
+      ? 'accepted'
+      : isOutcomeUnknown
+        ? 'outcome_unknown'
+        : isProcessing
+          ? 'processing'
+          : isFailed
+            ? 'failed'
+            : 'done',
   };
 }
 
@@ -390,13 +468,21 @@ function ActiveRunsWidget({ circleId }: { circleId: string }) {
     (async () => {
       try {
         const { getActiveRuns } = await import('../../../lib/agentRunSystem');
-        setRuns(await getActiveRuns(circleId));
+        setRuns(await getActiveRuns(circleId, {
+          activeOnly: true,
+          includeAcceptedHandoffs: true,
+          nowMs: Date.now(),
+        }));
       } catch {}
     })();
     const interval = setInterval(async () => {
       try {
         const { getActiveRuns } = await import('../../../lib/agentRunSystem');
-        setRuns(await getActiveRuns(circleId));
+        setRuns(await getActiveRuns(circleId, {
+          activeOnly: true,
+          includeAcceptedHandoffs: true,
+          nowMs: Date.now(),
+        }));
       } catch {}
     }, 10000);
     return () => clearInterval(interval);
@@ -415,21 +501,34 @@ function ActiveRunsWidget({ circleId }: { circleId: string }) {
     unknown: '#606075',
   };
 
+  // Recheck the canonical bucket at render time as well as query time. A row
+  // can cross the 30-minute freshness boundary between ten-second polls; it
+  // must disappear from ACTIVE immediately without being rewritten terminal.
+  const nowMs = Date.now();
+  const acceptedRuns = runs.filter((run: any) => isAwaitingConnectedAgentResultMetadata(run.metadata));
+  const runtimeRuns = runs.filter((run: any) =>
+    !isAwaitingConnectedAgentResultMetadata(run.metadata)
+      && bucketRunForHistory(run, nowMs) === 'running',
+  );
+
   // Finding 2: a just-finished run or a momentary poll gap must NOT blank the
   // widget via `return null`. Render an explicit "no active runs" affordance.
-  const emptyState = runEmptyStateModel({ hasRuns: runs.length, loading: false, error: null });
+  const emptyState = runEmptyStateModel({
+    hasRuns: runtimeRuns.length + acceptedRuns.length,
+    loading: false,
+    error: null,
+  });
   if (emptyState.kind !== 'has_data') {
     return (
       <View style={{ marginBottom: 12 }}>
-        <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO, marginBottom: 6 }}>ACTIVE RUNS ({runs.length})</Text>
+        <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO, marginBottom: 6 }}>ACTIVE RUNS ({runtimeRuns.length})</Text>
         <Text style={{ color: '#3a3a4e', fontSize: 10, fontFamily: MONO }}>{emptyState.message}</Text>
       </View>
     );
   }
 
   // Classify each run once, then order most-alive → over via the shared rank.
-  const nowMs = Date.now();
-  const rankedRuns = runs
+  const rankedRuns = runtimeRuns
     .map((run: any) => ({
       run,
       fresh: classifyRunFreshness({
@@ -442,7 +541,26 @@ function ActiveRunsWidget({ circleId }: { circleId: string }) {
 
   return (
     <View style={{ marginBottom: 12 }}>
-      <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO, marginBottom: 6 }}>ACTIVE RUNS ({runs.length})</Text>
+      <Text style={{ color: '#606075', fontSize: 9, fontWeight: '700', letterSpacing: 1, fontFamily: MONO, marginBottom: 6 }}>ACTIVE RUNS ({runtimeRuns.length})</Text>
+      {acceptedRuns.length > 0 && (
+        <View style={{ marginBottom: rankedRuns.length > 0 ? 6 : 0 }}>
+          <Text style={{ color: '#60a5fa', fontSize: 8, fontWeight: '700', letterSpacing: 0.7, fontFamily: MONO, marginBottom: 4 }}>
+            ACCEPTED HANDOFFS ({acceptedRuns.length})
+          </Text>
+          {acceptedRuns.map((run: any) => (
+            <View key={run.id} style={{ backgroundColor: '#0a0f18', borderWidth: 1, borderColor: '#60a5fa40', borderRadius: 2, padding: 8, marginBottom: 4 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#60a5fa' }} />
+                <Text style={{ color: '#f0f0f5', fontSize: 10, fontWeight: '600', fontFamily: MONO, flex: 1 }} numberOfLines={1}>{run.title || 'Untitled'}</Text>
+              </View>
+              <Text style={{ color: '#60a5fa', fontSize: 8, fontWeight: '700', fontFamily: MONO, marginTop: 4 }}>
+                ACCEPTED · AWAITING UPDATE · COMPLETION UNVERIFIED
+              </Text>
+              {run.delegated_to && <Text style={{ color: '#a855f7', fontSize: 8, fontFamily: MONO, marginTop: 2 }}>{run.delegated_to}</Text>}
+            </View>
+          ))}
+        </View>
+      )}
       {rankedRuns.map(({ run, fresh }) => {
         const dotColor = freshnessColors[fresh.freshness] || '#606075';
         return (
@@ -523,7 +641,10 @@ function AgentTasksPanel({
     return haystack.includes(searchQuery);
   });
 
-  const processingCount = agentTasks.filter(t => parseAgentTaskMeta(t).status === 'processing').length;
+  const openCount = agentTasks.filter(t => {
+    const status = parseAgentTaskMeta(t).status;
+    return status === 'processing' || status === 'accepted';
+  }).length;
 
   // Extract unique agent names + match to agent records for spirit info
   const activeAgentNames = useMemo(() => {
@@ -560,10 +681,10 @@ function AgentTasksPanel({
           <View style={at.countBadge}>
             <Text style={at.countText}>{filteredTasks.length}</Text>
           </View>
-          {processingCount > 0 && (
+          {openCount > 0 && (
             <View style={at.liveBadge}>
               <View style={at.liveDot} />
-              <Text style={at.liveText}>{processingCount} active</Text>
+              <Text style={at.liveText}>{openCount} open</Text>
             </View>
           )}
         </View>
@@ -608,14 +729,15 @@ function AgentTasksPanel({
             <Pressable
               key={task.id}
               onPress={() => onCardPress(task)}
-              style={[at.card, meta.status === 'processing' && at.cardActive]}
+              style={[at.card, (meta.status === 'processing' || meta.status === 'accepted') && at.cardActive]}
             >
               {/* Status + Agent + Spirit row */}
               <View style={at.cardTopRow}>
                 <View style={at.statusRow}>
                   <View style={[
                     at.statusDot,
-                    meta.status === 'processing' ? at.statusProcessing :
+                    meta.status === 'processing' || meta.status === 'accepted' ? at.statusProcessing :
+                    meta.status === 'outcome_unknown' ? at.statusUnknown :
                     meta.status === 'failed' ? at.statusFailed :
                     at.statusDone,
                   ]} />
@@ -645,7 +767,7 @@ function AgentTasksPanel({
               )}
 
               {/* Metrics row (only for completed) */}
-              {meta.status !== 'processing' && (meta.tokens || meta.duration) && (
+              {(meta.status === 'done' || meta.status === 'failed') && (meta.tokens || meta.duration) && (
                 <View style={at.metricsRow}>
                   {meta.model ? <Text style={at.metricText}>{meta.model}</Text> : null}
                   {meta.duration && meta.duration !== 'N/A' ? (
@@ -660,6 +782,12 @@ function AgentTasksPanel({
               {/* Processing indicator */}
               {meta.status === 'processing' && (
                 <Text style={at.processingText}>Processing...</Text>
+              )}
+              {meta.status === 'accepted' && (
+                <Text style={at.processingText}>Accepted · awaiting verified result</Text>
+              )}
+              {meta.status === 'outcome_unknown' && (
+                <Text style={at.outcomeUnknownText}>Outcome unknown · verify the connected session before retrying</Text>
               )}
 
               {/* Response preview (expandable) */}
@@ -710,10 +838,118 @@ function timeAgo(dateStr: string): string {
   return `${Math.floor(hrs / 24)}d`;
 }
 
-const MOBILE_BREAKPOINT = 768;
+// Below this width the three fixed desktop columns become cramped. Use the
+// focused surface switcher for tablets and zoomed desktop layouts as well as
+// phones so Missions and the task board always retain useful working room.
+const MOBILE_BREAKPOINT = 1180;
 
 type MobileTab = 'missions' | 'goals' | 'activity' | 'agents' | 'board' | 'ai-tools';
 type DesktopLowerTab = 'activity' | 'agents' | 'ai-tools';
+
+function FeedOverviewBar({
+  circleId,
+  agents,
+  missionStats,
+  taskStats,
+  automationStats,
+  expanded,
+  onToggle,
+}: {
+  circleId: string;
+  agents: CircleOfficeAgent[];
+  missionStats: { active: number; overdue: number; avgProgress: number };
+  taskStats: { total: number; completed: number; inProgress: number; overdue: number; dueToday: number; completedThisWeek: number };
+  automationStats: { activeCount: number; runsThisWeek: number };
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const urgentCount = taskStats.overdue + taskStats.dueToday + missionStats.overdue;
+  return (
+    <View style={s.overviewShell} nativeID="section-feed-overview">
+      <View style={s.overviewBar}>
+        <View style={s.overviewCopy}>
+          <Text style={s.overviewTitle}>Today</Text>
+          <Text style={s.overviewSummary} numberOfLines={1}>
+            {missionStats.active} active mission{missionStats.active === 1 ? '' : 's'}
+            {' · '}{taskStats.inProgress} task{taskStats.inProgress === 1 ? '' : 's'} in progress
+            {urgentCount > 0 ? ` · ${urgentCount} due or overdue` : ''}
+          </Text>
+        </View>
+        <View style={s.overviewMeta}>
+          <View style={s.overviewAgentStatus}>
+            <View style={[s.overviewAgentDot, { backgroundColor: agents.length > 0 ? '#3fb950' : '#484f58' }]} />
+            <Text style={s.overviewAgentText}>{agents.length} connected</Text>
+          </View>
+          <Pressable
+            onPress={onToggle}
+            style={({ hovered, pressed }: any) => [
+              s.overviewButton,
+              hovered && s.overviewButtonHover,
+              pressed && { opacity: 0.8 },
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel={expanded ? 'Hide workspace status' : 'Show workspace status'}
+            accessibilityState={{ expanded }}
+          >
+            <Text style={s.overviewButtonText}>{expanded ? 'Hide status' : 'Status'}</Text>
+          </Pressable>
+        </View>
+      </View>
+      {expanded && (
+        <DeferredFeedPanel label="workspace status">
+          <View style={s.overviewDetails}>
+            <AgentTopBar agents={agents} />
+            {Platform.OS === 'web' && <CircleStoriesRail circleId={circleId} accentColor="#6366f1" />}
+            <OrchestraPanel
+              agents={agents}
+              automationStats={automationStats}
+              taskStats={taskStats}
+              missionStats={missionStats}
+            />
+          </View>
+        </DeferredFeedPanel>
+      )}
+    </View>
+  );
+}
+
+function FeedAttentionDisclosure({
+  items,
+  expanded,
+  onToggle,
+  onAction,
+}: {
+  items: ReturnType<typeof buildNeedsAttention>;
+  expanded: boolean;
+  onToggle: () => void;
+  onAction: (item: { taskId?: string }) => void;
+}) {
+  if (items.length === 0) return null;
+  return (
+    <View style={s.attentionShell}>
+      <Pressable
+        onPress={onToggle}
+        style={s.attentionSummary}
+        accessibilityRole="button"
+        accessibilityLabel={`${items.length} items need attention`}
+        accessibilityState={{ expanded }}
+      >
+        <View style={s.attentionDot} />
+        <Text style={s.attentionTitle}>Needs attention</Text>
+        <Text style={s.attentionPreview} numberOfLines={1}>{items[0]?.title}</Text>
+        <View style={s.attentionCount}>
+          <Text style={s.attentionCountText}>{items.length}</Text>
+        </View>
+        <Text style={s.attentionChevron}>{expanded ? '−' : '+'}</Text>
+      </Pressable>
+      {expanded && (
+        <DeferredFeedPanel label="items needing attention">
+          <NeedsAttentionPanel items={items} onAction={onAction} />
+        </DeferredFeedPanel>
+      )}
+    </View>
+  );
+}
 
 const AGENT_ASSIGNMENT_STATUS_ORDER: Record<AgentStatus, number> = {
   active: 0,
@@ -775,10 +1011,12 @@ export default function FeedTab({
   circleId,
   accentColor,
   onOpenMarketplace,
+  onOpenOfficeRun,
 }: {
   circleId: string;
   accentColor?: string;
   onOpenMarketplace?: (focus?: { itemId?: string | null; groupKey?: CircleIntegrationGroupKey | null }) => void;
+  onOpenOfficeRun?: (runId: string) => void;
 }) {
   const kanban = useKanbanData(circleId);
   const goalsHook = useGoals(circleId);
@@ -794,7 +1032,10 @@ export default function FeedTab({
   // or other deeplink flows. Cleared on modal close.
   const [createPrefillTitle, setCreatePrefillTitle] = useState('');
   const [mobileTab, setMobileTab] = useState<MobileTab>('missions');
+  const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
   const [desktopLowerTab, setDesktopLowerTab] = useState<DesktopLowerTab>('activity');
+  const [overviewExpanded, setOverviewExpanded] = useState(false);
+  const [attentionExpanded, setAttentionExpanded] = useState(false);
   // Notion-style view toggle for the task pane: board (kanban) / calendar
   // (month grid keyed on tasks.due_date) / table (sortable rows + group-by).
   // Same underlying task data, three projections.
@@ -877,10 +1118,13 @@ export default function FeedTab({
   // `useAutoConnectLiveAgents` below.
   useEffect(() => {
     const unsubDb = subscribeToCircleOffice(circleId, () => {
-      kanban.refresh();
+      // Office heartbeats can arrive once per agent. Refresh only the roster;
+      // refetching tasks + members on every heartbeat caused avoidable request
+      // bursts and repeated member-query errors on the Feed.
+      kanban.refreshAgents();
     });
     return () => { unsubDb(); };
-  // kanban.refresh is a stable closure; re-subscribing on every render would
+  // refreshAgents is a stable closure; re-subscribing on every render would
   // tear down the realtime channel needlessly.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [circleId]);
@@ -991,13 +1235,13 @@ export default function FeedTab({
     for (const room of projectRooms) {
       if (seen.has(room.id)) continue;
       seen.add(room.id);
-      opts.push({ id: room.id, label: room.name, color: room.color || '#22d3ee' });
+      opts.push({ id: room.id, label: room.name, color: room.color || '#6366f1' });
     }
     const allTasks = Object.values(kanban.tasksByColumn).flat();
     for (const t of allTasks) {
       if (!t.room_id || seen.has(t.room_id) || !t.room?.name) continue;
       seen.add(t.room_id);
-      opts.push({ id: t.room_id, label: t.room.name, color: t.room.color || '#22d3ee' });
+      opts.push({ id: t.room_id, label: t.room.name, color: t.room.color || '#6366f1' });
     }
     return opts;
   }, [kanban.tasksByColumn, projectRooms]);
@@ -1011,7 +1255,11 @@ export default function FeedTab({
   }, [automations, dashStats]);
 
   // Mission stats for OrchestraPanel
-  const { missions: allMissions } = useMissions(circleId);
+  const {
+    missions: allMissions,
+    loading: missionsLoading,
+    refresh: refreshMissions,
+  } = useMissions(circleId, { includeArchived: true, includeTasks: true });
   const missionStats = useMemo(() => {
     const active = allMissions.filter(m => m.status === 'active');
     const overdueCount = active.filter(m => isOverdue(m)).length;
@@ -1144,56 +1392,81 @@ export default function FeedTab({
   if (isMobile) {
     return (
       <View style={s.container}>
-        <AgentTopBar agents={orchestraAgents} />
-        {Platform.OS === 'web' && <CircleStoriesRail circleId={circleId} accentColor="#6366f1" />}
-        <OrchestraPanel agents={orchestraAgents} automationStats={automationStats} taskStats={taskStats} missionStats={missionStats} />
-        <NeedsAttentionPanel items={needsAttention} onAction={handleNeedsAttentionAction} />
-        <TaskSearchBar
-          searchText={searchText}
-          onSearchChange={setSearchText}
-          filterPriority={filterPriority}
-          onFilterPriority={setFilterPriority}
-          filterAssignee={filterAssignee}
-          onFilterAssignee={setFilterAssignee}
-          filterRoom={filterRoom}
-          onFilterRoom={setFilterRoom}
-          assigneeOptions={assigneeOptions}
-          roomOptions={roomOptions}
-          searchInputRef={searchInputRef}
-          totalTasks={totalTasks}
+        <FeedOverviewBar
+          circleId={circleId}
+          agents={orchestraAgents}
+          automationStats={automationStats}
+          taskStats={taskStats}
+          missionStats={missionStats}
+          expanded={overviewExpanded}
+          onToggle={() => setOverviewExpanded((value) => !value)}
         />
+        <FeedAttentionDisclosure
+          items={needsAttention}
+          expanded={attentionExpanded}
+          onToggle={() => setAttentionExpanded((value) => !value)}
+          onAction={handleNeedsAttentionAction}
+        />
+        {(mobileTab === 'board' || mobileTab === 'agents') && (
+          <TaskSearchBar
+            searchText={searchText}
+            onSearchChange={setSearchText}
+            filterPriority={filterPriority}
+            onFilterPriority={setFilterPriority}
+            filterAssignee={filterAssignee}
+            onFilterAssignee={setFilterAssignee}
+            filterRoom={filterRoom}
+            onFilterRoom={setFilterRoom}
+            assigneeOptions={assigneeOptions}
+            roomOptions={roomOptions}
+            searchInputRef={searchInputRef}
+            totalTasks={totalTasks}
+          />
+        )}
 
         <View style={s.mobileBody}>
           {mobileTab === 'missions' && (
             <View style={s.mobilePanel}>
-              <MissionsTab circleId={circleId} accentColor={accentColor || '#6366f1'} />
+              <DeferredFeedPanel label="missions">
+                <MissionsTab
+                  circleId={circleId}
+                  accentColor={accentColor || '#6366f1'}
+                  missions={allMissions}
+                  loading={missionsLoading}
+                  onRefresh={refreshMissions}
+                />
+              </DeferredFeedPanel>
             </View>
           )}
           {mobileTab === 'goals' && (
             <View style={s.mobilePanel}>
-              <GoalsPanel
-                goals={goalsHook.goals}
-                agents={agents}
-                filteredGoalId={filteredGoalId}
-                onFilter={setFilteredGoalId}
-                onCreateGoal={goalsHook.createGoal}
-                onUpdateGoal={goalsHook.updateGoal}
-                onDeleteGoal={goalsHook.deleteGoal}
-                onCreateTask={kanban.createTask}
-                onEditGoal={setEditGoal}
-                plans={plansHook.plans}
-                onOpenMarketplace={handleOpenMarketplace}
-                circleId={circleId}
-                onCreatePlan={plansHook.createPlan}
-                onUpdatePlan={plansHook.updatePlan}
-                onDeletePlan={plansHook.deletePlan}
-                onGenerateTasks={plansHook.generateTasksFromPlan}
-              />
+              <DeferredFeedPanel label="goals">
+                <GoalsPanel
+                  goals={goalsHook.goals}
+                  agents={agents}
+                  filteredGoalId={filteredGoalId}
+                  onFilter={setFilteredGoalId}
+                  onCreateGoal={goalsHook.createGoal}
+                  onUpdateGoal={goalsHook.updateGoal}
+                  onDeleteGoal={goalsHook.deleteGoal}
+                  onCreateTask={async (fields) => { await kanban.createTask(fields); }}
+                  onEditGoal={setEditGoal}
+                  plans={plansHook.plans}
+                  onOpenMarketplace={handleOpenMarketplace}
+                  circleId={circleId}
+                  onCreatePlan={plansHook.createPlan}
+                  onUpdatePlan={plansHook.updatePlan}
+                  onDeletePlan={plansHook.deletePlan}
+                  onGenerateTasks={plansHook.generateTasksFromPlan}
+                />
+              </DeferredFeedPanel>
             </View>
           )}
           {mobileTab === 'activity' && (
             <View style={s.mobilePanel}>
-              <ActivityFeedPanel circleId={circleId} agents={agents} />
+              <DeferredFeedPanel label="recent activity">
+                <ActivityFeedPanel circleId={circleId} agents={agents} onOpenOfficeRun={onOpenOfficeRun} />
+              </DeferredFeedPanel>
             </View>
           )}
           {mobileTab === 'agents' && (
@@ -1219,52 +1492,54 @@ export default function FeedTab({
           {mobileTab === 'board' && (
             <>
               <KanbanViewToggle mode={kanbanViewMode} onChange={setKanbanViewMode} />
-              {kanbanViewMode === 'calendar' ? (
-                <TaskCalendar
-                  tasks={Object.values(visibleTasksByColumn).flat()}
-                  accentColor={accentColor || '#6366f1'}
-                  isFiltered={hasActiveFilters}
-                  onClearFilters={clearAllTaskFilters}
-                  onSelectTask={(id) => {
-                    const t = Object.values(visibleTasksByColumn).flat().find(x => x.id === id);
-                    if (t) setDetailTask(t);
-                  }}
-                />
-              ) : kanbanViewMode === 'table' ? (
-                <TaskTable
-                  tasks={Object.values(visibleTasksByColumn).flat()}
-                  accentColor={accentColor || '#6366f1'}
-                  isFiltered={hasActiveFilters}
-                  onClearFilters={clearAllTaskFilters}
-                  onSelectTask={(id) => {
-                    const t = Object.values(visibleTasksByColumn).flat().find(x => x.id === id);
-                    if (t) setDetailTask(t);
-                  }}
-                  onStatusChange={(taskId, nextStatus) => kanban.moveTask(taskId, nextStatus)}
-                />
-              ) : (
-            <KanbanBoard
-              columns={COLUMNS}
-              tasksByColumn={visibleTasksByColumn}
-              agents={agents}
-              goals={goalsHook.goals}
-              isFiltered={hasActiveFilters}
-              onClearFilters={clearAllTaskFilters}
-              onCardPress={setDetailTask}
-              onMoveTask={kanban.moveTask}
-              onQuickAdd={(status, title) => kanban.createTask({
-                title,
-                status,
-                goal_id: filteredGoalId || undefined,
-                room_id: filterRoom || undefined,
-              })}
-              onAddTask={(status) => { setCreateInColumn(status); setShowCreate(true); }}
-              onBatchMove={handleBatchMove}
-              onBatchAssignRoom={handleBatchAssignRoom}
-              roomOptions={roomOptions}
-              onArchiveDone={handleArchiveDone}
-            />
-              )}
+              <DeferredFeedPanel label={`${kanbanViewMode} tasks`}>
+                {kanbanViewMode === 'calendar' ? (
+                  <TaskCalendar
+                    tasks={Object.values(visibleTasksByColumn).flat()}
+                    accentColor={accentColor || '#6366f1'}
+                    isFiltered={hasActiveFilters}
+                    onClearFilters={clearAllTaskFilters}
+                    onSelectTask={(id) => {
+                      const t = Object.values(visibleTasksByColumn).flat().find(x => x.id === id);
+                      if (t) setDetailTask(t);
+                    }}
+                  />
+                ) : kanbanViewMode === 'table' ? (
+                  <TaskTable
+                    tasks={Object.values(visibleTasksByColumn).flat()}
+                    accentColor={accentColor || '#6366f1'}
+                    isFiltered={hasActiveFilters}
+                    onClearFilters={clearAllTaskFilters}
+                    onSelectTask={(id) => {
+                      const t = Object.values(visibleTasksByColumn).flat().find(x => x.id === id);
+                      if (t) setDetailTask(t);
+                    }}
+                    onStatusChange={(taskId, nextStatus) => kanban.moveTask(taskId, nextStatus)}
+                  />
+                ) : (
+                  <KanbanBoard
+                    columns={COLUMNS}
+                    tasksByColumn={visibleTasksByColumn}
+                    agents={agents}
+                    goals={goalsHook.goals}
+                    isFiltered={hasActiveFilters}
+                    onClearFilters={clearAllTaskFilters}
+                    onCardPress={setDetailTask}
+                    onMoveTask={kanban.moveTask}
+                    onQuickAdd={(status, title) => kanban.createTask({
+                      title,
+                      status,
+                      goal_id: filteredGoalId || undefined,
+                      room_id: filterRoom || undefined,
+                    })}
+                    onAddTask={(status) => { setCreateInColumn(status); setShowCreate(true); }}
+                    onBatchMove={handleBatchMove}
+                    onBatchAssignRoom={handleBatchAssignRoom}
+                    roomOptions={roomOptions}
+                    onArchiveDone={handleArchiveDone}
+                  />
+                )}
+              </DeferredFeedPanel>
             </>
           )}
         </View>
@@ -1276,48 +1551,92 @@ export default function FeedTab({
           contentContainerStyle={s.mobileTabBar}
         >
           {([
-            { key: 'missions' as MobileTab, label: 'Missions', icon: '\uD83C\uDFAF' },
-            { key: 'goals' as MobileTab, label: 'Goals', icon: '\u2299' },
-            { key: 'board' as MobileTab, label: 'Board', icon: '\u25A6' },
-            { key: 'activity' as MobileTab, label: 'Activity', icon: '\u26A1' },
-            { key: 'agents' as MobileTab, label: 'Agents', icon: '\u2699' },
-            { key: 'ai-tools' as MobileTab, label: 'AI Tools', icon: '\uD83E\uDD17' },
+            { key: 'missions' as MobileTab, label: 'Missions', icon: 'M' },
+            { key: 'board' as MobileTab, label: 'Tasks', icon: 'T' },
+            { key: 'goals' as MobileTab, label: 'Goals', icon: 'G' },
+            { key: 'activity' as MobileTab, label: 'Activity', icon: 'A' },
           ]).map(tab => {
             const isActive = mobileTab === tab.key;
             return (
               <Pressable
                 key={tab.key}
-                onPress={() => setMobileTab(tab.key)}
+                onPress={() => { setMobileTab(tab.key); setMobileMoreOpen(false); }}
                 style={[s.mobileTabBtn, isActive && s.mobileTabBtnActive]}
+                accessibilityRole="tab"
+                accessibilityLabel={tab.label}
+                accessibilityState={{ selected: isActive }}
               >
                 <Text style={[s.mobileTabIcon, isActive && s.mobileTabIconActive]}>{tab.icon}</Text>
                 <Text style={[s.mobileTabLabel, isActive && s.mobileTabLabelActive]}>{tab.label}</Text>
               </Pressable>
             );
           })}
+          <Pressable
+            onPress={() => setMobileMoreOpen((value) => !value)}
+            style={[
+              s.mobileTabBtn,
+              (mobileMoreOpen || mobileTab === 'agents' || mobileTab === 'ai-tools') && s.mobileTabBtnActive,
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel="More Feed views"
+            accessibilityState={{ expanded: mobileMoreOpen }}
+          >
+            <Text style={[
+              s.mobileTabIcon,
+              (mobileMoreOpen || mobileTab === 'agents' || mobileTab === 'ai-tools') && s.mobileTabIconActive,
+            ]}>···</Text>
+            <Text style={[
+              s.mobileTabLabel,
+              (mobileMoreOpen || mobileTab === 'agents' || mobileTab === 'ai-tools') && s.mobileTabLabelActive,
+            ]}>More</Text>
+          </Pressable>
         </ScrollView>
 
+        {mobileMoreOpen && (
+          <View style={s.mobileMoreMenu} nativeID="menu-feed-more">
+            {([
+              { key: 'agents' as MobileTab, label: 'Agent runs' },
+              { key: 'ai-tools' as MobileTab, label: 'AI tool activity' },
+            ]).map((item) => (
+              <Pressable
+                key={item.key}
+                onPress={() => { setMobileTab(item.key); setMobileMoreOpen(false); }}
+                style={s.mobileMoreItem}
+                accessibilityRole="button"
+                accessibilityLabel={`Open ${item.label}`}
+              >
+                <Text style={s.mobileMoreItemText}>{item.label}</Text>
+              </Pressable>
+            ))}
+          </View>
+        )}
+
         {detailTask && (
-      <TaskDetailModal
-        task={detailTask}
-        kanban={kanban}
-        agents={sortedAgentsForAssign}
-        goals={goalsHook.goals}
-        circleId={circleId}
-        onOpenMarketplace={handleOpenMarketplace}
-        onClose={() => setDetailTask(null)}
-      />
+          <DeferredFeedPanel label="task details">
+            <TaskDetailModal
+              task={detailTask}
+              kanban={kanban}
+              agents={sortedAgentsForAssign}
+              goals={goalsHook.goals}
+              circleId={circleId}
+              onOpenMarketplace={handleOpenMarketplace}
+              onOpenOfficeRun={onOpenOfficeRun}
+              onClose={() => setDetailTask(null)}
+            />
+          </DeferredFeedPanel>
         )}
 
         {editGoal && (
-          <GoalDetailModal
-            goal={editGoal}
-            agents={agents}
-            onClose={() => setEditGoal(null)}
-            onUpdate={(goalId, fields) => { goalsHook.updateGoal(goalId, fields); setEditGoal(null); }}
-            onDelete={(goalId) => { goalsHook.deleteGoal(goalId); setEditGoal(null); }}
-            onCreateTask={kanban.createTask}
-          />
+          <DeferredFeedPanel label="goal details">
+            <GoalDetailModal
+              goal={editGoal}
+              agents={agents}
+              onClose={() => setEditGoal(null)}
+              onUpdate={(goalId, fields) => { goalsHook.updateGoal(goalId, fields); setEditGoal(null); }}
+              onDelete={(goalId) => { goalsHook.deleteGoal(goalId); setEditGoal(null); }}
+              onCreateTask={async (fields) => { await kanban.createTask(fields); }}
+            />
+          </DeferredFeedPanel>
         )}
 
         {showCreate && (
@@ -1333,7 +1652,8 @@ export default function FeedTab({
             prefillTitle={createPrefillTitle}
             onClose={() => { setShowCreate(false); setCreatePrefillTitle(''); }}
             onCreate={async (fields) => {
-              await kanban.createTask(fields);
+              const created = await kanban.createTask(fields);
+              if (!created) return;
               setShowCreate(false);
               setCreatePrefillTitle('');
             }}
@@ -1346,133 +1666,161 @@ export default function FeedTab({
   // ─── Desktop Layout ────────────────────────────────────────────────────
   return (
     <View style={s.container}>
-      <AgentTopBar agents={orchestraAgents} />
-      {Platform.OS === 'web' && <CircleStoriesRail circleId={circleId} accentColor="#6366f1" />}
-      <OrchestraPanel agents={orchestraAgents} automationStats={automationStats} taskStats={taskStats} missionStats={missionStats} />
-      <NeedsAttentionPanel items={needsAttention} onAction={handleNeedsAttentionAction} />
-
-      {/* Collapsible search bar — click to expand, / key also opens */}
-      {searchExpanded ? (
-        <TaskSearchBar
-          searchText={searchText}
-          onSearchChange={setSearchText}
-          filterPriority={filterPriority}
-          onFilterPriority={setFilterPriority}
-          filterAssignee={filterAssignee}
-          onFilterAssignee={setFilterAssignee}
-          filterRoom={filterRoom}
-          onFilterRoom={setFilterRoom}
-          assigneeOptions={assigneeOptions}
-          roomOptions={roomOptions}
-          searchInputRef={searchInputRef}
-          totalTasks={totalTasks}
-        />
-      ) : (
-        <Pressable
-          onPress={() => { setSearchExpanded(true); setTimeout(() => searchInputRef.current?.focus(), 100); }}
-          style={{
-            flexDirection: 'row', alignItems: 'center', gap: 8,
-            paddingHorizontal: 16, paddingVertical: 6,
-            borderBottomWidth: 1, borderBottomColor: '#111',
-          }}
-        >
-          <Text style={{ color: '#404050', fontSize: 12, fontFamily: 'monospace' }}>/</Text>
-          <Text style={{ color: '#404050', fontSize: 12 }}>Search {totalTasks} tasks...</Text>
-          {(searchText || filterPriority || filterAssignee || filterRoom) && (
-            <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: '#6366f1', marginLeft: 4 }} />
-          )}
-        </Pressable>
-      )}
+      <FeedOverviewBar
+        circleId={circleId}
+        agents={orchestraAgents}
+        automationStats={automationStats}
+        taskStats={taskStats}
+        missionStats={missionStats}
+        expanded={overviewExpanded}
+        onToggle={() => setOverviewExpanded((value) => !value)}
+      />
+      <FeedAttentionDisclosure
+        items={needsAttention}
+        expanded={attentionExpanded}
+        onToggle={() => setAttentionExpanded((value) => !value)}
+        onAction={handleNeedsAttentionAction}
+      />
 
       <View style={s.body}>
-        <GoalsPanel
-          goals={goalsHook.goals}
-          agents={agents}
-          filteredGoalId={filteredGoalId}
-          onFilter={setFilteredGoalId}
-          onCreateGoal={goalsHook.createGoal}
-          onUpdateGoal={goalsHook.updateGoal}
-          onDeleteGoal={goalsHook.deleteGoal}
-          onCreateTask={kanban.createTask}
-          onEditGoal={setEditGoal}
-          plans={plansHook.plans}
-          circleId={circleId}
-          onCreatePlan={plansHook.createPlan}
-          onUpdatePlan={plansHook.updatePlan}
-          onDeletePlan={plansHook.deletePlan}
-          onGenerateTasks={plansHook.generateTasksFromPlan}
-          onOpenMarketplace={handleOpenMarketplace}
-        />
+        <DeferredFeedPanel label="goals">
+          <GoalsPanel
+            goals={goalsHook.goals}
+            agents={agents}
+            filteredGoalId={filteredGoalId}
+            onFilter={setFilteredGoalId}
+            onCreateGoal={goalsHook.createGoal}
+            onUpdateGoal={goalsHook.updateGoal}
+            onDeleteGoal={goalsHook.deleteGoal}
+            onCreateTask={async (fields) => { await kanban.createTask(fields); }}
+            onEditGoal={setEditGoal}
+            plans={plansHook.plans}
+            circleId={circleId}
+            onCreatePlan={plansHook.createPlan}
+            onUpdatePlan={plansHook.updatePlan}
+            onDeletePlan={plansHook.deletePlan}
+            onGenerateTasks={plansHook.generateTasksFromPlan}
+            onOpenMarketplace={handleOpenMarketplace}
+          />
+        </DeferredFeedPanel>
 
         {/* Center panel: Missions only (full height) */}
         <View style={ct.wrapper}>
-          <MissionsTab circleId={circleId} accentColor={accentColor || '#6366f1'} />
+          <DeferredFeedPanel label="missions">
+            <MissionsTab
+              circleId={circleId}
+              accentColor={accentColor || '#6366f1'}
+              missions={allMissions}
+              loading={missionsLoading}
+              onRefresh={refreshMissions}
+            />
+          </DeferredFeedPanel>
         </View>
 
         <View style={{ flex: 1, flexDirection: 'column', minWidth: 0 }}>
-          <KanbanViewToggle mode={kanbanViewMode} onChange={setKanbanViewMode} />
-          {kanbanViewMode === 'calendar' ? (
-            <TaskCalendar
-              tasks={Object.values(visibleTasksByColumn).flat()}
-              accentColor={accentColor || '#6366f1'}
-              isFiltered={hasActiveFilters}
-              onClearFilters={clearAllTaskFilters}
-              onSelectTask={(id) => {
-                const t = Object.values(visibleTasksByColumn).flat().find(x => x.id === id);
-                if (t) setDetailTask(t);
-              }}
-            />
-          ) : kanbanViewMode === 'table' ? (
-            <TaskTable
-              tasks={Object.values(visibleTasksByColumn).flat()}
-              accentColor={accentColor || '#6366f1'}
-              isFiltered={hasActiveFilters}
-              onClearFilters={clearAllTaskFilters}
-              onSelectTask={(id) => {
-                const t = Object.values(visibleTasksByColumn).flat().find(x => x.id === id);
-                if (t) setDetailTask(t);
-              }}
-              onStatusChange={(taskId, nextStatus) => kanban.moveTask(taskId, nextStatus)}
+          {/* Task search belongs to the task surface; it no longer pushes the
+              Goals and Missions panes below task-only controls. */}
+          {searchExpanded ? (
+            <TaskSearchBar
+              searchText={searchText}
+              onSearchChange={setSearchText}
+              filterPriority={filterPriority}
+              onFilterPriority={setFilterPriority}
+              filterAssignee={filterAssignee}
+              onFilterAssignee={setFilterAssignee}
+              filterRoom={filterRoom}
+              onFilterRoom={setFilterRoom}
+              assigneeOptions={assigneeOptions}
+              roomOptions={roomOptions}
+              searchInputRef={searchInputRef}
+              totalTasks={totalTasks}
             />
           ) : (
-            <KanbanBoard
-              columns={COLUMNS}
-              tasksByColumn={visibleTasksByColumn}
-              agents={agents}
-              goals={goalsHook.goals}
-              isFiltered={hasActiveFilters}
-              onClearFilters={clearAllTaskFilters}
-              onCardPress={setDetailTask}
-              onMoveTask={kanban.moveTask}
-              onQuickAdd={(status, title) => kanban.createTask({
-                title,
-                status,
-                goal_id: filteredGoalId || undefined,
-                room_id: filterRoom || undefined,
-              })}
-              onAddTask={(status) => { setCreateInColumn(status); setShowCreate(true); }}
-              onBatchMove={handleBatchMove}
-              onBatchAssignRoom={handleBatchAssignRoom}
-              roomOptions={roomOptions}
-              onArchiveDone={handleArchiveDone}
-            />
+            <Pressable
+              onPress={() => { setSearchExpanded(true); setTimeout(() => searchInputRef.current?.focus(), 100); }}
+              style={s.boardSearchTrigger}
+              accessibilityRole="button"
+              accessibilityLabel={`Search ${totalTasks} tasks`}
+            >
+              <Text style={s.boardSearchIcon}>/</Text>
+              <Text style={s.boardSearchText}>Search {totalTasks} tasks</Text>
+              {(searchText || filterPriority || filterAssignee || filterRoom) && <View style={s.boardSearchActiveDot} />}
+            </Pressable>
           )}
+          <KanbanViewToggle mode={kanbanViewMode} onChange={setKanbanViewMode} />
+          <DeferredFeedPanel label={`${kanbanViewMode} tasks`}>
+            {kanbanViewMode === 'calendar' ? (
+              <TaskCalendar
+                tasks={Object.values(visibleTasksByColumn).flat()}
+                accentColor={accentColor || '#6366f1'}
+                isFiltered={hasActiveFilters}
+                onClearFilters={clearAllTaskFilters}
+                onSelectTask={(id) => {
+                  const t = Object.values(visibleTasksByColumn).flat().find(x => x.id === id);
+                  if (t) setDetailTask(t);
+                }}
+              />
+            ) : kanbanViewMode === 'table' ? (
+              <TaskTable
+                tasks={Object.values(visibleTasksByColumn).flat()}
+                accentColor={accentColor || '#6366f1'}
+                isFiltered={hasActiveFilters}
+                onClearFilters={clearAllTaskFilters}
+                onSelectTask={(id) => {
+                  const t = Object.values(visibleTasksByColumn).flat().find(x => x.id === id);
+                  if (t) setDetailTask(t);
+                }}
+                onStatusChange={(taskId, nextStatus) => kanban.moveTask(taskId, nextStatus)}
+              />
+            ) : (
+              <KanbanBoard
+                columns={COLUMNS}
+                tasksByColumn={visibleTasksByColumn}
+                agents={agents}
+                goals={goalsHook.goals}
+                isFiltered={hasActiveFilters}
+                onClearFilters={clearAllTaskFilters}
+                onCardPress={setDetailTask}
+                onMoveTask={kanban.moveTask}
+                onQuickAdd={(status, title) => kanban.createTask({
+                  title,
+                  status,
+                  goal_id: filteredGoalId || undefined,
+                  room_id: filterRoom || undefined,
+                })}
+                onAddTask={(status) => { setCreateInColumn(status); setShowCreate(true); }}
+                onBatchMove={handleBatchMove}
+                onBatchAssignRoom={handleBatchAssignRoom}
+                roomOptions={roomOptions}
+                onArchiveDone={handleArchiveDone}
+              />
+            )}
+          </DeferredFeedPanel>
         </View>
       </View>
 
       {/* Collapsible Activity strip at bottom */}
-      <View style={{ borderTopWidth: 1, borderTopColor: '#151515', backgroundColor: '#0a0a0a' }}>
-        <View
-          style={{
-            flexDirection: 'row', alignItems: 'center', gap: 8,
-            paddingHorizontal: 16, paddingVertical: 8,
-          }}
+      <View style={s.activityDrawer}>
+        <Pressable
+          onPress={() => setActivityExpanded(!activityExpanded)}
+          style={s.activityDrawerHeader}
+          accessibilityRole="button"
+          accessibilityLabel={activityExpanded ? 'Hide recent activity' : 'Show recent activity'}
+          accessibilityState={{ expanded: activityExpanded }}
         >
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+          <Text style={s.activityDrawerTitle}>Recent activity</Text>
+          <Text style={s.activityDrawerSummary} numberOfLines={1}>
+            Runs, agent tasks, and AI tool updates
+          </Text>
+          <Text style={s.activityDrawerChevron}>{activityExpanded ? '−' : '+'}</Text>
+        </Pressable>
+        {activityExpanded && (
+          <>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.activityTabs}>
             {([
-              { key: 'activity' as DesktopLowerTab, label: 'ACTIVITY' },
-              { key: 'agents' as DesktopLowerTab, label: 'AGENT TASKS' },
-              { key: 'ai-tools' as DesktopLowerTab, label: 'AI TOOLS' },
+              { key: 'activity' as DesktopLowerTab, label: 'Activity' },
+              { key: 'agents' as DesktopLowerTab, label: 'Agent tasks' },
+              { key: 'ai-tools' as DesktopLowerTab, label: 'AI tools' },
             ]).map(tab => {
               const active = desktopLowerTab === tab.key;
               return (
@@ -1480,50 +1828,23 @@ export default function FeedTab({
                   key={tab.key}
                   onPress={() => {
                     setDesktopLowerTab(tab.key);
-                    if (!activityExpanded) setActivityExpanded(true);
                   }}
-                  style={{
-                    paddingHorizontal: 10,
-                    paddingVertical: 4,
-                    borderRadius: 999,
-                    borderWidth: 1,
-                    borderColor: active ? '#6366f155' : '#1f1f28',
-                    backgroundColor: active ? '#6366f118' : '#0f0f15',
-                  }}
+                  style={[s.activityTab, active && s.activityTabActive]}
+                  accessibilityRole="tab"
+                  accessibilityState={{ selected: active }}
                 >
-                  <Text style={{ color: active ? '#c7d2fe' : '#606070', fontSize: 10, fontWeight: '700', letterSpacing: 1 }}>
+                  <Text style={[s.activityTabText, active && s.activityTabTextActive]}>
                     {tab.label}
                   </Text>
                 </Pressable>
               );
             })}
           </ScrollView>
-          <Text style={{ color: '#404050', fontSize: 11, flex: 1, textAlign: 'right' }}>
-            {activityExpanded
-              ? desktopLowerTab === 'activity'
-                ? 'Hide feed'
-                : desktopLowerTab === 'agents'
-                  ? 'Hide agent task stream'
-                  : 'Hide AI tool feed'
-              : desktopLowerTab === 'activity'
-                ? 'Show recent agent activity'
-                : desktopLowerTab === 'agents'
-                  ? 'Show agent task stream'
-                  : 'Show AI tool feed'}
-          </Text>
-          <Pressable
-            onPress={() => setActivityExpanded(!activityExpanded)}
-            style={{ paddingHorizontal: 8, paddingVertical: 4 }}
-          >
-            <Text style={{ color: '#606070', fontSize: 14, fontFamily: 'monospace' }}>
-              {activityExpanded ? '−' : '+'}
-            </Text>
-          </Pressable>
-        </View>
-        {activityExpanded && (
-          <View style={{ height: 240, borderTopWidth: 1, borderTopColor: '#151515' }}>
+          <View style={s.activityDrawerBody}>
             {desktopLowerTab === 'activity' ? (
-              <ActivityFeedPanel circleId={circleId} agents={agents} />
+              <DeferredFeedPanel label="recent activity">
+                <ActivityFeedPanel circleId={circleId} agents={agents} onOpenOfficeRun={onOpenOfficeRun} />
+              </DeferredFeedPanel>
             ) : desktopLowerTab === 'agents' ? (
               <View style={{ flex: 1, paddingTop: 10 }}>
                 <ActiveRunsWidget circleId={circleId} />
@@ -1543,37 +1864,48 @@ export default function FeedTab({
               </View>
             )}
           </View>
+          </>
         )}
       </View>
 
       {detailTask && (
-        <TaskDetailModal
-          task={detailTask}
-          kanban={kanban}
-          agents={sortedAgentsForAssign}
-          goals={goalsHook.goals}
-          circleId={circleId}
-          onOpenMarketplace={handleOpenMarketplace}
-          onClose={() => setDetailTask(null)}
-        />
+        <DeferredFeedPanel label="task details">
+          <TaskDetailModal
+            task={detailTask}
+            kanban={kanban}
+            agents={sortedAgentsForAssign}
+            goals={goalsHook.goals}
+            circleId={circleId}
+            onOpenMarketplace={handleOpenMarketplace}
+            onOpenOfficeRun={onOpenOfficeRun}
+            onClose={() => setDetailTask(null)}
+          />
+        </DeferredFeedPanel>
       )}
 
       {editGoal && (
-        <GoalDetailModal
-          goal={editGoal}
-          agents={agents}
-          onClose={() => setEditGoal(null)}
-          onUpdate={(goalId, fields) => { goalsHook.updateGoal(goalId, fields); setEditGoal(null); }}
-          onDelete={(goalId) => { goalsHook.deleteGoal(goalId); setEditGoal(null); }}
-          onCreateTask={kanban.createTask}
-        />
+        <DeferredFeedPanel label="goal details">
+          <GoalDetailModal
+            goal={editGoal}
+            agents={agents}
+            onClose={() => setEditGoal(null)}
+            onUpdate={(goalId, fields) => { goalsHook.updateGoal(goalId, fields); setEditGoal(null); }}
+            onDelete={(goalId) => { goalsHook.deleteGoal(goalId); setEditGoal(null); }}
+            onCreateTask={async (fields) => { await kanban.createTask(fields); }}
+          />
+        </DeferredFeedPanel>
       )}
 
       {/* Member-card modal — driven by the @user deeplink consumer above. */}
-      <MemberCardModal
-        userId={memberCardUserId}
-        onClose={() => setMemberCardUserId(null)}
-      />
+      {memberCardUserId && (
+        <DeferredFeedPanel label="member details">
+          <MemberCardModal
+            circleId={circleId}
+            userId={memberCardUserId}
+            onClose={() => setMemberCardUserId(null)}
+          />
+        </DeferredFeedPanel>
+      )}
 
       {showCreate && (
         <CreateTaskModal
@@ -1588,7 +1920,8 @@ export default function FeedTab({
           prefillTitle={createPrefillTitle}
           onClose={() => { setShowCreate(false); setCreatePrefillTitle(''); }}
           onCreate={async (fields) => {
-            await kanban.createTask(fields);
+            const created = await kanban.createTask(fields);
+            if (!created) return;
             setShowCreate(false);
             setCreatePrefillTitle('');
           }}
@@ -1758,8 +2091,8 @@ function CreateTaskModal({
               <Text style={m.contextLabel}>Starting from current board context</Text>
               <View style={m.contextChipRow}>
                 {initialRoom && (
-                  <View style={[m.contextChip, { borderColor: (initialRoom.color || '#22d3ee') + '35' }]}>
-                    <View style={[m.contextChipDot, { backgroundColor: initialRoom.color || '#22d3ee' }]} />
+                  <View style={[m.contextChip, { borderColor: (initialRoom.color || '#6366f1') + '35' }]}>
+                    <View style={[m.contextChipDot, { backgroundColor: initialRoom.color || '#6366f1' }]} />
                     <Text style={m.contextChipText}>Room: {initialRoom.name}</Text>
                   </View>
                 )}
@@ -1785,7 +2118,7 @@ function CreateTaskModal({
                 </Pressable>
                 {rooms.map(room => {
                   const active = selectedRoomId === room.id;
-                  const color = room.color || '#22d3ee';
+                  const color = room.color || '#6366f1';
                   return (
                     <Pressable
                       key={room.id}
@@ -1991,7 +2324,98 @@ function CreateTaskModal({
 // ─── Styles ─────────────────────────────────────────────────────────────────
 
 const s = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#080808' },
+  container: { flex: 1, backgroundColor: '#0d1117' },
+  overviewShell: {
+    backgroundColor: '#161b22',
+    borderBottomWidth: 1,
+    borderBottomColor: '#21262d',
+    zIndex: 25,
+  },
+  overviewBar: {
+    minHeight: 58,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  overviewCopy: { flex: 1, minWidth: 0 },
+  overviewTitle: { color: '#e6edf3', fontSize: 17, fontWeight: '600' },
+  overviewSummary: { color: '#8b949e', fontSize: 12, marginTop: 2 },
+  overviewMeta: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  overviewAgentStatus: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  overviewAgentDot: { width: 7, height: 7, borderRadius: 4 },
+  overviewAgentText: { color: '#8b949e', fontSize: 12 },
+  overviewButton: {
+    minHeight: 36,
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    backgroundColor: '#21262d',
+    borderWidth: 1,
+    borderColor: '#30363d',
+    borderRadius: 6,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  overviewButtonHover: { backgroundColor: '#30363d', borderColor: '#8b949e' },
+  overviewButtonText: { color: '#e6edf3', fontSize: 12, fontWeight: '600' },
+  overviewDetails: { borderTopWidth: 1, borderTopColor: '#21262d' },
+  attentionShell: { backgroundColor: '#0d1117' },
+  attentionSummary: {
+    minHeight: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#21262d',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  attentionDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: '#f85149' },
+  attentionTitle: { color: '#e6edf3', fontSize: 12, fontWeight: '600' },
+  attentionPreview: { color: '#8b949e', fontSize: 11, flex: 1 },
+  attentionCount: { backgroundColor: '#f8514920', borderRadius: 20, paddingHorizontal: 7, paddingVertical: 2 },
+  attentionCountText: { color: '#f85149', fontSize: 10, fontWeight: '600' },
+  attentionChevron: { color: '#8b949e', fontSize: 15, width: 20, textAlign: 'center' },
+  boardSearchTrigger: {
+    minHeight: 40,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    backgroundColor: '#0d1117',
+    borderBottomWidth: 1,
+    borderBottomColor: '#21262d',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  boardSearchIcon: { color: '#8b949e', fontSize: 12 },
+  boardSearchText: { color: '#8b949e', fontSize: 12 },
+  boardSearchActiveDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#6366f1' },
+  activityDrawer: { borderTopWidth: 1, borderTopColor: '#21262d', backgroundColor: '#161b22' },
+  activityDrawerHeader: {
+    minHeight: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 16,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  activityDrawerTitle: { color: '#e6edf3', fontSize: 12, fontWeight: '600' },
+  activityDrawerSummary: { color: '#8b949e', fontSize: 11, flex: 1 },
+  activityDrawerChevron: { color: '#8b949e', fontSize: 15 },
+  activityTabs: { gap: 6, paddingHorizontal: 16, paddingBottom: 8 },
+  activityTab: {
+    minHeight: 34,
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#30363d',
+    backgroundColor: '#0d1117',
+  },
+  activityTabActive: { borderColor: '#6366f1', backgroundColor: '#6366f115' },
+  activityTabText: { color: '#8b949e', fontSize: 11, fontWeight: '600' },
+  activityTabTextActive: { color: '#a5b4fc' },
+  activityDrawerBody: { height: 240, borderTopWidth: 1, borderTopColor: '#21262d' },
   loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#080808' },
   loadingDots: { flexDirection: 'row', gap: 10, alignItems: 'center', height: 40 },
   loadingDot: { width: 10, height: 10, borderRadius: 5 },
@@ -2008,9 +2432,9 @@ const s = StyleSheet.create({
   },
   mobileTabBar: {
     flexDirection: 'row',
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#161b22',
     borderTopWidth: 1,
-    borderTopColor: '#151515',
+    borderTopColor: '#30363d',
     paddingVertical: 6,
     paddingHorizontal: 12,
     gap: 8,
@@ -2018,18 +2442,20 @@ const s = StyleSheet.create({
   mobileTabBtn: {
     alignItems: 'center',
     gap: 3,
-    minWidth: 72,
+    minWidth: 68,
+    minHeight: 48,
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 12,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
   mobileTabBtnActive: {
-    backgroundColor: '#151515',
+    backgroundColor: '#6366f115',
   },
   mobileTabIcon: {
-    fontSize: 16,
-    color: '#444444',
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#8b949e',
   },
   mobileTabIconActive: {
     color: '#6366f1',
@@ -2037,13 +2463,32 @@ const s = StyleSheet.create({
   mobileTabLabel: {
     fontSize: 10,
     fontWeight: '600',
-    color: '#444444',
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
+    color: '#8b949e',
   },
   mobileTabLabelActive: {
-    color: '#c0c0c0',
+    color: '#e6edf3',
   },
+  mobileMoreMenu: {
+    position: 'absolute',
+    right: 12,
+    bottom: 64,
+    zIndex: 80,
+    minWidth: 190,
+    padding: 6,
+    backgroundColor: '#1c2128',
+    borderWidth: 1,
+    borderColor: '#30363d',
+    borderRadius: 8,
+    ...(Platform.OS === 'web' ? { boxShadow: '0 8px 24px rgba(0,0,0,0.4)' } as any : {}),
+  },
+  mobileMoreItem: {
+    minHeight: 44,
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  mobileMoreItemText: { color: '#e6edf3', fontSize: 13, fontWeight: '500' },
 });
 
 // ─── Center Tab Switcher (Desktop: Activity ↔ Agent Tasks) ──────────────────
@@ -2190,6 +2635,9 @@ const at = StyleSheet.create({
   statusFailed: {
     backgroundColor: '#ef4444',
   },
+  statusUnknown: {
+    backgroundColor: '#f97316',
+  },
   agentName: {
     fontSize: 11,
     fontWeight: '700',
@@ -2221,6 +2669,12 @@ const at = StyleSheet.create({
     fontSize: 10,
     fontWeight: '600',
     fontStyle: 'italic',
+    marginTop: 2,
+  },
+  outcomeUnknownText: {
+    color: '#f97316',
+    fontSize: 10,
+    fontWeight: '600',
     marginTop: 2,
   },
   responseToggle: {

@@ -289,17 +289,17 @@ function main(): void {
 
   const two = decideAutoBestOfN({ ...raceBase, connectedProviders: ['anthropic', 'openai'] });
   assertEq(two.race, true, '(9) anthropic+openai → race');
-  assertEq(JSON.stringify(two.models), JSON.stringify(['claude-sonnet-4-6', 'gpt-5.5']), '(9) exactly the two concrete ids, priority order');
-  assert(two.reason.includes('claude-sonnet-4-6') && two.reason.includes('gpt-5.5'), '(9) race reason names the models', two.reason);
+  assertEq(JSON.stringify(two.models), JSON.stringify(['claude-sonnet-5', 'gpt-5.6-sol']), '(9) exactly the two current concrete ids, priority order');
+  assert(two.reason.includes('claude-sonnet-5') && two.reason.includes('gpt-5.6-sol'), '(9) race reason names the models', two.reason);
 
   const five = decideAutoBestOfN({ ...raceBase, connectedProviders: ['openrouter', 'deepseek', 'google_ai', 'openai', 'anthropic'] });
   assertEq(five.race, true, '(9) five providers → race');
   assertEq(five.models.length, 3, '(9) capped at 3 models');
-  assertEq(JSON.stringify(five.models), JSON.stringify(['claude-sonnet-4-6', 'gpt-5.5', 'google_ai/gemini-2.5-pro']), '(9) top-3 by priority');
+  assertEq(JSON.stringify(five.models), JSON.stringify(['claude-sonnet-5', 'gpt-5.6-sol', 'google_ai/gemini-3.6-flash']), '(9) top-3 current models by priority');
 
   const tail = decideAutoBestOfN({ ...raceBase, connectedProviders: ['openrouter', 'deepseek'] });
   assertEq(tail.race, true, '(9) deepseek+openrouter → race');
-  assertEq(JSON.stringify(tail.models), JSON.stringify(['deepseek/deepseek-v3.2', 'openrouter/auto']), '(9) tail providers keep priority order');
+  assertEq(JSON.stringify(tail.models), JSON.stringify(['deepseek/deepseek-v4-pro', 'openrouter/auto']), '(9) tail providers keep current priority order');
 
   const one = decideAutoBestOfN({ ...raceBase, connectedProviders: ['anthropic'] });
   assertEq(one.race, false, '(9) one provider → no race');

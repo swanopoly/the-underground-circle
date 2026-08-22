@@ -180,12 +180,17 @@ assert.deepEqual(
     },
     mutationDispatchReceipt: {
       schemaVersion: 1,
+      actionId: 'action-1',
       tool: 'desktop.click',
+      epochId: 'epoch-1',
       authorizedAt: '2026-07-24T13:59:59.000Z',
       dispatchedAt: '2026-07-24T14:00:00.000Z',
     },
     computerAppVerificationReceipt: {
       schemaVersion: 1,
+      actionId: 'action-1',
+      beforeEpochId: 'epoch-1',
+      afterEpochId: null,
       status: 'inconclusive',
       checkedAt: '2026-07-24T14:00:01.000Z',
       canComplete: false,
@@ -209,6 +214,75 @@ assert.equal(
   undefined,
   'metadata is omitted when no recognized receipt field survives',
 );
+const mismatchedVerification = sanitize({
+  mutationDispatchReceipt: {
+    schemaVersion: 1,
+    actionId: 'action-a',
+    tool: 'desktop.click',
+    epochId: 'epoch-a',
+    authorizedAt: '2026-07-24T13:59:59.000Z',
+    dispatchedAt: '2026-07-24T14:00:00.000Z',
+  },
+  computerAppVerificationReceipt: {
+    schemaVersion: 1,
+    actionId: 'action-b',
+    beforeEpochId: 'epoch-a',
+    afterEpochId: 'epoch-b',
+    status: 'verified',
+    checkedAt: '2026-07-24T14:00:01.000Z',
+    canComplete: true,
+    evidenceCount: 1,
+    blockerCount: 0,
+  },
+});
+assert.ok(mismatchedVerification?.mutationDispatchReceipt, 'a valid dispatch receipt remains available for outcome-unknown recovery');
+assert.equal(mismatchedVerification?.computerAppVerificationReceipt, undefined, 'verification for another action is stripped before persistence');
+
+const staleEpochVerification = sanitize({
+  mutationDispatchReceipt: {
+    schemaVersion: 1,
+    actionId: 'action-a',
+    tool: 'desktop.click',
+    epochId: 'epoch-a',
+    authorizedAt: '2026-07-24T13:59:59.000Z',
+    dispatchedAt: '2026-07-24T14:00:00.000Z',
+  },
+  computerAppVerificationReceipt: {
+    schemaVersion: 1,
+    actionId: 'action-a',
+    beforeEpochId: 'epoch-a',
+    afterEpochId: 'epoch-a',
+    status: 'verified',
+    checkedAt: '2026-07-24T14:00:01.000Z',
+    canComplete: true,
+    evidenceCount: 1,
+    blockerCount: 0,
+  },
+});
+assert.equal(staleEpochVerification?.computerAppVerificationReceipt, undefined, 'same-epoch verification is stripped as stale proof');
+
+const preDispatchVerification = sanitize({
+  mutationDispatchReceipt: {
+    schemaVersion: 1,
+    actionId: 'action-a',
+    tool: 'desktop.click',
+    epochId: 'epoch-a',
+    authorizedAt: '2026-07-24T13:59:59.000Z',
+    dispatchedAt: '2026-07-24T14:00:00.000Z',
+  },
+  computerAppVerificationReceipt: {
+    schemaVersion: 1,
+    actionId: 'action-a',
+    beforeEpochId: 'epoch-a',
+    afterEpochId: 'epoch-b',
+    status: 'verified',
+    checkedAt: '2026-07-24T13:59:59.500Z',
+    canComplete: true,
+    evidenceCount: 1,
+    blockerCount: 0,
+  },
+});
+assert.equal(preDispatchVerification?.computerAppVerificationReceipt, undefined, 'pre-dispatch verification is stripped before persistence');
 assert.doesNotThrow(() => {
   const hostileReceipt: Record<string, unknown> = { actionId: 'safe-action' };
   Object.defineProperty(hostileReceipt, 'tool', {

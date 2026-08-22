@@ -138,10 +138,10 @@ function formatActionVerb(a: LiveAction | undefined): { code: string; tone: stri
   if (a.tool === 'bash')          return { code: 'SH', tone: '#a855f7' };
   switch (action) {
     case 'screenshot':            return { code: 'SS', tone: '#64748b' };
-    case 'left_click':            return { code: 'CL', tone: '#22d3ee' };
-    case 'right_click':           return { code: 'RC', tone: '#22d3ee' };
-    case 'double_click':          return { code: 'DC', tone: '#22d3ee' };
-    case 'triple_click':          return { code: 'TC', tone: '#22d3ee' };
+    case 'left_click':            return { code: 'CL', tone: '#6366f1' };
+    case 'right_click':           return { code: 'RC', tone: '#6366f1' };
+    case 'double_click':          return { code: 'DC', tone: '#6366f1' };
+    case 'triple_click':          return { code: 'TC', tone: '#6366f1' };
     case 'mouse_move':            return { code: 'MV', tone: '#94a3b8' };
     case 'type':                  return { code: 'TY', tone: '#22c55e' };
     case 'key':                   return { code: 'KE', tone: '#22c55e' };
@@ -203,7 +203,7 @@ function ConfirmCountdown(props: { createdAtIso?: string; timeoutSec: number }):
 }
 
 export default function ComputerUseLiveCard(props: ComputerUseLiveCardProps) {
-  const accent = props.accentColor || '#22d3ee';
+  const accent = props.accentColor || '#6366f1';
   const maxIterations = props.maxIterations ?? 20;
 
   // Pinned frame — when a user taps a timeline thumbnail we freeze the
@@ -1087,7 +1087,7 @@ const s = StyleSheet.create({
     backgroundColor: '#020617',
   },
   actionPreviewLabel: {
-    color: '#22d3ee',
+    color: '#6366f1',
     fontSize: 9,
     fontWeight: '900',
     letterSpacing: 0.8,

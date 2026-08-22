@@ -466,7 +466,7 @@ export default function OfficeActionPanel({ agents, getConfig, onResult, compact
             icon="📈"
             label="Status"
             onPress={() => handleAction('status')}
-            color="#22d3ee"
+            color="#6366f1"
             disabled={!hasAgents}
             size={buttonSize}
             tooltip="Quick status check: see all active agents, their status, and daily costs"

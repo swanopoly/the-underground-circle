@@ -41,46 +41,32 @@ export default function JoinCircleScreen({ navigation }: any) {
       setLoading(false);
       return;
     }
-    const { data: circle, error: findError } = await supabase
-      .from('circles')
-      .select('*, circle_members(count)')
-      .eq('invite_code', code.trim().toLowerCase())
-      .single();
-    if (findError || !circle) {
-      setError('No circle found with that code.');
-      setLoading(false);
-      return;
-    }
-    const memberCount = circle.circle_members?.[0]?.count || 0;
-    if (memberCount >= circle.max_members) {
-      setError('This circle is full.');
-      setLoading(false);
-      return;
-    }
-    const { data: existing } = await supabase
-      .from('circle_members')
-      .select('id')
-      .eq('circle_id', circle.id)
-      .eq('user_id', user.id)
-      .single();
-    if (existing) {
-      setError("You're already in this circle.");
-      setLoading(false);
-      return;
-    }
-    const { error: joinError } = await supabase.from('circle_members').insert({
-      circle_id: circle.id,
-      user_id: user.id,
-      role: 'member',
+    // Resolve, authorize, capacity-check, consume, and join in one serialized
+    // server transaction. Never query raw invite/circle rows by secret code.
+    const { data, error: joinError } = await supabase.rpc('join_circle_by_invite_code', {
+      p_invite_code: code.trim(),
     });
     setLoading(false);
     if (joinError) {
-      setError(joinError.message);
+      setError(joinError.message?.includes('circle_full')
+        ? 'This circle is full.'
+        : 'That invite is invalid, expired, or unavailable.');
       return;
     }
-    awardXP(user.id, getXPForAction('circle_join'), 'circle_join', { circle_id: circle.id }).catch(console.error);
-    showAlert("You're in!", `Welcome to ${circle.name}.`);
-    navigation.replace('CircleDetail', { circleId: circle.id, circleName: circle.name, tab: 'OFFICE' });
+    const joined = Array.isArray(data) ? data[0] : data;
+    if (!joined?.circle_id) {
+      setError('The join could not be verified. Please try again.');
+      return;
+    }
+    if (!joined.already_member) {
+      awardXP(user.id, getXPForAction('circle_join'), 'circle_join', { circle_id: joined.circle_id }).catch(console.error);
+    }
+    showAlert(joined.already_member ? 'Circle found' : "You're in!", `Welcome to ${joined.circle_name}.`);
+    navigation.replace('CircleDetail', {
+      circleId: joined.circle_id,
+      circleName: joined.circle_name,
+      tab: 'OFFICE',
+    });
   };
 
   return (
@@ -119,10 +105,10 @@ export default function JoinCircleScreen({ navigation }: any) {
                   onChangeText={setCode}
                   autoCapitalize="none"
                   autoCorrect={false}
-                  maxLength={32}
+                  maxLength={64}
                 />
               </View>
-              <Text style={styles.helper}>Codes are 8 lowercase characters. Ask the circle's owner for one.</Text>
+              <Text style={styles.helper}>Enter the code exactly as shared by the circle owner.</Text>
             </View>
 
             <Pressable

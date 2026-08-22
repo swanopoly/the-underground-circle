@@ -168,7 +168,7 @@ export const CORE_GOLDEN_CORPUS: CoreGoldenCase[] = [
     id: 'approval-delete-floor-beats-auto',
     suite: 'approval',
     describe:
-      'the always-confirm floor (delete) requires approval even when the category is user-auto-approved AND the tool mode is auto',
+      'the always-exact delete effect requires approval even when the category is user-auto-approved AND the tool mode is auto',
     run: () => {
       const d = resolveApprovalDecision({
         category: 'delete',
@@ -176,7 +176,7 @@ export const CORE_GOLDEN_CORPUS: CoreGoldenCase[] = [
         toolApprovalMode: 'auto',
         isFloorAction: true,
       });
-      return d.kind === 'require_approval' && d.category === 'delete' && /floor/.test(d.reason);
+      return d.kind === 'require_approval' && d.category === 'delete' && /always-exact/.test(d.reason);
     },
   },
   {
@@ -191,10 +191,11 @@ export const CORE_GOLDEN_CORPUS: CoreGoldenCase[] = [
   {
     id: 'approval-tool-auto-clean-auto-approves',
     suite: 'approval',
-    describe: 'tool policy auto + provably non-mutating & non-external → auto_approve',
+    describe: 'tool policy auto + positively classified observe + non-mutating/non-external → auto_approve',
     run: () => {
       const d = resolveApprovalDecision({
         toolApprovalMode: 'auto',
+        effect: 'observe',
         mutatesState: false,
         externalSideEffect: false,
       });
@@ -204,9 +205,9 @@ export const CORE_GOLDEN_CORPUS: CoreGoldenCase[] = [
   {
     id: 'approval-tool-auto-mutating-fails-closed',
     suite: 'approval',
-    describe: 'tool auto is DROPPED when the tool mutates state → fail-closed require_approval',
+    describe: 'even a positively classified observe tool fails closed when it reports a mutation',
     run: () => {
-      const d = resolveApprovalDecision({ toolApprovalMode: 'auto', mutatesState: true });
+      const d = resolveApprovalDecision({ toolApprovalMode: 'auto', effect: 'observe', mutatesState: true });
       return d.kind === 'require_approval' && /fail-closed/.test(d.reason);
     },
   },
@@ -231,10 +232,10 @@ export const CORE_GOLDEN_CORPUS: CoreGoldenCase[] = [
   {
     id: 'approval-pay-marker-category-floors',
     suite: 'approval',
-    describe: 'a floor-marker category (pay) forces approval even under tool auto (defense-in-depth)',
+    describe: 'the payment effect forces exact approval even under tool auto (defense-in-depth)',
     run: () => {
       const d = resolveApprovalDecision({ category: 'pay', toolApprovalMode: 'auto' });
-      return d.kind === 'require_approval' && /floor/.test(d.reason);
+      return d.kind === 'require_approval' && /always-exact/.test(d.reason);
     },
   },
   {

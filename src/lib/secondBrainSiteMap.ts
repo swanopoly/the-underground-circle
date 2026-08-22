@@ -103,7 +103,7 @@ const SITE_SECTIONS: SiteSection[] = [
   {
     key: 'provider-routing',
     title: 'Provider Routing — Multi-Provider LLM Orchestration',
-    content: `Provider routing is a first-class system managing requests across 18+ AI providers. crossProviderRouter.ts handles fallback chains, universalInvoke.ts provides a unified invocation API, and billingPriority.ts determines cost-aware routing order. Model IDs use provider prefixes: openrouter/auto, google_ai/gemini-2.5-pro, deepseek/deepseek-reasoner. Alias normalization: hugging_face → huggingface, z_ai → zai. The llm-proxy edge function routes authenticated requests server-side. Provider changes must be reflected in 8 files simultaneously. Key: crossProviderRouter.ts, universalInvoke.ts, billingPriority.ts, llm-proxy.`,
+    content: `Provider routing is a first-class system managing requests across 18+ AI providers. crossProviderRouter.ts handles fallback chains, universalInvoke.ts provides a unified invocation API, and billingPriority.ts determines cost-aware routing order. Model IDs use provider prefixes: openrouter/auto, google_ai/gemini-3.6-flash, deepseek/deepseek-v4-pro. Alias normalization: hugging_face → huggingface, z_ai → zai. The llm-proxy edge function routes authenticated requests server-side, and its authenticated list_models action hydrates current account catalogs while curated rows keep the site usable offline. Key: crossProviderRouter.ts, universalInvoke.ts, billingPriority.ts, llmProviders.ts, llm-proxy.`,
     tags: ['routing', 'providers', 'llm', 'fallback', 'model-ids', 'cross-provider'],
     importance: 0.82,
     linksTo: ['marketplace', 'chat', 'blackswan'],

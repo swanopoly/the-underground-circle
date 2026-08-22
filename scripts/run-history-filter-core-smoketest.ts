@@ -32,6 +32,8 @@
 
 import {
   bucketRunStatus,
+  bucketRunForHistory,
+  describeRunHistoryStatus,
   filterAndStatRuns,
   formatRunHistoryStatsLine,
   EMPTY_RUN_HISTORY_STATS,
@@ -157,6 +159,31 @@ function main(): void {
     const result = filterAndStatRuns(rows, { query: 'edge', statusFilter: 'failed' });
     assertEq(result.visible.map((r) => r.id).join(','), 'a', '(5) query AND status compose');
     assertEq(result.stats.count, 3, '(5) stats still cover the FULL list');
+  }
+
+  // Freshness is part of the ACTIVE contract: old status-only zombies remain
+  // visible in ALL/OTHER as STALE, but never inflate ACTIVE.
+  {
+    const nowMs = Date.UTC(2026, 7, 11, 12, 0, 0);
+    const fresh = run({ id: 'fresh', status: 'running', updated_at: new Date(nowMs - 60_000).toISOString() });
+    const planning = run({ id: 'planning', status: 'planning', updated_at: new Date(nowMs - 60_000).toISOString() });
+    const queued = run({ id: 'queued', status: 'queued', updated_at: new Date(nowMs - 60_000).toISOString() });
+    const paused = run({ id: 'paused', status: 'paused', updated_at: new Date(nowMs - 60_000).toISOString() });
+    const waiting = run({ id: 'waiting', status: 'waiting_approval', updated_at: new Date(nowMs - 60_000).toISOString() });
+    const stale = run({ id: 'stale', status: 'running', updated_at: new Date(nowMs - 31 * 60_000).toISOString() });
+    assertEq(bucketRunForHistory(fresh, nowMs), 'running', '(5b) fresh running row stays ACTIVE');
+    assertEq(bucketRunForHistory(planning, nowMs), 'running', '(5b) fresh planning row stays ACTIVE');
+    assertEq(bucketRunForHistory(queued, nowMs), 'other', '(5b) queued work has not started and is not ACTIVE');
+    assertEq(bucketRunForHistory(paused, nowMs), 'other', '(5b) paused work is not ACTIVE');
+    assertEq(bucketRunForHistory(waiting, nowMs), 'other', '(5b) approval-waiting work is not ACTIVE');
+    assertEq(bucketRunForHistory(stale, nowMs), 'other', '(5b) stale running row leaves ACTIVE');
+    assertEq(filterAndStatRuns([fresh, planning, queued, paused, waiting, stale], { statusFilter: 'running', nowMs }).visible.map((r) => r.id).join(','), 'fresh,planning',
+      '(5b) ACTIVE filter contains only actually processing fresh work');
+    assertEq(filterAndStatRuns([fresh, planning, queued, paused, waiting, stale], { statusFilter: 'other', nowMs }).visible.map((r) => r.id).join(','), 'queued,paused,waiting,stale',
+      '(5b) queued, paused, waiting, and stale rows remain inspectable under OTHER');
+    assert(describeRunHistoryStatus(paused, nowMs).label.includes('NOT ACTIVE'), '(5b) fresh paused copy is explicit');
+    const presentation = describeRunHistoryStatus(stale, nowMs);
+    assert(presentation.stale && presentation.label.includes('NOT ACTIVE'), '(5b) stale row copy cannot say RUNNING');
   }
 
   // ── Group 6: stats through the REAL rollup (pinned dollars) ────────────────

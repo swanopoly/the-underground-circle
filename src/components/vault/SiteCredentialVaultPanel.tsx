@@ -40,6 +40,7 @@ import {
   pruneExpiredVaultAccessGrants,
 } from '../../lib/vaultAgentAccess';
 import { supabase } from '../../lib/supabase';
+import { loadSafeCircleProfiles } from '../../lib/safeProfiles';
 import { useAuth } from '../../hooks/useAuth';
 
 interface Props {
@@ -144,19 +145,6 @@ const PASSWORD_CHAR_GROUPS = [
   '!@#$%^&*_-+=?',
 ];
 const PASSWORD_CHARS = PASSWORD_CHAR_GROUPS.join('');
-
-const VAULT_SPARKS = [
-  { x: -278, y: -128, size: 8, delay: 0.2 },
-  { x: 268, y: -102, size: 5, delay: 0.24 },
-  { x: -214, y: 128, size: 6, delay: 0.3 },
-  { x: 246, y: 118, size: 8, delay: 0.34 },
-  { x: -82, y: -164, size: 5, delay: 0.38 },
-  { x: 104, y: 160, size: 6, delay: 0.42 },
-  { x: -338, y: -18, size: 7, delay: 0.46 },
-  { x: 342, y: 8, size: 5, delay: 0.5 },
-  { x: -22, y: 178, size: 4, delay: 0.54 },
-  { x: 14, y: -186, size: 4, delay: 0.58 },
-];
 
 function webCursor(cursor: string = 'pointer') {
   return Platform.OS === 'web' ? ({ cursor } as any) : null;
@@ -455,6 +443,12 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
   const [unlocking, setUnlocking] = useState(false);
   const doorProgress = useRef(new Animated.Value(0)).current;
   const lockShake = useRef(new Animated.Value(0)).current;
+  // Red ACCESS DENIED pulse on a failed unlock (runs alongside the shake).
+  const denyFlash = useRef(new Animated.Value(0)).current;
+  // Carries the end-of-open flash ACROSS the lock→dashboard mount so the
+  // reveal reads as "light floods in", not a hard component swap.
+  const revealFlash = useRef(new Animated.Value(0)).current;
+  const [revealing, setRevealing] = useState(false);
   const [entries, setEntries] = useState<SiteCredentialVaultEntry[]>([]);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -470,6 +464,11 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
   const [rotationOnly, setRotationOnly] = useState(false);
   const [riskFilter, setRiskFilter] = useState<RiskFilter>('all');
   const [securityOpen, setSecurityOpen] = useState(false);
+  // Single gate for everything that is not day-to-day credential work
+  // (security posture, CSV import, activity log, vault facts).
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  // Per-entry counterpart: which credential has its settings/audit fold open.
+  const [entrySettingsOpenId, setEntrySettingsOpenId] = useState<string | null>(null);
 
   const [platform, setPlatform] = useState('wordpress');
   const [label, setLabel] = useState('default');
@@ -544,14 +543,18 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     if (!vaultUnlocked) return;
     const { data } = await supabase
       .from('circle_members')
-      .select('user_id, profiles!user_id(display_name, username)')
+      .select('user_id')
       .eq('circle_id', circleId);
     if (Array.isArray(data)) {
+      const profiles = await loadSafeCircleProfiles({
+        circleId,
+        userIds: data.map((row: any) => row.user_id),
+      });
       setMembers(
-        data.map((row: any) => ({
-          user_id: row.user_id,
-          display_name: row.profiles?.display_name || row.profiles?.username || 'Member',
-          username: row.profiles?.username || '',
+        profiles.map(profile => ({
+          user_id: profile.id,
+          display_name: profile.display_name || profile.username || 'Member',
+          username: profile.username || '',
         })),
       );
     }
@@ -566,8 +569,6 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     if (!Array.isArray(raw)) return [];
     return raw.filter((value): value is string => typeof value === 'string');
   };
-
-  const isRestricted = (entry: SiteCredentialVaultEntry): boolean => allowedMemberIds(entry).length > 0;
 
   const isVisibleToCurrentUser = (entry: SiteCredentialVaultEntry): boolean => {
     const list = allowedMemberIds(entry);
@@ -1326,14 +1327,22 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
 
   const playUnlockFailure = () => {
     lockShake.setValue(0);
-    Animated.sequence([
-      // Softer than ±10 — the old shake felt cartoonish. ±4 reads as
-      // "denied" without making the card look broken.
-      Animated.timing(lockShake, { toValue: 4, duration: 42, useNativeDriver: true }),
-      Animated.timing(lockShake, { toValue: -4, duration: 42, useNativeDriver: true }),
-      Animated.timing(lockShake, { toValue: 3, duration: 42, useNativeDriver: true }),
-      Animated.timing(lockShake, { toValue: -3, duration: 42, useNativeDriver: true }),
-      Animated.timing(lockShake, { toValue: 0, duration: 58, useNativeDriver: true }),
+    denyFlash.setValue(0);
+    Animated.parallel([
+      Animated.sequence([
+        // Softer than ±10 — the old shake felt cartoonish. ±4 reads as
+        // "denied" without making the card look broken.
+        Animated.timing(lockShake, { toValue: 4, duration: 42, useNativeDriver: true }),
+        Animated.timing(lockShake, { toValue: -4, duration: 42, useNativeDriver: true }),
+        Animated.timing(lockShake, { toValue: 3, duration: 42, useNativeDriver: true }),
+        Animated.timing(lockShake, { toValue: -3, duration: 42, useNativeDriver: true }),
+        Animated.timing(lockShake, { toValue: 0, duration: 58, useNativeDriver: true }),
+      ]),
+      // Red pulse: snap on, decay slow — reads as the mechanism refusing.
+      Animated.sequence([
+        Animated.timing(denyFlash, { toValue: 1, duration: 70, easing: Easing.out(Easing.quad), useNativeDriver: true }),
+        Animated.timing(denyFlash, { toValue: 0, duration: 520, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      ]),
     ]).start();
   };
 
@@ -1370,20 +1379,50 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     setUnlockPassword('');
     setVaultOpening(true);
     doorProgress.setValue(0);
-    Animated.timing(doorProgress, {
-      toValue: 1,
-      duration: 1250,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }).start(() => {
+    const reduceMotion = Platform.OS === 'web'
+      && typeof window !== 'undefined'
+      && !!window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+    // Four mechanical phases, each with its own easing (a single eased ramp
+    // reads as one motion; a vault opening is a SEQUENCE):
+    //   A 0→0.28  wheel     — the combination wheel accelerates
+    //   B →0.45   dogs      — eight locking dogs retract toward the hub
+    //   C →0.58   seal      — the pressure ring releases and the door settles
+    //   D →1      swing     — the circular plate opens on its hinge into light
+    const open = reduceMotion
+      ? Animated.timing(doorProgress, { toValue: 1, duration: 320, easing: Easing.out(Easing.quad), useNativeDriver: true })
+      : Animated.sequence([
+          Animated.timing(doorProgress, { toValue: 0.28, duration: 560, easing: Easing.in(Easing.cubic), useNativeDriver: true }),
+          Animated.timing(doorProgress, { toValue: 0.45, duration: 280, easing: Easing.out(Easing.quad), useNativeDriver: true }),
+          Animated.timing(doorProgress, { toValue: 0.58, duration: 240, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+          Animated.timing(doorProgress, { toValue: 1, duration: 640, easing: Easing.inOut(Easing.cubic), useNativeDriver: true }),
+        ]);
+    open.start(() => {
+      // Mount the dashboard UNDER the flash, then fade the flash out over
+      // it — the reveal carries across the component swap instead of
+      // hard-cutting from the open vault to a data table.
+      if (!reduceMotion) {
+        setRevealing(true);
+        revealFlash.setValue(1);
+      }
       setVaultUnlocked(true);
       setVaultOpening(false);
+      if (!reduceMotion) {
+        Animated.timing(revealFlash, {
+          toValue: 0,
+          duration: 520,
+          easing: Easing.out(Easing.quad),
+          useNativeDriver: true,
+        }).start(() => setRevealing(false));
+      }
     });
   };
 
   const handleLockVault = () => {
     setVaultUnlocked(false);
     setVaultOpening(false);
+    setRevealing(false);
+    revealFlash.setValue(0);
+    denyFlash.setValue(0);
     doorProgress.setValue(0);
     setUnlockPassword('');
     setUnlockError('');
@@ -1407,13 +1446,13 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
         accentColor={accentColor}
         circleId={circleId}
         fullHeight={fullHeight}
-        email={user?.email || ''}
         password={unlockPassword}
         error={unlockError}
         unlocking={unlocking}
         opening={vaultOpening}
         doorProgress={doorProgress}
         shake={lockShake}
+        denyFlash={denyFlash}
         onPasswordChange={setUnlockPassword}
         onUnlock={handleUnlockVault}
       />
@@ -1428,29 +1467,16 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
       ]}
       nativeID="section-site-credential-vault"
     >
+      {/* One-line header — trust badges, subtitle, and the serial moved
+          into the Advanced accordion; the list is the interface. */}
       <View style={styles.header}>
         <View style={styles.headerText}>
           <View style={styles.kickerRow}>
-            <Text style={styles.kicker}>▣ SITE VAULT</Text>
-            <Text style={[styles.lockedPill, { color: accentColor, borderColor: accentColor + '55', backgroundColor: accentColor + '14' }]}>● VAULT OPEN</Text>
-          </View>
-          <Text style={styles.title}>Agent login vault</Text>
-          <Text style={styles.subtitle}>
-            Store website credentials, restrict what agents can do, and test readiness without putting passwords in prompts.
-          </Text>
-          <View style={styles.statusRibbon}>
-            <View style={styles.statusPill}>
-              <View style={styles.statusDot} />
-              <Text style={styles.statusPillText}>ENCRYPTED · AT REST</Text>
-            </View>
-            <View style={styles.statusPill}>
-              <View style={styles.statusDot} />
-              <Text style={styles.statusPillText}>RLS · CIRCLE MEMBERS</Text>
-            </View>
-            <View style={styles.statusPill}>
-              <View style={styles.statusDot} />
-              <Text style={styles.statusPillText}>AUDIT · ALL ACCESS</Text>
-            </View>
+            <Text style={styles.title}>Site Vault</Text>
+            <Text style={[styles.lockedPill, { color: accentColor, borderColor: accentColor + '55', backgroundColor: accentColor + '14' }]}>● OPEN</Text>
+            <Text style={styles.headerCount}>
+              {entries.length} credential{entries.length === 1 ? '' : 's'}
+            </Text>
           </View>
         </View>
         <View style={styles.headerRight}>
@@ -1459,7 +1485,7 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
             disabled={loading}
             style={[styles.refreshBtn, { borderColor: accentColor + '55' }, webCursor(loading ? 'wait' : 'pointer')]}
           >
-            {loading ? <ActivityIndicator size="small" color={accentColor} /> : <Text style={[styles.refreshText, { color: accentColor }]}>↻ REFRESH</Text>}
+            {loading ? <ActivityIndicator size="small" color={accentColor} /> : <Text style={[styles.refreshText, { color: accentColor }]}>↻</Text>}
           </Pressable>
           <Pressable
             onPress={handleLockVault}
@@ -1467,7 +1493,6 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
           >
             <Text style={[styles.refreshText, { color: '#f59e0b' }]}>LOCK</Text>
           </Pressable>
-          <Text style={styles.vaultSerial}>VAULT-{(circleId || '').replace(/-/g, '').slice(0, 8).toUpperCase() || '00000000'}</Text>
         </View>
       </View>
 
@@ -1478,246 +1503,6 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
         contentContainerStyle={styles.scrollerContent}
         showsVerticalScrollIndicator
       >
-        <View style={styles.statsGrid}>
-          <MetricCard label="Credentials" value={String(entries.length)} />
-          <MetricCard label="Ready" value={String(readinessStats.ready)} color="#22c55e" />
-          <MetricCard label="Needs Test" value={String(readinessStats.needsTest)} color="#f59e0b" />
-          <MetricCard label="Rotation Due" value={String(readinessStats.rotationDue)} color="#f97316" />
-          <MetricCard
-            label="Security"
-            value={`${securityReport.score}/100`}
-            color={securityReport.grade === 'critical' ? '#ef4444' : securityReport.score >= 90 ? '#22c55e' : securityReport.score >= 75 ? '#f59e0b' : '#fb7185'}
-          />
-          <MetricCard
-            label="High Risk"
-            value={String(securityReport.counts.critical + securityReport.counts.high)}
-            color={securityReport.counts.critical + securityReport.counts.high > 0 ? '#ef4444' : '#22c55e'}
-          />
-        </View>
-
-        <View style={[styles.card, securityOpen && styles.cardExpanded]}>
-          <Pressable
-            onPress={() => setSecurityOpen((value) => !value)}
-            style={({ hovered, pressed }: any) => [
-              styles.cardHeader,
-              webTransition(),
-              securityOpen && accordionExpandedStyle(accentColor),
-              hovered && accordionHoverStyle(accentColor),
-              pressed && accordionPressedStyle(accentColor),
-              webCursor(),
-            ]}
-          >
-            <View style={styles.cardHeaderText}>
-              <Text style={styles.cardTitle}>Security Command Center</Text>
-              <Text style={styles.cardMeta}>
-                {securityReport.score}/100 · {securityReport.counts.critical} critical · {securityReport.counts.high} high · {securityReport.expiredGrantCount} expired grant{securityReport.expiredGrantCount === 1 ? '' : 's'}
-              </Text>
-            </View>
-            <AccordionChevron open={securityOpen} accent={accentColor} />
-          </Pressable>
-          {securityOpen ? (
-            <View style={styles.form}>
-              <View style={styles.securityHero}>
-                <View style={styles.securityScoreRing}>
-                  <Text
-                    style={[
-                      styles.securityScoreValue,
-                      {
-                        color: securityReport.grade === 'critical'
-                          ? '#ef4444'
-                          : securityReport.score >= 90
-                            ? '#22c55e'
-                            : securityReport.score >= 75
-                              ? '#f59e0b'
-                              : '#fb7185',
-                      },
-                    ]}
-                  >
-                    {securityReport.score}
-                  </Text>
-                  <Text style={styles.securityScoreLabel}>score</Text>
-                </View>
-                <View style={styles.securitySummaryBody}>
-                  <Text style={styles.sectionTitle}>
-                    {securityReport.grade === 'excellent'
-                      ? 'Vault posture is strong'
-                      : securityReport.grade === 'good'
-                        ? 'Vault posture is good'
-                        : securityReport.grade === 'critical'
-                          ? 'Critical vault fixes needed'
-                          : 'Vault needs hardening'}
-                  </Text>
-                  <Text style={styles.helperText}>
-                    Tracks approval gaps, scoped origins, high-risk actions, stale grants, rotation debt, failed tests, and breached-secret flags.
-                  </Text>
-                  <View style={styles.securityCountGrid}>
-                    <SecurityCount label="Critical" value={securityReport.counts.critical} color="#ef4444" />
-                    <SecurityCount label="High" value={securityReport.counts.high} color="#fb7185" />
-                    <SecurityCount label="Medium" value={securityReport.counts.medium} color="#f59e0b" />
-                    <SecurityCount label="Low" value={securityReport.counts.low} color="#94a3b8" />
-                  </View>
-                </View>
-              </View>
-
-              {securityReport.issues.length > 0 ? (
-                <View style={styles.securityIssueList}>
-                  {securityReport.issues.slice(0, 8).map((issue) => {
-                    const entry = entries.find((item) => item.id === issue.credentialId);
-                    const severityColor =
-                      issue.severity === 'critical' ? '#ef4444' :
-                      issue.severity === 'high' ? '#fb7185' :
-                      issue.severity === 'medium' ? '#f59e0b' :
-                      '#94a3b8';
-                    return (
-                      <View key={issue.id} style={[styles.securityIssueRow, { borderColor: severityColor + '44' }]}>
-                        <View style={styles.securityIssueTop}>
-                          <Text style={[styles.securitySeverity, { color: severityColor }]}>{issue.severity}</Text>
-                          <Text style={styles.securityIssueTarget}>
-                            {entry ? `${entry.platform}/${entry.label}` : issue.credentialId.slice(0, 8)}
-                          </Text>
-                        </View>
-                        <Text style={styles.securityIssueTitle}>{issue.title}</Text>
-                        <Text style={styles.helperText}>{issue.detail}</Text>
-                        <Text style={[styles.helperText, { color: severityColor }]}>Fix: {issue.fix}</Text>
-                      </View>
-                    );
-                  })}
-                </View>
-              ) : (
-                <Text style={styles.helperText}>No vault security issues detected for credentials visible to you.</Text>
-              )}
-
-              <View style={styles.actionRow}>
-                <Pressable
-                  onPress={() => setRiskFilter('security_risk')}
-                  style={[styles.secondaryBtn, { borderColor: '#ef444466' }, webCursor()]}
-                >
-                  <Text style={[styles.secondaryText, { color: '#fca5a5' }]}>Review high-risk</Text>
-                </Pressable>
-                <Pressable
-                  onPress={handleHardenHighRisk}
-                  disabled={bulkBusy || securityReport.counts.critical + securityReport.counts.high === 0}
-                  style={[styles.secondaryBtn, { borderColor: accentColor + '55' }, (bulkBusy || securityReport.counts.critical + securityReport.counts.high === 0) && styles.disabledBtn, webCursor(bulkBusy ? 'wait' : 'pointer')]}
-                >
-                  <Text style={[styles.secondaryText, { color: accentColor }]}>Harden high-risk</Text>
-                </Pressable>
-                <Pressable
-                  onPress={handlePruneAllExpiredGrants}
-                  disabled={bulkBusy || securityReport.expiredGrantCount === 0}
-                  style={[styles.secondaryBtn, (bulkBusy || securityReport.expiredGrantCount === 0) && styles.disabledBtn, webCursor(bulkBusy ? 'wait' : 'pointer')]}
-                >
-                  <Text style={styles.secondaryText}>Remove expired grants</Text>
-                </Pressable>
-              </View>
-            </View>
-          ) : null}
-        </View>
-
-        <View style={[styles.card, importOpen && styles.cardExpanded]}>
-          <Pressable
-            onPress={() => setImportOpen((value) => !value)}
-            style={({ hovered, pressed }: any) => [
-              styles.cardHeader,
-              webTransition(),
-              importOpen && accordionExpandedStyle(accentColor),
-              hovered && accordionHoverStyle(accentColor),
-              pressed && accordionPressedStyle(accentColor),
-              webCursor(),
-            ]}
-          >
-            <View style={styles.cardHeaderText}>
-              <Text style={styles.cardTitle}>Import from CSV</Text>
-              <Text style={styles.cardMeta}>1Password, Bitwarden, or LastPass exports. Auto-detects format.</Text>
-            </View>
-            <AccordionChevron open={importOpen} accent={accentColor} />
-          </Pressable>
-          {importOpen ? (
-            <View style={styles.form}>
-              {Platform.OS === 'web' ? (
-                <View style={styles.actionRow}>
-                  {/* @ts-ignore — RN Web exposes the underlying input */}
-                  <input
-                    type="file"
-                    accept=".csv,text/csv"
-                    onChange={(e: any) => {
-                      const file: File | undefined = e?.target?.files?.[0];
-                      if (file) handleImportFile(file);
-                      // Reset so re-selecting the same file fires onChange again.
-                      e.target.value = '';
-                    }}
-                    style={{
-                      color: '#cbd5e1',
-                      fontSize: 12,
-                      padding: 6,
-                      borderRadius: 8,
-                      border: '1px solid #ffffff20',
-                      backgroundColor: '#050914',
-                    }}
-                  />
-                </View>
-              ) : (
-                <Text style={styles.helperText}>CSV import is web-only. Open the app on desktop to import a vault export.</Text>
-              )}
-              {importBusy && !importParseResult ? <ActivityIndicator size="small" color={accentColor} /> : null}
-              {importStatus ? <Text style={[styles.status, { borderColor: accentColor + '33' }]}>{importStatus}</Text> : null}
-              {importParseResult ? (
-                <View style={styles.sectionBox}>
-                  <Text style={styles.sectionTitle}>
-                    Preview ({importParseResult.format}) — {importParseResult.rows.length} row{importParseResult.rows.length === 1 ? '' : 's'}, {importSelected.size} selected
-                  </Text>
-                  {importParseResult.warnings.map((warning, idx) => (
-                    <Text key={idx} style={styles.helperText}>{warning}</Text>
-                  ))}
-                  <View style={styles.importPreviewList}>
-                    {importParseResult.rows.slice(0, 100).map((row) => {
-                      const checked = importSelected.has(row.index);
-                      return (
-                        <Pressable
-                          key={row.index}
-                          onPress={() => toggleImportSelected(row.index)}
-                          style={[styles.importPreviewRow, checked && { borderColor: accentColor + '88', backgroundColor: accentColor + '0c' }, webCursor()]}
-                        >
-                          <View style={[styles.bulkCheckbox, checked && { backgroundColor: accentColor, borderColor: accentColor }]} />
-                          <View style={styles.importPreviewBody}>
-                            <Text style={styles.importPreviewTitle}>
-                              {row.platform}/{row.label}
-                              {!row.isComplete ? ' · skipped (missing password)' : ''}
-                            </Text>
-                            <Text style={styles.importPreviewMeta}>
-                              {row.title || '—'}{row.url ? ` · ${row.url}` : ''}{row.username ? ` · ${row.username}` : ''}
-                            </Text>
-                            {row.tags.length > 0 ? (
-                              <Text style={styles.importPreviewMeta}>tags: {row.tags.join(', ')}</Text>
-                            ) : null}
-                          </View>
-                        </Pressable>
-                      );
-                    })}
-                    {importParseResult.rows.length > 100 ? (
-                      <Text style={styles.helperText}>+ {importParseResult.rows.length - 100} more rows hidden in preview but still imported if selected.</Text>
-                    ) : null}
-                  </View>
-                  <View style={styles.actionRow}>
-                    <Pressable
-                      disabled={importBusy}
-                      onPress={runImport}
-                      style={[styles.primaryBtn, { backgroundColor: accentColor }, importBusy && styles.disabledBtn, webCursor(importBusy ? 'wait' : 'pointer')]}
-                    >
-                      {importBusy ? <ActivityIndicator size="small" color="#061018" /> : <Text style={styles.primaryText}>Import {importSelected.size}</Text>}
-                    </Pressable>
-                    <Pressable
-                      onPress={() => { setImportParseResult(null); setImportSelected(new Set()); setImportStatus(''); }}
-                      style={[styles.secondaryBtn, webCursor()]}
-                    >
-                      <Text style={styles.secondaryText}>Cancel</Text>
-                    </Pressable>
-                  </View>
-                </View>
-              ) : null}
-            </View>
-          ) : null}
-        </View>
-
         <View style={[styles.card, expandedId === 'new' && styles.cardExpanded]}>
           <Pressable
             onPress={() => setExpandedId(expandedId === 'new' ? null : 'new')}
@@ -1731,7 +1516,7 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
             ]}
           >
             <View style={styles.cardHeaderText}>
-              <Text style={styles.cardTitle}>Add or Change Credentials</Text>
+              <Text style={styles.cardTitle}>+ Add credential</Text>
               <Text style={styles.cardMeta}>Encrypted at rest. Existing platform + label rotates the secret.</Text>
             </View>
             <AccordionChevron open={expandedId === 'new'} accent={accentColor} />
@@ -2057,70 +1842,6 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
             ) : null}
           </View>
         ) : null}
-
-        <View style={[styles.card, globalAuditOpen && styles.cardExpanded]}>
-          <Pressable
-            onPress={() => setGlobalAuditOpen((value) => !value)}
-            style={({ hovered, pressed }: any) => [
-              styles.cardHeader,
-              webTransition(),
-              globalAuditOpen && accordionExpandedStyle(accentColor),
-              hovered && accordionHoverStyle(accentColor),
-              pressed && accordionPressedStyle(accentColor),
-              webCursor(),
-            ]}
-          >
-            <View style={styles.cardHeaderText}>
-              <Text style={styles.cardTitle}>Recent activity</Text>
-              <Text style={styles.cardMeta}>
-                {globalAuditEntries.length > 0
-                  ? `Last ${globalAuditEntries.length} vault events across every credential.`
-                  : 'Last 50 vault events across every credential. Use this for audits and incident review.'}
-              </Text>
-            </View>
-            <AccordionChevron open={globalAuditOpen} accent={accentColor} />
-          </Pressable>
-          {globalAuditOpen ? (
-            <View style={styles.form}>
-              {globalAuditLoading ? (
-                <ActivityIndicator size="small" color={accentColor} />
-              ) : globalAuditError ? (
-                <Text style={styles.helperText}>{globalAuditError}</Text>
-              ) : globalAuditEntries.length === 0 ? (
-                <Text style={styles.helperText}>No vault events recorded yet.</Text>
-              ) : (
-                <View style={styles.globalAuditList}>
-                  {globalAuditEntries.map((entry) => {
-                    const credential = entries.find((c) => c.id === entry.credentialId);
-                    const tag = credential ? `${credential.platform}/${credential.label}` : entry.credentialId ? 'deleted credential' : '—';
-                    return (
-                      <View key={entry.id} style={[styles.globalAuditRow, !entry.success && styles.globalAuditRowFailed]}>
-                        <View style={styles.globalAuditRowHead}>
-                          <Text style={[styles.globalAuditAction, !entry.success && { color: '#ef4444' }]}>
-                            {entry.action.toUpperCase()}{entry.success ? '' : ' · FAILED'}
-                          </Text>
-                          <Text style={styles.globalAuditTime}>{formatAuditTime(entry.createdAt)}</Text>
-                        </View>
-                        <Text style={styles.globalAuditTarget}>{tag}</Text>
-                        {entry.purpose ? <Text style={styles.globalAuditPurpose}>{entry.purpose}</Text> : null}
-                      </View>
-                    );
-                  })}
-                </View>
-              )}
-              <Pressable
-                onPress={loadGlobalAudit}
-                disabled={globalAuditLoading}
-                style={[styles.secondaryBtn, { borderColor: accentColor + '55' }, webCursor(globalAuditLoading ? 'wait' : 'pointer')]}
-              >
-                <Text style={[styles.secondaryText, { color: accentColor }]}>
-                  {globalAuditLoading ? 'Loading...' : 'Refresh activity'}
-                </Text>
-              </Pressable>
-            </View>
-          ) : null}
-        </View>
-
         {entries.length === 0 && !loading ? (
           <View style={styles.emptyCard}>
             <Text style={styles.emptyTitle}>No saved site credentials yet.</Text>
@@ -2170,6 +1891,7 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
 
         {visibleEntries.map((entry) => {
           const expanded = expandedId === entry.id;
+          const entrySettingsOpen = entrySettingsOpenId === entry.id;
           const reveal = revealed[entry.id];
           const revealSeconds = reveal ? Math.max(0, Math.ceil((reveal.expiresAt - Date.now()) / 1000)) : 0;
           const rotationDue = isRotationDue(entry);
@@ -2184,11 +1906,12 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
           const isSelected = selectedIds.has(entry.id);
           const lastTestedAt = entryMetadataString(entry, 'lastTestedAt');
           const lastTestSuccess = entryMetadataBoolean(entry, 'lastTestSuccess');
-          const lastTestPill: { label: string; color: string } | null = lastTestedAt
-            ? lastTestSuccess === false
+          // Collapsed rows only flag ATTENTION states — a passing test is the
+          // expected condition and lives in the entry's Service details.
+          const lastTestPill: { label: string; color: string } | null =
+            lastTestedAt && lastTestSuccess === false
               ? { label: `TEST FAIL · ${formatAuditTime(lastTestedAt)}`, color: '#f87171' }
-              : { label: `TEST OK · ${formatAuditTime(lastTestedAt)}`, color: '#34d399' }
-            : null;
+              : null;
           const lastUsedRelative = entry.lastUsedAt ? formatAuditTime(entry.lastUsedAt) : null;
           const cardMetaBits = [
             entry.siteUrl || 'No site URL',
@@ -2224,11 +1947,6 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                       {rotationDue ? <Text style={styles.rotationBadge}>Rotation due</Text> : null}
                       {!entry.isActive ? <Text style={styles.inactiveBadge}>Inactive</Text> : null}
                       {highSecurityIssueCount > 0 ? <Text style={styles.securityRiskBadge}>SECURITY ×{highSecurityIssueCount}</Text> : null}
-                      {isHighTrust(entry) ? <Text style={styles.highTrustBadge}>HIGH-TRUST</Text> : null}
-                      {isRestricted(entry) ? <Text style={styles.restrictedBadge}>RESTRICTED</Text> : null}
-                      {entryTags(entry).slice(0, 4).map((tag) => (
-                        <Text key={tag} style={[styles.tagBadge, { color: accentColor, borderColor: accentColor + '55' }]}>{tag}</Text>
-                      ))}
                     </View>
                     <Text style={styles.cardMeta}>{cardMetaBits.join(' · ')}</Text>
                   </View>
@@ -2248,242 +1966,6 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                     ) : (
                       <Text style={styles.helperText}>Ready for approved login and website automation.</Text>
                     )}
-                  </View>
-
-                  <View style={styles.sectionBox}>
-                    <Text style={styles.sectionTitle}>Service details</Text>
-                    <InfoLine label="Login URL" value={entry.loginUrl || entry.siteUrl || 'Not set'} />
-                    <InfoLine label="Secret type" value={entry.secretKind.replace(/_/g, ' ')} />
-                    <InfoLine label="Updated" value={formatDate(entry.updatedAt)} />
-                    <InfoLine label="Last used" value={formatDate(entry.lastUsedAt)} />
-                    <InfoLine label="Last tested" value={formatDate(entryMetadataString(entry, 'lastTestedAt'))} />
-                    <InfoLine label="Rotation due" value={formatDate(entry.rotationDueAt)} />
-                  </View>
-
-                  <View style={styles.sectionBox}>
-                    <Text style={styles.sectionTitle}>Security controls</Text>
-                    {entrySecurityIssues.length > 0 ? (
-                      <View style={styles.entrySecurityList}>
-                        {entrySecurityIssues.slice(0, 5).map((issue) => {
-                          const severityColor =
-                            issue.severity === 'critical' ? '#ef4444' :
-                            issue.severity === 'high' ? '#fb7185' :
-                            issue.severity === 'medium' ? '#f59e0b' :
-                            '#94a3b8';
-                          return (
-                            <View key={issue.id} style={styles.entrySecurityIssue}>
-                              <Text style={[styles.securitySeverity, { color: severityColor }]}>{issue.severity}</Text>
-                              <Text style={styles.helperText}>{issue.title}: {issue.fix}</Text>
-                            </View>
-                          );
-                        })}
-                      </View>
-                    ) : (
-                      <Text style={styles.helperText}>No security issues detected on this credential.</Text>
-                    )}
-                    <View style={styles.actionRow}>
-                      <Pressable
-                        onPress={() => updateEntryControls(entry, {}, 'No changes needed.')}
-                        disabled
-                        style={[styles.secondaryBtn, styles.disabledBtn]}
-                      >
-                        <Text style={styles.secondaryText}>{entrySecurityIssues.length} issue{entrySecurityIssues.length === 1 ? '' : 's'}</Text>
-                      </Pressable>
-                      <Pressable
-                        onPress={async () => {
-                          setUpdating((current) => ({ ...current, [entry.id]: true }));
-                          const result = await hardenVaultCredential(circleId, entry, currentUserId);
-                          if (result.entry) replaceEntry(result.entry);
-                          setStatus(result.resultsText);
-                          await loadAudit(entry.id);
-                          setUpdating((current) => ({ ...current, [entry.id]: false }));
-                        }}
-                        disabled={!!updating[entry.id]}
-                        style={[styles.secondaryBtn, { borderColor: accentColor + '55' }, webCursor(updating[entry.id] ? 'wait' : 'pointer')]}
-                      >
-                        <Text style={[styles.secondaryText, { color: accentColor }]}>Harden now</Text>
-                      </Pressable>
-                      {expiredGrantCount > 0 ? (
-                        <Pressable
-                          onPress={async () => {
-                            setUpdating((current) => ({ ...current, [entry.id]: true }));
-                            const result = await pruneExpiredVaultAccessGrants(circleId, entry, currentUserId);
-                            if (result.entry) replaceEntry(result.entry);
-                            setStatus(result.resultsText);
-                            await loadAudit(entry.id);
-                            setUpdating((current) => ({ ...current, [entry.id]: false }));
-                          }}
-                          disabled={!!updating[entry.id]}
-                          style={[styles.secondaryBtn, webCursor(updating[entry.id] ? 'wait' : 'pointer')]}
-                        >
-                          <Text style={styles.secondaryText}>Remove {expiredGrantCount} expired grant{expiredGrantCount === 1 ? '' : 's'}</Text>
-                        </Pressable>
-                      ) : null}
-                    </View>
-                    <Pressable
-                      onPress={() => updateEntryControls(entry, {
-                        accessPolicy: {
-                          ...entry.accessPolicy,
-                          require_approval: entry.accessPolicy?.require_approval === false,
-                        },
-                      }, 'Approval policy updated.')}
-                      disabled={!!updating[entry.id]}
-                      style={[styles.approvalRow, webCursor(updating[entry.id] ? 'wait' : 'pointer')]}
-                    >
-                      <View style={[styles.checkbox, entry.accessPolicy?.require_approval !== false && { backgroundColor: accentColor, borderColor: accentColor }]} />
-                      <Text style={styles.approvalText}>Require approval before use</Text>
-                    </Pressable>
-                    <Pressable
-                      onPress={() => updateEntryControls(entry, {
-                        metadata: { ...entry.metadata, highTrust: !isHighTrust(entry) },
-                      }, isHighTrust(entry) ? 'High-trust gate disabled.' : 'High-trust gate enabled.')}
-                      disabled={!!updating[entry.id]}
-                      style={[styles.approvalRow, webCursor(updating[entry.id] ? 'wait' : 'pointer')]}
-                    >
-                      <View style={[styles.checkbox, isHighTrust(entry) && { backgroundColor: '#f59e0b', borderColor: '#f59e0b' }]} />
-                      <Text style={styles.approvalText}>High-trust — require typed confirmation before reveal</Text>
-                    </Pressable>
-                    <View style={styles.kindRow}>
-                      {ACTION_OPTIONS.map((action) => {
-                        const active = actions.includes(action.key);
-                        const nextActions = active
-                          ? actions.filter((item) => item !== action.key)
-                          : [...actions, action.key];
-                        return (
-                          <Pressable
-                            key={action.key}
-                            onPress={() => updateEntryControls(entry, {
-                              accessPolicy: {
-                                ...entry.accessPolicy,
-                                allowed_actions: nextActions.includes('login') ? nextActions : ['login', ...nextActions],
-                                allowed_origins: origins,
-                              },
-                            }, 'Allowed actions updated.')}
-                            disabled={!!updating[entry.id]}
-                            style={[
-                              styles.kindChip,
-                              active && { borderColor: accentColor + '88', backgroundColor: accentColor + '18' },
-                              webCursor(updating[entry.id] ? 'wait' : 'pointer'),
-                            ]}
-                          >
-                            <Text style={[styles.kindText, active && { color: accentColor }]}>{action.label}</Text>
-                          </Pressable>
-                        );
-                      })}
-                    </View>
-                    <Text style={styles.helperText}>Allowed origins: {origins.join(', ') || 'not set'}</Text>
-                  </View>
-
-                  <View style={styles.sectionBox}>
-                    <Text style={styles.sectionTitle}>Sharing</Text>
-                    <Text style={styles.helperText}>
-                      {allowedMemberIds(entry).length === 0
-                        ? 'Visible to every circle member. Pick specific people to restrict access.'
-                        : `Restricted to ${allowedMemberIds(entry).length} member${allowedMemberIds(entry).length === 1 ? '' : 's'} plus the credential creator.`}
-                    </Text>
-                    <View style={styles.kindRow}>
-                      {members.map((member) => {
-                        const list = allowedMemberIds(entry);
-                        const active = list.includes(member.user_id);
-                        const isCreator = entry.createdBy === member.user_id;
-                        return (
-                          <Pressable
-                            key={member.user_id}
-                            onPress={() => {
-                              if (isCreator) return;
-                              const next = active ? list.filter((id) => id !== member.user_id) : [...list, member.user_id];
-                              updateEntryControls(entry, {
-                                metadata: { ...entry.metadata, allowedMemberIds: next },
-                              }, active ? `Removed ${member.display_name} from sharing.` : `Shared with ${member.display_name}.`);
-                            }}
-                            disabled={!!updating[entry.id] || isCreator}
-                            style={[
-                              styles.kindChip,
-                              active && { borderColor: accentColor + '88', backgroundColor: accentColor + '18' },
-                              isCreator && { borderColor: '#22c55e55', backgroundColor: '#22c55e14' },
-                              webCursor(isCreator ? 'default' : updating[entry.id] ? 'wait' : 'pointer'),
-                            ]}
-                          >
-                            <Text style={[
-                              styles.kindText,
-                              active && { color: accentColor },
-                              isCreator && { color: '#22c55e' },
-                            ]}>
-                              {isCreator ? `${member.display_name} · creator` : member.display_name}
-                            </Text>
-                          </Pressable>
-                        );
-                      })}
-                    </View>
-                    {allowedMemberIds(entry).length > 0 ? (
-                      <Pressable
-                        onPress={() => updateEntryControls(entry, {
-                          metadata: { ...entry.metadata, allowedMemberIds: [] },
-                        }, 'Restored open sharing.')}
-                        disabled={!!updating[entry.id]}
-                        style={[styles.secondaryBtn, webCursor(updating[entry.id] ? 'wait' : 'pointer')]}
-                      >
-                        <Text style={styles.secondaryText}>Open to everyone</Text>
-                      </Pressable>
-                    ) : null}
-                  </View>
-
-                  <View style={styles.sectionBox}>
-                    <Text style={styles.sectionTitle}>Agent access</Text>
-                    {automationGrants.length === 0 ? (
-                      <Text style={styles.helperText}>
-                        No agent grants yet. Use /vault grant from chat to give OpenSwan, chat, or a named agent scoped login access.
-                      </Text>
-                    ) : (
-                      <>
-                        {automationGrants.slice(0, 8).map((grant) => {
-                          const expired = isVaultAccessGrantExpired(grant);
-                          const expiry = grant.expiresAt ? ` until ${grant.expiresAt.slice(0, 10)}` : '';
-                          return (
-                            <Text key={grant.id} style={styles.helperText}>
-                              {grant.granteeType}:{grant.grantee} - {grant.actions.join(', ')}{expiry}{expired ? ' [expired]' : ''}
-                            </Text>
-                          );
-                        })}
-                        {automationGrants.length > 8 ? (
-                          <Text style={styles.helperText}>+ {automationGrants.length - 8} more grant{automationGrants.length - 8 === 1 ? '' : 's'}</Text>
-                        ) : null}
-                      </>
-                    )}
-                    <Text style={styles.helperText}>Agents receive credential IDs and runbooks only. Secrets stay inside the approved vault/browser tools.</Text>
-                  </View>
-
-                  <View style={styles.sectionBox}>
-                    <Text style={styles.sectionTitle}>Rotation and test</Text>
-                    <View style={styles.kindRow}>
-                      {ROTATION_OPTIONS.map((option) => (
-                        <Pressable
-                          key={option.label}
-                          onPress={() => updateEntryControls(entry, { rotationDueAt: dueDateFromCadence(option.days) }, 'Rotation reminder updated.')}
-                          disabled={!!updating[entry.id]}
-                          style={[styles.kindChip, webCursor(updating[entry.id] ? 'wait' : 'pointer')]}
-                        >
-                          <Text style={styles.kindText}>{option.label}</Text>
-                        </Pressable>
-                      ))}
-                    </View>
-                    <View style={styles.actionRow}>
-                      <Pressable
-                        onPress={() => handleTest(entry)}
-                        disabled={!!testing[entry.id]}
-                        style={[styles.secondaryBtn, { borderColor: accentColor + '55' }, webCursor(testing[entry.id] ? 'wait' : 'pointer')]}
-                      >
-                        <Text style={[styles.secondaryText, { color: accentColor }]}>{testing[entry.id] ? 'Testing...' : 'Test login'}</Text>
-                      </Pressable>
-                      <Pressable
-                        onPress={() => updateEntryControls(entry, { isActive: !entry.isActive }, entry.isActive ? 'Credential disabled.' : 'Credential enabled.')}
-                        disabled={!!updating[entry.id]}
-                        style={[styles.secondaryBtn, webCursor(updating[entry.id] ? 'wait' : 'pointer')]}
-                      >
-                        <Text style={styles.secondaryText}>{entry.isActive ? 'Disable' : 'Enable'}</Text>
-                      </Pressable>
-                    </View>
-                    {entryMetadataString(entry, 'lastTestMessage') ? <Text style={styles.helperText}>{entryMetadataString(entry, 'lastTestMessage')}</Text> : null}
                   </View>
 
                   {confirmReveal && confirmReveal.entryId === entry.id ? (
@@ -2570,30 +2052,614 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                     </Pressable>
                   </View>
 
-                  <View style={styles.auditBox}>
-                    <View style={styles.auditHeader}>
-                      <Text style={styles.auditTitle}>Audit trail</Text>
-                      {auditLoading[entry.id] ? <ActivityIndicator size="small" color={accentColor} /> : null}
-                    </View>
-                    {(auditEntries[entry.id] || []).length === 0 && !auditLoading[entry.id] ? (
-                      <Text style={styles.auditEmpty}>{auditErrors[entry.id] || 'No access events loaded yet.'}</Text>
-                    ) : null}
-                    {(auditEntries[entry.id] || []).slice(0, 8).map((event) => (
-                      <View key={event.id} style={styles.auditRow}>
-                        <Text style={[styles.auditAction, event.success ? null : styles.auditActionFailed]}>
-                          {event.action.toUpperCase()}
-                        </Text>
-                        <Text style={styles.auditPurpose}>{event.purpose || 'no purpose'}</Text>
-                        <Text style={styles.auditDate}>{formatDate(event.createdAt)}</Text>
+                  {/* Per-entry settings & activity — config sections and the
+                      audit trail fold behind one row so the expanded view
+                      leads with the secret and the actions. */}
+                  <Pressable
+                    onPress={() => setEntrySettingsOpenId(entrySettingsOpen ? null : entry.id)}
+                    style={({ hovered }: any) => [
+                      styles.entrySettingsToggle,
+                      webTransition(),
+                      hovered && { borderColor: accentColor + '55' },
+                      webCursor(),
+                    ]}
+                  >
+                    <Text style={styles.entrySettingsToggleText}>Settings & activity</Text>
+                    <AccordionChevron open={entrySettingsOpen} accent={accentColor} />
+                  </Pressable>
+                  {entrySettingsOpen ? (
+                    <View style={styles.entrySettingsBody}>
+                      <View style={styles.sectionBox}>
+                        <Text style={styles.sectionTitle}>Service details</Text>
+                        <InfoLine label="Login URL" value={entry.loginUrl || entry.siteUrl || 'Not set'} />
+                        <InfoLine label="Secret type" value={entry.secretKind.replace(/_/g, ' ')} />
+                        <InfoLine label="Updated" value={formatDate(entry.updatedAt)} />
+                        <InfoLine label="Last used" value={formatDate(entry.lastUsedAt)} />
+                        <InfoLine label="Last tested" value={formatDate(entryMetadataString(entry, 'lastTestedAt'))} />
+                        <InfoLine label="Rotation due" value={formatDate(entry.rotationDueAt)} />
+                        <InfoLine label="Tags" value={entryTags(entry).join(', ') || 'None'} />
                       </View>
-                    ))}
-                  </View>
+
+                      <View style={styles.sectionBox}>
+                        <Text style={styles.sectionTitle}>Security controls</Text>
+                        {entrySecurityIssues.length > 0 ? (
+                          <View style={styles.entrySecurityList}>
+                            {entrySecurityIssues.slice(0, 5).map((issue) => {
+                              const severityColor =
+                                issue.severity === 'critical' ? '#ef4444' :
+                                issue.severity === 'high' ? '#fb7185' :
+                                issue.severity === 'medium' ? '#f59e0b' :
+                                '#94a3b8';
+                              return (
+                                <View key={issue.id} style={styles.entrySecurityIssue}>
+                                  <Text style={[styles.securitySeverity, { color: severityColor }]}>{issue.severity}</Text>
+                                  <Text style={styles.helperText}>{issue.title}: {issue.fix}</Text>
+                                </View>
+                              );
+                            })}
+                          </View>
+                        ) : (
+                          <Text style={styles.helperText}>No security issues detected on this credential.</Text>
+                        )}
+                        <View style={styles.actionRow}>
+                          <Pressable
+                            onPress={() => updateEntryControls(entry, {}, 'No changes needed.')}
+                            disabled
+                            style={[styles.secondaryBtn, styles.disabledBtn]}
+                          >
+                            <Text style={styles.secondaryText}>{entrySecurityIssues.length} issue{entrySecurityIssues.length === 1 ? '' : 's'}</Text>
+                          </Pressable>
+                          <Pressable
+                            onPress={async () => {
+                              setUpdating((current) => ({ ...current, [entry.id]: true }));
+                              const result = await hardenVaultCredential(circleId, entry, currentUserId);
+                              if (result.entry) replaceEntry(result.entry);
+                              setStatus(result.resultsText);
+                              await loadAudit(entry.id);
+                              setUpdating((current) => ({ ...current, [entry.id]: false }));
+                            }}
+                            disabled={!!updating[entry.id]}
+                            style={[styles.secondaryBtn, { borderColor: accentColor + '55' }, webCursor(updating[entry.id] ? 'wait' : 'pointer')]}
+                          >
+                            <Text style={[styles.secondaryText, { color: accentColor }]}>Harden now</Text>
+                          </Pressable>
+                          {expiredGrantCount > 0 ? (
+                            <Pressable
+                              onPress={async () => {
+                                setUpdating((current) => ({ ...current, [entry.id]: true }));
+                                const result = await pruneExpiredVaultAccessGrants(circleId, entry, currentUserId);
+                                if (result.entry) replaceEntry(result.entry);
+                                setStatus(result.resultsText);
+                                await loadAudit(entry.id);
+                                setUpdating((current) => ({ ...current, [entry.id]: false }));
+                              }}
+                              disabled={!!updating[entry.id]}
+                              style={[styles.secondaryBtn, webCursor(updating[entry.id] ? 'wait' : 'pointer')]}
+                            >
+                              <Text style={styles.secondaryText}>Remove {expiredGrantCount} expired grant{expiredGrantCount === 1 ? '' : 's'}</Text>
+                            </Pressable>
+                          ) : null}
+                        </View>
+                        <Pressable
+                          onPress={() => updateEntryControls(entry, {
+                            accessPolicy: {
+                              ...entry.accessPolicy,
+                              require_approval: entry.accessPolicy?.require_approval === false,
+                            },
+                          }, 'Approval policy updated.')}
+                          disabled={!!updating[entry.id]}
+                          style={[styles.approvalRow, webCursor(updating[entry.id] ? 'wait' : 'pointer')]}
+                        >
+                          <View style={[styles.checkbox, entry.accessPolicy?.require_approval !== false && { backgroundColor: accentColor, borderColor: accentColor }]} />
+                          <Text style={styles.approvalText}>Require approval before use</Text>
+                        </Pressable>
+                        <Pressable
+                          onPress={() => updateEntryControls(entry, {
+                            metadata: { ...entry.metadata, highTrust: !isHighTrust(entry) },
+                          }, isHighTrust(entry) ? 'High-trust gate disabled.' : 'High-trust gate enabled.')}
+                          disabled={!!updating[entry.id]}
+                          style={[styles.approvalRow, webCursor(updating[entry.id] ? 'wait' : 'pointer')]}
+                        >
+                          <View style={[styles.checkbox, isHighTrust(entry) && { backgroundColor: '#f59e0b', borderColor: '#f59e0b' }]} />
+                          <Text style={styles.approvalText}>High-trust — require typed confirmation before reveal</Text>
+                        </Pressable>
+                        <View style={styles.kindRow}>
+                          {ACTION_OPTIONS.map((action) => {
+                            const active = actions.includes(action.key);
+                            const nextActions = active
+                              ? actions.filter((item) => item !== action.key)
+                              : [...actions, action.key];
+                            return (
+                              <Pressable
+                                key={action.key}
+                                onPress={() => updateEntryControls(entry, {
+                                  accessPolicy: {
+                                    ...entry.accessPolicy,
+                                    allowed_actions: nextActions.includes('login') ? nextActions : ['login', ...nextActions],
+                                    allowed_origins: origins,
+                                  },
+                                }, 'Allowed actions updated.')}
+                                disabled={!!updating[entry.id]}
+                                style={[
+                                  styles.kindChip,
+                                  active && { borderColor: accentColor + '88', backgroundColor: accentColor + '18' },
+                                  webCursor(updating[entry.id] ? 'wait' : 'pointer'),
+                                ]}
+                              >
+                                <Text style={[styles.kindText, active && { color: accentColor }]}>{action.label}</Text>
+                              </Pressable>
+                            );
+                          })}
+                        </View>
+                        <Text style={styles.helperText}>Allowed origins: {origins.join(', ') || 'not set'}</Text>
+                      </View>
+
+                      <View style={styles.sectionBox}>
+                        <Text style={styles.sectionTitle}>Sharing</Text>
+                        <Text style={styles.helperText}>
+                          {allowedMemberIds(entry).length === 0
+                            ? 'Visible to every circle member. Pick specific people to restrict access.'
+                            : `Restricted to ${allowedMemberIds(entry).length} member${allowedMemberIds(entry).length === 1 ? '' : 's'} plus the credential creator.`}
+                        </Text>
+                        <View style={styles.kindRow}>
+                          {members.map((member) => {
+                            const list = allowedMemberIds(entry);
+                            const active = list.includes(member.user_id);
+                            const isCreator = entry.createdBy === member.user_id;
+                            return (
+                              <Pressable
+                                key={member.user_id}
+                                onPress={() => {
+                                  if (isCreator) return;
+                                  const next = active ? list.filter((id) => id !== member.user_id) : [...list, member.user_id];
+                                  updateEntryControls(entry, {
+                                    metadata: { ...entry.metadata, allowedMemberIds: next },
+                                  }, active ? `Removed ${member.display_name} from sharing.` : `Shared with ${member.display_name}.`);
+                                }}
+                                disabled={!!updating[entry.id] || isCreator}
+                                style={[
+                                  styles.kindChip,
+                                  active && { borderColor: accentColor + '88', backgroundColor: accentColor + '18' },
+                                  isCreator && { borderColor: '#22c55e55', backgroundColor: '#22c55e14' },
+                                  webCursor(isCreator ? 'default' : updating[entry.id] ? 'wait' : 'pointer'),
+                                ]}
+                              >
+                                <Text style={[
+                                  styles.kindText,
+                                  active && { color: accentColor },
+                                  isCreator && { color: '#22c55e' },
+                                ]}>
+                                  {isCreator ? `${member.display_name} · creator` : member.display_name}
+                                </Text>
+                              </Pressable>
+                            );
+                          })}
+                        </View>
+                        {allowedMemberIds(entry).length > 0 ? (
+                          <Pressable
+                            onPress={() => updateEntryControls(entry, {
+                              metadata: { ...entry.metadata, allowedMemberIds: [] },
+                            }, 'Restored open sharing.')}
+                            disabled={!!updating[entry.id]}
+                            style={[styles.secondaryBtn, webCursor(updating[entry.id] ? 'wait' : 'pointer')]}
+                          >
+                            <Text style={styles.secondaryText}>Open to everyone</Text>
+                          </Pressable>
+                        ) : null}
+                      </View>
+
+                      <View style={styles.sectionBox}>
+                        <Text style={styles.sectionTitle}>Agent access</Text>
+                        {automationGrants.length === 0 ? (
+                          <Text style={styles.helperText}>
+                            No agent grants yet. Use /vault grant from chat to give OpenSwan, chat, or a named agent scoped login access.
+                          </Text>
+                        ) : (
+                          <>
+                            {automationGrants.slice(0, 8).map((grant) => {
+                              const expired = isVaultAccessGrantExpired(grant);
+                              const expiry = grant.expiresAt ? ` until ${grant.expiresAt.slice(0, 10)}` : '';
+                              return (
+                                <Text key={grant.id} style={styles.helperText}>
+                                  {grant.granteeType}:{grant.grantee} - {grant.actions.join(', ')}{expiry}{expired ? ' [expired]' : ''}
+                                </Text>
+                              );
+                            })}
+                            {automationGrants.length > 8 ? (
+                              <Text style={styles.helperText}>+ {automationGrants.length - 8} more grant{automationGrants.length - 8 === 1 ? '' : 's'}</Text>
+                            ) : null}
+                          </>
+                        )}
+                        <Text style={styles.helperText}>Agents receive credential IDs and runbooks only. Secrets stay inside the approved vault/browser tools.</Text>
+                      </View>
+
+                      <View style={styles.sectionBox}>
+                        <Text style={styles.sectionTitle}>Rotation and test</Text>
+                        <View style={styles.kindRow}>
+                          {ROTATION_OPTIONS.map((option) => (
+                            <Pressable
+                              key={option.label}
+                              onPress={() => updateEntryControls(entry, { rotationDueAt: dueDateFromCadence(option.days) }, 'Rotation reminder updated.')}
+                              disabled={!!updating[entry.id]}
+                              style={[styles.kindChip, webCursor(updating[entry.id] ? 'wait' : 'pointer')]}
+                            >
+                              <Text style={styles.kindText}>{option.label}</Text>
+                            </Pressable>
+                          ))}
+                        </View>
+                        <View style={styles.actionRow}>
+                          <Pressable
+                            onPress={() => handleTest(entry)}
+                            disabled={!!testing[entry.id]}
+                            style={[styles.secondaryBtn, { borderColor: accentColor + '55' }, webCursor(testing[entry.id] ? 'wait' : 'pointer')]}
+                          >
+                            <Text style={[styles.secondaryText, { color: accentColor }]}>{testing[entry.id] ? 'Testing...' : 'Test login'}</Text>
+                          </Pressable>
+                          <Pressable
+                            onPress={() => updateEntryControls(entry, { isActive: !entry.isActive }, entry.isActive ? 'Credential disabled.' : 'Credential enabled.')}
+                            disabled={!!updating[entry.id]}
+                            style={[styles.secondaryBtn, webCursor(updating[entry.id] ? 'wait' : 'pointer')]}
+                          >
+                            <Text style={styles.secondaryText}>{entry.isActive ? 'Disable' : 'Enable'}</Text>
+                          </Pressable>
+                        </View>
+                        {entryMetadataString(entry, 'lastTestMessage') ? <Text style={styles.helperText}>{entryMetadataString(entry, 'lastTestMessage')}</Text> : null}
+                      </View>
+
+                      <View style={styles.auditBox}>
+                        <View style={styles.auditHeader}>
+                          <Text style={styles.auditTitle}>Audit trail</Text>
+                          {auditLoading[entry.id] ? <ActivityIndicator size="small" color={accentColor} /> : null}
+                        </View>
+                        {(auditEntries[entry.id] || []).length === 0 && !auditLoading[entry.id] ? (
+                          <Text style={styles.auditEmpty}>{auditErrors[entry.id] || 'No access events loaded yet.'}</Text>
+                        ) : null}
+                        {(auditEntries[entry.id] || []).slice(0, 8).map((event) => (
+                          <View key={event.id} style={styles.auditRow}>
+                            <Text style={[styles.auditAction, event.success ? null : styles.auditActionFailed]}>
+                              {event.action.toUpperCase()}
+                            </Text>
+                            <Text style={styles.auditPurpose}>{event.purpose || 'no purpose'}</Text>
+                            <Text style={styles.auditDate}>{formatDate(event.createdAt)}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    </View>
+                  ) : null}
                 </View>
               ) : null}
             </View>
           );
         })}
+
+        {/* ── Advanced — security posture, CSV import, and the audit log live
+            behind one collapsed row so the default view is just credentials. */}
+        <View style={[styles.card, advancedOpen && styles.cardExpanded]}>
+          <Pressable
+            onPress={() => setAdvancedOpen((value) => !value)}
+            style={({ hovered, pressed }: any) => [
+              styles.cardHeader,
+              webTransition(),
+              advancedOpen && accordionExpandedStyle(accentColor),
+              hovered && accordionHoverStyle(accentColor),
+              pressed && accordionPressedStyle(accentColor),
+              webCursor(),
+            ]}
+          >
+            <View style={styles.cardHeaderText}>
+              <Text style={styles.cardTitle}>Advanced</Text>
+              <Text style={styles.cardMeta}>
+                Security {securityReport.score}/100
+                {securityReport.counts.critical + securityReport.counts.high > 0
+                  ? ` · ${securityReport.counts.critical + securityReport.counts.high} high-risk`
+                  : ''} · CSV import · activity log
+              </Text>
+            </View>
+            <AccordionChevron open={advancedOpen} accent={accentColor} />
+          </Pressable>
+          {advancedOpen ? (
+            <View style={styles.advancedBody}>
+            <View style={[styles.card, securityOpen && styles.cardExpanded]}>
+              <Pressable
+                onPress={() => setSecurityOpen((value) => !value)}
+                style={({ hovered, pressed }: any) => [
+                  styles.cardHeader,
+                  webTransition(),
+                  securityOpen && accordionExpandedStyle(accentColor),
+                  hovered && accordionHoverStyle(accentColor),
+                  pressed && accordionPressedStyle(accentColor),
+                  webCursor(),
+                ]}
+              >
+                <View style={styles.cardHeaderText}>
+                  <Text style={styles.cardTitle}>Security Command Center</Text>
+                  <Text style={styles.cardMeta}>
+                    {securityReport.score}/100 · {securityReport.counts.critical} critical · {securityReport.counts.high} high · {securityReport.expiredGrantCount} expired grant{securityReport.expiredGrantCount === 1 ? '' : 's'}
+                  </Text>
+                </View>
+                <AccordionChevron open={securityOpen} accent={accentColor} />
+              </Pressable>
+              {securityOpen ? (
+                <View style={styles.form}>
+                  <View style={styles.securityHero}>
+                    <View style={styles.securityScoreRing}>
+                      <Text
+                        style={[
+                          styles.securityScoreValue,
+                          {
+                            color: securityReport.grade === 'critical'
+                              ? '#ef4444'
+                              : securityReport.score >= 90
+                                ? '#22c55e'
+                                : securityReport.score >= 75
+                                  ? '#f59e0b'
+                                  : '#fb7185',
+                          },
+                        ]}
+                      >
+                        {securityReport.score}
+                      </Text>
+                      <Text style={styles.securityScoreLabel}>score</Text>
+                    </View>
+                    <View style={styles.securitySummaryBody}>
+                      <Text style={styles.sectionTitle}>
+                        {securityReport.grade === 'excellent'
+                          ? 'Vault posture is strong'
+                          : securityReport.grade === 'good'
+                            ? 'Vault posture is good'
+                            : securityReport.grade === 'critical'
+                              ? 'Critical vault fixes needed'
+                              : 'Vault needs hardening'}
+                      </Text>
+                      <Text style={styles.helperText}>
+                        Tracks approval gaps, scoped origins, high-risk actions, stale grants, rotation debt, failed tests, and breached-secret flags.
+                      </Text>
+                      <View style={styles.securityCountGrid}>
+                        <SecurityCount label="Critical" value={securityReport.counts.critical} color="#ef4444" />
+                        <SecurityCount label="High" value={securityReport.counts.high} color="#fb7185" />
+                        <SecurityCount label="Medium" value={securityReport.counts.medium} color="#f59e0b" />
+                        <SecurityCount label="Low" value={securityReport.counts.low} color="#94a3b8" />
+                      </View>
+                    </View>
+                  </View>
+
+                  {securityReport.issues.length > 0 ? (
+                    <View style={styles.securityIssueList}>
+                      {securityReport.issues.slice(0, 8).map((issue) => {
+                        const entry = entries.find((item) => item.id === issue.credentialId);
+                        const severityColor =
+                          issue.severity === 'critical' ? '#ef4444' :
+                          issue.severity === 'high' ? '#fb7185' :
+                          issue.severity === 'medium' ? '#f59e0b' :
+                          '#94a3b8';
+                        return (
+                          <View key={issue.id} style={[styles.securityIssueRow, { borderColor: severityColor + '44' }]}>
+                            <View style={styles.securityIssueTop}>
+                              <Text style={[styles.securitySeverity, { color: severityColor }]}>{issue.severity}</Text>
+                              <Text style={styles.securityIssueTarget}>
+                                {entry ? `${entry.platform}/${entry.label}` : issue.credentialId.slice(0, 8)}
+                              </Text>
+                            </View>
+                            <Text style={styles.securityIssueTitle}>{issue.title}</Text>
+                            <Text style={styles.helperText}>{issue.detail}</Text>
+                            <Text style={[styles.helperText, { color: severityColor }]}>Fix: {issue.fix}</Text>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  ) : (
+                    <Text style={styles.helperText}>No vault security issues detected for credentials visible to you.</Text>
+                  )}
+
+                  <View style={styles.actionRow}>
+                    <Pressable
+                      onPress={() => setRiskFilter('security_risk')}
+                      style={[styles.secondaryBtn, { borderColor: '#ef444466' }, webCursor()]}
+                    >
+                      <Text style={[styles.secondaryText, { color: '#fca5a5' }]}>Review high-risk</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={handleHardenHighRisk}
+                      disabled={bulkBusy || securityReport.counts.critical + securityReport.counts.high === 0}
+                      style={[styles.secondaryBtn, { borderColor: accentColor + '55' }, (bulkBusy || securityReport.counts.critical + securityReport.counts.high === 0) && styles.disabledBtn, webCursor(bulkBusy ? 'wait' : 'pointer')]}
+                    >
+                      <Text style={[styles.secondaryText, { color: accentColor }]}>Harden high-risk</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={handlePruneAllExpiredGrants}
+                      disabled={bulkBusy || securityReport.expiredGrantCount === 0}
+                      style={[styles.secondaryBtn, (bulkBusy || securityReport.expiredGrantCount === 0) && styles.disabledBtn, webCursor(bulkBusy ? 'wait' : 'pointer')]}
+                    >
+                      <Text style={styles.secondaryText}>Remove expired grants</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ) : null}
+            </View>
+
+            <View style={[styles.card, importOpen && styles.cardExpanded]}>
+              <Pressable
+                onPress={() => setImportOpen((value) => !value)}
+                style={({ hovered, pressed }: any) => [
+                  styles.cardHeader,
+                  webTransition(),
+                  importOpen && accordionExpandedStyle(accentColor),
+                  hovered && accordionHoverStyle(accentColor),
+                  pressed && accordionPressedStyle(accentColor),
+                  webCursor(),
+                ]}
+              >
+                <View style={styles.cardHeaderText}>
+                  <Text style={styles.cardTitle}>Import from CSV</Text>
+                  <Text style={styles.cardMeta}>1Password, Bitwarden, or LastPass exports. Auto-detects format.</Text>
+                </View>
+                <AccordionChevron open={importOpen} accent={accentColor} />
+              </Pressable>
+              {importOpen ? (
+                <View style={styles.form}>
+                  {Platform.OS === 'web' ? (
+                    <View style={styles.actionRow}>
+                      {/* @ts-ignore — RN Web exposes the underlying input */}
+                      <input
+                        type="file"
+                        accept=".csv,text/csv"
+                        onChange={(e: any) => {
+                          const file: File | undefined = e?.target?.files?.[0];
+                          if (file) handleImportFile(file);
+                          // Reset so re-selecting the same file fires onChange again.
+                          e.target.value = '';
+                        }}
+                        style={{
+                          color: '#cbd5e1',
+                          fontSize: 12,
+                          padding: 6,
+                          borderRadius: 8,
+                          border: '1px solid #ffffff20',
+                          backgroundColor: '#050914',
+                        }}
+                      />
+                    </View>
+                  ) : (
+                    <Text style={styles.helperText}>CSV import is web-only. Open the app on desktop to import a vault export.</Text>
+                  )}
+                  {importBusy && !importParseResult ? <ActivityIndicator size="small" color={accentColor} /> : null}
+                  {importStatus ? <Text style={[styles.status, { borderColor: accentColor + '33' }]}>{importStatus}</Text> : null}
+                  {importParseResult ? (
+                    <View style={styles.sectionBox}>
+                      <Text style={styles.sectionTitle}>
+                        Preview ({importParseResult.format}) — {importParseResult.rows.length} row{importParseResult.rows.length === 1 ? '' : 's'}, {importSelected.size} selected
+                      </Text>
+                      {importParseResult.warnings.map((warning, idx) => (
+                        <Text key={idx} style={styles.helperText}>{warning}</Text>
+                      ))}
+                      <View style={styles.importPreviewList}>
+                        {importParseResult.rows.slice(0, 100).map((row) => {
+                          const checked = importSelected.has(row.index);
+                          return (
+                            <Pressable
+                              key={row.index}
+                              onPress={() => toggleImportSelected(row.index)}
+                              style={[styles.importPreviewRow, checked && { borderColor: accentColor + '88', backgroundColor: accentColor + '0c' }, webCursor()]}
+                            >
+                              <View style={[styles.bulkCheckbox, checked && { backgroundColor: accentColor, borderColor: accentColor }]} />
+                              <View style={styles.importPreviewBody}>
+                                <Text style={styles.importPreviewTitle}>
+                                  {row.platform}/{row.label}
+                                  {!row.isComplete ? ' · skipped (missing password)' : ''}
+                                </Text>
+                                <Text style={styles.importPreviewMeta}>
+                                  {row.title || '—'}{row.url ? ` · ${row.url}` : ''}{row.username ? ` · ${row.username}` : ''}
+                                </Text>
+                                {row.tags.length > 0 ? (
+                                  <Text style={styles.importPreviewMeta}>tags: {row.tags.join(', ')}</Text>
+                                ) : null}
+                              </View>
+                            </Pressable>
+                          );
+                        })}
+                        {importParseResult.rows.length > 100 ? (
+                          <Text style={styles.helperText}>+ {importParseResult.rows.length - 100} more rows hidden in preview but still imported if selected.</Text>
+                        ) : null}
+                      </View>
+                      <View style={styles.actionRow}>
+                        <Pressable
+                          disabled={importBusy}
+                          onPress={runImport}
+                          style={[styles.primaryBtn, { backgroundColor: accentColor }, importBusy && styles.disabledBtn, webCursor(importBusy ? 'wait' : 'pointer')]}
+                        >
+                          {importBusy ? <ActivityIndicator size="small" color="#061018" /> : <Text style={styles.primaryText}>Import {importSelected.size}</Text>}
+                        </Pressable>
+                        <Pressable
+                          onPress={() => { setImportParseResult(null); setImportSelected(new Set()); setImportStatus(''); }}
+                          style={[styles.secondaryBtn, webCursor()]}
+                        >
+                          <Text style={styles.secondaryText}>Cancel</Text>
+                        </Pressable>
+                      </View>
+                    </View>
+                  ) : null}
+                </View>
+              ) : null}
+            </View>
+
+            <View style={[styles.card, globalAuditOpen && styles.cardExpanded]}>
+              <Pressable
+                onPress={() => setGlobalAuditOpen((value) => !value)}
+                style={({ hovered, pressed }: any) => [
+                  styles.cardHeader,
+                  webTransition(),
+                  globalAuditOpen && accordionExpandedStyle(accentColor),
+                  hovered && accordionHoverStyle(accentColor),
+                  pressed && accordionPressedStyle(accentColor),
+                  webCursor(),
+                ]}
+              >
+                <View style={styles.cardHeaderText}>
+                  <Text style={styles.cardTitle}>Recent activity</Text>
+                  <Text style={styles.cardMeta}>
+                    {globalAuditEntries.length > 0
+                      ? `Last ${globalAuditEntries.length} vault events across every credential.`
+                      : 'Last 50 vault events across every credential. Use this for audits and incident review.'}
+                  </Text>
+                </View>
+                <AccordionChevron open={globalAuditOpen} accent={accentColor} />
+              </Pressable>
+              {globalAuditOpen ? (
+                <View style={styles.form}>
+                  {globalAuditLoading ? (
+                    <ActivityIndicator size="small" color={accentColor} />
+                  ) : globalAuditError ? (
+                    <Text style={styles.helperText}>{globalAuditError}</Text>
+                  ) : globalAuditEntries.length === 0 ? (
+                    <Text style={styles.helperText}>No vault events recorded yet.</Text>
+                  ) : (
+                    <View style={styles.globalAuditList}>
+                      {globalAuditEntries.map((entry) => {
+                        const credential = entries.find((c) => c.id === entry.credentialId);
+                        const tag = credential ? `${credential.platform}/${credential.label}` : entry.credentialId ? 'deleted credential' : '—';
+                        return (
+                          <View key={entry.id} style={[styles.globalAuditRow, !entry.success && styles.globalAuditRowFailed]}>
+                            <View style={styles.globalAuditRowHead}>
+                              <Text style={[styles.globalAuditAction, !entry.success && { color: '#ef4444' }]}>
+                                {entry.action.toUpperCase()}{entry.success ? '' : ' · FAILED'}
+                              </Text>
+                              <Text style={styles.globalAuditTime}>{formatAuditTime(entry.createdAt)}</Text>
+                            </View>
+                            <Text style={styles.globalAuditTarget}>{tag}</Text>
+                            {entry.purpose ? <Text style={styles.globalAuditPurpose}>{entry.purpose}</Text> : null}
+                          </View>
+                        );
+                      })}
+                    </View>
+                  )}
+                  <Pressable
+                    onPress={loadGlobalAudit}
+                    disabled={globalAuditLoading}
+                    style={[styles.secondaryBtn, { borderColor: accentColor + '55' }, webCursor(globalAuditLoading ? 'wait' : 'pointer')]}
+                  >
+                    <Text style={[styles.secondaryText, { color: accentColor }]}>
+                      {globalAuditLoading ? 'Loading...' : 'Refresh activity'}
+                    </Text>
+                  </Pressable>
+                </View>
+              ) : null}
+            </View>
+
+              <Text style={styles.advancedFacts}>
+                VAULT-{(circleId || '').replace(/-/g, '').slice(0, 8).toUpperCase() || '00000000'} · encrypted at rest · RLS scoped to circle members · every access audited
+              </Text>
+            </View>
+          ) : null}
+        </View>
       </ScrollView>
+      {/* End-of-unlock light flood — mounted already at full opacity in the
+          same frame the dashboard appears, then fades to reveal it. */}
+      {revealing ? (
+        <Animated.View
+          pointerEvents="none"
+          style={[styles.revealFlashOverlay, { opacity: revealFlash }]}
+        />
+      ) : null}
     </View>
   );
 }
@@ -2602,78 +2668,115 @@ function VaultLockScreen({
   accentColor,
   circleId,
   fullHeight,
-  email,
   password,
   error,
   unlocking,
   opening,
   doorProgress,
   shake,
+  denyFlash,
   onPasswordChange,
   onUnlock,
 }: {
   accentColor: string;
   circleId: string;
   fullHeight: boolean;
-  email: string;
   password: string;
   error: string;
   unlocking: boolean;
   opening: boolean;
   doorProgress: Animated.Value;
   shake: Animated.Value;
+  denyFlash: Animated.Value;
   onPasswordChange: (value: string) => void;
   onUnlock: () => void;
 }) {
-  const leftDoorX = doorProgress.interpolate({ inputRange: [0, 1], outputRange: [0, -260] });
-  const rightDoorX = doorProgress.interpolate({ inputRange: [0, 1], outputRange: [0, 260] });
-  const dialRotate = doorProgress.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '540deg'] });
-  const dialOpacity = doorProgress.interpolate({ inputRange: [0, 0.16, 0.34, 1], outputRange: [1, 0.78, 0.18, 0] });
-  const innerGlowOpacity = doorProgress.interpolate({ inputRange: [0, 0.35, 1], outputRange: [0.08, 0.45, 1] });
-  const escapeBackdropOpacity = doorProgress.interpolate({ inputRange: [0, 0.24, 1], outputRange: [0, 0.1, 1] });
-  const tunnelScale = doorProgress.interpolate({ inputRange: [0, 1], outputRange: [0.55, 1.18] });
-  const tunnelRotate = doorProgress.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '18deg'] });
+  // ── Unlock choreography ─────────────────────────────────────────────
+  // One shared 0→1 progress value, but every layer keys off its own phase
+  // window so the open reads as a MECHANISM, not a crossfade:
+  //   A 0→0.28 wheel · B →0.45 locking dogs · C →0.58 seal · D →1 swing.
+  // The plate is frozen through A/B so the release has believable weight.
+  const wheelRotate = doorProgress.interpolate({
+    inputRange: [0, 0.28, 0.45, 1],
+    outputRange: ['0deg', '540deg', '585deg', '585deg'],
+  });
+  const wheelScale = doorProgress.interpolate({
+    inputRange: [0, 0.28, 0.45, 1],
+    outputRange: [1, 1.035, 0.98, 0.98],
+  });
+  const dogRetreat = doorProgress.interpolate({
+    inputRange: [0, 0.28, 0.44, 1],
+    outputRange: [0, 0, 14, 14],
+  });
+  const sealOpacity = doorProgress.interpolate({
+    inputRange: [0, 0.44, 0.58, 1],
+    outputRange: [0.72, 0.72, 0.12, 0],
+  });
+  const doorSwing = doorProgress.interpolate({
+    inputRange: [0, 0.46, 0.58, 1],
+    outputRange: ['0deg', '0deg', '-6deg', '-72deg'],
+  });
+  const doorTranslateX = doorProgress.interpolate({
+    inputRange: [0, 0.46, 0.58, 1],
+    outputRange: [0, 0, -8, -118],
+  });
+  const doorScaleX = doorProgress.interpolate({
+    inputRange: [0, 0.5, 0.64, 1],
+    outputRange: [1, 1, 0.96, 0.68],
+  });
+  const doorDropY = doorProgress.interpolate({
+    inputRange: [0, 0.3, 0.36, 1],
+    outputRange: [0, 0, 2, 2],
+  });
+  const chamberOpacity = doorProgress.interpolate({
+    inputRange: [0, 0.5, 0.64, 1],
+    outputRange: [0.12, 0.12, 0.72, 1],
+  });
+  const chamberScale = doorProgress.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [0.92, 0.92, 1.06],
+  });
+  const stageScale = doorProgress.interpolate({
+    inputRange: [0, 0.28, 0.52, 1],
+    outputRange: [1, 0.994, 1, 1.035],
+  });
+  const flashOpacity = doorProgress.interpolate({
+    inputRange: [0, 0.8, 0.94, 1],
+    outputRange: [0, 0, 0.72, 1],
+  });
   const serial = (circleId || '').replace(/-/g, '').slice(0, 8).toUpperCase() || '00000000';
 
   // ── Idle ambient animation ──────────────────────────────────────────
-  // Continuously loops while the vault is locked, driving subtle rotations,
-  // breathing, and a scanline drift. All pure transform/opacity work so
-  // it stays cheap on web.
+  // A slow reflection and status pulse add material depth without making a
+  // locked mechanical wheel rotate on its own.
   const idleProgress = useRef(new Animated.Value(0)).current;
+  const reduceMotion = Platform.OS === 'web'
+    && typeof window !== 'undefined'
+    && !!window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
   useEffect(() => {
+    if (reduceMotion) {
+      idleProgress.setValue(0.45);
+      return undefined;
+    }
     const loop = Animated.loop(
       Animated.sequence([
-        Animated.timing(idleProgress, { toValue: 1, duration: 16000, easing: Easing.linear, useNativeDriver: true }),
+        Animated.timing(idleProgress, { toValue: 1, duration: 9000, easing: Easing.linear, useNativeDriver: true }),
         Animated.timing(idleProgress, { toValue: 0, duration: 0, useNativeDriver: true }),
       ]),
     );
     loop.start();
     return () => loop.stop();
-  }, [idleProgress]);
+  }, [idleProgress, reduceMotion]);
 
-  // Slow counter-rotating halo ring around the dial (full lap every 16s).
-  const haloRotate = idleProgress.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '-360deg'] });
-  // Bezel tick ring rotates the OTHER way at half the angular speed.
-  const bezelRotate = idleProgress.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '180deg'] });
-  // Status pip ring rotates in the same direction as bezel but faster.
-  const pipRotate = idleProgress.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
-  // Lock-shell border breathing — opacity 0.55 ↔ 0.95 over the loop.
-  const breathOpacity = idleProgress.interpolate({
+  const steelSweepX = idleProgress.interpolate({ inputRange: [0, 1], outputRange: [-180, 180] });
+  const statusPulse = idleProgress.interpolate({
     inputRange: [0, 0.5, 1],
-    outputRange: [0.55, 0.95, 0.55],
+    outputRange: [0.45, 1, 0.45],
   });
-  // Scanline drift — sweeps top to bottom across the vault stage.
-  const scanY = idleProgress.interpolate({ inputRange: [0, 1], outputRange: [-12, 312] });
-  // Hot core pulse — small scale on the dial center dot.
-  const corePulse = idleProgress.interpolate({
-    inputRange: [0, 0.5, 1],
-    outputRange: [1.0, 1.18, 1.0],
+  const reflectionOpacity = doorProgress.interpolate({
+    inputRange: [0, 0.28, 0.48, 1],
+    outputRange: [0.34, 0.2, 0, 0],
   });
-
-  // Hide ambient layers once the unlock is in flight so they don't fight
-  // the door-open animation. We tie this directly to doorProgress so it
-  // fades out as the doors begin to part.
-  const idleVisibility = doorProgress.interpolate({ inputRange: [0, 0.18, 1], outputRange: [1, 0.6, 0] });
 
   return (
     <View
@@ -2684,261 +2787,221 @@ function VaultLockScreen({
       nativeID="section-site-credential-vault-lock"
     >
       <Animated.View style={[styles.lockShell, { transform: [{ translateX: shake }] }]}>
-        {/* Ambient breathing accent border — sits absolutely behind the
-            shell content and pulses opacity 0.55↔0.95 so the surface feels
-            alive while idle. */}
-        <Animated.View
-          pointerEvents="none"
-          style={[
-            styles.lockBreathBorder,
-            { borderColor: accentColor + '88', opacity: breathOpacity },
-          ]}
-        />
         <View style={styles.lockCopy}>
-          <Text style={styles.lockEyebrow}>UNDERGROUND CIRCLE SECURE VAULT</Text>
-          <Text style={styles.lockTitle}>Credentials are sealed.</Text>
-          <Text style={styles.lockSubtitle}>
-            Re-enter your account password to unlock the dashboard. Vault records, audit logs, and shared credential metadata do not load until this check passes.
-          </Text>
-          <View style={styles.lockAssuranceRow}>
-            <Text style={styles.lockAssurance}>AES-GCM</Text>
-            <Text style={styles.lockAssurance}>RLS</Text>
-            <Text style={styles.lockAssurance}>RE-AUTH</Text>
-            <Text style={styles.lockAssurance}>AUDITED</Text>
+          <View style={styles.lockEyebrowRow}>
+            <Animated.View style={[styles.lockStatusDot, { backgroundColor: accentColor, opacity: statusPulse }]} />
+            <Text style={styles.lockEyebrow}>UNDERGROUND CIRCLE / SECURE STORAGE</Text>
           </View>
+          <Text style={styles.lockTitle}>The vault is sealed.</Text>
+          <Text style={styles.lockSubtitle}>
+            Re-authenticate to release the mechanical lock. Credentials remain unloaded until access is confirmed.
+          </Text>
         </View>
 
-        <View style={styles.vaultStage}>
-          <Animated.View
-            pointerEvents="none"
-            style={[
-              styles.escapeBackdrop,
-              {
-                opacity: escapeBackdropOpacity,
-                transform: [{ scale: tunnelScale }, { rotate: tunnelRotate }],
-              },
-            ]}
-          />
-          <Animated.View
-            pointerEvents="none"
-            style={[
-              styles.escapeBeam,
-              styles.escapeBeamLeft,
-              {
-                opacity: escapeBackdropOpacity,
-                transform: [{ rotate: '-24deg' }, { scaleY: tunnelScale }],
-              },
-            ]}
-          />
-          <Animated.View
-            pointerEvents="none"
-            style={[
-              styles.escapeBeam,
-              styles.escapeBeamRight,
-              {
-                opacity: escapeBackdropOpacity,
-                transform: [{ rotate: '24deg' }, { scaleY: tunnelScale }],
-              },
-            ]}
-          />
-          <Animated.View style={[styles.vaultInteriorGlow, { opacity: innerGlowOpacity, backgroundColor: accentColor }]} />
+        <Animated.View style={[styles.vaultStage, { transform: [{ scale: stageScale }, { translateY: doorDropY }] }]}>
+          <View pointerEvents="none" style={styles.vaultWallPanelLeft}>
+            <View style={styles.vaultWallInset} />
+            <View style={styles.vaultWallInset} />
+          </View>
+          <View pointerEvents="none" style={styles.vaultWallPanelRight}>
+            <View style={styles.vaultWallInset} />
+            <View style={styles.vaultWallInset} />
+          </View>
 
-          {/* ── Ambient detail layers (idle while locked, fade as doors open) ── */}
-
-          {/* Bezel ring — 16 tick marks evenly distributed around a wide
-              circle. Slowly counter-rotates to feel like an instrument
-              face that's always tracking. */}
+          {/* The chamber exists behind the seal from the first frame. Dim
+              deposit boxes and converging floor lines create real depth as
+              soon as the circular door starts to swing away. */}
           <Animated.View
             pointerEvents="none"
             style={[
-              styles.vaultBezelRing,
-              { borderColor: accentColor + '22', opacity: idleVisibility, transform: [{ rotate: bezelRotate }] },
+              styles.vaultChamber,
+              { opacity: chamberOpacity, transform: [{ scale: chamberScale }] },
             ]}
           >
-            {Array.from({ length: 16 }).map((_, i) => {
-              const angle = (i / 16) * 360;
-              const long = i % 4 === 0; // every 4th tick is longer (cardinal points)
+            <View style={styles.vaultChamberCeiling} />
+            <View style={styles.vaultDepositWallLeft}>
+              {Array.from({ length: 8 }).map((_, index) => (
+                <View key={'left-box-' + index} style={styles.vaultDepositBox} />
+              ))}
+            </View>
+            <View style={styles.vaultDepositWallRight}>
+              {Array.from({ length: 8 }).map((_, index) => (
+                <View key={'right-box-' + index} style={styles.vaultDepositBox} />
+              ))}
+            </View>
+            <View style={styles.vaultChamberFloor}>
+              <View style={[styles.vaultFloorLine, styles.vaultFloorLineLeft]} />
+              <View style={[styles.vaultFloorLine, styles.vaultFloorLineCenter]} />
+              <View style={[styles.vaultFloorLine, styles.vaultFloorLineRight]} />
+            </View>
+            <View style={[styles.vaultChamberLight, { backgroundColor: accentColor + '55' }]} />
+          </Animated.View>
+
+          {/* A fixed three-ring jamb makes the door feel installed in a thick
+              wall. Its fasteners remain planted while the door face moves. */}
+          <View pointerEvents="none" style={styles.vaultJambOuter}>
+            {Array.from({ length: 16 }).map((_, index) => {
+              const angle = (index / 16) * 360;
               return (
                 <View
-                  key={i}
-                  pointerEvents="none"
+                  key={'frame-bolt-' + index}
                   style={[
-                    styles.vaultBezelTick,
-                    long && styles.vaultBezelTickLong,
-                    {
-                      backgroundColor: long ? accentColor + 'aa' : accentColor + '55',
-                      transform: [{ rotate: `${angle}deg` }, { translateY: -125 }],
-                    },
+                    styles.vaultFrameBolt,
+                    { transform: [{ rotate: String(angle) + 'deg' }, { translateY: -137 }] },
                   ]}
                 />
               );
             })}
-          </Animated.View>
+            <View style={styles.vaultJambMiddle}>
+              <View style={styles.vaultJambWell} />
+            </View>
+          </View>
 
-          {/* Halo ring — bordered circle around the dial that counter-
-              rotates relative to the dial. The pip ring sits inside it
-              and rotates the same way as bezel for a layered parallax. */}
+          <View pointerEvents="none" style={styles.vaultHingeSpine}>
+            <View style={styles.vaultHingeCap} />
+            <View style={styles.vaultHingeKnuckle} />
+            <View style={styles.vaultHingeKnuckle} />
+            <View style={styles.vaultHingeKnuckle} />
+            <View style={styles.vaultHingeCap} />
+          </View>
+
           <Animated.View
             pointerEvents="none"
             style={[
-              styles.vaultHaloRing,
-              { borderColor: accentColor + '44', opacity: idleVisibility, transform: [{ rotate: haloRotate }] },
-            ]}
-          />
-
-          {/* Status pip ring — 6 small dots orbit the dial. Two cardinal
-              dots are accent-bright, the rest dimmed, alternating around
-              the ring like an instrument readout. */}
-          <Animated.View
-            pointerEvents="none"
-            style={[
-              styles.vaultPipRing,
-              { opacity: idleVisibility, transform: [{ rotate: pipRotate }] },
-            ]}
-          >
-            {Array.from({ length: 6 }).map((_, i) => {
-              const angle = (i / 6) * 360;
-              const bright = i % 3 === 0;
-              return (
-                <View
-                  key={i}
-                  pointerEvents="none"
-                  style={[
-                    styles.vaultPip,
-                    {
-                      backgroundColor: bright ? accentColor : accentColor + '55',
-                      transform: [{ rotate: `${angle}deg` }, { translateY: -82 }, { rotate: `${-angle}deg` }],
-                      ...(bright && Platform.OS === 'web'
-                        ? { boxShadow: `0 0 8px ${accentColor}aa` } as any
-                        : {}),
-                    },
-                  ]}
-                />
-              );
-            })}
-          </Animated.View>
-
-          {/* Scanline drift — single 1px accent gradient sweeping top-to-
-              bottom while locked. Adds the "instrument scanning" feel
-              without being a green-text-cascade cliché. */}
-          <Animated.View
-            pointerEvents="none"
-            style={[
-              styles.vaultScanline,
+              styles.vaultDoorAssembly,
               {
-                opacity: idleVisibility,
-                backgroundColor: accentColor + '33',
-                transform: [{ translateY: scanY }],
+                transform: [
+                  { perspective: 900 },
+                  { translateX: doorTranslateX },
+                  { rotateY: doorSwing },
+                  { scaleX: doorScaleX },
+                ],
               },
             ]}
-          />
+          >
+            <View style={styles.vaultDoorDepth} />
+            <View style={styles.vaultDoorPlate}>
+              <View style={styles.vaultDoorOuterRing} />
+              <View style={styles.vaultDoorInnerRing} />
 
-          {VAULT_SPARKS.map((spark, index) => {
-            const start = spark.delay;
-            const opacity = doorProgress.interpolate({
-              inputRange: [0, start, Math.min(1, start + 0.2), 1],
-              outputRange: [0, 0, 1, 0.18],
-            });
-            const translateX = doorProgress.interpolate({
-              inputRange: [0, start, 1],
-              outputRange: [0, 0, spark.x],
-            });
-            const translateY = doorProgress.interpolate({
-              inputRange: [0, start, 1],
-              outputRange: [0, 0, spark.y],
-            });
-            const scale = doorProgress.interpolate({
-              inputRange: [0, start, 1],
-              outputRange: [0.2, 0.2, 1.4],
-            });
-            return (
+              {Array.from({ length: 12 }).map((_, index) => {
+                const angle = (index / 12) * 360;
+                return (
+                  <View
+                    key={'door-rivet-' + index}
+                    style={[
+                      styles.vaultDoorRivet,
+                      { transform: [{ rotate: String(angle) + 'deg' }, { translateY: -101 }] },
+                    ]}
+                  />
+                );
+              })}
+
+              {Array.from({ length: 8 }).map((_, index) => {
+                const angle = (index / 8) * 360;
+                return (
+                  <Animated.View
+                    key={'locking-dog-' + index}
+                    style={[
+                      styles.vaultLockingDog,
+                      {
+                        transform: [
+                          { rotate: String(angle) + 'deg' },
+                          { translateY: -113 },
+                          { translateY: dogRetreat },
+                        ],
+                      },
+                    ]}
+                  >
+                    <View style={styles.vaultLockingDogFace} />
+                  </Animated.View>
+                );
+              })}
+
               <Animated.View
-                key={`spark-${index}`}
-                pointerEvents="none"
                 style={[
-                  styles.escapeSpark,
-                  {
-                    width: spark.size,
-                    height: spark.size,
-                    borderRadius: spark.size,
-                    backgroundColor: index % 3 === 0 ? '#facc15' : index % 3 === 1 ? accentColor : '#38bdf8',
-                    opacity,
-                    transform: [{ translateX }, { translateY }, { scale }],
-                  },
+                  styles.vaultSteelReflection,
+                  { opacity: reflectionOpacity, transform: [{ translateX: steelSweepX }, { rotate: '16deg' }] },
                 ]}
               />
-            );
-          })}
-          <Animated.View
-            pointerEvents="none"
-            style={[
-              styles.vaultDoor,
-              styles.vaultDoorLeft,
-              {
-                borderColor: accentColor + '33',
-                transform: [{ translateX: leftDoorX }],
-              },
-            ]}
-          >
-            <View style={styles.vaultRivetsLeft} />
-            <View style={styles.vaultDoorStripes} />
-          </Animated.View>
-          <Animated.View
-            pointerEvents="none"
-            style={[
-              styles.vaultDoor,
-              styles.vaultDoorRight,
-              {
-                borderColor: accentColor + '33',
-                transform: [{ translateX: rightDoorX }],
-              },
-            ]}
-          >
-            <View style={styles.vaultRivetsRight} />
-            <View style={styles.vaultDoorStripes} />
-          </Animated.View>
-          <View pointerEvents="none" style={[styles.vaultCenterSeam, { backgroundColor: accentColor + '55' }]} />
-          <Animated.View pointerEvents="none" style={[styles.vaultDial, { borderColor: accentColor + '77', opacity: dialOpacity, transform: [{ rotate: dialRotate }] }]}>
-            <Animated.View
-              style={[
-                styles.vaultDialCore,
-                {
-                  backgroundColor: accentColor,
-                  transform: [{ scale: corePulse }],
-                  ...(Platform.OS === 'web'
-                    ? { boxShadow: `0 0 14px ${accentColor}88, 0 0 28px ${accentColor}44` } as any
-                    : {}),
-                },
-              ]}
-            />
-            <View style={styles.vaultDialSpoke} />
-            <View style={[styles.vaultDialSpoke, styles.vaultDialSpokeVertical]} />
-            {/* Cross-hair tick at each spoke end — small accent squares
-                that read as alignment marks on the dial face. */}
-            {[0, 90, 180, 270].map((deg) => (
-              <View
-                key={deg}
-                pointerEvents="none"
+
+              <Animated.View
                 style={[
-                  styles.vaultDialTick,
-                  {
-                    backgroundColor: accentColor + 'cc',
-                    transform: [{ rotate: `${deg}deg` }, { translateY: -48 }],
-                  },
+                  styles.vaultWheel,
+                  { transform: [{ rotate: wheelRotate }, { scale: wheelScale }] },
                 ]}
-              />
-            ))}
+              >
+                <View style={styles.vaultWheelNumberRing}>
+                  {Array.from({ length: 24 }).map((_, index) => {
+                    const angle = (index / 24) * 360;
+                    return (
+                      <View
+                        key={'wheel-tick-' + index}
+                        style={[
+                          styles.vaultWheelTick,
+                          index % 3 === 0 && styles.vaultWheelTickMajor,
+                          { transform: [{ rotate: String(angle) + 'deg' }, { translateY: -54 }] },
+                        ]}
+                      />
+                    );
+                  })}
+                </View>
+                {Array.from({ length: 3 }).map((_, index) => (
+                  <View
+                    key={'wheel-spoke-' + index}
+                    style={[styles.vaultWheelSpoke, { transform: [{ rotate: String(index * 60) + 'deg' }] }]}
+                  >
+                    <View style={[styles.vaultWheelHandle, styles.vaultWheelHandleLeft]} />
+                    <View style={[styles.vaultWheelHandle, styles.vaultWheelHandleRight]} />
+                  </View>
+                ))}
+                <View style={styles.vaultWheelHubOuter}>
+                  <View style={[styles.vaultWheelHub, { borderColor: accentColor + '88' }]}>
+                    <View style={[styles.vaultWheelHubPin, { backgroundColor: accentColor }]} />
+                  </View>
+                </View>
+              </Animated.View>
+
+              <View style={styles.vaultDoorMakerPlate}>
+                <Text style={styles.vaultDoorMakerText}>UC / CLASS IV</Text>
+              </View>
+            </View>
+            <View style={[styles.vaultHingeArm, styles.vaultHingeArmTop]} />
+            <View style={[styles.vaultHingeArm, styles.vaultHingeArmBottom]} />
           </Animated.View>
+
+          <Animated.View
+            pointerEvents="none"
+            style={[styles.vaultPressureSeal, { borderColor: accentColor + '99', opacity: sealOpacity }]}
+          />
+
+          <View pointerEvents="none" style={styles.vaultStageReadout}>
+            <Animated.View style={[styles.vaultStageReadoutDot, { backgroundColor: accentColor, opacity: statusPulse }]} />
+            <Text style={styles.vaultStageReadoutText}>{opening ? 'RELEASING' : 'SEALED'}</Text>
+          </View>
           <View pointerEvents="none" style={styles.vaultSerialPlate}>
             <Text style={styles.vaultSerialPlateText}>VAULT-{serial}</Text>
           </View>
-        </View>
+
+          <Animated.View
+            pointerEvents="none"
+            style={[styles.vaultDenyOverlay, { opacity: denyFlash }]}
+          />
+        </Animated.View>
 
         <View style={styles.unlockPanel}>
-          <Text style={styles.unlockPanelTitle}>{opening ? 'Vault doors opening...' : 'Password required'}</Text>
-          <Text style={styles.unlockPanelText}>
-            Signed in as {email || 'current user'}. This uses Supabase password re-auth and does not store your password.
-          </Text>
+          <View style={styles.unlockPanelHeader}>
+            <View style={styles.unlockPanelHeading}>
+              <Text style={styles.unlockPanelTitle}>{opening ? 'Access granted' : 'Release the lock'}</Text>
+              <Text style={styles.unlockPanelText}>
+                {opening ? 'The locking dogs are retracting.' : 'Confirm your account password. It is checked once and never stored.'}
+              </Text>
+            </View>
+            <View style={[styles.unlockStepBadge, { borderColor: accentColor + '55' }]}>
+              <Text style={[styles.unlockStepBadgeText, { color: accentColor }]}>RE-AUTH</Text>
+            </View>
+          </View>
+          <Text style={styles.unlockFieldLabel}>Account password</Text>
           <TextInput
             value={password}
             onChangeText={onPasswordChange}
@@ -2948,6 +3011,8 @@ function VaultLockScreen({
             autoCapitalize="none"
             autoCorrect={false}
             autoFocus={Platform.OS === 'web'}
+            accessibilityLabel="Vault account password"
+            accessibilityHint="Re-authenticates your account and opens the credential vault"
             placeholder="Enter account password"
             placeholderTextColor="#657186"
             style={[styles.unlockInput, error ? styles.unlockInputError : null]}
@@ -2956,6 +3021,7 @@ function VaultLockScreen({
           <Pressable
             onPress={onUnlock}
             disabled={unlocking || opening}
+            accessibilityState={{ disabled: unlocking || opening, busy: unlocking || opening }}
             style={[
               styles.unlockButton,
               { backgroundColor: accentColor },
@@ -2969,22 +3035,30 @@ function VaultLockScreen({
               <Text style={styles.unlockButtonText}>Open Vault</Text>
             )}
           </Pressable>
+          <View style={styles.unlockAssuranceRow}>
+            <Text style={styles.unlockAssurance}>ENCRYPTED AT REST</Text>
+            <View style={styles.unlockAssuranceDivider} />
+            <Text style={styles.unlockAssurance}>CIRCLE SCOPED</Text>
+            <View style={styles.unlockAssuranceDivider} />
+            <Text style={styles.unlockAssurance}>ACCESS LOGGED</Text>
+          </View>
         </View>
       </Animated.View>
-    </View>
-  );
-}
-
-function MetricCard({ label, value, color = '#cbd5e1' }: { label: string; value: string; color?: string }) {
-  // Pad single-digit counts so the readout grid aligns like a vault display.
-  const padded = /^\d+$/.test(value) && value.length < 3 ? value.padStart(3, '0') : value;
-  return (
-    <View style={[styles.metricCard, { borderColor: color + '22' }]}>
-      <View style={styles.metricTopRow}>
-        <View style={[styles.metricPip, { backgroundColor: color }]} />
-        <Text style={styles.metricLabel}>{label}</Text>
-      </View>
-      <Text style={[styles.metricValue, { color }]}>{padded}</Text>
+      {/* Terminal light flood — peaks as the door clears, and the parent
+          hands the same brightness to a fading overlay on the dashboard so
+          the swap happens inside the flash. */}
+      <Animated.View
+        pointerEvents="none"
+        style={[
+          styles.vaultFlashOverlay,
+          {
+            opacity: flashOpacity,
+            ...(Platform.OS === 'web'
+              ? { boxShadow: `inset 0 0 120px ${accentColor}66` } as any
+              : {}),
+          },
+        ]}
+      />
     </View>
   );
 }
@@ -3010,17 +3084,17 @@ function InfoLine({ label, value }: { label: string; value: string }) {
 const styles = StyleSheet.create({
   lockRoot: {
     width: '100%',
-    borderRadius: 24,
+    borderRadius: 18,
     borderWidth: 1,
-    borderColor: '#1f2937',
-    backgroundColor: '#020617',
+    borderColor: '#30363d',
+    backgroundColor: '#0d1117',
     overflow: 'hidden',
     justifyContent: 'center',
     ...Platform.select({
       web: {
         backgroundImage:
-          'radial-gradient(circle at 20% 0%, rgba(20, 184, 166, 0.12), transparent 30%), radial-gradient(circle at 80% 100%, rgba(245, 158, 11, 0.1), transparent 28%), linear-gradient(135deg, #020617 0%, #07111f 46%, #020617 100%)',
-        boxShadow: '0 24px 80px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.06)',
+          'radial-gradient(circle at 50% 18%, rgba(148,163,184,0.09), transparent 34%), linear-gradient(160deg, #151b23 0%, #090d12 48%, #05070a 100%)',
+        boxShadow: '0 20px 60px rgba(0,0,0,0.48), inset 0 1px 0 rgba(255,255,255,0.05)',
       } as any,
       default: {},
     }) as any,
@@ -3028,401 +3102,854 @@ const styles = StyleSheet.create({
   lockShell: {
     flex: 1,
     minHeight: 0,
-    padding: 22,
-    gap: 18,
+    padding: 16,
+    gap: 12,
     alignItems: 'center',
     justifyContent: 'center',
   },
   lockCopy: {
     width: '100%',
-    maxWidth: 760,
-    alignItems: 'center',
-    gap: 8,
-  },
-  lockEyebrow: {
-    color: '#94a3b8',
-    fontSize: 10,
-    fontWeight: '900',
-    letterSpacing: 2,
-    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
-    textAlign: 'center',
-  },
-  lockTitle: {
-    color: '#f8fafc',
-    fontSize: 28,
-    fontWeight: '900',
-    letterSpacing: -0.6,
-    textAlign: 'center',
-  },
-  lockSubtitle: {
     maxWidth: 680,
-    color: '#9ca3af',
-    fontSize: 13,
-    lineHeight: 20,
-    textAlign: 'center',
+    alignItems: 'center',
+    gap: 4,
   },
-  lockAssuranceRow: {
-    marginTop: 4,
+  lockEyebrowRow: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'center',
-    gap: 8,
-  },
-  lockAssurance: {
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: '#ffffff16',
-    backgroundColor: '#0b1220',
-    color: '#cbd5e1',
-    fontSize: 10,
-    fontWeight: '900',
-    letterSpacing: 1,
-    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
-  },
-  vaultStage: {
-    width: '100%',
-    maxWidth: 620,
-    height: 300,
-    borderRadius: 28,
-    borderWidth: 1,
-    borderColor: '#ffffff18',
-    backgroundColor: '#030712',
-    overflow: Platform.OS === 'web' ? 'visible' as any : 'hidden',
     alignItems: 'center',
     justifyContent: 'center',
-    ...Platform.select({
-      web: {
-        backgroundImage:
-          'radial-gradient(circle at 50% 50%, rgba(20,184,166,0.18), transparent 18%), radial-gradient(circle at 24% 36%, rgba(250,204,21,0.12), transparent 21%), radial-gradient(circle at 76% 38%, rgba(56,189,248,0.12), transparent 21%), linear-gradient(135deg, #030712 0%, #071426 52%, #020617 100%)',
-        boxShadow: 'inset 0 0 80px rgba(15,23,42,0.9), 0 18px 60px rgba(0,0,0,0.5)',
-      } as any,
-      default: {},
-    }) as any,
+    gap: 7,
   },
-  escapeBackdrop: {
-    position: 'absolute' as any,
-    width: 430,
-    height: 430,
-    borderRadius: 999,
-    backgroundColor: '#0f172a',
-    borderWidth: 1,
-    borderColor: '#ffffff10',
-    ...Platform.select({
-      web: {
-        backgroundImage:
-          'conic-gradient(from 25deg, rgba(20,184,166,0.36), rgba(250,204,21,0.28), rgba(56,189,248,0.32), rgba(168,85,247,0.25), rgba(20,184,166,0.36))',
-        filter: 'blur(1px)',
-        boxShadow: '0 0 80px rgba(20,184,166,0.22), inset 0 0 70px rgba(2,6,23,0.72)',
-      } as any,
-      default: {},
-    }) as any,
-  },
-  escapeBeam: {
-    position: 'absolute' as any,
-    width: 72,
-    height: 460,
-    borderRadius: 999,
-    backgroundColor: '#38bdf866',
-    ...Platform.select({
-      web: {
-        filter: 'blur(16px)',
-        boxShadow: '0 0 48px rgba(56,189,248,0.5)',
-      } as any,
-      default: {},
-    }) as any,
-  },
-  escapeBeamLeft: {
-    left: 138,
-    top: -74,
-    backgroundColor: '#14b8a666',
-  },
-  escapeBeamRight: {
-    right: 138,
-    top: -74,
-    backgroundColor: '#facc1566',
-  },
-  escapeSpark: {
-    position: 'absolute' as any,
-    zIndex: 2,
-    ...Platform.select({
-      web: {
-        boxShadow: '0 0 16px currentColor',
-      } as any,
-      default: {},
-    }) as any,
-  },
-  vaultInteriorGlow: {
-    position: 'absolute' as any,
-    width: 420,
-    height: 420,
-    borderRadius: 999,
-    opacity: 0.12,
-    ...Platform.select({
-      web: {
-        filter: 'blur(42px)',
-      } as any,
-      default: {},
-    }) as any,
-  },
-  vaultDoor: {
-    position: 'absolute' as any,
-    top: 0,
-    bottom: 0,
-    width: '50%',
-    borderWidth: 1,
-    backgroundColor: '#111827',
-    overflow: 'hidden',
-    zIndex: 4,
-    ...Platform.select({
-      web: {
-        backgroundImage:
-          'linear-gradient(135deg, rgba(255,255,255,0.08), transparent 24%), repeating-linear-gradient(90deg, rgba(255,255,255,0.035) 0 1px, transparent 1px 18px), linear-gradient(180deg, #182235 0%, #0b1220 52%, #151f33 100%)',
-      } as any,
-      default: {},
-    }) as any,
-  },
-  vaultDoorLeft: {
-    left: 0,
-    borderTopLeftRadius: 28,
-    borderBottomLeftRadius: 28,
-  },
-  vaultDoorRight: {
-    right: 0,
-    borderTopRightRadius: 28,
-    borderBottomRightRadius: 28,
-  },
-  vaultDoorStripes: {
-    position: 'absolute' as any,
-    top: 18,
-    bottom: 18,
-    left: 28,
-    right: 28,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: '#ffffff12',
-    backgroundColor: '#02061755',
-  },
-  vaultRivetsLeft: {
-    position: 'absolute' as any,
-    left: 14,
-    top: 22,
-    bottom: 22,
-    width: 8,
-    borderRadius: 999,
-    backgroundColor: '#020617',
-    borderWidth: 1,
-    borderColor: '#ffffff12',
-  },
-  vaultRivetsRight: {
-    position: 'absolute' as any,
-    right: 14,
-    top: 22,
-    bottom: 22,
-    width: 8,
-    borderRadius: 999,
-    backgroundColor: '#020617',
-    borderWidth: 1,
-    borderColor: '#ffffff12',
-  },
-  vaultCenterSeam: {
-    position: 'absolute' as any,
-    top: 0,
-    bottom: 0,
-    width: 2,
-    zIndex: 5,
-  },
-  vaultDial: {
-    position: 'absolute' as any,
-    width: 104,
-    height: 104,
-    borderRadius: 999,
-    borderWidth: 3,
-    backgroundColor: '#0b1220',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 6,
-    ...Platform.select({
-      web: {
-        boxShadow: '0 0 34px rgba(0,0,0,0.65), inset 0 0 20px rgba(255,255,255,0.06)',
-      } as any,
-      default: {},
-    }) as any,
-  },
-  vaultDialCore: {
-    width: 18,
-    height: 18,
-    borderRadius: 999,
-  },
-  vaultDialSpoke: {
-    position: 'absolute' as any,
-    width: 74,
-    height: 6,
-    borderRadius: 999,
-    backgroundColor: '#d1d5db',
-  },
-  vaultDialSpokeVertical: {
-    transform: [{ rotate: '90deg' }],
-  },
-  vaultDialTick: {
-    position: 'absolute' as any,
-    width: 4,
-    height: 8,
-    borderRadius: 1,
-  },
-  // ── Ambient detail layers ───────────────────────────────────────────
-  vaultBezelRing: {
-    position: 'absolute' as any,
-    width: 280,
-    height: 280,
-    borderRadius: 999,
-    borderWidth: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 3,
-  },
-  vaultBezelTick: {
-    position: 'absolute' as any,
-    width: 2,
-    height: 8,
-    borderRadius: 1,
-  },
-  vaultBezelTickLong: {
-    height: 14,
-    width: 3,
-  },
-  vaultHaloRing: {
-    position: 'absolute' as any,
-    width: 196,
-    height: 196,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderStyle: 'dashed',
-    zIndex: 5,
-  },
-  vaultPipRing: {
-    position: 'absolute' as any,
-    width: 178,
-    height: 178,
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 5,
-  },
-  vaultPip: {
-    position: 'absolute' as any,
+  lockStatusDot: {
     width: 6,
     height: 6,
     borderRadius: 999,
   },
-  vaultScanline: {
+  lockEyebrow: {
+    color: '#8b949e',
+    fontSize: 10,
+    fontWeight: '600',
+    letterSpacing: 0.9,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+    textAlign: 'center',
+  },
+  lockTitle: {
+    color: '#e6edf3',
+    fontSize: 26,
+    fontWeight: '700',
+    letterSpacing: -0.4,
+    textAlign: 'center',
+  },
+  lockSubtitle: {
+    maxWidth: 620,
+    color: '#8b949e',
+    fontSize: 12,
+    lineHeight: 18,
+    textAlign: 'center',
+  },
+  vaultStage: {
+    width: '100%',
+    maxWidth: 680,
+    height: 310,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#3d4652',
+    backgroundColor: '#111820',
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...Platform.select({
+      web: {
+        backgroundImage:
+          'repeating-linear-gradient(0deg, rgba(255,255,255,0.018) 0 1px, transparent 1px 22px), linear-gradient(115deg, #222b35 0%, #111820 44%, #080c11 100%)',
+        boxShadow:
+          'inset 0 0 0 8px rgba(4,7,10,0.46), inset 0 0 72px rgba(0,0,0,0.8), 0 16px 36px rgba(0,0,0,0.42)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultWallPanelLeft: {
+    position: 'absolute' as any,
+    top: 10,
+    bottom: 10,
+    left: 10,
+    width: 126,
+    padding: 8,
+    gap: 8,
+    borderRadius: 9,
+    borderWidth: 1,
+    borderColor: '#ffffff0c',
+    backgroundColor: '#0a0f15',
+    zIndex: 0,
+  },
+  vaultWallPanelRight: {
+    position: 'absolute' as any,
+    top: 10,
+    bottom: 10,
+    right: 10,
+    width: 126,
+    padding: 8,
+    gap: 8,
+    borderRadius: 9,
+    borderWidth: 1,
+    borderColor: '#ffffff0c',
+    backgroundColor: '#0a0f15',
+    zIndex: 0,
+  },
+  vaultWallInset: {
+    flex: 1,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#ffffff0b',
+    backgroundColor: '#111820',
+    ...Platform.select({
+      web: {
+        boxShadow: 'inset 4px 5px 12px rgba(0,0,0,0.58), inset -1px -1px 0 rgba(255,255,255,0.035)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultChamber: {
+    position: 'absolute' as any,
+    width: 238,
+    height: 238,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#53617144',
+    backgroundColor: '#020408',
+    overflow: 'hidden',
+    zIndex: 4,
+    ...Platform.select({
+      web: {
+        backgroundImage: 'radial-gradient(circle at 50% 42%, #17212a 0%, #060a0e 54%, #010203 100%)',
+        boxShadow: 'inset 0 0 54px rgba(0,0,0,0.95)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultChamberCeiling: {
+    position: 'absolute' as any,
+    top: 0,
+    left: 30,
+    right: 30,
+    height: 74,
+    borderBottomLeftRadius: 42,
+    borderBottomRightRadius: 42,
+    borderBottomWidth: 1,
+    borderBottomColor: '#7f8b9822',
+    ...Platform.select({
+      web: {
+        backgroundImage: 'linear-gradient(180deg, rgba(123,139,153,0.18), rgba(20,28,36,0.02))',
+      } as any,
+      default: { backgroundColor: '#141d26' },
+    }) as any,
+  },
+  vaultDepositWallLeft: {
+    position: 'absolute' as any,
+    left: 22,
+    top: 52,
+    width: 56,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 3,
+  },
+  vaultDepositWallRight: {
+    position: 'absolute' as any,
+    right: 22,
+    top: 52,
+    width: 56,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 3,
+  },
+  vaultDepositBox: {
+    width: 26,
+    height: 25,
+    borderRadius: 2,
+    borderWidth: 1,
+    borderColor: '#76839233',
+    backgroundColor: '#1b2630',
+    ...Platform.select({
+      web: {
+        boxShadow: 'inset 1px 1px 0 rgba(255,255,255,0.05), inset -2px -2px 5px rgba(0,0,0,0.5)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultChamberFloor: {
+    position: 'absolute' as any,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: 70,
+    overflow: 'hidden',
+    borderTopWidth: 1,
+    borderTopColor: '#ffffff12',
+    backgroundColor: '#070b0f',
+    ...Platform.select({
+      web: {
+        backgroundImage: 'linear-gradient(180deg, #111820 0%, #030507 100%)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultFloorLine: {
+    position: 'absolute' as any,
+    bottom: -14,
+    width: 1,
+    height: 100,
+    backgroundColor: '#8b98a51f',
+  },
+  vaultFloorLineLeft: {
+    left: 68,
+    transform: [{ rotate: '24deg' }],
+  },
+  vaultFloorLineCenter: {
+    left: '50%',
+  },
+  vaultFloorLineRight: {
+    right: 68,
+    transform: [{ rotate: '-24deg' }],
+  },
+  vaultChamberLight: {
+    position: 'absolute' as any,
+    left: '50%',
+    top: 72,
+    marginLeft: -19,
+    width: 38,
+    height: 38,
+    borderRadius: 999,
+    ...Platform.select({
+      web: {
+        filter: 'blur(18px)',
+        boxShadow: '0 0 38px rgba(255,255,255,0.16)',
+      } as any,
+      default: { opacity: 0.28 },
+    }) as any,
+  },
+  vaultJambOuter: {
+    position: 'absolute' as any,
+    width: 294,
+    height: 294,
+    borderRadius: 999,
+    borderWidth: 2,
+    borderColor: '#65717d',
+    backgroundColor: '#29323c',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 3,
+    ...Platform.select({
+      web: {
+        backgroundImage:
+          'radial-gradient(circle at 38% 30%, #56616d 0%, #343e48 34%, #1a222b 67%, #0b1016 100%)',
+        boxShadow:
+          '0 18px 38px rgba(0,0,0,0.66), inset 0 2px 2px rgba(255,255,255,0.16), inset 0 -8px 18px rgba(0,0,0,0.62)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultFrameBolt: {
+    position: 'absolute' as any,
+    left: '50%',
+    top: '50%',
+    marginLeft: -4,
+    marginTop: -4,
+    width: 8,
+    height: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#0b1016',
+    backgroundColor: '#b0b8c0',
+    zIndex: 2,
+    ...Platform.select({
+      web: {
+        boxShadow: 'inset 1px 1px 1px rgba(255,255,255,0.65), 0 2px 3px rgba(0,0,0,0.7)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultJambMiddle: {
+    width: 270,
+    height: 270,
+    borderRadius: 999,
+    borderWidth: 9,
+    borderColor: '#111820',
+    backgroundColor: '#353f49',
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...Platform.select({
+      web: {
+        boxShadow: 'inset 0 0 0 2px rgba(255,255,255,0.1), inset 0 0 30px rgba(0,0,0,0.82)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultJambWell: {
+    width: 242,
+    height: 242,
+    borderRadius: 999,
+    borderWidth: 3,
+    borderColor: '#020305',
+    backgroundColor: '#05080c',
+    ...Platform.select({
+      web: {
+        boxShadow: 'inset 0 0 32px rgba(0,0,0,0.96), 0 0 0 1px rgba(140,151,162,0.16)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultHingeSpine: {
+    position: 'absolute' as any,
+    left: '50%',
+    top: '50%',
+    marginLeft: -164,
+    marginTop: -89,
+    width: 24,
+    height: 178,
+    paddingVertical: 5,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#747f8a',
+    backgroundColor: '#222b34',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    zIndex: 8,
+    ...Platform.select({
+      web: {
+        backgroundImage: 'linear-gradient(90deg, #111820, #66717b 48%, #1b232c)',
+        boxShadow: '4px 8px 12px rgba(0,0,0,0.62), inset 1px 0 0 rgba(255,255,255,0.18)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultHingeCap: {
+    width: 28,
+    height: 8,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#8a949d',
+    backgroundColor: '#39444e',
+  },
+  vaultHingeKnuckle: {
+    width: 30,
+    height: 38,
+    borderRadius: 7,
+    borderWidth: 1,
+    borderColor: '#8b96a1',
+    backgroundColor: '#303a44',
+    ...Platform.select({
+      web: {
+        backgroundImage: 'linear-gradient(90deg, #151c23, #7b8690 48%, #202932)',
+        boxShadow: '3px 4px 7px rgba(0,0,0,0.5)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultDoorAssembly: {
+    position: 'absolute' as any,
+    width: 260,
+    height: 260,
+    borderRadius: 999,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 7,
+  },
+  vaultDoorDepth: {
+    position: 'absolute' as any,
+    top: 7,
+    left: -9,
+    width: 260,
+    height: 260,
+    borderRadius: 999,
+    borderWidth: 2,
+    borderColor: '#070a0d',
+    backgroundColor: '#0b1015',
+    ...Platform.select({
+      web: {
+        boxShadow: '-12px 16px 22px rgba(0,0,0,0.72)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultDoorPlate: {
+    width: 252,
+    height: 252,
+    borderRadius: 999,
+    borderWidth: 2,
+    borderColor: '#7a8590',
+    backgroundColor: '#303a44',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    ...Platform.select({
+      web: {
+        backgroundImage:
+          'radial-gradient(circle at 35% 28%, rgba(255,255,255,0.2), transparent 22%), radial-gradient(circle at 50% 50%, #48535e 0%, #27313a 47%, #121920 78%, #090d12 100%)',
+        boxShadow:
+          'inset 0 2px 2px rgba(255,255,255,0.2), inset 0 -16px 24px rgba(0,0,0,0.5), 0 8px 18px rgba(0,0,0,0.58)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultDoorOuterRing: {
+    position: 'absolute' as any,
+    width: 220,
+    height: 220,
+    borderRadius: 999,
+    borderWidth: 7,
+    borderColor: '#121920',
+    ...Platform.select({
+      web: {
+        boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.13), 0 0 0 1px rgba(0,0,0,0.8)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultDoorInnerRing: {
+    position: 'absolute' as any,
+    width: 170,
+    height: 170,
+    borderRadius: 999,
+    borderWidth: 2,
+    borderColor: '#69758066',
+    backgroundColor: '#10161c55',
+    ...Platform.select({
+      web: {
+        boxShadow: 'inset 0 0 22px rgba(0,0,0,0.48), 0 2px 4px rgba(0,0,0,0.5)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultDoorRivet: {
+    position: 'absolute' as any,
+    left: '50%',
+    top: '50%',
+    marginLeft: -3,
+    marginTop: -3,
+    width: 6,
+    height: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#12171d',
+    backgroundColor: '#a5afb8',
+    zIndex: 2,
+  },
+  vaultLockingDog: {
+    position: 'absolute' as any,
+    left: '50%',
+    top: '50%',
+    marginLeft: -9,
+    marginTop: -14,
+    width: 18,
+    height: 28,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#0b0f14',
+    backgroundColor: '#717c86',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 3,
+    ...Platform.select({
+      web: {
+        backgroundImage: 'linear-gradient(90deg, #263039, #a5afb8 50%, #303a43)',
+        boxShadow: '0 3px 5px rgba(0,0,0,0.68)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultLockingDogFace: {
+    width: 8,
+    height: 15,
+    borderRadius: 2,
+    borderWidth: 1,
+    borderColor: '#ffffff30',
+    backgroundColor: '#263039',
+  },
+  vaultSteelReflection: {
+    position: 'absolute' as any,
+    top: -44,
+    width: 44,
+    height: 340,
+    backgroundColor: '#ffffff',
+    zIndex: 3,
+    ...Platform.select({
+      web: {
+        filter: 'blur(18px)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultWheel: {
+    width: 124,
+    height: 124,
+    borderRadius: 999,
+    borderWidth: 3,
+    borderColor: '#b6bec6',
+    backgroundColor: '#111820cc',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 5,
+    ...Platform.select({
+      web: {
+        backgroundImage: 'radial-gradient(circle, #303a43 0%, #151c23 58%, #090d12 100%)',
+        boxShadow:
+          '0 10px 22px rgba(0,0,0,0.7), inset 0 1px 2px rgba(255,255,255,0.24), inset 0 -7px 12px rgba(0,0,0,0.6)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultWheelNumberRing: {
+    position: 'absolute' as any,
+    width: 112,
+    height: 112,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#d2d8dd33',
+  },
+  vaultWheelTick: {
+    position: 'absolute' as any,
+    left: '50%',
+    top: '50%',
+    marginLeft: -0.5,
+    marginTop: -2.5,
+    width: 1,
+    height: 5,
+    borderRadius: 1,
+    backgroundColor: '#87919a',
+  },
+  vaultWheelTickMajor: {
+    marginLeft: -1,
+    marginTop: -4,
+    width: 2,
+    height: 8,
+    backgroundColor: '#d4d9de',
+  },
+  vaultWheelSpoke: {
+    position: 'absolute' as any,
+    width: 94,
+    height: 8,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#4f5a64',
+    backgroundColor: '#b9c1c8',
+    zIndex: 2,
+    ...Platform.select({
+      web: {
+        backgroundImage: 'linear-gradient(180deg, #eef1f3, #7f8992 55%, #3d4650)',
+        boxShadow: '0 3px 4px rgba(0,0,0,0.62), inset 0 1px 0 rgba(255,255,255,0.7)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultWheelHandle: {
+    position: 'absolute' as any,
+    top: -4,
+    width: 14,
+    height: 14,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#535d66',
+    backgroundColor: '#d8dde1',
+  },
+  vaultWheelHandleLeft: {
+    left: -6,
+  },
+  vaultWheelHandleRight: {
+    right: -6,
+  },
+  vaultWheelHubOuter: {
+    width: 44,
+    height: 44,
+    borderRadius: 999,
+    borderWidth: 2,
+    borderColor: '#747f88',
+    backgroundColor: '#0d1319',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 4,
+    ...Platform.select({
+      web: {
+        boxShadow: '0 5px 10px rgba(0,0,0,0.68), inset 0 1px 1px rgba(255,255,255,0.14)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultWheelHub: {
+    width: 28,
+    height: 28,
+    borderRadius: 999,
+    borderWidth: 2,
+    backgroundColor: '#303943',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  vaultWheelHubPin: {
+    width: 8,
+    height: 8,
+    borderRadius: 999,
+  },
+  vaultDoorMakerPlate: {
+    position: 'absolute' as any,
+    bottom: 27,
+    minWidth: 92,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#77828c66',
+    backgroundColor: '#0a0f14d9',
+    zIndex: 4,
+  },
+  vaultDoorMakerText: {
+    color: '#aeb7bf',
+    fontSize: 8,
+    fontWeight: '600',
+    letterSpacing: 0.8,
+    textAlign: 'center',
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+  },
+  vaultHingeArm: {
+    position: 'absolute' as any,
+    left: -22,
+    width: 74,
+    height: 16,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: '#707b85',
+    backgroundColor: '#3d4750',
+    zIndex: 8,
+    ...Platform.select({
+      web: {
+        backgroundImage: 'linear-gradient(180deg, #808a93, #313b44 58%, #161e25)',
+        boxShadow: '2px 5px 8px rgba(0,0,0,0.62)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultHingeArmTop: {
+    top: 66,
+    transform: [{ rotate: '-9deg' }],
+  },
+  vaultHingeArmBottom: {
+    bottom: 66,
+    transform: [{ rotate: '9deg' }],
+  },
+  vaultPressureSeal: {
+    position: 'absolute' as any,
+    width: 262,
+    height: 262,
+    borderRadius: 999,
+    borderWidth: 2,
+    zIndex: 9,
+    ...Platform.select({
+      web: {
+        boxShadow: '0 0 12px rgba(255,255,255,0.08), inset 0 0 8px rgba(255,255,255,0.06)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultStageReadout: {
+    position: 'absolute' as any,
+    top: 13,
+    right: 13,
+    minHeight: 24,
+    paddingHorizontal: 9,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#ffffff18',
+    backgroundColor: '#05080cd9',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    zIndex: 12,
+  },
+  vaultStageReadoutDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 999,
+  },
+  vaultStageReadoutText: {
+    color: '#b7c0c8',
+    fontSize: 9,
+    fontWeight: '600',
+    letterSpacing: 0.7,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+  },
+  vaultSerialPlate: {
+    position: 'absolute' as any,
+    left: 13,
+    bottom: 13,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#ffffff18',
+    backgroundColor: '#05080cd9',
+    zIndex: 12,
+  },
+  vaultSerialPlateText: {
+    color: '#8b949e',
+    fontSize: 9,
+    fontWeight: '600',
+    letterSpacing: 0.7,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+  },
+  vaultDenyOverlay: {
     position: 'absolute' as any,
     top: 0,
     left: 0,
     right: 0,
-    height: 1,
-    zIndex: 6,
+    bottom: 0,
+    borderRadius: 16,
+    borderWidth: 2,
+    borderColor: '#f85149',
+    backgroundColor: '#f8514912',
+    zIndex: 20,
     ...Platform.select({
       web: {
-        boxShadow: '0 0 8px rgba(255,255,255,0.18)',
+        boxShadow: 'inset 0 0 48px rgba(248,81,73,0.22)',
       } as any,
       default: {},
     }) as any,
   },
-  lockBreathBorder: {
+  vaultFlashOverlay: {
     position: 'absolute' as any,
-    top: -1,
-    left: -1,
-    right: -1,
-    bottom: -1,
-    borderRadius: 28,
-    borderWidth: 1,
-    pointerEvents: 'none' as any,
-    ...Platform.select({
-      web: {
-        boxShadow: '0 0 32px rgba(255,255,255,0.05) inset',
-      } as any,
-      default: {},
-    }) as any,
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: 18,
+    backgroundColor: '#e6edf3',
+    zIndex: 50,
   },
-  vaultSerialPlate: {
+  revealFlashOverlay: {
     position: 'absolute' as any,
-    bottom: 16,
-    paddingHorizontal: 12,
-    paddingVertical: 5,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: '#ffffff18',
-    backgroundColor: '#020617dd',
-    zIndex: 7,
-  },
-  vaultSerialPlateText: {
-    color: '#94a3b8',
-    fontSize: 10,
-    fontWeight: '900',
-    letterSpacing: 1.4,
-    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: 18,
+    backgroundColor: '#e6edf3',
+    zIndex: 999,
   },
   unlockPanel: {
     width: '100%',
     maxWidth: 520,
-    padding: 16,
-    borderRadius: 18,
+    padding: 14,
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#ffffff18',
-    backgroundColor: '#060b14d9',
-    gap: 10,
+    borderColor: '#30363d',
+    backgroundColor: '#11161ddf',
+    gap: 8,
     ...Platform.select({
       web: {
         backdropFilter: 'blur(14px)',
-        boxShadow: '0 18px 50px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.05)',
+        boxShadow: '0 14px 36px rgba(0,0,0,0.42), inset 0 1px 0 rgba(255,255,255,0.04)',
       } as any,
       default: {},
     }) as any,
   },
+  unlockPanelHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  unlockPanelHeading: {
+    flex: 1,
+    gap: 2,
+  },
   unlockPanelTitle: {
-    color: '#f8fafc',
-    fontSize: 15,
-    fontWeight: '900',
-    letterSpacing: 0.8,
-    textTransform: 'uppercase',
+    color: '#e6edf3',
+    fontSize: 14,
+    fontWeight: '700',
   },
   unlockPanelText: {
-    color: '#9ca3af',
-    fontSize: 12,
-    lineHeight: 18,
+    color: '#8b949e',
+    fontSize: 11,
+    lineHeight: 16,
   },
-  unlockInput: {
-    minHeight: 48,
-    borderRadius: 12,
+  unlockStepBadge: {
+    minHeight: 24,
+    paddingHorizontal: 8,
+    borderRadius: 20,
     borderWidth: 1,
-    borderColor: '#ffffff20',
-    backgroundColor: '#020617',
-    color: '#f8fafc',
-    paddingHorizontal: 14,
-    fontSize: 14,
+    backgroundColor: '#0d1117',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  unlockStepBadgeText: {
+    fontSize: 9,
+    fontWeight: '600',
+    letterSpacing: 0.7,
     fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
   },
+  unlockFieldLabel: {
+    color: '#c9d1d9',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  unlockInput: {
+    minHeight: 44,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#30363d',
+    backgroundColor: '#0d1117',
+    color: '#e6edf3',
+    paddingHorizontal: 12,
+    fontSize: 14,
+    ...Platform.select({
+      web: {
+        outlineStyle: 'none',
+      } as any,
+      default: {},
+    }) as any,
+  },
   unlockInputError: {
-    borderColor: '#ef444488',
+    borderColor: '#f85149',
   },
   unlockError: {
-    color: '#fca5a5',
+    color: '#ff7b72',
     fontSize: 12,
     lineHeight: 17,
   },
   unlockButton: {
-    minHeight: 46,
-    borderRadius: 12,
+    minHeight: 44,
+    borderRadius: 8,
     alignItems: 'center',
     justifyContent: 'center',
+    ...Platform.select({
+      web: {
+        transition: 'background-color 0.18s ease, opacity 0.18s ease',
+      } as any,
+      default: {},
+    }) as any,
   },
   unlockButtonText: {
     color: '#061018',
     fontSize: 12,
-    fontWeight: '900',
-    textTransform: 'uppercase',
-    letterSpacing: 1.3,
+    fontWeight: '700',
+  },
+  unlockAssuranceRow: {
+    minHeight: 16,
+    marginTop: 2,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  unlockAssurance: {
+    color: '#6e7781',
+    fontSize: 8.5,
+    fontWeight: '600',
+    letterSpacing: 0.5,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+  },
+  unlockAssuranceDivider: {
+    width: 3,
+    height: 3,
+    borderRadius: 999,
+    backgroundColor: '#484f58',
   },
   root: {
     width: '100%',
@@ -3464,12 +3991,6 @@ const styles = StyleSheet.create({
     gap: 8,
     flexWrap: 'wrap',
   },
-  kicker: {
-    color: '#8b95a7',
-    fontSize: 10,
-    letterSpacing: 1.6,
-    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
-  },
   lockedPill: {
     paddingHorizontal: 8,
     paddingVertical: 2,
@@ -3480,64 +4001,20 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
   },
-  statusRibbon: {
-    marginTop: 10,
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-  },
-  statusPill: {
+  headerRight: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#ffffff15',
-    backgroundColor: '#0c1422',
-  },
-  statusDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 999,
-    backgroundColor: '#22c55e',
-    ...Platform.select({
-      web: {
-        boxShadow: '0 0 6px rgba(34, 197, 94, 0.7)',
-      } as any,
-      default: {},
-    }) as any,
-  },
-  statusPillText: {
-    color: '#cbd5e1',
-    fontSize: 9.5,
-    fontWeight: '800',
-    letterSpacing: 0.6,
-    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
-  },
-  headerRight: {
-    alignItems: 'flex-end',
-    gap: 6,
-  },
-  vaultSerial: {
-    color: '#64748b',
-    fontSize: 10,
-    letterSpacing: 1.4,
-    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
   },
   title: {
-    marginTop: 4,
     color: '#f8fafc',
-    fontSize: 20,
+    fontSize: 16,
     fontWeight: '800',
   },
-  subtitle: {
-    marginTop: 4,
-    maxWidth: 720,
-    color: '#9ca3af',
-    fontSize: 12,
-    lineHeight: 18,
+  headerCount: {
+    color: '#64748b',
+    fontSize: 11,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
   },
   refreshBtn: {
     alignSelf: 'flex-start',
@@ -3584,42 +4061,14 @@ const styles = StyleSheet.create({
     padding: 12,
     gap: 12,
   },
-  statsGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
+  advancedBody: {
+    padding: 12,
+    paddingTop: 4,
     gap: 10,
   },
-  metricCard: {
-    flex: 1,
-    minWidth: 130,
-    padding: 12,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#ffffff12',
-    backgroundColor: '#050914',
-    gap: 6,
-  },
-  metricTopRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 7,
-  },
-  metricPip: {
-    width: 6,
-    height: 6,
-    borderRadius: 999,
-  },
-  metricValue: {
-    fontSize: 22,
-    fontWeight: '900',
-    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
-    letterSpacing: 1.5,
-  },
-  metricLabel: {
-    color: '#7c8798',
+  advancedFacts: {
+    color: '#64748b',
     fontSize: 10,
-    fontWeight: '800',
-    textTransform: 'uppercase',
     letterSpacing: 0.8,
     fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
   },
@@ -3709,15 +4158,6 @@ const styles = StyleSheet.create({
   tagChipText: {
     fontSize: 11,
     fontWeight: '700',
-  },
-  tagBadge: {
-    paddingHorizontal: 7,
-    paddingVertical: 2,
-    borderRadius: 6,
-    borderWidth: 1,
-    fontSize: 10,
-    fontWeight: '800',
-    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
   },
   tagFilterChip: {
     paddingHorizontal: 10,
@@ -3899,31 +4339,25 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
   },
-  highTrustBadge: {
-    paddingHorizontal: 7,
-    paddingVertical: 2,
-    borderRadius: 6,
+  entrySettingsToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#f59e0b66',
-    color: '#f59e0b',
-    backgroundColor: '#f59e0b18',
-    fontSize: 9,
-    fontWeight: '900',
-    letterSpacing: 0.6,
-    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+    borderColor: '#ffffff14',
+    backgroundColor: '#0a101c',
   },
-  restrictedBadge: {
-    paddingHorizontal: 7,
-    paddingVertical: 2,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#a855f766',
-    color: '#a855f7',
-    backgroundColor: '#a855f718',
-    fontSize: 9,
-    fontWeight: '900',
-    letterSpacing: 0.6,
-    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+  entrySettingsToggleText: {
+    color: '#cbd5e1',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+  },
+  entrySettingsBody: {
+    gap: 10,
   },
   confirmRevealBox: {
     padding: 14,

@@ -1,6 +1,14 @@
 # The Underground Circle - Office Dashboard Roadmap
 ## Vision: AI Agent Command Center for Teams
 
+> **Historical product roadmap.** Current Office ownership, shipped state, and
+> evidence boundaries live in `docs/AGENTS_ROADMAP.md`, `CLAUDE.md`, and
+> `docs/UC_APP_STACK_REFERENCE.md`. In particular, the 2026-08-12 addon/editor
+> contract has one exhaustive 81-item catalog, explicit Local/Demo/Setup/Live/
+> Stale/Error truth, five room kits, and bounded reversible editing. Treat any
+> older real-time, completion, cost, or connectivity claim below as an idea
+> until the canonical docs say it is proven.
+
 ### 🎯 Core Value Proposition
 **"Monitor, orchestrate, and optimize your AI agents from one beautiful, collaborative dashboard"**
 

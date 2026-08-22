@@ -31,18 +31,7 @@ process.env.EXPO_PUBLIC_SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || '
 process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || 'formatters-smoke-anon-key';
 
 const NATIVE_STUBS = new Set(['react-native', '@react-native-async-storage/async-storage']);
-const NATIVE_STUB_SOURCE = `
-export const Platform = { OS: 'web', select: (obj) => (obj ? (obj.web !== undefined ? obj.web : obj.default) : undefined) };
-export const AppState = { currentState: 'active', addEventListener: () => ({ remove() {} }) };
-export const Dimensions = { get: () => ({ width: 1280, height: 800, scale: 2, fontScale: 1 }) };
-export const NativeModules = {};
-export const StyleSheet = { create: (s) => s, flatten: (s) => s };
-const asyncStorageStub = {
-  getItem: async () => null, setItem: async () => {}, removeItem: async () => {},
-  multiGet: async () => [], multiSet: async () => {}, multiRemove: async () => {}, getAllKeys: async () => [],
-};
-export default asyncStorageStub;
-`;
+const NATIVE_STUB_URL = new URL('./native-module-stub.mjs', import.meta.url).href;
 
 // Deterministic desktop-bridge stub so the REAL runtime execution cases run
 // without a live bridge: 120 file entries and a 300-node a11y tree, both big
@@ -84,22 +73,25 @@ export function renderBrowserTree(tree) {
 }
 `;
 
+// Keep the hook resolve-only. On Node 22, composing a synchronous custom
+// `load` hook with tsx's loader can make `nextLoad` return `undefined` for a
+// normal TypeScript module. Data URLs let Node load only these deterministic
+// bridge fixtures directly while tsx remains the sole loader for app source.
+const sourceDataUrl = (source: string): string =>
+  `data:text/javascript;base64,${Buffer.from(source, 'utf8').toString('base64')}`;
+const DESKTOP_BRIDGE_STUB_URL = sourceDataUrl(DESKTOP_BRIDGE_STUB_SOURCE);
+const BROWSER_BRIDGE_STUB_URL = sourceDataUrl(BROWSER_BRIDGE_STUB_SOURCE);
+
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (NATIVE_STUBS.has(specifier)) return { url: `stub:${specifier}`, shortCircuit: true };
+    if (NATIVE_STUBS.has(specifier)) return { url: NATIVE_STUB_URL, shortCircuit: true };
     if (specifier === './desktopBridge' && String(context.parentURL || '').includes('openswanToolRuntime')) {
-      return { url: 'stub:desktopBridge', shortCircuit: true };
+      return { url: DESKTOP_BRIDGE_STUB_URL, shortCircuit: true };
     }
     if (specifier === './browserBridge' && String(context.parentURL || '').includes('openswanToolRuntime')) {
-      return { url: 'stub:browserBridge', shortCircuit: true };
+      return { url: BROWSER_BRIDGE_STUB_URL, shortCircuit: true };
     }
     return nextResolve(specifier, context);
-  },
-  load(url, context, nextLoad) {
-    if (url === 'stub:desktopBridge') return { format: 'module', source: DESKTOP_BRIDGE_STUB_SOURCE, shortCircuit: true };
-    if (url === 'stub:browserBridge') return { format: 'module', source: BROWSER_BRIDGE_STUB_SOURCE, shortCircuit: true };
-    if (url.startsWith('stub:')) return { format: 'module', source: NATIVE_STUB_SOURCE, shortCircuit: true };
-    return nextLoad(url, context);
   },
 });
 

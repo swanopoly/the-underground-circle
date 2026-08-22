@@ -22,7 +22,6 @@ import {
   type CircleIntegrationPlatformKey,
 } from '../../../lib/circleIntegrationCatalog';
 import {
-  buildCircleCapabilityPreflight,
   connectGenericCircleIntegration,
   INTEGRATION_DEFINITIONS,
   listCircleIntegrationSecretKeys,
@@ -36,6 +35,12 @@ import { getCircleDiscordConfig } from '../../../lib/discord';
 import { getSlackConfig } from '../../../lib/slack';
 import { supabase } from '../../../lib/supabase';
 import { loadCircleSiteCredentials, loadSiteCredentials, type SiteCredential } from '../../../lib/siteAutomation';
+import {
+  notifyUserApiKeyChanges,
+  storeApiKey,
+  testApiKey,
+  testStoredApiKey,
+} from '../../../lib/llmProviders';
 import { getTeamsConfig } from '../../../lib/teams';
 import DiscordTab from './DiscordTab';
 import GitHubTab from './GitHubTab';
@@ -270,6 +275,20 @@ function hostnameFromUrl(raw?: string | null): string | undefined {
   }
 }
 
+function formatIntegrationFieldLabel(key: string): string {
+  const acronyms = new Set(['api', 'id', 'llm', 'mcp', 'sdk', 'ssh', 'url']);
+  return key
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .map((part, index) => {
+      const lower = part.toLowerCase();
+      if (acronyms.has(lower)) return lower.toUpperCase();
+      return index === 0 ? lower.charAt(0).toUpperCase() + lower.slice(1) : lower;
+    })
+    .join(' ');
+}
+
 function getPrimaryWordPressCredential(
   credentials: SiteCredential[],
   circleId: string,
@@ -305,67 +324,36 @@ function PlatformCard({
       style={[
         styles.platformCard,
         isWide && styles.platformCardWide,
-        {
-          borderColor: connected ? item.color + '40' : '#2a2a2a',
-          opacity: 1,
-        },
+        connected && { borderColor: item.color + '33' },
         hovered && clickable && styles.platformCardHovered,
-        hovered && clickable && { borderColor: item.color + '60' },
+        hovered && clickable && { borderColor: item.color + '55' },
       ]}
     >
+      {/* Minimal card (2026-08-12): identity + one-line capability + state.
+          The description, scope/New badges, relationship chips, hint prose,
+          and action pill moved out — the detail page owns the long form.
+          State is a dot (green = connected) unless health is degraded, which
+          keeps the actionable IntegrationHealthChip. */}
       <View style={styles.cardTop}>
-        <View style={[styles.iconCircle, { backgroundColor: item.color + '18' }]}>
+        <View style={[styles.iconCircle, { backgroundColor: item.color + '14' }]}>
           <Text style={[styles.platformIconText, item.icon.length > 2 && styles.platformIconTextSmall]}>{item.icon}</Text>
         </View>
-        <View style={styles.cardTopRight}>
-          {item.recentlyAdded ? (
-            <View style={styles.newBadge}>
-              <Text style={styles.newBadgeText}>New</Text>
-            </View>
-          ) : null}
-          {status?.health && status.health.tone !== 'ok' ? (
-            <IntegrationHealthChip badge={status.health} />
-          ) : connected ? (
-            <View style={[
-              styles.statusBadge,
-              { backgroundColor: '#22c55e15', borderColor: '#22c55e30' },
-            ]}>
-              <View style={[styles.statusDot, { backgroundColor: '#22c55e' }]} />
-              <Text style={[styles.statusLabel, { color: '#22c55e' }]}>
-                Connected
-              </Text>
-            </View>
-          ) : null}
-          <View style={styles.scopeBadge}>
-            <Text style={styles.scopeBadgeText}>{item.scopeLabel}</Text>
-          </View>
+        <View style={styles.cardTitleCol}>
+          <Text style={styles.platformName} numberOfLines={1}>{item.label}</Text>
+          <Text style={styles.capabilityLabel} numberOfLines={1}>{item.capabilityLabel}</Text>
         </View>
+        {status?.health && status.health.tone !== 'ok' ? (
+          <IntegrationHealthChip badge={status.health} />
+        ) : (
+          <View style={[styles.cardStateDot, { backgroundColor: connected ? '#22c55e' : '#252b3a' }]} />
+        )}
       </View>
-
-      <Text style={[styles.platformName, { color: item.color }]}>{item.label}</Text>
-      <Text style={styles.capabilityLabel}>{item.capabilityLabel}</Text>
-
-      {status?.name ? <Text style={styles.connectedTo}>{status.name}</Text> : null}
-      {status?.hint ? <Text style={styles.connectedHint}>{status.hint}</Text> : null}
-
-      <Text style={styles.platformDesc}>{item.description}</Text>
-
-      <View style={styles.relationshipRow}>
-        {item.relationships.slice(0, 3).map(rel => (
-          <View key={rel} style={styles.relationshipChip}>
-            <Text style={styles.relationshipChipText}>{rel}</Text>
-          </View>
-        ))}
-      </View>
-
-      <View style={[
-        styles.cardAction,
-        { backgroundColor: item.color + '12', borderColor: item.color + '25' },
-      ]}>
-        <Text style={[styles.cardActionText, { color: item.color }]}>
-          {connected ? 'Manage →' : clickable ? 'Connect →' : 'Built in'}
-        </Text>
-      </View>
+      {connected && status?.name ? (
+        <Text style={styles.connectedTo} numberOfLines={1}>{status.name}</Text>
+      ) : null}
+      <Text style={[styles.cardActionText, { color: clickable ? item.color : '#475569' }]}>
+        {connected ? 'Manage →' : clickable ? 'Connect →' : 'Built in'}
+      </Text>
     </Pressable>
   );
 }
@@ -425,9 +413,6 @@ function MarketplaceAppOverview({
   return (
     <View style={styles.mpAccordionGroup}>
       <MarketplaceAccordion title="What this unlocks" accentColor={accentColor} defaultOpen>
-        <Text style={styles.marketplaceOverviewText}>
-          This app expands what the circle can own end-to-end across Souls, tasks, and operational workflows.
-        </Text>
         {detail.unlocks.map(value => (
           <Text key={value} style={styles.marketplaceOverviewBullet}>- {value}</Text>
         ))}
@@ -576,7 +561,7 @@ function GenericIntegrationManager({
   const [secrets, setSecrets] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
-  const [preflight, setPreflight] = useState<{ ok: boolean; missingCapabilities: string[]; missingConnectors: string[] } | null>(null);
+  const [showSetupHelp, setShowSetupHelp] = useState(false);
   // Reveal modal — when the user clicks the eye icon next to a saved
   // secret, we re-prompt for their account password (not the integration
   // token) before showing the value. Using Supabase signInWithPassword
@@ -611,25 +596,116 @@ function GenericIntegrationManager({
       if (typeof value === 'string') acc[key] = value;
       return acc;
     }, {});
+    // This is BlackSwan's canonical model, not example copy. Treat it as an
+    // actual default so the field cannot look complete while validation still
+    // sees an empty value.
+    if (provider === 'blackswan' && !nextMetadata.model_id?.trim()) {
+      nextMetadata.model_id = 'cswan801/BlackSwan-v5';
+    }
     setMetadata(nextMetadata);
-  }, [status?.metadata]);
+  }, [provider, status?.metadata]);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const result = await buildCircleCapabilityPreflight({
-        circleId,
-        requiredCapabilities: definition.capabilityFlags,
-      });
-      if (!cancelled) setPreflight(result);
-    })();
-    return () => { cancelled = true; };
-  }, [circleId, definition.capabilityFlags]);
+  const metadataLabelByKey = new Map(
+    (definition.metadataFields || []).map(field => [field.key, field.label]),
+  );
+  const missingMetadataKeys = status?.validation?.missingMetadataFields || [];
+  const missingSecretKeys = status?.validation?.missingSecretKeys || [];
+  const pendingMetadataLabels = missingMetadataKeys
+    .filter(key => !!metadata[key]?.trim())
+    .map(key => metadataLabelByKey.get(key) || formatIntegrationFieldLabel(key));
+  const pendingSecretLabels = missingSecretKeys
+    .filter(key => !!secrets[key]?.trim())
+    .map(formatIntegrationFieldLabel);
+  const pendingSetupLabels = [...pendingMetadataLabels, ...pendingSecretLabels];
+  const missingMetadataLabels = missingMetadataKeys
+    .filter(key => !metadata[key]?.trim())
+    .map(key => metadataLabelByKey.get(key) || formatIntegrationFieldLabel(key));
+  const missingSecretLabels = missingSecretKeys
+    .filter(key => !secrets[key]?.trim())
+    .map(formatIntegrationFieldLabel);
+  const missingSetupLabels = [...missingMetadataLabels, ...missingSecretLabels];
+  const setupIncomplete = !!status?.validation && !status.validation.ok;
+  const healthNeedsAttention = status?.health?.tone === 'warn' || status?.health?.tone === 'danger';
+  const setupStateLabel = setupIncomplete
+    ? 'Finish setup'
+    : healthNeedsAttention
+      ? 'Check connection'
+      : status?.connected
+        ? 'Ready to use'
+        : 'Connect to your circle';
+  const setupStateText = missingSetupLabels.length > 0
+    ? `Add ${missingSetupLabels.join(' and ')} to finish connecting ${definition.label}.`
+    : pendingSetupLabels.length > 0
+      ? `Save ${pendingSetupLabels.join(' and ')} to finish connecting ${definition.label}.`
+      : (status?.validation?.providerWarnings[0]
+        || (healthNeedsAttention ? 'Review the saved connection before using this integration.' : status?.hint)
+        || (status?.connected
+          ? `${definition.label} is available to this circle.`
+          : `Add the required details below to connect ${definition.label}.`));
+  const savedSecretLabels = Array.from(savedSecretKeys).map(formatIntegrationFieldLabel);
+  const modelSecurityNote = !isModelProvider
+    ? null
+    : provider === 'anthropic'
+      ? 'Your key stays in your encrypted personal vault and is verified for Chat.'
+      : provider === 'brave'
+        ? 'Your key is encrypted and made available to Chat search.'
+        : modelProviderChatReady
+          ? 'Credentials are encrypted and made available to Chat and agents.'
+          : userApiProvider === 'replicate'
+            ? 'Credentials are encrypted for image and hosted-model tools.'
+            : 'Credentials are encrypted for Marketplace workflows.';
 
   const handleSave = async () => {
     setSaving(true);
     setMessage('');
     try {
+      // Anthropic Chat is a personal BYOK connection. Validate the submitted
+      // key, store it only in the signed-in user's encrypted model-key vault,
+      // then prove the stored ciphertext can be read by the exact Chat path.
+      // Do not duplicate a personal Anthropic key into circle-wide integration
+      // secrets where another circle manager could later reveal it.
+      if (provider === 'anthropic') {
+        const apiKey = getMarketplaceProviderUserApiSecret(provider, secrets);
+        if (!apiKey) {
+          setMessage('Paste a fresh Anthropic API key to connect or replace this Chat credential.');
+          return;
+        }
+
+        const submittedProbe = await testApiKey(
+          'anthropic',
+          apiKey,
+          undefined,
+          'claude-sonnet-5',
+        );
+        if (!submittedProbe.success) {
+          setMessage(`Anthropic rejected the key: ${submittedProbe.error || 'validation failed'}. Nothing was saved.`);
+          return;
+        }
+
+        const stored = await storeApiKey('anthropic', apiKey, 'default', undefined, { notify: false });
+        if (stored.error) {
+          setMessage(`Anthropic key validation passed, but encrypted Marketplace storage failed: ${stored.error}`);
+          return;
+        }
+
+        const storedProbe = await testStoredApiKey(
+          'anthropic',
+          'claude-sonnet-5',
+          circleId,
+        );
+        if (!storedProbe.success) {
+          setMessage(`Anthropic was saved, but Chat could not read the stored connection: ${storedProbe.error || 'stored-key validation failed'}. Replace the key and try once more.`);
+          onRefresh();
+          return;
+        }
+
+        setSecrets({});
+        notifyUserApiKeyChanges();
+        setMessage('Anthropic connected. Claude Sonnet 5 was verified through your signed-in Marketplace credential.');
+        onRefresh();
+        return;
+      }
+
       const integration = await connectGenericCircleIntegration({
         circleId,
         provider,
@@ -655,14 +731,20 @@ function GenericIntegrationManager({
               } else {
                 modelKeyMessage = ` Circle integration saved, but encrypted key database sync failed: ${error.message}`;
               }
-            } else if (modelProviderChatReady) {
-              modelKeyMessage = provider === 'brave'
-                ? ' API key also saved to your encrypted key vault for chat web search and research tools.'
-                : ' API key also saved to your encrypted model key vault for chat and agents.';
-            } else if (userApiProvider === 'replicate') {
-              modelKeyMessage = ' API token also saved to your encrypted model key vault for image and model tools.';
             } else {
-              modelKeyMessage = ' API key also saved to your encrypted model key vault; direct chat routing for this provider still needs backend routing.';
+              // Chat/Rooms may stay mounted while Marketplace is open. Retire
+              // their exact account catalogs immediately after this direct
+              // key-vault write so Auto sees the new provider without reload.
+              notifyUserApiKeyChanges();
+              if (modelProviderChatReady) {
+                modelKeyMessage = provider === 'brave'
+                  ? ' API key also saved to your encrypted key vault for chat web search and research tools.'
+                  : ' API key also saved to your encrypted model key vault for chat and agents.';
+              } else if (userApiProvider === 'replicate') {
+                modelKeyMessage = ' API token also saved to your encrypted model key vault for image and model tools.';
+              } else {
+                modelKeyMessage = ' API key also saved to your encrypted model key vault; direct chat routing for this provider still needs backend routing.';
+              }
             }
           } else if (definition.requiredSecretKeys.length > 0) {
             modelKeyMessage = ' Add the API key above to save it for chat, agents, and automations.';
@@ -689,103 +771,47 @@ function GenericIntegrationManager({
   };
 
   return (
-    <ScrollView style={styles.platformDetailShell} contentContainerStyle={styles.genericDetailContent}>
-      <View style={styles.detailIntro}>
-        <Text style={styles.detailTitle}>{definition.label}</Text>
-        <Text style={styles.detailText}>{definition.description}</Text>
-      </View>
-
-      {isModelProvider ? (
-        <View style={styles.modelKeyNoticeCard}>
-          <Text style={styles.detailSummaryLabel}>{provider === 'brave' ? 'CHAT SEARCH API KEY' : 'MODEL API KEY'}</Text>
-          <Text style={styles.detailSummaryText}>
-            {provider === 'brave'
-              ? 'Enter the Brave Search API key here. Saving writes the circle integration and syncs the key into your encrypted user key vault so chat can run current web searches server-side.'
-              : 'Enter the provider key in this setup form. Saving writes the circle integration and encrypted secrets to the database, then syncs the key into your encrypted user model key vault.'}
-          </Text>
-          <Text style={styles.detailSummaryText}>
-            {provider === 'brave'
-              ? 'This provider is wired for direct chat search and research tool usage.'
-              : modelProviderChatReady
-              ? 'This provider is wired for direct chat and agent usage.'
-              : userApiProvider === 'replicate'
-                ? 'Replicate keys are used by image and hosted-model tools.'
-                : 'This provider is stored now for marketplace workflows while direct chat routing is finished.'}
-          </Text>
+    <View style={[styles.platformDetailShell, styles.genericDetailContent]}>
+      <View style={styles.genericSetupSummary}>
+        <View style={styles.genericSetupSummaryCopy}>
+          <Text style={styles.genericSetupTitle}>{setupStateLabel}</Text>
+          <Text style={styles.genericSetupText}>{setupStateText}</Text>
+          {savedSecretLabels.length > 0 || missingSetupLabels.length > 0 || pendingSetupLabels.length > 0 ? (
+            <View style={styles.genericSetupMetaRow}>
+              {savedSecretLabels.length > 0 ? (
+                <Text style={styles.genericSavedText}>✓ {savedSecretLabels.join(', ')} saved</Text>
+              ) : null}
+              {missingSetupLabels.length > 0 ? (
+                <Text style={styles.genericMissingText}>{missingSetupLabels.join(', ')} required</Text>
+              ) : null}
+              {pendingSetupLabels.length > 0 ? (
+                <Text style={styles.genericPendingText}>{pendingSetupLabels.join(', ')} ready to save</Text>
+              ) : null}
+            </View>
+          ) : null}
         </View>
-      ) : null}
-
-      <View style={styles.detailSummaryCard}>
-        <Text style={styles.detailSummaryLabel}>CAPABILITIES</Text>
-        {definition.capabilityFlags.map(flag => (
-          <Text key={flag} style={styles.detailSummaryText}>- {flag}</Text>
-        ))}
-      </View>
-
-      {definition.validationHints && definition.validationHints.length > 0 ? (
-        <View style={styles.detailSummaryCard}>
-          <Text style={styles.detailSummaryLabel}>SETUP NOTES</Text>
-          {definition.validationHints.map(hint => (
-            <Text key={hint} style={styles.detailSummaryText}>- {hint}</Text>
-          ))}
-        </View>
-      ) : null}
-
-      <View style={styles.detailSummaryCard}>
-        <Text style={styles.detailSummaryLabel}>CONNECTION</Text>
-        <Text style={[styles.detailSummaryValue, { color: accentColor }]}>{status?.connected ? 'Active' : 'Not connected'}</Text>
-        {status?.health ? (
+        {status?.health
+          && status.health.tone !== 'ok'
+          && (!setupIncomplete || status.health.tone === 'danger') ? (
           <IntegrationHealthChip
             badge={status.health}
             onRetest={status.health.showRetest ? handleSave : undefined}
-            initiallyExpanded={status.health.tone !== 'ok'}
+            initiallyExpanded={false}
           />
         ) : null}
-        {status?.hint ? <Text style={styles.detailSummaryText}>{status.hint}</Text> : null}
-        {status?.secretKeys && status.secretKeys.length > 0 ? (
-          <Text style={styles.detailSummaryText}>Saved secrets: {status.secretKeys.join(', ')}</Text>
-        ) : null}
-        {status?.validation && !status.validation.ok ? (
-          <>
-            {status.validation.missingSecretKeys.length > 0 ? (
-              <Text style={styles.detailSummaryText}>
-                Missing secrets: {status.validation.missingSecretKeys.join(', ')}
-              </Text>
-            ) : null}
-            {status.validation.missingMetadataFields.length > 0 ? (
-              <Text style={styles.detailSummaryText}>
-                Missing fields: {status.validation.missingMetadataFields.join(', ')}
-              </Text>
-            ) : null}
-            {status.validation.providerWarnings.length > 0 ? (
-              <Text style={styles.detailSummaryText}>
-                Provider warnings: {status.validation.providerWarnings.join(' | ')}
-              </Text>
-            ) : null}
-          </>
-        ) : null}
-        {preflight && !preflight.ok ? (
-          <Text style={styles.detailSummaryText}>
-            Missing capabilities: {preflight.missingCapabilities.join(', ') || 'none'}
-          </Text>
-        ) : null}
       </View>
 
       <View style={styles.genericFormCard}>
-        <Text style={styles.genericFieldLabel}>DISPLAY NAME</Text>
-        <TextInput
-          value={displayName}
-          onChangeText={setDisplayName}
-          placeholder={definition.label}
-          placeholderTextColor="#5b6474"
-          style={styles.genericInput}
-        />
-      </View>
+        <View style={styles.genericFormHeader}>
+          <Text style={styles.genericFormTitle}>Connection details</Text>
+          {modelSecurityNote ? <Text style={styles.genericFormHelper}>{modelSecurityNote}</Text> : null}
+        </View>
 
-      <View style={styles.genericFormCard}>
         {definition.metadataFields?.map(field => (
           <View key={field.key} style={styles.genericFieldBlock}>
-            <Text style={styles.genericFieldLabel}>{field.label.toUpperCase()}</Text>
+            <Text style={styles.genericFieldLabel}>
+              {field.label}{field.required === false ? ' (optional)' : ''}
+            </Text>
             <TextInput
               value={metadata[field.key] || ''}
               onChangeText={(value) => setMetadata(prev => ({ ...prev, [field.key]: value }))}
@@ -801,12 +827,12 @@ function GenericIntegrationManager({
           const localValue = secrets[secretKey] || '';
           return (
             <View key={secretKey} style={styles.genericFieldBlock}>
-              <Text style={styles.genericFieldLabel}>{secretKey.toUpperCase()}</Text>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Text style={styles.genericFieldLabel}>{formatIntegrationFieldLabel(secretKey)}</Text>
+              <View style={styles.genericSecretRow}>
                 <TextInput
                   value={localValue}
                   onChangeText={(value) => setSecrets(prev => ({ ...prev, [secretKey]: value }))}
-                  placeholder={isSaved ? '•••••••••• saved — paste new value to overwrite' : 'Paste value'}
+                  placeholder={isSaved ? 'Saved • paste to replace' : 'Paste value'}
                   placeholderTextColor={isSaved ? '#94a3b8' : '#5b6474'}
                   secureTextEntry
                   style={[styles.genericInput, { flex: 1 }]}
@@ -815,13 +841,14 @@ function GenericIntegrationManager({
                   <Pressable
                     onPress={() => setReveal({ open: true, key: secretKey, password: '', busy: false, error: null, value: null })}
                     style={({ hovered }: any) => [
-                      { paddingHorizontal: 10, paddingVertical: 8, borderRadius: 6, borderWidth: 1, borderColor: accentColor + '55', backgroundColor: accentColor + '12' },
+                      styles.genericRevealButton,
+                      { borderColor: accentColor + '55', backgroundColor: accentColor + '12' },
                       hovered && { backgroundColor: accentColor + '22' },
                       RNPlatform.OS === 'web' ? ({ cursor: 'pointer' } as any) : {},
                     ]}
                     accessibilityLabel={`Reveal ${secretKey}`}
                   >
-                    <Text style={{ color: accentColor, fontSize: 11, fontWeight: '700' }}>👁 Reveal</Text>
+                    <Text style={[styles.genericRevealText, { color: accentColor }]}>Reveal</Text>
                   </Pressable>
                 ) : null}
               </View>
@@ -829,19 +856,43 @@ function GenericIntegrationManager({
           );
         })}
 
-        {definition.optionalSecretKeys && definition.optionalSecretKeys.length > 0 ? (
-          <>
-            <Text style={styles.genericFieldLabel}>OPTIONAL SECRETS</Text>
-            {definition.optionalSecretKeys.map(secretKey => {
+        <Pressable
+          onPress={() => setShowSetupHelp(value => !value)}
+          accessibilityRole="button"
+          accessibilityState={{ expanded: showSetupHelp }}
+          style={({ hovered }: any) => [
+            styles.genericHelpToggle,
+            hovered && styles.genericHelpToggleHovered,
+          ]}
+        >
+          <Text style={styles.genericHelpToggleText}>More options & setup help</Text>
+          <Text style={styles.genericHelpChevron}>{showSetupHelp ? '−' : '+'}</Text>
+        </Pressable>
+
+        {showSetupHelp ? (
+          <View style={styles.genericAdvancedSection}>
+            <View style={styles.genericFieldBlock}>
+              <Text style={styles.genericFieldLabel}>Display name (optional)</Text>
+              <TextInput
+                value={displayName}
+                onChangeText={setDisplayName}
+                placeholder={definition.label}
+                placeholderTextColor="#5b6474"
+                style={styles.genericInput}
+              />
+            </View>
+
+            {definition.optionalSecretKeys?.map(secretKey => {
               const isSaved = savedSecretKeys.has(secretKey);
               const localValue = secrets[secretKey] || '';
               return (
                 <View key={secretKey} style={styles.genericFieldBlock}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Text style={styles.genericFieldLabel}>{formatIntegrationFieldLabel(secretKey)} (optional)</Text>
+                  <View style={styles.genericSecretRow}>
                     <TextInput
                       value={localValue}
                       onChangeText={(value) => setSecrets(prev => ({ ...prev, [secretKey]: value }))}
-                      placeholder={isSaved ? `•••••••••• saved (${secretKey})` : secretKey}
+                      placeholder={isSaved ? 'Saved • paste to replace' : 'Paste value'}
                       placeholderTextColor={isSaved ? '#94a3b8' : '#5b6474'}
                       secureTextEntry
                       style={[styles.genericInput, { flex: 1 }]}
@@ -849,25 +900,55 @@ function GenericIntegrationManager({
                     {isSaved && integrationId ? (
                       <Pressable
                         onPress={() => setReveal({ open: true, key: secretKey, password: '', busy: false, error: null, value: null })}
-                        style={{ paddingHorizontal: 10, paddingVertical: 8, borderRadius: 6, borderWidth: 1, borderColor: accentColor + '55', backgroundColor: accentColor + '12' }}
+                        style={[
+                          styles.genericRevealButton,
+                          { borderColor: accentColor + '55', backgroundColor: accentColor + '12' },
+                        ]}
                         accessibilityLabel={`Reveal ${secretKey}`}
                       >
-                        <Text style={{ color: accentColor, fontSize: 11, fontWeight: '700' }}>👁 Reveal</Text>
+                        <Text style={[styles.genericRevealText, { color: accentColor }]}>Reveal</Text>
                       </Pressable>
                     ) : null}
                   </View>
                 </View>
               );
             })}
-          </>
+
+            {definition.validationHints?.length ? (
+              <View style={styles.genericHelpNotes}>
+                <Text style={styles.genericHelpNotesTitle}>Where to find these values</Text>
+                {definition.validationHints.map(hint => (
+                  <Text key={hint} style={styles.genericHelpNote}>• {hint}</Text>
+                ))}
+              </View>
+            ) : null}
+          </View>
         ) : null}
+
+        <Pressable
+          disabled={saving}
+          onPress={handleSave}
+          style={[
+            styles.genericSaveBtn,
+            { borderColor: accentColor + '55', backgroundColor: accentColor + '18' },
+            saving && { opacity: 0.6 },
+          ]}
+        >
+          <Text style={[styles.genericSaveBtnText, { color: accentColor }]}>
+            {saving
+              ? 'Saving…'
+              : provider === 'anthropic'
+                ? 'Save & verify'
+                : setupIncomplete
+                  ? 'Finish setup'
+                  : integrationId
+                    ? 'Save changes'
+                    : `Connect ${definition.label}`}
+          </Text>
+        </Pressable>
+
+        {message ? <Text style={styles.genericStatus}>{message}</Text> : null}
       </View>
-
-      <Pressable onPress={handleSave} style={[styles.genericSaveBtn, { borderColor: accentColor + '55', backgroundColor: accentColor + '18' }, saving && { opacity: 0.6 }]}>
-        <Text style={[styles.genericSaveBtnText, { color: accentColor }]}>{saving ? 'Saving...' : `Save ${definition.label}`}</Text>
-      </Pressable>
-
-      {message ? <Text style={styles.genericStatus}>{message}</Text> : null}
 
       <Modal
         visible={reveal.open}
@@ -979,7 +1060,7 @@ function GenericIntegrationManager({
           </Pressable>
         </Pressable>
       </Modal>
-    </ScrollView>
+    </View>
   );
 }
 
@@ -1269,10 +1350,6 @@ export default function MarketplaceTab({
   const visibleItemsCount = useMemo(() => {
     return filteredCatalogItems.length;
   }, [filteredCatalogItems]);
-  const agentAppCount = useMemo(
-    () => CIRCLE_INTEGRATION_CATALOG.filter(item => item.group === 'ai_agents_services').length,
-    [],
-  );
 
   const handleBack = () => {
     setActivePlatform('none');
@@ -1283,39 +1360,55 @@ export default function MarketplaceTab({
     const activeItem = CIRCLE_INTEGRATION_CATALOG.find(item => item.platformKey === activePlatform) || null;
     const activeStatus = statuses[activePlatform as CircleIntegrationPlatformKey];
     const heroAccent = activeItem?.color || '#6366f1';
+    const heroNeedsSetup = !!activeStatus?.validation && !activeStatus.validation.ok;
+    const heroHasDanger = activeStatus?.health?.tone === 'danger';
+    const heroHasHealthIssue = activeStatus?.health?.tone === 'warn' || activeStatus?.health?.tone === 'danger';
+    const heroStatusLabel = heroHasDanger
+      ? 'CHECK CONNECTION'
+      : heroNeedsSetup
+        ? 'SETUP NEEDED'
+        : heroHasHealthIssue
+          ? 'CHECK CONNECTION'
+          : activeStatus?.connected
+            ? 'CONNECTED'
+            : 'NOT CONNECTED';
+    const heroStatusColor = heroHasDanger
+      ? '#ef4444'
+      : heroNeedsSetup || heroHasHealthIssue
+        ? '#f59e0b'
+        : activeStatus?.connected
+          ? '#22c55e'
+          : '#94a3b8';
     return (
       <ScrollView style={styles.container} contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator>
-        <View style={styles.inner}>
+        <View style={[styles.inner, styles.marketplaceDetailInner]}>
           <Pressable onPress={handleBack} style={styles.backRow}>
-            <Text style={styles.backText}>← All Marketplace Apps</Text>
+            <Text style={styles.backText}>← Marketplace</Text>
           </Pressable>
 
           {activeItem ? (
             <View style={[styles.mpHeroCard, { borderColor: heroAccent + '44' }]}>
               <View style={styles.mpHeroTop}>
-                <View style={[styles.mpHeroIcon, { backgroundColor: heroAccent + '22', borderColor: heroAccent + '55' }]} />
-                <View style={{ flex: 1, gap: 2 }}>
+                <View style={{ flex: 1, minWidth: 210, gap: 2 }}>
                   <Text style={[styles.mpHeroLabel, { color: heroAccent }]}>{activeItem.label}</Text>
-                  <Text style={styles.mpHeroDesc} numberOfLines={3}>{activeItem.description}</Text>
+                  <Text style={styles.mpHeroDesc} numberOfLines={2}>{activeItem.description}</Text>
                 </View>
                 <View style={[
                   styles.mpHeroStatus,
-                  activeStatus?.connected
-                    ? { backgroundColor: '#22c55e22', borderColor: '#22c55e88' }
-                    : { backgroundColor: '#1f2937', borderColor: '#334155' },
+                  { backgroundColor: heroStatusColor + '18', borderColor: heroStatusColor + '66' },
                 ]}>
                   <Text style={{
-                    color: activeStatus?.connected ? '#22c55e' : '#94a3b8',
+                    color: heroStatusColor,
                     fontSize: 10, fontWeight: '900', letterSpacing: 0.6, fontFamily: 'monospace',
                   }}>
-                    {activeStatus?.connected ? '● ACTIVE' : '○ NOT CONNECTED'}
+                    {heroStatusLabel}
                   </Text>
                 </View>
               </View>
             </View>
           ) : null}
 
-          <MarketplaceAccordion title="Setup & connect" accentColor={heroAccent} defaultOpen>
+          <MarketplaceAccordion title="Connection" accentColor={heroAccent} defaultOpen>
             <View style={styles.platformContent}>
               {activePlatform === 'github' && <GitHubTab circleId={circleId} />}
               {activePlatform === 'wordpress' && (
@@ -1362,9 +1455,7 @@ export default function MarketplaceTab({
           <View style={styles.headerTop}>
             <View style={styles.headerLeft}>
               <Text style={styles.headerTitle}>Marketplace</Text>
-              <Text style={styles.headerDesc}>
-                Circle-wide apps and native capabilities. Connect once, then use them across Office, tasks, rooms, chat, publishing, automations, and agent execution.
-              </Text>
+              <Text style={styles.headerDesc}>Connect once — used across chat, rooms, tasks, and automations.</Text>
             </View>
             <View style={styles.headerBadge}>
               <Text style={styles.headerBadgeNum}>{connectedCount}</Text>
@@ -1375,37 +1466,11 @@ export default function MarketplaceTab({
             <TextInput
               value={searchQuery}
               onChangeText={setSearchQuery}
-              placeholder="Search marketplace apps, capabilities, workflows, or systems..."
+              placeholder="Search apps..."
               placeholderTextColor="#667085"
               style={styles.searchInput}
             />
-            <Text style={styles.searchMeta}>
-              {visibleItemsCount} marketplace item{visibleItemsCount === 1 ? '' : 's'} visible across the circle catalog.
-            </Text>
           </View>
-          <View style={styles.summaryGrid}>
-            <View style={styles.summaryCard}>
-              <Text style={styles.summaryCardLabel}>Installed</Text>
-              <Text style={styles.summaryCardValue}>{connectedCount}</Text>
-              <Text style={styles.summaryCardHint}>Live circle apps</Text>
-            </View>
-            <View style={styles.summaryCard}>
-              <Text style={styles.summaryCardLabel}>Native</Text>
-              <Text style={styles.summaryCardValue}>{nativeCount}</Text>
-              <Text style={styles.summaryCardHint}>Built into the app</Text>
-            </View>
-            <View style={styles.summaryCard}>
-              <Text style={styles.summaryCardLabel}>Agent Systems</Text>
-              <Text style={styles.summaryCardValue}>{agentAppCount}</Text>
-              <Text style={styles.summaryCardHint}>Runtime, evals, browser ops</Text>
-            </View>
-            <View style={styles.summaryCard}>
-              <Text style={styles.summaryCardLabel}>Connectable</Text>
-              <Text style={styles.summaryCardValue}>{externalCount}</Text>
-              <Text style={styles.summaryCardHint}>Managed provider apps</Text>
-            </View>
-          </View>
-
           {/* What's connected — the user-facing mirror of the agent's
               connected-resources prompt block (names only, secret-safe). */}
           <View style={{ marginBottom: 12 }}>
@@ -1420,10 +1485,9 @@ export default function MarketplaceTab({
           </View>
 
           {/* Model providers live in the marketplace card grid below.
-              Select a Models card, open Setup & connect, and save the
-              provider key there. Model keys are also synced to
-              user_api_keys so chat and agents can use the user's own
-              billing account instead of platform keys. */}
+              Personal BYOK credentials are validated and stored in the
+              signed-in user's encrypted model-key vault so Chat bills the
+              user's provider account, not a platform or circle credential. */}
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
             {([
               { key: 'all', label: 'All' },
@@ -1475,12 +1539,9 @@ export default function MarketplaceTab({
             })}
           </ScrollView>
           {activeGroupFilter === 'models' ? (
-            <View style={styles.modelsKeyHint}>
-              <Text style={styles.modelsKeyHintTitle}>Model API keys save to the database</Text>
-              <Text style={styles.modelsKeyHintText}>
-                Select a provider card, open Setup & connect, and paste its API key. Saving creates the circle integration, stores encrypted integration secrets, and syncs supported providers into your user model key vault for chat and agents.
-              </Text>
-            </View>
+            <Text style={styles.modelsKeyHint}>
+              Pick a provider card and paste its API key under Setup & connect — keys are validated and stored in your encrypted vault.
+            </Text>
           ) : null}
           {/* Sort row — applies to whatever the filters above produced.
               Default is `popular` (curated rank) so anthropic / openai
@@ -1532,7 +1593,7 @@ export default function MarketplaceTab({
               ))}
             </View>
             <Text style={styles.statusText}>
-              {connectedCount} installed now. {nativeCount} native app capabilities. {externalCount} managed provider apps are ready for circle-wide connection.
+              {connectedCount} installed · {nativeCount} native · {externalCount} connectable
             </Text>
           </View>
         )}
@@ -1556,18 +1617,15 @@ export default function MarketplaceTab({
                 if (items.length === 0) return null;
                 const connectedInGroup = items.filter(item => item.platformKey && statuses[item.platformKey]?.connected).length;
                 const availableInGroup = items.filter(item => item.availability === 'available').length;
-                const nativeInGroup = items.filter(item => item.availability === 'available' && !item.platformKey).length;
 
                 return (
                   <View key={group.key} style={styles.groupCard}>
                     <View style={styles.groupHeader}>
                       <View style={styles.groupHeaderLeft}>
                         <Text style={styles.groupTitle}>{group.label}</Text>
-                        <Text style={styles.groupDesc}>{group.description}</Text>
                       </View>
                       <View style={styles.groupHeaderRight}>
                         <Text style={styles.groupMeta}>{connectedInGroup}/{availableInGroup || 0}</Text>
-                        {nativeInGroup > 0 ? <Text style={styles.groupMetaSub}>{nativeInGroup} native</Text> : null}
                       </View>
                     </View>
 
@@ -1602,6 +1660,9 @@ const styles = StyleSheet.create({
     maxWidth: 1940,
     alignSelf: 'center' as const,
     padding: 22,
+  },
+  marketplaceDetailInner: {
+    maxWidth: 960,
   },
   headerBlock: {
     marginBottom: 16,
@@ -1666,46 +1727,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     ...(RNPlatform.OS === 'web' ? { outlineWidth: 0 } as any : {}),
   },
-  searchMeta: {
-    color: '#7d8798',
-    fontSize: 11,
-    fontFamily: 'monospace',
-    fontWeight: '600',
-  },
-  summaryGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-  },
-  summaryCard: {
-    minWidth: 170,
-    flexGrow: 1,
-    backgroundColor: '#0d1018',
-    borderWidth: 1,
-    borderColor: '#1b2433',
-    borderRadius: 14,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    gap: 4,
-  },
-  summaryCardLabel: {
-    color: '#7d8798',
-    fontSize: 11,
-    fontWeight: '700',
-    fontFamily: 'monospace',
-    textTransform: 'uppercase',
-  },
-  summaryCardValue: {
-    color: '#f8fafc',
-    fontSize: 22,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-  },
-  summaryCardHint: {
-    color: '#94a3b8',
-    fontSize: 11,
-    fontFamily: 'monospace',
-  },
   filterRow: {
     gap: 8,
     paddingBottom: 2,
@@ -1732,22 +1753,7 @@ const styles = StyleSheet.create({
     color: '#dbeafe',
   },
   modelsKeyHint: {
-    backgroundColor: '#07110d',
-    borderWidth: 1,
-    borderColor: '#14532d',
-    borderRadius: 12,
-    padding: 12,
-    gap: 6,
-  },
-  modelsKeyHintTitle: {
-    color: '#86efac',
-    fontSize: 12,
-    fontWeight: '900',
-    fontFamily: 'monospace',
-    letterSpacing: 0.6,
-  },
-  modelsKeyHintText: {
-    color: '#bbf7d0',
+    color: '#7d8798',
     fontSize: 11,
     lineHeight: 17,
     fontFamily: 'monospace',
@@ -1755,13 +1761,13 @@ const styles = StyleSheet.create({
   statusBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#0d0d0d',
+    backgroundColor: '#0b0d13',
     borderRadius: 10,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    marginBottom: 20,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginBottom: 16,
     borderWidth: 1,
-    borderColor: '#000000',
+    borderColor: '#161821',
     gap: 10,
   },
   statusPips: {
@@ -1804,14 +1810,14 @@ const styles = StyleSheet.create({
     lineHeight: 19,
     fontFamily: 'monospace',
   },
-  groupStack: { gap: 14 },
+  groupStack: { gap: 12 },
   groupCard: {
     backgroundColor: '#0a0a0e',
-    borderRadius: 14,
+    borderRadius: 12,
     borderWidth: 1,
     borderColor: '#161821',
-    padding: 14,
-    gap: 12,
+    padding: 12,
+    gap: 10,
   },
   groupHeader: {
     flexDirection: 'row',
@@ -1829,12 +1835,6 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     fontFamily: 'monospace',
   },
-  groupDesc: {
-    color: '#7d8798',
-    fontSize: 12,
-    lineHeight: 18,
-    fontFamily: 'monospace',
-  },
   groupHeaderRight: {
     alignItems: 'flex-end',
     gap: 3,
@@ -1845,27 +1845,22 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
     fontWeight: '700',
   },
-  groupMetaSub: {
-    color: '#64748b',
-    fontSize: 10,
-    fontFamily: 'monospace',
-    fontWeight: '700',
-  },
   platformGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 12,
+    gap: 10,
   },
   platformCell: {
     minWidth: 240,
     maxWidth: '100%',
   },
   platformCard: {
-    backgroundColor: '#111',
+    backgroundColor: '#0c0e14',
     borderWidth: 1,
-    borderRadius: 14,
-    padding: 18,
-    gap: 10,
+    borderColor: '#1c2130',
+    borderRadius: 10,
+    padding: 12,
+    gap: 8,
     ...(RNPlatform.OS === 'web' ? { transition: 'all 0.2s ease' } as any : {}),
   },
   platformCardWide: {
@@ -1878,139 +1873,55 @@ const styles = StyleSheet.create({
   },
   cardTop: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     gap: 10,
   },
-  cardTopRight: {
-    alignItems: 'flex-end',
-    gap: 6,
+  cardTitleCol: {
+    flex: 1,
+    minWidth: 0,
+    gap: 1,
+  },
+  cardStateDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
   },
   iconCircle: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
+    width: 30,
+    height: 30,
+    borderRadius: 8,
     justifyContent: 'center',
     alignItems: 'center',
   },
   platformIconText: {
-    fontSize: 20,
+    fontSize: 14,
     fontWeight: '800',
     fontFamily: 'monospace',
   },
   platformIconTextSmall: {
-    fontSize: 14,
-  },
-  statusBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-    borderRadius: 20,
-    backgroundColor: '#000000',
-    borderWidth: 1,
-    borderColor: '#2a2a2a',
-  },
-  statusDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 4,
-    backgroundColor: '#555',
-  },
-  statusLabel: {
-    color: '#cbd5e1',
-    fontSize: 11,
-    fontFamily: 'monospace',
-    fontWeight: '600',
-  },
-  scopeBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 999,
-    backgroundColor: '#0b1020',
-    borderWidth: 1,
-    borderColor: '#1d2948',
-  },
-  scopeBadgeText: {
-    color: '#93c5fd',
     fontSize: 10,
-    fontFamily: 'monospace',
-    fontWeight: '700',
-  },
-  newBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 999,
-    backgroundColor: '#132112',
-    borderWidth: 1,
-    borderColor: '#1f4b1c',
-  },
-  newBadgeText: {
-    color: '#86efac',
-    fontSize: 10,
-    fontFamily: 'monospace',
-    fontWeight: '800',
-    textTransform: 'uppercase',
   },
   platformName: {
-    fontSize: 16,
+    color: '#f8fafc',
+    fontSize: 13,
     fontWeight: '700',
     fontFamily: 'monospace',
   },
   capabilityLabel: {
-    color: '#dbe4f0',
-    fontSize: 11,
-    fontFamily: 'monospace',
-    fontWeight: '700',
-  },
-  connectedTo: {
-    color: '#d1d5db',
-    fontSize: 12,
-    fontFamily: 'monospace',
-  },
-  connectedHint: {
-    color: '#7d8798',
-    fontSize: 11,
-    fontFamily: 'monospace',
-    lineHeight: 16,
-  },
-  platformDesc: {
-    color: '#8792a4',
-    fontSize: 12,
-    fontFamily: 'monospace',
-    lineHeight: 18,
-  },
-  relationshipRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-  },
-  relationshipChip: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 999,
-    backgroundColor: '#17181d',
-    borderWidth: 1,
-    borderColor: '#242630',
-  },
-  relationshipChipText: {
-    color: '#94a3b8',
+    color: '#64748b',
     fontSize: 10,
     fontFamily: 'monospace',
-    fontWeight: '700',
+    fontWeight: '600',
   },
-  cardAction: {
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderRadius: 8,
-    borderWidth: 1,
-    alignItems: 'center',
-    marginTop: 2,
+  connectedTo: {
+    color: '#8b95a7',
+    fontSize: 11,
+    fontFamily: 'monospace',
   },
   cardActionText: {
-    fontSize: 12,
-    fontWeight: '700',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.4,
     fontFamily: 'monospace',
   },
   backRow: {
@@ -2038,14 +1949,9 @@ const styles = StyleSheet.create({
   },
   mpHeroTop: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
     gap: 12,
-  },
-  mpHeroIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    borderWidth: 1,
   },
   mpHeroLabel: {
     fontSize: 16,
@@ -2112,37 +2018,6 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: '#ffffff10',
   },
-  marketplaceOverviewCard: {
-    backgroundColor: '#0b1018',
-    borderWidth: 1,
-    borderColor: '#1b2433',
-    borderRadius: 14,
-    padding: 14,
-    marginBottom: 14,
-    gap: 10,
-  },
-  marketplaceOverviewTitle: {
-    color: '#f8fafc',
-    fontSize: 15,
-    fontWeight: '800',
-    fontFamily: 'monospace',
-  },
-  marketplaceOverviewText: {
-    color: '#93a0b4',
-    fontSize: 12,
-    lineHeight: 18,
-    fontFamily: 'monospace',
-  },
-  marketplaceOverviewSection: {
-    gap: 6,
-  },
-  marketplaceOverviewLabel: {
-    color: '#cbd5e1',
-    fontSize: 11,
-    fontWeight: '800',
-    fontFamily: 'monospace',
-    textTransform: 'uppercase',
-  },
   marketplaceOverviewBullet: {
     color: '#9fb0c7',
     fontSize: 12,
@@ -2202,14 +2077,6 @@ const styles = StyleSheet.create({
     padding: 14,
     gap: 5,
   },
-  modelKeyNoticeCard: {
-    backgroundColor: '#07110d',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#14532d',
-    padding: 14,
-    gap: 7,
-  },
   detailSummaryLabel: {
     color: '#7d8798',
     fontSize: 11,
@@ -2229,26 +2096,79 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
   },
   genericDetailContent: {
-    gap: 14,
-    paddingBottom: 32,
+    gap: 16,
+    paddingBottom: 4,
+  },
+  genericSetupSummary: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+    paddingBottom: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#1f2937',
+  },
+  genericSetupSummaryCopy: {
+    flex: 1,
+    minWidth: 210,
+    gap: 5,
+  },
+  genericSetupTitle: {
+    color: '#f8fafc',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  genericSetupText: {
+    color: '#94a3b8',
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  genericSetupMetaRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    marginTop: 2,
+  },
+  genericSavedText: {
+    color: '#4ade80',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  genericMissingText: {
+    color: '#fbbf24',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  genericPendingText: {
+    color: '#a5b4fc',
+    fontSize: 11,
+    fontWeight: '600',
   },
   genericFormCard: {
-    backgroundColor: '#0b0f18',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#1f2937',
-    padding: 14,
-    gap: 12,
+    gap: 14,
+  },
+  genericFormHeader: {
+    gap: 4,
+  },
+  genericFormTitle: {
+    color: '#e2e8f0',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  genericFormHelper: {
+    color: '#7d8798',
+    fontSize: 11,
+    lineHeight: 16,
   },
   genericFieldBlock: {
     gap: 6,
   },
   genericFieldLabel: {
-    color: '#94a3b8',
+    color: '#aab4c4',
     fontSize: 11,
-    fontWeight: '800',
-    fontFamily: 'monospace',
-    letterSpacing: 1,
+    fontWeight: '700',
+    letterSpacing: 0.1,
   },
   genericInput: {
     backgroundColor: '#06080d',
@@ -2262,11 +2182,64 @@ const styles = StyleSheet.create({
     fontSize: 12,
     ...(RNPlatform.OS === 'web' ? { outlineWidth: 0 } as any : {}),
   },
-  genericHint: {
+  genericSecretRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  genericRevealButton: {
+    minHeight: 38,
+    justifyContent: 'center',
+    paddingHorizontal: 11,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  genericRevealText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  genericHelpToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
+    paddingHorizontal: 2,
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: '#1f2937',
+    ...(RNPlatform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  genericHelpToggleHovered: {
+    backgroundColor: '#ffffff05',
+  },
+  genericHelpToggleText: {
+    color: '#94a3b8',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  genericHelpChevron: {
+    color: '#64748b',
+    fontSize: 16,
+    fontWeight: '500',
+  },
+  genericAdvancedSection: {
+    gap: 14,
+  },
+  genericHelpNotes: {
+    gap: 6,
+    paddingLeft: 11,
+    borderLeftWidth: 2,
+    borderLeftColor: '#334155',
+  },
+  genericHelpNotesTitle: {
+    color: '#cbd5e1',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  genericHelpNote: {
     color: '#7d8798',
     fontSize: 11,
     lineHeight: 16,
-    fontFamily: 'monospace',
   },
   genericSaveBtn: {
     paddingVertical: 12,

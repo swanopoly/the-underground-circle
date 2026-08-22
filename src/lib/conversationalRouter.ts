@@ -20,7 +20,7 @@
 // chat-transport-handlers-smoketest.ts, which asserts the no-re-detection
 // contract against the REAL module).
 import type { ChatCommandDecision } from './chatCommandRegistry';
-import type { HfCommandResult } from './huggingFaceChatCommands';
+import type { HfCommandContext, HfCommandResult } from './huggingFaceChatCommands';
 import type { WpCommandResult } from './wordpressChatCommands';
 import {
   inferWpListTargetFromText,
@@ -107,8 +107,8 @@ function extractOfficeAgentName(message: string): string | null {
 
 function extractRequestedModel(message: string): string | undefined {
   const lower = message.toLowerCase();
-  if (/\bopus\b/.test(lower)) return 'claude-opus-4-8';
-  if (/\bsonnet\b/.test(lower)) return 'claude-sonnet-4-6';
+  if (/\bopus\b/.test(lower)) return 'claude-opus-5';
+  if (/\bsonnet\b/.test(lower)) return 'claude-sonnet-5';
   if (/\bhaiku\b/.test(lower)) return 'claude-haiku-4-5';
   return undefined;
 }
@@ -283,12 +283,18 @@ export type ConversationalIntentContext = {
   userId: string;
   userName?: string;
   model?: string | null;
+  requestedModel?: string | null;
+  provider?: string | null;
+  threadId?: string;
+  sourceMessageId?: string;
+  accessToken?: string;
+  signal?: AbortSignal;
   fullMessage: string;
   attachments?: Array<{ uri: string; type: string; id: string }>;
   commandDecisions?: ChatCommandDecision[];
   executeHfCommand?: (
     input: string,
-    context: { circleId: string; userId: string; userName?: string; model?: string },
+    context: HfCommandContext,
   ) => Promise<HfCommandResult>;
   executeWpCommand?: (
     input: string,
@@ -357,6 +363,7 @@ export type ConversationalIntentResult = {
   handled: boolean;
   message: string;
   artifacts?: any[];
+  imageGeneration?: HfCommandResult['imageGeneration'];
 } | null;
 
 /**
@@ -717,19 +724,35 @@ ${status === 'draft' ? `Say "publish it" or use \`/wp publish ${result.postId}\`
         const prompt = intent.prompt.trim();
         if (!prompt) return { handled: true, message: 'Usage: `/imagine <prompt>`' };
 
+        // The generated artifact is durable and must retain exact request
+        // lineage. Refuse before resolving/importing an executor when Chat has
+        // not provided the persisted source row and active thread identity.
+        if (!context.threadId || !context.sourceMessageId) {
+          return {
+            handled: true,
+            message: '**Image generation needs a saved Chat message**\n\nYour request was not sent to an image provider. Retry after the conversation finishes saving.',
+          };
+        }
+
         const executeHfCommand = context.executeHfCommand
           || (await import('./huggingFaceChatCommands')).executeHfCommand;
         const result = await executeHfCommand(`/imagine ${prompt}`, {
           circleId: context.circleId,
+          threadId: context.threadId,
+          sourceMessageId: context.sourceMessageId,
           userId: context.userId,
           userName: context.userName,
-          model: context.model || undefined,
+          requestedModel: context.requestedModel || undefined,
+          provider: context.provider || undefined,
+          accessToken: context.accessToken,
+          signal: context.signal,
         });
 
         return {
           handled: true,
           message: result.message || (result.success ? `**Generated image:** _${prompt}_` : 'Image generation failed.'),
           artifacts: result.artifacts,
+          imageGeneration: result.imageGeneration,
         };
       } catch (e: any) {
         return { handled: true, message: `Image generation failed: ${e.message}` };

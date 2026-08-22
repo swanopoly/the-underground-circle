@@ -5,21 +5,34 @@
  *   npx tsx scripts/desktop-bridge-security-smoketest.ts
  */
 
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 
 const require = createRequire(import.meta.url);
 const {
+  auditRepoGitConfig,
+  buildBridgeCorsHeaders,
+  parseGitConfigKeyNames,
+  timingSafeTokenEqual,
   classifyExecBinary,
   canonicalizePathWithExistingAncestor,
   createPairingChallengeStore,
   isAllowedBridgeHostHeader,
+  isExactOpenSwanToolUnavailableResponse,
   isLoopbackAddress,
   isPairingRequestSourceAllowed,
   prepareSupportedDiagnosticCommand,
   prepareSupportedExecInvocation,
 } = require('./desktop-bridge-security.js') as {
+  auditRepoGitConfig: (cwd: string) => { ok: boolean; code?: string; error?: string };
+  buildBridgeCorsHeaders: (
+    req: { headers: { origin?: string } },
+    isOriginAllowed: (req: { headers: { origin?: string } }) => boolean,
+    baseHeaders: Record<string, string>,
+  ) => Record<string, string>;
+  parseGitConfigKeyNames: (text: string) => string[];
+  timingSafeTokenEqual: (supplied: string, expected: string) => boolean;
   canonicalizePathWithExistingAncestor: (target: string) => string;
   classifyExecBinary: (binary: string) => { ok: boolean; binaryName: string; code?: string };
   createPairingChallengeStore: (options?: {
@@ -32,6 +45,13 @@ const {
     consume: (challenge: string, remoteAddress: string) => boolean;
   };
   isAllowedBridgeHostHeader: (host: string, port: number) => boolean;
+  isExactOpenSwanToolUnavailableResponse: (input: {
+    requestMethod?: string;
+    requestUrl?: string;
+    statusCode?: number;
+    contentType?: string;
+    body?: Buffer;
+  }) => boolean;
   isLoopbackAddress: (address: string) => boolean;
   isPairingRequestSourceAllowed: (
     req: { socket: { remoteAddress: string }; headers: { host?: string; origin?: string } },
@@ -72,6 +92,33 @@ function mockRequest(
 }
 
 function main(): void {
+  const unavailableToolResponse = (tool: string, requestMethod = 'POST') => ({
+    requestMethod,
+    requestUrl: '/tools/invoke',
+    statusCode: 404,
+    contentType: 'application/json',
+    body: Buffer.from(JSON.stringify({
+      ok: false,
+      error: { type: 'not_found', message: `Tool not available: ${tool}` },
+    })),
+  });
+  assert(
+    isExactOpenSwanToolUnavailableResponse(unavailableToolResponse('cron')),
+    'proxy normalization: exact cron capability miss is eligible for HTTP 200',
+  );
+  assert(
+    isExactOpenSwanToolUnavailableResponse(unavailableToolResponse('agents_list')),
+    'proxy normalization: exact agents_list capability miss is eligible for HTTP 200',
+  );
+  assert(
+    !isExactOpenSwanToolUnavailableResponse(unavailableToolResponse('sessions_send')),
+    'proxy normalization: sessions_send remains HTTP 404 for fail-closed delivery callers',
+  );
+  assert(
+    !isExactOpenSwanToolUnavailableResponse(unavailableToolResponse('cron', 'GET')),
+    'proxy normalization: non-POST requests remain HTTP 404',
+  );
+
   assert(isLoopbackAddress('127.0.0.1'), 'socket: IPv4 loopback is allowed');
   assert(isLoopbackAddress('::ffff:127.0.0.1'), 'socket: IPv4-mapped loopback is allowed');
   assert(isLoopbackAddress('::1'), 'socket: IPv6 loopback is recognized');
@@ -192,6 +239,82 @@ function main(): void {
   }
   assert(prepareSupportedDiagnosticCommand('pwd', process.cwd()).ok, 'diagnostics: fixed pwd is supported');
   assert(!prepareSupportedDiagnosticCommand('pwd; id', process.cwd()).ok, 'diagnostics: shell operators are refused');
+
+  // ── Repository-config command execution ────────────────────────────────
+  // An allowlisted read-only subcommand is NOT sufficient: `git diff` runs
+  // filter.<name>.clean to compare the worktree against the index, so a repo
+  // whose .git/config defines one turns this endpoint into arbitrary command
+  // execution. --no-ext-diff/--no-textconv do not cover content filters.
+  assert(
+    parseGitConfigKeyNames('[core]\n\trepositoryformatversion = 0\n[remote "origin"]\n\turl = git@x')
+      .join(',') === 'core.repositoryformatversion,remote.origin.url',
+    'git config parse: benign local config yields section.subsection.key names',
+  );
+  assert(
+    parseGitConfigKeyNames('[FILTER "P"]\n\tCLEAN = evil')[0] === 'filter.P.clean',
+    'git config parse: section and key names are lowercased, subsection case is preserved',
+  );
+  const repoRoot = mkdtempSync('/private/tmp/uc-bridge-gitcfg-');
+  try {
+    const safeRepo = join(repoRoot, 'safe');
+    mkdirSync(join(safeRepo, '.git'), { recursive: true });
+    writeFileSync(join(safeRepo, '.git', 'config'), '[core]\n\trepositoryformatversion = 0\n');
+    assert(auditRepoGitConfig(safeRepo).ok, 'git repo audit: an ordinary repository is allowed');
+    assert(
+      prepareSupportedExecInvocation(['git', 'diff', '--stat'], safeRepo).ok,
+      'git repo audit: read-only diff still works in an ordinary repository',
+    );
+
+    for (const [label, body] of [
+      ['filter.clean', '[filter "x"]\n\tclean = /bin/sh -c id\n'],
+      ['filter.process', '[filter "x"]\n\tprocess = /bin/sh -c id\n'],
+      ['diff.textconv', '[diff "x"]\n\ttextconv = /bin/sh -c id\n'],
+      ['diff.external', '[diff]\n\texternal = /bin/sh -c id\n'],
+      ['core.pager', '[core]\n\tpager = /bin/sh -c id\n'],
+      ['core.sshCommand', '[core]\n\tsshCommand = /bin/sh -c id\n'],
+      ['include.path', '[include]\n\tpath = /tmp/evil-config\n'],
+    ] as const) {
+      const evilRepo = join(repoRoot, `evil-${label.replace(/\W/g, '_')}`);
+      mkdirSync(join(evilRepo, '.git'), { recursive: true });
+      writeFileSync(join(evilRepo, '.git', 'config'), body);
+      const audited = auditRepoGitConfig(evilRepo);
+      assert(!audited.ok, `git repo audit: ${label} is refused`);
+      const prepared = prepareSupportedExecInvocation(['git', 'diff', '--stat'], evilRepo);
+      assert(
+        !prepared.ok && prepared.code === 'exec_git_repo_config_executable',
+        `git repo audit: exec_file refuses a diagnostic in a ${label} repository`,
+      );
+      assert(
+        !JSON.stringify(prepared).includes('/bin/sh'),
+        `git repo audit: the ${label} refusal does not echo the attacker-controlled command value`,
+      );
+    }
+
+    // A nested working directory must resolve upward to the same repository.
+    const nested = join(repoRoot, 'evil-filter_clean', 'src', 'deep');
+    mkdirSync(nested, { recursive: true });
+    assert(!auditRepoGitConfig(nested).ok, 'git repo audit: a nested cwd resolves up to the repository config');
+
+    // A `gitdir:` pointer file (linked worktree / submodule) must be followed.
+    const linked = join(repoRoot, 'linked');
+    mkdirSync(linked, { recursive: true });
+    writeFileSync(join(linked, '.git'), `gitdir: ${join(repoRoot, 'evil-filter_clean', '.git')}\n`);
+    assert(!auditRepoGitConfig(linked).ok, 'git repo audit: a gitdir pointer file is followed to the real config');
+
+    // config.worktree is scanned unconditionally alongside config.
+    const wt = join(repoRoot, 'wt');
+    mkdirSync(join(wt, '.git'), { recursive: true });
+    writeFileSync(join(wt, '.git', 'config'), '[core]\n\trepositoryformatversion = 0\n');
+    writeFileSync(join(wt, '.git', 'config.worktree'), '[diff]\n\texternal = /bin/sh -c id\n');
+    assert(!auditRepoGitConfig(wt).ok, 'git repo audit: config.worktree is scanned too');
+
+    // No repository at all is safe by definition — git itself will error.
+    const bare = join(repoRoot, 'nogit');
+    mkdirSync(bare, { recursive: true });
+    assert(auditRepoGitConfig(bare).ok, 'git repo audit: a directory with no repository is allowed');
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
 
   const tempRoot = mkdtempSync('/private/tmp/uc-bridge-security-');
   try {
@@ -360,6 +483,7 @@ function main(): void {
       && geminiDetectorSource.includes('requestBridgePairToken(`${bridgeUrl}/pair`'),
     'source: direct Codex and Gemini detector callers complete challenge-v1',
   );
+  const codexBridgeSource = sharedTokenBridgeSources[1][1];
   const geminiBridgeSource = sharedTokenBridgeSources[2][1];
   const cursorBridgeSource = sharedTokenBridgeSources[3][1];
   const geminiHealthSource = geminiBridgeSource.slice(
@@ -375,6 +499,106 @@ function main(): void {
       && !/geminiDir:\s*GEMINI_DIR/.test(geminiHealthSource)
       && !/cursorDir:\s*CURSOR_DIR/.test(cursorHealthSource),
     'source: public bridge health does not disclose user email or personal config paths',
+  );
+
+  // ── Constant-time token comparison ─────────────────────────────────────
+  assert(timingSafeTokenEqual('a'.repeat(48), 'a'.repeat(48)), 'token compare: identical tokens match');
+  assert(!timingSafeTokenEqual('a'.repeat(48), 'b'.repeat(48)), 'token compare: different tokens do not match');
+  assert(!timingSafeTokenEqual('a'.repeat(47), 'a'.repeat(48)), 'token compare: a length mismatch does not match');
+  for (const bad of ['', null, undefined, 0, {}, []]) {
+    assert(!timingSafeTokenEqual(bad as never, 'a'.repeat(48)), `token compare: ${JSON.stringify(bad)} is refused`);
+  }
+  for (const [bridge, source] of [
+    ['codex', codexBridgeSource],
+    ['gemini', geminiBridgeSource],
+    ['cursor', cursorBridgeSource],
+  ] as const) {
+    assert(
+      /timingSafeTokenEqual\(/.test(source) && !/===\s*getOrCreateBridgeToken\(\)/.test(source),
+      `source: ${bridge} bridge compares the desktop token in constant time`,
+    );
+  }
+
+  // ── Origin-scoped CORS ─────────────────────────────────────────────────
+  // A static `Access-Control-Allow-Origin: *` plus a static Private Network
+  // Access grant let any website read these bridges' responses.
+  const allowLocalhost8081 = (req: { headers: { origin?: string } }) =>
+    req.headers.origin === 'http://localhost:8081';
+  const base = { 'Content-Type': 'application/json' };
+  const noOrigin = buildBridgeCorsHeaders({ headers: {} }, allowLocalhost8081, base);
+  assert(noOrigin['Access-Control-Allow-Origin'] === '*', 'cors: a no-Origin (non-browser) caller keeps *');
+  assert(!noOrigin['Access-Control-Allow-Private-Network'], 'cors: a no-Origin caller gets no PNA grant');
+  const allowed = buildBridgeCorsHeaders(
+    { headers: { origin: 'http://localhost:8081' } }, allowLocalhost8081, base,
+  );
+  assert(
+    allowed['Access-Control-Allow-Origin'] === 'http://localhost:8081'
+      && allowed['Access-Control-Allow-Private-Network'] === 'true'
+      && allowed.Vary === 'Origin',
+    'cors: an allow-listed origin is echoed exactly and granted PNA',
+  );
+  for (const origin of ['https://evil.com', 'null', 'http://localhost:8081.evil.com', 'http://localhost:31337']) {
+    const blocked = buildBridgeCorsHeaders({ headers: { origin } }, allowLocalhost8081, base);
+    assert(
+      !('Access-Control-Allow-Origin' in blocked) && !('Access-Control-Allow-Private-Network' in blocked),
+      `cors: origin ${origin} receives no ACAO and no PNA grant`,
+    );
+  }
+  for (const [bridge, source] of [
+    ['codex', codexBridgeSource],
+    ['gemini', geminiBridgeSource],
+    ['cursor', cursorBridgeSource],
+  ] as const) {
+    assert(
+      !/'Access-Control-Allow-Origin':\s*'\*'/.test(source),
+      `source: ${bridge} bridge has no static wildcard Access-Control-Allow-Origin`,
+    );
+    assert(
+      !/'Access-Control-Allow-Private-Network':\s*'true',\n/.test(source.slice(0, source.indexOf('function corsFor'))),
+      `source: ${bridge} bridge does not grant Private Network Access unconditionally`,
+    );
+    assert(
+      /res\.__ucCors = buildBridgeCorsHeaders\(req, isAllowedPairOrigin, CORS_BASE\)/.test(source),
+      `source: ${bridge} bridge stamps origin-scoped CORS at handler entry`,
+    );
+  }
+
+  // ── /health sits behind the source guard ───────────────────────────────
+  // It is unauthenticated by design (presence probing before pairing) but must
+  // not be readable by an arbitrary website, and must not be a DNS-rebinding
+  // target — both of which it was while it ran ahead of the guard.
+  for (const [bridge, source, healthPath] of [
+    ['codex', codexBridgeSource, "pathname === '/health'"],
+    ['gemini', geminiBridgeSource, "url === '/health'"],
+    ['cursor', cursorBridgeSource, "url === '/health'"],
+  ] as const) {
+    const guardIndex = source.indexOf('isBridgeRequestSourceAllowed(req, PORT');
+    const healthIndex = source.indexOf(healthPath);
+    assert(
+      guardIndex > 0 && healthIndex > 0 && guardIndex < healthIndex,
+      `source: ${bridge} bridge computes the source guard before serving /health`,
+    );
+  }
+
+  // ── cursor: the Composer target application is not caller-chosen ───────
+  // The handoff ends in `key code 36` (Return) into the frontmost app, so
+  // `open -a <appName>` + paste + Return is arbitrary shell execution when the
+  // request body picks the app (appName: "Terminal").
+  assert(
+    /CURSOR_ALLOWED_APP_NAMES/.test(cursorBridgeSource)
+      && /resolveCursorAppName\(appName\)/.test(cursorBridgeSource)
+      && !/\['-a', appName \|\| 'Cursor', cwd\]/.test(cursorBridgeSource),
+    'source: cursor Composer handoff resolves appName through an allowlist before `open -a`',
+  );
+
+  // ── codex: terminalTitle cannot come from a request body ───────────────
+  // sendToTerminalByTitle feeds the matched tab to AppleScript `do script`,
+  // which runs text as a shell command, and the only guard on that path is the
+  // presence of terminalTitle.
+  assert(
+    /function registerSession\(data, \{ trusted = false \} = \{\}\)/.test(codexBridgeSource)
+      && !/terminalTitle: data\.terminalTitle/.test(codexBridgeSource),
+    'source: codex registerSession only accepts terminalTitle from a trusted internal launch',
   );
 
   if (failures > 0) {

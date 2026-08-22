@@ -13,9 +13,13 @@
  */
 
 import type { ChatComputerAppResolution } from '../src/lib/chatComputerRequestRouter';
+import fs from 'node:fs';
 import {
   LAST_APP_RESOLUTION_MAX_SERIALIZED_BYTES,
   boundChatFailureLedgerEntries,
+  chatPersonalCircleStorageKey,
+  chatPersonalScopeKey,
+  chatPersonalThreadStorageKey,
   deserializeChatFailureLedger,
   deserializeLastAppResolution,
   serializeChatFailureLedger,
@@ -48,6 +52,80 @@ function entry(overrides: Partial<PersistedChatFailureLedgerEntry> = {}): Persis
     lastSuccessfulHandoffAt: null,
     ...overrides,
   };
+}
+
+// ── Exact account/circle storage scope ───────────────────────────────────
+
+const accountA = { userId: 'user-a', circleId: 'circle-shared' };
+const accountB = { userId: 'user-b', circleId: 'circle-shared' };
+const otherCircle = { userId: 'user-a', circleId: 'circle-other' };
+const circleKeyA = chatPersonalCircleStorageKey('pending_clarifications', accountA);
+const circleKeyB = chatPersonalCircleStorageKey('pending_clarifications', accountB);
+assert(Boolean(circleKeyA), 'exact personal circle key exists for complete identity');
+assert(circleKeyA !== circleKeyB, 'same-circle accounts never share a personal circle key');
+assert(
+  circleKeyA !== chatPersonalCircleStorageKey('pending_clarifications', otherCircle),
+  'one account never shares a personal key across circles',
+);
+assert(
+  chatPersonalCircleStorageKey('user_profile', { userId: '', circleId: 'circle-shared' }) === null,
+  'missing user identity fails closed instead of creating an ownerless key',
+);
+assert(
+  chatPersonalCircleStorageKey('user_profile', { userId: 'user-a', circleId: '' }) === null,
+  'missing circle identity fails closed instead of creating an ownerless key',
+);
+const threadKeyA = chatPersonalThreadStorageKey('pending_bot_messages', accountA, 'thread-shared');
+const threadKeyB = chatPersonalThreadStorageKey('pending_bot_messages', accountB, 'thread-shared');
+assert(threadKeyA !== threadKeyB, 'same shared thread has separate pending-message recovery per account');
+assert(
+  chatPersonalThreadStorageKey('builder_history', accountA, 'thread-shared')
+    !== chatPersonalThreadStorageKey('builder_history', accountB, 'thread-shared'),
+  'same shared thread has separate full builder source history per account',
+);
+assert(
+  chatPersonalThreadStorageKey('builder_images', accountA, 'thread-shared')
+    !== chatPersonalThreadStorageKey('builder_images', accountB, 'thread-shared'),
+  'same shared thread has separate builder image URLs per account',
+);
+assert(
+  chatPersonalThreadStorageKey('builder_artifact', accountA, 'thread-shared')
+    !== chatPersonalThreadStorageKey('builder_artifact', accountB, 'thread-shared'),
+  'same shared thread has separate last build artifact per account',
+);
+assert(
+  chatPersonalCircleStorageKey('brand_pack', accountA)
+    !== chatPersonalCircleStorageKey('brand_pack', accountB),
+  'same-Circle accounts never share brand notes or logo URLs',
+);
+assert(
+  chatPersonalCircleStorageKey('agent_avatar', accountA)
+    !== chatPersonalCircleStorageKey('agent_avatar', accountB),
+  'same-Circle accounts never share Chat agent identity presentation',
+);
+assert(
+  chatPersonalThreadStorageKey('mode', accountA, '') === null,
+  'missing thread identity fails closed instead of creating a wildcard thread key',
+);
+assert(
+  chatPersonalThreadStorageKey('automation_suggestion_seen', accountA, 'thread-shared', 'flow:unsafe')
+    === 'uc_chat_private_v2::automation_suggestion_seen::user-a::circle-shared::thread-shared::flow_unsafe',
+  'optional discriminator is bounded and cannot inject key segments',
+);
+assert(chatPersonalScopeKey(accountA) !== chatPersonalScopeKey(accountB), 'runtime scope distinguishes accounts in one circle');
+
+for (const file of [
+  'src/lib/builderHistory.ts',
+  'src/lib/builderImages.ts',
+  'src/lib/brandPack.ts',
+  'src/lib/chatAgentIdentity.ts',
+]) {
+  const source = fs.readFileSync(file, 'utf8');
+  assert(source.includes('storage.removeItem('), `${file} retires its legacy ownerless envelope`);
+  assert(
+    !/storage\.getItem\((?:legacy[A-Za-z]+Key|`\$\{(?:BUILDER_HISTORY_STORAGE_KEY|BUILDER_IMAGES_STORAGE_KEY|BRAND_PACK_STORAGE_KEY|CHAT_AGENT_STORAGE_KEY|CHAT_AGENT_AVATAR_STORAGE_KEY|CHAT_THREAD_BUILD_ARTIFACT_STORAGE_KEY))/m.test(source),
+    `${file} never imports a legacy ownerless envelope`,
+  );
 }
 
 // ── Ledger: retention window ──────────────────────────────────────────────

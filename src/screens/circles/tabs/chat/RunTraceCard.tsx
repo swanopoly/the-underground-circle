@@ -22,6 +22,7 @@ import {
   type AgentRun,
   type RunStep,
 } from '../../../../lib/agentRunSystem';
+import { isAwaitingConnectedAgentResultMetadata } from '../../../../lib/officeOpsBoard';
 import { supabase } from '../../../../lib/supabase';
 
 const MONO = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
@@ -116,7 +117,9 @@ export default function RunTraceCard({ runId, onRunAgain, accentColor = '#a78bfa
     };
   }, [runId]);
 
-  const isLive = run?.status === 'running' || run?.status === 'planning' || run?.status === 'queued';
+  const awaitingExternalResult = isAwaitingConnectedAgentResultMetadata(run?.metadata);
+  const isLive = !awaitingExternalResult
+    && (run?.status === 'running' || run?.status === 'planning' || run?.status === 'queued');
   const isFailed = run?.status === 'failed';
   const isDone = run?.status === 'completed';
   const headerDot = STATUS_DOT[run?.status || 'queued'] || '#94a3b8';
@@ -175,7 +178,11 @@ export default function RunTraceCard({ runId, onRunAgain, accentColor = '#a78bfa
             <Text style={s.modeChipText}>{run.mode}</Text>
           </View>
         </View>
-        <Text style={s.statusText}>{run.status.toUpperCase()}</Text>
+        <Text style={s.statusText}>
+          {awaitingExternalResult
+            ? 'ACCEPTED · AWAITING UPDATE'
+            : run.status.toUpperCase()}
+        </Text>
       </View>
 
       <Text style={s.title} numberOfLines={2}>{run.title || run.goal || '(untitled run)'}</Text>
@@ -190,6 +197,15 @@ export default function RunTraceCard({ runId, onRunAgain, accentColor = '#a78bfa
         </Text>
       </View>
 
+      {awaitingExternalResult ? (
+        <View style={s.awaitingBox}>
+          <Text style={s.awaitingLabel}>CONNECTED AGENT ACCEPTED</Text>
+          <Text style={s.awaitingBody}>
+            Awaiting a connected-agent update. Completion is not yet verified.
+          </Text>
+        </View>
+      ) : null}
+
       {isFailed && run.metadata?.error_message ? (
         <View style={s.errorBox}>
           <Text style={s.errorLabel}>RUN ERROR</Text>
@@ -200,7 +216,11 @@ export default function RunTraceCard({ runId, onRunAgain, accentColor = '#a78bfa
       <ScrollView style={{ maxHeight: 320 }} contentContainerStyle={{ gap: 4 }}>
         {steps.length === 0 ? (
           <Text style={s.emptyHint}>
-            {isLive ? 'Waiting for first step…' : 'No steps recorded.'}
+            {awaitingExternalResult
+              ? 'No local run steps are expected while this external handoff is awaiting an update.'
+              : isLive
+                ? 'Waiting for first step…'
+                : 'No steps recorded.'}
           </Text>
         ) : (
           steps.map((step) => {
@@ -247,7 +267,7 @@ export default function RunTraceCard({ runId, onRunAgain, accentColor = '#a78bfa
       </ScrollView>
 
       <View style={s.actionRow}>
-        {isLive && !readOnly ? (
+        {isLive && !readOnly && !awaitingExternalResult ? (
           <Pressable
             onPress={async () => {
               if (cancelling) return;
@@ -285,7 +305,7 @@ export default function RunTraceCard({ runId, onRunAgain, accentColor = '#a78bfa
             <Text style={s.stopText}>{cancelling ? 'STOPPING…' : '■ STOP'}</Text>
           </Pressable>
         ) : null}
-        {!readOnly && (isFailed || isDone || run.status === 'cancelled') && onRunAgain ? (
+        {!readOnly && !awaitingExternalResult && (isFailed || isDone || run.status === 'cancelled') && onRunAgain ? (
           <Pressable
             onPress={() => onRunAgain(run)}
             style={({ pressed }) => [
@@ -380,6 +400,16 @@ const s = StyleSheet.create({
   },
   errorLabel: { color: '#fca5a5', fontSize: 9, fontWeight: '900', letterSpacing: 1, fontFamily: MONO },
   errorBody: { color: '#fecaca', fontSize: 11, lineHeight: 16, fontFamily: MONO },
+  awaitingBox: {
+    backgroundColor: '#082f4930',
+    borderWidth: 1,
+    borderColor: '#38bdf855',
+    borderRadius: 8,
+    padding: 8,
+    gap: 4,
+  },
+  awaitingLabel: { color: '#7dd3fc', fontSize: 9, fontWeight: '900', letterSpacing: 1, fontFamily: MONO },
+  awaitingBody: { color: '#bae6fd', fontSize: 11, lineHeight: 16, fontFamily: MONO },
   emptyHint: { color: '#64748b', fontSize: 11, fontStyle: 'italic', textAlign: 'center', paddingVertical: 12 },
   stepRow: {
     backgroundColor: '#0f172a',

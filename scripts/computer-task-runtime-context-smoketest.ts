@@ -16,6 +16,10 @@ import { fileURLToPath } from 'node:url';
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const agentRuntimeSource = readFileSync(`${repoRoot}/src/lib/agentRuntime.ts`, 'utf8');
 const computerRuntimeSource = readFileSync(`${repoRoot}/src/lib/computerTaskRuntime.ts`, 'utf8');
+const computerSequenceProgramSource = readFileSync(
+  `${repoRoot}/src/lib/computerSequenceProgramCore.ts`,
+  'utf8',
+);
 const chatSource = readFileSync(
   `${repoRoot}/src/screens/circles/tabs/ChatTab.tsx`,
   'utf8',
@@ -112,11 +116,21 @@ assert.match(
 );
 
 const exactProgramDispatchIndex = computerRuntimeSource.indexOf(
-  'if (sequenceProgram && args.exactSequenceDispatchAuthorized) {',
+  'const exactSequenceAuthorized = sequenceProgram',
 );
 assert(
   exactProgramDispatchIndex >= 0 && exactProgramDispatchIndex < mainAgentCallStart,
   'a dispatcher-authorized compiler-owned sequence runs locally before the AI relay',
+);
+assert.match(
+  computerRuntimeSource,
+  /export async function buildExactSequenceProgramFingerprint[\s\S]*buildComputerSequenceProgramManifest\(program\)[\s\S]*export async function exactSequenceDispatchAuthorityMatches[\s\S]*authority\.programFingerprint !== programFingerprint[\s\S]*authority\.kind === 'direct_user_request'[\s\S]*isIssuedChatPlanApprovalAuthority/,
+  'exact execution consumes a manifest-bound typed direct or runtime-issued approval authority instead of a Boolean',
+);
+assert.match(
+  computerRuntimeSource,
+  /if \(sequenceProgram && !exactSequenceAuthorized\) \{[\s\S]*no matching dispatch authority[\s\S]*no app action was attempted/,
+  'a missing or mismatched exact authority fails closed before any app action',
 );
 assert.match(
   computerRuntimeSource,
@@ -191,9 +205,22 @@ assert.match(
   /waitForExactPhotoshopFinalStatusRetry\(signal\)/,
   'bounded proof retry delays preserve the caller AbortSignal',
 );
-assert.match(
-  exactFinalStatusHelperSource,
-  /const status = await desktop\.photoshopDocumentStatus\(\{[\s\S]*?\}\);\s*if \(signal\?\.aborted\) \{\s*return \{ ok: false, actualName, aborted: true, error: lastError \};/,
+const exactFinalStatusAwaitIndex = exactFinalStatusHelperSource.indexOf(
+  'const status = await desktop.photoshopDocumentStatus({',
+);
+const exactFinalStatusParseIndex = exactFinalStatusHelperSource.indexOf(
+  'const observedName = exactPhotoshopDocumentProofIdentity(',
+  exactFinalStatusAwaitIndex,
+);
+assert(
+  exactFinalStatusAwaitIndex >= 0
+    && exactFinalStatusParseIndex > exactFinalStatusAwaitIndex
+    && /if \(signal\?\.aborted\) \{[\s\S]*?ok: false,[\s\S]*?aborted: true,[\s\S]*?error: lastError/.test(
+      exactFinalStatusHelperSource.slice(
+        exactFinalStatusAwaitIndex,
+        exactFinalStatusParseIndex,
+      ),
+    ),
   'each awaited post-create status read checks cancellation before accepting proof',
 );
 assert.doesNotMatch(
@@ -379,8 +406,8 @@ assert.doesNotMatch(
 );
 assert.match(
   exactForegroundHelperSource,
-  /catch \{\s*observed = null;\s*\}[\s\S]*?if \(isPhotoshopAppIdentity\(frontmostApp\)\)[\s\S]*?desktop\.focusApp\('Photoshop'\)/,
-  'a failed or empty initial observation falls through to the one bounded Photoshop focus dispatch',
+  /if \(isPhotoshopAppIdentity\(frontmostApp\)\)[\s\S]*?if \(!allowFocusDispatch\)[\s\S]*?focusDispatched: false[\s\S]*?desktop\.focusApp\('Photoshop'\)/,
+  'focus dispatch is explicitly budgeted and a human/OS focus override can fail closed without another activation',
 );
 assert.match(
   exactForegroundHelperSource,
@@ -398,21 +425,35 @@ const exactHandlerEnd = computerRuntimeSource.indexOf(
 assert(exactHandlerStart >= 0 && exactHandlerEnd > exactHandlerStart);
 const exactHandlerSource = computerRuntimeSource.slice(exactHandlerStart, exactHandlerEnd);
 const foregroundBeforeCreateIndex = exactHandlerSource.indexOf(
-  'const foregroundBeforeCreate = await ensureExactPhotoshopForeground(desktop, signal);',
+  'const foregroundBeforeCreate = await ensureExactPhotoshopForeground(',
 );
 const createDocumentIndex = exactHandlerSource.indexOf(
   'created = await desktop.photoshopCreateDocument({',
+);
+const durableStartIndex = exactHandlerSource.indexOf(
+  'const durableStart = await durableLease.store.start({',
+);
+const launchIndex = exactHandlerSource.indexOf("desktop.launchApp('Photoshop')");
+const focusIndex = exactHandlerSource.indexOf(
+  'const foregroundBeforeCreate = await ensureExactPhotoshopForeground(',
 );
 const finalDocumentStatusIndex = exactHandlerSource.indexOf(
   'const finalStatus = await observeExactPhotoshopFinalStatus({',
 );
 const foregroundAfterCreateIndex = exactHandlerSource.indexOf(
-  'const foregroundAfterCreate = await ensureExactPhotoshopForeground(desktop, signal);',
+  'const foregroundAfterCreate = await ensureExactPhotoshopForeground(',
 );
 const completedResultIndex = exactHandlerSource.lastIndexOf("status: 'completed'");
 assert(
   foregroundBeforeCreateIndex >= 0 && foregroundBeforeCreateIndex < createDocumentIndex,
   'the exact program verifies or focuses Photoshop before document creation',
+);
+assert(
+  durableStartIndex >= 0
+    && durableStartIndex < launchIndex
+    && durableStartIndex < focusIndex
+    && durableStartIndex < createDocumentIndex,
+  'the §26 start acknowledgement precedes every launch, focus, and create mutation site',
 );
 assert.equal(
   (exactHandlerSource.match(/desktop\.photoshopCreateDocument\(/g) || []).length,
@@ -421,7 +462,7 @@ assert.equal(
 );
 assert.match(
   exactHandlerSource,
-  /const expectedName = exactPhotoshopDocumentProofIdentity\(created\.data\?\.documentName\);[\s\S]*?if \(!created\.ok \|\| !created\.data\?\.created \|\| expectedName === null\)[\s\S]*?exactSequenceManualVerificationResult\([\s\S]*?const finalStatus = await observeExactPhotoshopFinalStatus\(\{[\s\S]*?signal,/,
+  /const expectedName = exactPhotoshopDocumentProofIdentity\(created\.data\?\.documentName\);[\s\S]*?if \(!created\.ok \|\| !created\.data\?\.created \|\| expectedName === null\)[\s\S]*?manualAfterDurableStart\([\s\S]*?const finalStatus = await observeExactPhotoshopFinalStatus\(\{[\s\S]*?signal,/,
   'bounded final-status retries begin only after a positive safe raw creation receipt and retain cancellation',
 );
 assert(
@@ -432,13 +473,18 @@ assert(
 );
 assert.match(
   exactHandlerSource.slice(foregroundAfterCreateIndex, completedResultIndex),
-  /exactSequenceManualVerificationResult\([\s\S]*?will not be replayed automatically/,
+  /manualAfterDurableStart\([\s\S]*?will not be replayed automatically/,
   'a post-mutation foreground verification failure remains partial and non-replayable',
 );
 assert.match(
   exactHandlerSource,
-  /if \(stopped\(\)\) \{\s*return exactSequenceManualVerificationResult\([\s\S]*?final foreground verification was cancelled[\s\S]*?const foregroundAfterCreate = await ensureExactPhotoshopForeground\(desktop, signal\);[\s\S]*?if \(stopped\(\)\) \{\s*return exactSequenceManualVerificationResult\([\s\S]*?completion was cancelled after foreground verification[\s\S]*?status: 'completed'/,
+  /if \(stopped\(\)\) \{\s*return manualAfterDurableStart\([\s\S]*?final foreground verification was cancelled[\s\S]*?const foregroundAfterCreate = await ensureExactPhotoshopForeground\([\s\S]*?false\);[\s\S]*?if \(stopped\(\)\) \{\s*return manualAfterDurableStart\([\s\S]*?completion was cancelled after foreground verification[\s\S]*?status: 'completed'/,
   'STOP is checked before final foreground work and again before completion after mutation',
+);
+assert.match(
+  exactHandlerSource,
+  /const foregroundBeforeCreate = await ensureExactPhotoshopForeground\([\s\S]*?!launched,[\s\S]*?const foregroundAfterCreate = await ensureExactPhotoshopForeground\(desktop, signal, false\)/,
+  'a fresh launch cannot be followed by a focus reclaim, and final verification is observation-only',
 );
 assert.match(
   exactHandlerSource,
@@ -462,13 +508,101 @@ assert.doesNotMatch(
 );
 assert.match(
   computerRuntimeSource,
-  /catch \(error: any\) \{[\s\S]*?exactSequenceManualVerificationResult\([\s\S]*?automatic replay is disabled/,
+  /catch \(error: any\) \{[\s\S]*?manualAfterDurableStart\([\s\S]*?automatic replay is disabled/,
   'a transport exception after create dispatch remains outcome-unknown and non-replayable',
 );
 assert.match(
   computerRuntimeSource,
-  /if \(!created\.ok \|\| !created\.data\?\.created \|\| expectedName === null\) \{[\s\S]*?exactSequenceManualVerificationResult\([\s\S]*?automatic replay is disabled/,
+  /if \(!created\.ok \|\| !created\.data\?\.created \|\| expectedName === null\) \{[\s\S]*?manualAfterDurableStart\([\s\S]*?automatic replay is disabled/,
   'a missing or unsafe creation receipt cannot be downgraded to a safe-to-retry failure',
+);
+assert.match(
+  computerRuntimeSource,
+  /createExactSequenceRootRun[\s\S]*?createRun\([\s\S]*?run\?\.user_id[\s\S]*?run\?\.circle_id[\s\S]*?claimExactPhotoshopDurableAction[\s\S]*?durableLease\.store\.start\([\s\S]*?desktop\.launchApp\('Photoshop'\)[\s\S]*?desktop\.photoshopCreateDocument\(/,
+  'an authenticated persisted root and §26 claim/start are confirmed before any exact-program app mutation',
+);
+assert.match(
+  computerSequenceProgramSource,
+  /buildComputerSequenceActionIdempotencyKey[\s\S]*?requestIdentityFingerprint[\s\S]*?programFingerprint[\s\S]*?'desktop\.photoshop_create_document'[\s\S]*?'compiler\.photoshop_new_document\.create\.1'/,
+  'the durable mutation key binds stable request identity, exact program, tool, and action',
+);
+const exactIdentityBuilderStart = computerRuntimeSource.indexOf(
+  'async function buildExactPhotoshopDurableActionIdentity(',
+);
+const exactIdentityBuilderEnd = computerRuntimeSource.indexOf(
+  '\nasync function claimExactPhotoshopDurableAction(',
+  exactIdentityBuilderStart,
+);
+const exactIdentityBuilderSource = computerRuntimeSource.slice(
+  exactIdentityBuilderStart,
+  exactIdentityBuilderEnd,
+);
+assert.match(
+  exactIdentityBuilderSource,
+  /idempotencyKey: input\.root\.actionIdempotencyKey/,
+  '§26 claim consumes the request-stable action key',
+);
+assert.doesNotMatch(
+  exactIdentityBuilderSource,
+  /idempotencyKey:[^\n]*root\.runId/,
+  'a new wrapper run id cannot mint replay authority for the same submitted request',
+);
+const lifecycleIdempotencyStart = computerRuntimeSource.indexOf(
+  'async function buildLifecycleActionIdempotencyKey(',
+);
+const lifecycleIdempotencyEnd = computerRuntimeSource.indexOf(
+  '\nfunction exactSequenceUuid(',
+  lifecycleIdempotencyStart,
+);
+assert(lifecycleIdempotencyStart >= 0 && lifecycleIdempotencyEnd > lifecycleIdempotencyStart);
+const lifecycleIdempotencySource = computerRuntimeSource.slice(
+  lifecycleIdempotencyStart,
+  lifecycleIdempotencyEnd,
+);
+assert.match(
+  lifecycleIdempotencySource,
+  /namespace: 'named_app_lifecycle_activation'[\s\S]*requestIdentityFingerprint: input\.requestIdentityFingerprint[\s\S]*actionId: LIFECYCLE_ACTIVATION_CALL_ID/,
+  'one originating Chat message owns the fixed lifecycle activation slot',
+);
+assert.doesNotMatch(
+  lifecycleIdempotencySource,
+  /programFingerprint|dispatchAppName|targetAppName|runId/,
+  'refresh-sensitive app canonicalization and wrapper runs cannot mint a second lifecycle key',
+);
+assert.match(
+  computerRuntimeSource,
+  /function normalizedLifecycleFingerprintAppName[\s\S]*replace\(\/\\\.app\$\/i, ''\)[\s\S]*toLocaleLowerCase\(\)[\s\S]*function buildLifecycleProgramManifest[\s\S]*targetAppName: normalizedLifecycleFingerprintAppName\(program\.targetAppName\)[\s\S]*dispatchAppName: normalizedLifecycleFingerprintAppName\(program\.dispatchAppName\)/,
+  'case-only and .app inventory canonicalization preserves the original lifecycle program identity',
+);
+assert.match(
+  computerRuntimeSource,
+  /const actionOwner = await supabase[\s\S]*\.eq\('idempotency_key', actionIdempotencyKey\)[\s\S]*if \(ownerRunId\) return readLifecycleRootRun\(\{ \.\.\.rootLookup, runId: ownerRunId \}\)/,
+  'lifecycle refresh recovers the request-key owner before any replacement root can be created',
+);
+assert.match(
+  computerRuntimeSource,
+  /from\('agent_action_calls'\)[\s\S]*?\.eq\('idempotency_key', actionIdempotencyKey\)[\s\S]*?readExactSequenceRootRun\(\{ \.\.\.rootLookup, runId: ownerRunId \}\)[\s\S]*?readExactSequenceRootRun\(rootLookup\)[\s\S]*?createRun\(/,
+  'crash/resume discovers the action-owning root first, then the exact metadata-bound root, before creating one',
+);
+assert.match(
+  computerRuntimeSource,
+  /\.contains\('metadata', \{[\s\S]*?exactProgramFingerprint: input\.programFingerprint[\s\S]*?exactRequestIdentityFingerprint: input\.requestIdentityFingerprint[\s\S]*?exactActionIdempotencyKey: input\.actionIdempotencyKey/,
+  'persisted root lookup is exact on program, request, and stable action identity',
+);
+assert.match(
+  computerRuntimeSource,
+  /const circleChatThreadId = exactSequenceUuid\(input\.threadId\)[\s\S]*?circleChatThreadId/,
+  'the exact root retains bounded circle-chat thread lineage as metadata',
+);
+assert.doesNotMatch(
+  computerRuntimeSource,
+  /chatSessionId:\s*(?:threadId|circleChatThreadId)/,
+  'circle_chat_threads identity never enters the unrelated agent_runs.chat_session_id foreign key',
+);
+assert.match(
+  exactHandlerSource,
+  /durableStart\.disposition === 'duplicate'[\s\S]*?exactPhotoshopDurablePriorResult[\s\S]*?finishExactPhotoshopDurableAction\([\s\S]*?'outcome_unknown'[\s\S]*?finishExactPhotoshopDurableAction\([\s\S]*?'verified'/,
+  'duplicates never re-enter the bridge, post-start ambiguity seals outcome_unknown, and success requires durable verified finish',
 );
 assert.match(
   computerRuntimeSource,
@@ -484,6 +618,21 @@ assert.match(
   chatSource,
   /suppressGenericRecovery:[\s\S]*?replayPolicy,[\s\S]*?mutationDispatched,[\s\S]*?verificationOnlyTools,/,
   'Chat outcome presentation receives the structured replay boundary before recovery generation',
+);
+assert.match(
+  computerRuntimeSource,
+  /const turnReplayGuard = deriveComputerTaskTurnReplayGuard\(\{[\s\S]*evidence: result\.taskTurnEvidence[\s\S]*taskKind: execution\.preview\.kind/,
+  'typed-loop mutation evidence is converted into replay authority at the computer-task boundary',
+);
+assert.match(
+  computerRuntimeSource,
+  /const heuristicCapabilityBuildout = canRequestCapabilityBuildout\s*&& !turnReplayGuard\.manualVerifyOnly[\s\S]*const retryAttempt = turnReplayGuard\.manualVerifyOnly\s*\? null/,
+  'an outcome-unknown mutation suppresses capability buildout and automatic task retry',
+);
+assert.match(
+  computerRuntimeSource,
+  /const finalStatus = turnReplayGuard\.manualVerifyOnly\s*\? 'partial'[\s\S]*replayPolicy: 'manual_verify_only'[\s\S]*mutationDispatched: true[\s\S]*verificationOnlyTools: turnReplayGuard\.verificationOnlyTools/,
+  'post-dispatch ambiguity returns partial with durable manual-verification-only metadata',
 );
 assert.doesNotMatch(
   computerRuntimeSource,
@@ -572,8 +721,8 @@ assert.match(
 );
 assert.match(
   chatComputerCall,
-  /exactSequenceDispatchAuthorized: Boolean\(exactSequenceProgram\)/,
-  'only a compiler-owned deterministic sequence receives dispatcher authorization',
+  /exactSequenceDispatchAuthority/,
+  'the compiler-owned deterministic sequence receives typed dispatcher authority',
 );
 assert.match(
   chatComputerCall,
@@ -598,8 +747,30 @@ assert.match(
 );
 assert.match(
   computerRuntimeSource,
-  /return executeAuthorizedDeterministicLifecycleReadProgram\(\{[\s\S]{0,220}program: args\.deterministicLifecycleReadProgram/,
-  'strict lifecycle dispatch returns through the local deterministic executor before the agent loop',
+  /const lifecycleRoot = await createLifecycleRootRun\([\s\S]*const lifecycleResult = await executeAuthorizedDeterministicLifecycleReadProgram\(\{[\s\S]{0,220}root: lifecycleRoot[\s\S]{0,220}return settleExactSequenceRootRun\(lifecycleRoot, lifecycleResult\)/,
+  'strict lifecycle dispatch creates a request-bound durable root and settles through it before the agent loop',
+);
+const exactRootSettlementStart = computerRuntimeSource.indexOf(
+  'async function settleExactSequenceRootRun',
+);
+const exactRootSettlementEnd = computerRuntimeSource.indexOf(
+  '/**\n * Stable §26 contract',
+  exactRootSettlementStart,
+);
+assert(exactRootSettlementStart >= 0 && exactRootSettlementEnd > exactRootSettlementStart);
+const exactRootSettlementSource = computerRuntimeSource.slice(
+  exactRootSettlementStart,
+  exactRootSettlementEnd,
+);
+assert.match(
+  exactRootSettlementSource,
+  /terminalStatus === 'cancelled'[\s\S]*from\('agent_action_calls'\)[\s\S]*\.eq\('run_id', root\.runId\)[\s\S]*\.eq\('idempotency_key', root\.actionIdempotencyKey\)[\s\S]*actionRow\?\.state !== 'failed'[\s\S]*actionMetadata\?\.errorCode !== 'cancelled_before_dispatch'[\s\S]*return \{ \.\.\.result, runId: root\.runId \}/,
+  'a pre-claim losing cancellation cannot terminalize the request-shared root without the owner-sealed durable action',
+);
+assert.match(
+  exactRootSettlementSource,
+  /terminalStatus !== 'cancelled' && terminalStatus !== 'completed'[\s\S]*query = query\.neq\('status', 'cancelled'\)/,
+  'durably verified completion can reconcile a stale cancelled root while non-completions cannot overwrite owner cancellation',
 );
 const deterministicLifecycleExecutorStart = computerRuntimeSource.indexOf(
   'async function executeAuthorizedDeterministicLifecycleReadProgram',
@@ -615,13 +786,18 @@ const deterministicLifecycleExecutorSource = computerRuntimeSource.slice(
 );
 assert.match(
   deterministicLifecycleExecutorSource,
-  /executeObservedNativeAppActivation\(\s*'launch_app'/,
-  'the deterministic lifecycle executor reuses observe-first launch proof',
+  /executeObservedNativeAppActivation\(\s*program\.operation === 'focus' \? 'focus_app' : 'open_app'/,
+  'the deterministic lifecycle executor reuses the one-activation open/focus proof adapter',
 );
 assert.match(
   deterministicLifecycleExecutorSource,
-  /executeObservedNativeAppActivation\(\s*'focus_app'/,
-  'the deterministic lifecycle executor follows launch with foreground focus proof',
+  /claimLifecycleDurableAction\(\{ root, program \}\)[\s\S]*durableLease\.store\.start\([\s\S]*durableStart\.disposition === 'duplicate'[\s\S]*lifecycleDurablePriorResult[\s\S]*finishLifecycleDurableAction\([\s\S]*'outcome_unknown'/,
+  'lifecycle activation claims and starts once; duplicate/post-dispatch paths return prior state or seal outcome-unknown without replay',
+);
+assert.match(
+  deterministicLifecycleExecutorSource,
+  /completionVerified = lifecycleActivationCompletionVerified\(activation\)[\s\S]*lifecycleActivationAfterFrontmost\(activation\) === true[\s\S]*finishLifecycleDurableAction\([\s\S]*'verified'/,
+  'completion requires fresh foreground proof followed by a durable verified terminal',
 );
 assert.doesNotMatch(
   deterministicLifecycleExecutorSource,
@@ -708,6 +884,11 @@ assert.match(
 );
 assert.match(
   chatSource,
+  /if \(\s*!compileComputerSequenceProgram\(content\)\s*&& multiAsk\.isMultiIntent/,
+  'exact programs redundantly suppress the cosmetic multi-ask notice even if planner lane routing drifts',
+);
+assert.match(
+  chatSource,
   /const classifiedPlan = buildChatAutomationPlan\(\{\s*message: trimmed,/,
   'computer-task classification always receives the raw user task',
 );
@@ -720,6 +901,60 @@ assert.match(
   computerRuntimeSource,
   /currentPlanSummary:\s*\[\s*args\.agentContextPack\?\.compactPrompt/,
   'connected-agent capability buildout receives the bounded context pack',
+);
+const durableContractBuilderStart = computerRuntimeSource.indexOf(
+  'export async function buildExactSequenceDurableContractFingerprint',
+);
+const durableIdentityBuilderStart = computerRuntimeSource.indexOf(
+  'async function buildExactPhotoshopDurableActionIdentity',
+  durableContractBuilderStart,
+);
+const durableIdentityBuilderEnd = computerRuntimeSource.indexOf(
+  '\nasync function claimExactPhotoshopDurableAction',
+  durableIdentityBuilderStart,
+);
+assert(
+  durableContractBuilderStart >= 0
+    && durableIdentityBuilderStart > durableContractBuilderStart
+    && durableIdentityBuilderEnd > durableIdentityBuilderStart,
+  'the runtime exposes the stable exact durable-contract and action-identity boundaries',
+);
+const durableContractBuilder = computerRuntimeSource.slice(
+  durableContractBuilderStart,
+  durableIdentityBuilderStart,
+);
+const durableIdentityBuilder = computerRuntimeSource.slice(
+  durableIdentityBuilderStart,
+  durableIdentityBuilderEnd,
+);
+assert.match(
+  durableContractBuilder,
+  /requestIdentityFingerprint: input\.authority\.requestIdentityFingerprint[\s\S]*approvalIntentFingerprint: input\.authority\.kind === 'chat_plan_approval'[\s\S]*input\.authority\.planApprovalAuthority\.approvalIntentFingerprint/,
+  'durable contract identity binds stable request and approval intent rather than the replaceable approval row',
+);
+assert.doesNotMatch(
+  durableContractBuilder,
+  /approvalId|authorizationSource|policyCategory/,
+  'approval row id and policy source/category stay out of the durable contract fingerprint',
+);
+for (const binding of [
+  /input\.authority\.programId !== input\.program\.id/,
+  /input\.authority\.programFingerprint !== input\.root\.programFingerprint/,
+  /input\.authority\.requestIdentityFingerprint !== input\.root\.requestIdentityFingerprint/,
+  /input\.authority\.planApprovalAuthority\.programId !== input\.authority\.programId/,
+  /input\.authority\.planApprovalAuthority\.programFingerprint !== input\.authority\.programFingerprint/,
+  /input\.authority\.planApprovalAuthority\.requestIdentityFingerprint !== input\.authority\.requestIdentityFingerprint/,
+] as const) {
+  assert.match(
+    durableIdentityBuilder,
+    binding,
+    'durable action identity revalidates outer/root and nested approval program/request binding',
+  );
+}
+assert.doesNotMatch(
+  durableIdentityBuilder,
+  /approvalId/,
+  'approval id remains audit metadata and cannot alter the durable action identity',
 );
 assert.doesNotMatch(
   chatComputerCall,
@@ -774,7 +1009,7 @@ for (const readOnlyAwarenessTool of [
 }
 
 const computerPlanBranchStart = chatSource.indexOf(
-  "if (plan.execution.kind === 'run_computer_task') {",
+  "if (!providerFreeTurn && plan.execution.kind === 'run_computer_task') {",
 );
 assert.match(
   chatSource,
@@ -787,7 +1022,7 @@ assert.doesNotMatch(
   'Chat has no parallel local lane allowlist that can re-enable ask #1 for computer tasks',
 );
 const openSwanPlanBranchStart = chatSource.indexOf(
-  "if (plan.execution.kind === 'run_openswan') {",
+  "if (!providerFreeTurn && plan.execution.kind === 'run_openswan' && !plan.multiActionLedger) {",
   computerPlanBranchStart,
 );
 assert(
@@ -800,8 +1035,23 @@ const computerPlanBranch = chatSource.slice(
 );
 assert.match(
   computerPlanBranch,
-  /const shared = await executeSharedComputerTask\(content\);/,
-  'computer tasks, including launch/focus, enter the full shared authenticated runtime',
+  /const shared = await executeSharedComputerTask\(content, \{\s*requestIdentity: userMessage\.id,\s*\}\);/,
+  'computer tasks, including launch/focus, enter the full shared authenticated runtime with the originating message identity',
+);
+assert.match(
+  chatSource,
+  /const attachmentUserMessage = addUserMessage\(displayContent\);[\s\S]*?executeSharedComputerTask\(desktopTask, \{\s*planPrefix: 'Use uploaded desktop file: ',\s*requestIdentity: attachmentUserMessage\.id,/,
+  'uploaded desktop tasks retain the originating attachment-chat message identity',
+);
+assert.match(
+  chatSource,
+  /const requestIdentity = `computer-console-\$\{Date\.now\(\)\}-\$\{Math\.random\(\)\.toString\(36\)\.slice\(2\)\}`;[\s\S]*?executeSharedComputerTask\(trimmed, \{\s*planPrefix: 'Use computer: ',\s*requestIdentity,/,
+  'each Computer Use console submission mints and carries its own request identity',
+);
+assert.match(
+  chatSource,
+  /executeSharedComputerTask\(taskState\.task, \{\s*planPrefix: 'Retry after app capability buildout: ',\s*readyCapabilityBuildout: runningBuildout,\s*requestIdentity: taskState\.requestIdentity \|\| undefined,/,
+  'capability buildout retry reuses the originating persisted request identity and legacy missing identity stays absent',
 );
 assert.doesNotMatch(
   computerPlanBranch,
@@ -823,13 +1073,42 @@ assert(
 const sharedComputerDispatch = chatSource.slice(sharedComputerDispatchStart, sharedComputerDispatchEnd);
 assert.match(
   sharedComputerDispatch,
+  /ctx: \{\s*circleId: admittedCircleId,\s*userId: admittedUserId,\s*threadId: admittedThreadId,\s*requestIdentity,/,
+  'the dispatcher receives the originating request identity before any exact approval authority is issued',
+);
+assert.match(
+  sharedComputerDispatch,
   /approvalGate: exactSequenceProgram[\s\S]*?chatAutomationApprovalGate\(approvalPlan, approvalContext\)[\s\S]*?registerExactApprovalOwner\([\s\S]*?: undefined/,
   'only a compiler-owned computer program passes through the plan-level HITL gate',
 );
 assert.match(
   sharedComputerDispatch,
-  /run_computer_task: async \(_dispatchedPlan, transportCtx\)[\s\S]*exactSequenceDispatchAuthorized: Boolean\(exactSequenceProgram\)/,
-  'the post-gate handler marks only the compiled exact sequence approved',
+  /run_computer_task: async \(_dispatchedPlan, transportCtx\)[\s\S]*transportCtx\.planApprovalAuthority[\s\S]*requestIdentityFingerprint: exactSequenceRequestIdentityFingerprint[\s\S]*planApprovalAuthority: transportCtx\.planApprovalAuthority[\s\S]*requestIdentity,[\s\S]*universalTaskRoot,[\s\S]*exactSequenceDispatchAuthority/,
+  'the post-gate handler binds the exact manifest and originating request identity to both direct and approved runtime authority',
+);
+const sharedComputerAdmission = chatSource.slice(
+  chatSource.indexOf('const executeSharedComputerTask = useCallback'),
+  sharedComputerDispatchStart,
+);
+assert.match(
+  sharedComputerAdmission,
+  /normalizeChatRequestIdentity\(options\?\.requestIdentity\)[\s\S]*admitComputerTaskRuntimeRoot\(\{[\s\S]*source: 'chat'[\s\S]*normalizedTask: trimmed/,
+  'Chat admits the exact authenticated request root before shared computer planning dispatch',
+);
+assert(
+  sharedComputerAdmission.indexOf('admitComputerTaskRuntimeRoot({')
+    < sharedComputerAdmission.indexOf('compileComputerSequenceProgram(trimmed)'),
+  'root admission precedes exact compiler planning',
+);
+assert(
+  sharedComputerAdmission.indexOf('admitComputerTaskRuntimeRoot({')
+    < sharedComputerAdmission.indexOf('autoConnectDesktopBridge()'),
+  'root admission precedes bridge preparation',
+);
+assert.match(
+  chatSource.slice(Math.max(0, sharedComputerDispatchStart - 6000), sharedComputerDispatchStart),
+  /buildExactSequenceProgramFingerprint\(exactSequenceProgram\)[\s\S]*buildExactSequenceRequestIdentityFingerprint\(\{[\s\S]*requestIdentity,[\s\S]*approvalIntentFingerprint: exactPlanApprovalIntentFingerprint/,
+  'exact program, request, and approval fingerprints are sealed before filing or resuming the plan',
 );
 const openSwanPlanBranch = chatSource.slice(
   openSwanPlanBranchStart,
@@ -866,7 +1145,7 @@ const activeRunPersistStart = chatSource.lastIndexOf(
   'await persistComputerTaskState({',
   activeRunPhaseIndex,
 );
-const activeRunPersistEnd = chatSource.indexOf('\n    });', activeRunPhaseIndex);
+const activeRunPersistEnd = chatSource.indexOf('\n      });', activeRunPhaseIndex);
 assert(
   activeRunPersistStart >= 0 && activeRunPersistEnd > activeRunPersistStart,
   'Chat contains the initial planning/executing durable-state write',
@@ -985,13 +1264,43 @@ assert(
 const exactApprovalOwnerBlock = chatSource.slice(exactApprovalOwnerStart, exactApprovalOwnerEnd);
 assert.match(
   exactApprovalOwnerBlock,
-  /pendingExactPlanApprovalResumesRef\.current\.set\(approvalId, \{[\s\S]*task: trimmed,[\s\S]*circleId,[\s\S]*threadId: activeThreadId \|\| null,[\s\S]*expiresAt:[\s\S]*originSettled: exactApprovalOriginSettled/,
-  'an exact deferred plan keeps only an ephemeral approval-id resume entry for the current circle and thread',
+  /pendingExactPlanApprovalResumesRef\.current\.set\(approvalId, \{[\s\S]*task: trimmed,[\s\S]*requestIdentity: correlation\.requestIdentity,[\s\S]*circleId,[\s\S]*threadId: correlation\.threadId,[\s\S]*expiresAt:[\s\S]*originSettled: exactApprovalOriginSettled,[\s\S]*correlation,/,
+  'an exact deferred plan keeps its bounded correlation and originating identity in the approval-id owner',
 );
 assert.match(
   exactApprovalOwnerBlock,
   /exactPlanApprovalContinuityGateRef\.current\.register\(approvalId\)[\s\S]*registration\.kind === 'resolved'[\s\S]*exactApprovalResolutionDuringFiling/,
   'owner registration reconciles an approval decision that arrived before the filing call settled',
+);
+assert.match(
+  chatSource,
+  /executeSharedComputerTask\(owner\.task, \{\s*requestIdentity: owner\.requestIdentity,\s*exactApprovalResume: owner\.correlation,\s*\}\);/,
+  'an approval resolved during filing also resumes with the unchanged originating request identity',
+);
+const persistComputerTaskStateStart = chatSource.indexOf(
+  'const persistComputerTaskState = useCallback(async (args:',
+);
+const persistComputerTaskStateEnd = chatSource.indexOf(
+  '\n  useEffect(() => {',
+  persistComputerTaskStateStart,
+);
+assert(
+  persistComputerTaskStateStart >= 0 && persistComputerTaskStateEnd > persistComputerTaskStateStart,
+  'Chat contains the durable task-state persistence helper',
+);
+const persistComputerTaskStateBlock = chatSource.slice(
+  persistComputerTaskStateStart,
+  persistComputerTaskStateEnd,
+);
+assert.match(
+  persistComputerTaskStateBlock,
+  /computerTaskStateRef\.current\?\.task === args\.task[\s\S]*args\.requestIdentity === undefined\s*\? priorRequestIdentity[\s\S]*requestIdentity,/,
+  'an omitted phase-update identity carries the prior same-task request identity in memory and storage',
+);
+assert.match(
+  chatSource,
+  /refreshComputerTaskCapabilityBuildoutFromConnectedAgentSession\(capabilityBuildout\)[\s\S]*?persistComputerTaskState\(\{\s*task: computerTaskState\.task,\s*requestIdentity: computerTaskState\.requestIdentity \|\| null,/,
+  'capability-session refresh explicitly preserves the originating request identity',
 );
 const exactApprovalResumeStart = chatSource.indexOf('onResolved={async (approval, status) => {');
 const exactApprovalResumeEnd = chatSource.indexOf('\n        onEditAndResend=', exactApprovalResumeStart);
@@ -1002,13 +1311,36 @@ assert(
 const exactApprovalResumeBlock = chatSource.slice(exactApprovalResumeStart, exactApprovalResumeEnd);
 assert.match(
   exactApprovalResumeBlock,
-  /exactPlanApprovalContinuityGateRef\.current\.resolve\(approval\.id, status\)[\s\S]*resolution\.kind === 'queued_before_registration'[\s\S]*exactPlanApprovalResolvedRowsRef\.current\.set\(approval\.id, approval\)[\s\S]*resolution\.kind === 'duplicate'/,
-  'the one-shot continuity gate queues an early decision and rejects duplicate continuations',
+  /payload\.userId !== currentUserId[\s\S]*payload\.threadId !== \(activeThreadId \|\| null\)[\s\S]*exactPlanApprovalContinuityGateRef\.current\.resolve\(approval\.id, status\)[\s\S]*resolution\.kind === 'queued_before_registration'[\s\S]*exactPlanApprovalResolvedRowsRef\.current\.set\(approval\.id, approval\)/,
+  'the callback queues only an early authenticated requester/thread decision',
+);
+const durableExactResumeStart = chatSource.indexOf('const reconcileExactPlanApproval = useCallback');
+const durableExactResumeEnd = chatSource.indexOf(
+  'reconcileExactPlanApprovalRef.current = reconcileExactPlanApproval;',
+  durableExactResumeStart,
+);
+assert(durableExactResumeStart >= 0 && durableExactResumeEnd > durableExactResumeStart,
+  'Chat defines the durable exact approval reconciliation owner');
+const durableExactResumeBlock = chatSource.slice(durableExactResumeStart, durableExactResumeEnd);
+assert.match(
+  durableExactResumeBlock,
+  /\.eq\('id', correlation\.approvalId\)[\s\S]*\.eq\('circle_id', circleId\)[\s\S]*\.eq\('session_key', chatAutomationApprovalSessionKey\)[\s\S]*\.eq\('action_type', correlation\.actionType\)[\s\S]*\.contains\('payload', payloadScope\)[\s\S]*reconcileExactPlanApprovalRow\(\{ correlation, expected, row \}\)/,
+  'refresh continuation requeries and validates one exact authenticated row instead of trusting realtime payloads',
 );
 assert.match(
-  exactApprovalResumeBlock,
-  /await pending\.originSettled;[\s\S]*const livePending = pendingExactPlanApprovalResumesRef\.current\.get\(approval\.id\);[\s\S]*const liveContext = exactApprovalResumeContextRef\.current;[\s\S]*livePending !== pending[\s\S]*!liveContext\.mounted[\s\S]*liveContext\.generation !== approvalContext\.generation[\s\S]*pending\.circleId !== liveContext\.circleId[\s\S]*pending\.threadId !== liveContext\.threadId[\s\S]*pendingExactPlanApprovalResumesRef\.current\.delete\(approval\.id\);[\s\S]*status !== 'approved'[\s\S]*await executeSharedComputerTask\(pending\.task\);/,
-  'an approved exact plan revalidates its live mount and circle/thread generation after filing settles',
+  durableExactResumeBlock,
+  /await owner\.originSettled;[\s\S]*!liveContext\.mounted[\s\S]*pendingExactPlanApprovalResumesRef\.current\.get\(boundedApprovalId\) !== owner[\s\S]*await executeSharedComputerTask\(owner\.task, \{\s*requestIdentity: owner\.requestIdentity,\s*exactApprovalResume: owner\.correlation,/,
+  'an approved refresh continuation revalidates live scope and reuses the unchanged request identity',
+);
+const exactResumeGateEntry = chatSource.indexOf('if (!exactApprovalResume) {');
+const exactAuthorityRetirement = sharedComputerDispatch.indexOf('exactPlanApproval: null');
+const exactNativeDispatch = sharedComputerDispatch.indexOf("if (execution.entrypoint === 'browser_runtime')");
+assert(
+  exactResumeGateEntry >= 0
+    && exactAuthorityRetirement >= 0
+    && exactAuthorityRetirement < exactNativeDispatch
+    && sharedComputerDispatch.includes("authority.authorizationSource !== 'claimed_approval_row'"),
+  'crash-before-CAS keeps correlation durable; the post-CAS handler retires it before native/browser dispatch',
 );
 assert.match(
   chatSource,
@@ -1369,8 +1701,8 @@ for (const readOnlyMode of ['list', 'read', 'search', 'stat'] as const) {
 }
 assert.match(
   deterministicFileGate,
-  /if \(shouldRunDeterministicReadOnlyFileAdapter\) \{[\s\S]*?await executeComputerFileTask\(/,
-  'executeComputerFileTask is reachable only through the read-only gate',
+  /if \(shouldRunDeterministicReadOnlyFileAdapter\) \{[\s\S]*?await executeDesktopBridgeFileTask\(args\.task\)/,
+  'the exact desktop-bridge file task is reachable only through the read-only gate',
 );
 assert.match(
   deterministicFileGate,
@@ -1378,7 +1710,7 @@ assert.match(
   'app mutation classification is computed before either deterministic or agent dispatch',
 );
 assert.equal(
-  (computerRuntimeSource.match(/await executeComputerFileTask\(/g) || []).length,
+  (computerRuntimeSource.match(/await executeDesktopBridgeFileTask\(args\.task\)/g) || []).length,
   1,
   'there is exactly one deterministic file adapter dispatch site',
 );

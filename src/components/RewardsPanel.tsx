@@ -427,9 +427,9 @@ export default function RewardsPanel({ onClose }: Props) {
           <Text style={s.keySubtitle}>Every agent task earns you XP. Heavier models, bigger rewards.</Text>
           {[
             { label: 'BlackSwan LLM', pts: 50, color: '#00FF9C', icon: '🦢' },
-            { label: 'Opus / GPT-4 / Gemini Ultra', pts: 25, color: '#ffd700', icon: '🧠' },
-            { label: 'Sonnet / GPT-4o / Claude 3.5', pts: 15, color: '#c0c0c0', icon: '🎯' },
-            { label: 'Haiku / Flash / Mini', pts: 8, color: '#cd7f32', icon: '⚡' },
+            { label: 'Fable / Opus / GPT-5.6 Sol', pts: 25, color: '#ffd700', icon: '🧠' },
+            { label: 'Sonnet / GPT-5.6 Terra / Gemini 3.6', pts: 15, color: '#c0c0c0', icon: '🎯' },
+            { label: 'Haiku / GPT-5.6 Luna / Flash-Lite / Mini', pts: 8, color: '#cd7f32', icon: '⚡' },
             { label: 'Other / Unknown models', pts: 10, color: '#6366f1', icon: '🤖' },
           ].map(k => (
             <View key={k.label} style={s.keyRow}>

@@ -130,7 +130,7 @@ export async function getMyOrganizations(): Promise<OrgWithCounts[]> {
 
     const { count: circleCount } = await supabase
       .from('circles')
-      .select('*', { count: 'exact', head: true })
+      .select('id', { count: 'exact', head: true })
       .eq('org_id', org.id);
 
     results.push({
@@ -156,17 +156,19 @@ export async function getOrgDetails(orgId: string): Promise<Organization | null>
 export async function getOrgMembers(orgId: string): Promise<OrgMember[]> {
   const { data } = await supabase
     .from('org_members')
-    .select('*, user:profiles(id, username, display_name, avatar_url)')
+    .select('*')
     .eq('org_id', orgId)
     .order('joined_at');
 
-  return data || [];
+  // Organization membership alone is not authority to expose another user's
+  // profile. Exact shared-Circle surfaces hydrate through safe_profiles.
+  return (data || []).map((row: any) => ({ ...row, user: null }));
 }
 
 export async function getOrgCircles(orgId: string) {
   const { data } = await supabase
     .from('circles')
-    .select('*')
+    .select('id, name, description, invite_code, max_members, created_by, created_at, vibe, rules, circle_image_url, org_id, settings, circle_type, icon, accent_color, check_in_format, tags')
     .eq('org_id', orgId)
     .order('created_at', { ascending: false });
 

@@ -43,11 +43,14 @@ interface RateRow { in: number; out: number; cacheCreate: number; cacheRead: num
 const RATES: Record<string, RateRow> = {
   // Fable 5 — published $10/$50
   "claude-fable-5":    { in: 12.50, out: 62.50, cacheCreate: 15.625, cacheRead: 1.25 },
+  // Opus 5 — published $5/$25
+  "claude-opus-5":     { in: 6.25,  out: 31.25, cacheCreate: 7.8125, cacheRead: 0.625 },
   // Opus 4.6+ — published $5/$25
   "claude-opus-4-8":   { in: 6.25,  out: 31.25, cacheCreate: 7.8125, cacheRead: 0.625 },
   "claude-opus-4-7":   { in: 6.25,  out: 31.25, cacheCreate: 7.8125, cacheRead: 0.625 },
   "claude-opus-4-6":   { in: 6.25,  out: 31.25, cacheCreate: 7.8125, cacheRead: 0.625 },
   // Sonnet 4.6 / 4.5 — published $3/$15
+  "claude-sonnet-5":   { in: 3.75,  out: 18.75, cacheCreate: 4.6875, cacheRead: 0.375 },
   "claude-sonnet-4-6": { in: 3.75,  out: 18.75, cacheCreate: 4.6875, cacheRead: 0.375 },
   "claude-sonnet-4-5": { in: 3.75,  out: 18.75, cacheCreate: 4.6875, cacheRead: 0.375 },
   // Haiku 4.5 — published $1/$5

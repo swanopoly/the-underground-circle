@@ -76,6 +76,11 @@ import {
   parseStrictNamedAppLifecycleIntent,
   setStrictNamedAppLifecycleObservedNames,
 } from './genericAppNavigator';
+import {
+  MAX_INTENT_INPUT_CHARS,
+  segmentChatIntents,
+  type IntentConnective,
+} from './chatMultiIntentCore';
 
 export type ChatComputerRequestRouteKind =
   | 'browser'
@@ -318,6 +323,125 @@ export interface ChatComputerRequestActionItem {
   requiresApproval?: boolean;
 }
 
+/**
+ * One user-requested action, retained separately from planner/tool steps.
+ * `text` is the bounded, control-cleaned, secret-redacted segment emitted by
+ * chatMultiIntentCore; the original request remains the execution source of
+ * truth. These values are coverage anchors, never mutation authority.
+ */
+export interface ChatComputerRequestedAction {
+  id: string;
+  ordinal: number;
+  text: string;
+  verb: string;
+  connective: IntentConnective;
+  dependsOnActionIds: ReadonlyArray<string>;
+  proofRequirement: string;
+}
+
+export interface ChatComputerRequestedActionContract {
+  schemaVersion: 1;
+  mode: 'all_actions_required';
+  actionCount: number;
+  capped: boolean;
+  requiresDecompositionBeforeMutation: boolean;
+  actions: ReadonlyArray<ChatComputerRequestedAction>;
+  completionRule: string;
+  incompleteRule: string;
+}
+
+export interface ChatComputerRequestedActionExecutionGate {
+  blocked: boolean;
+  blocker: string | null;
+  fixAction: string | null;
+  contract: ChatComputerRequestedActionContract | null;
+}
+
+/**
+ * Build the request-level action-accounting contract for a compound computer
+ * task. The contract is deliberately inert: it prevents clause loss in plans,
+ * prompts, and acceptance criteria but cannot authorize a tool or manufacture
+ * task completion. Generic completion still requires the runtime-owned typed
+ * acceptance boundary.
+ */
+export function buildChatComputerRequestedActionContract(
+  message: unknown,
+): ChatComputerRequestedActionContract | null {
+  const inputExceededBound = typeof message === 'string' && message.length > MAX_INTENT_INPUT_CHARS;
+  const segmented = segmentChatIntents(message);
+  if (
+    (!segmented.isMultiIntent || segmented.segments.length < 2)
+    && !(inputExceededBound && segmented.segments.some((segment) => Boolean(segment.verb)))
+  ) return null;
+  const actions = segmented.segments.map((segment, index) => {
+    const id = `A${index + 1}`;
+    return Object.freeze({
+      id,
+      ordinal: index + 1,
+      text: segment.text,
+      verb: segment.verb || 'act',
+      connective: segment.connective,
+      dependsOnActionIds: Object.freeze(
+        segment.connective === 'then' && index > 0 ? [`A${index}`] : [],
+      ),
+      proofRequirement: `Fresh target-bound evidence must independently verify ${id}.`,
+    });
+  });
+  const capped = segmented.reason === 'capped'
+    || inputExceededBound
+    || actions.some((action) => action.text.endsWith('…'));
+  return Object.freeze({
+    schemaVersion: 1 as const,
+    mode: 'all_actions_required' as const,
+    actionCount: actions.length,
+    capped,
+    requiresDecompositionBeforeMutation: capped,
+    actions: Object.freeze(actions),
+    completionRule: 'Report the whole task completed only when every requested action has independent fresh target-bound proof and no action is blocked, pending, failed, cancelled, or outcome-unknown. Partial coverage is not whole-task completion.',
+    incompleteRule: 'If any requested action lacks proof, report the overall task as non-complete and identify completed, blocked, and still-pending action IDs without replaying an uncertain mutation.',
+  });
+}
+
+/**
+ * Executable pre-dispatch gate for a request whose bounded A-ledger folded an
+ * overflow tail. Prompt instructions alone are not authority: callers must
+ * stop before mutation whenever this gate is blocked.
+ */
+export function buildChatComputerRequestedActionExecutionGate(
+  message: unknown,
+): ChatComputerRequestedActionExecutionGate {
+  const contract = buildChatComputerRequestedActionContract(message);
+  const inputExceededBound = typeof message === 'string'
+    && message.length > MAX_INTENT_INPUT_CHARS;
+  if (!inputExceededBound && contract?.requiresDecompositionBeforeMutation !== true) {
+    return Object.freeze({ blocked: false, blocker: null, fixAction: null, contract });
+  }
+  return Object.freeze({
+    blocked: true,
+    blocker: 'This request exceeds the safe eight-action or 4,000-character execution bound. Nothing was run from the folded action list.',
+    fixAction: 'Split the intact request into bounded continuations of at most eight clearly ordered actions before any mutation.',
+    contract,
+  });
+}
+
+export function formatChatComputerRequestedActionContractPromptBlock(
+  contract: ChatComputerRequestedActionContract | null | undefined,
+): string | null {
+  if (!contract) return null;
+  return [
+    '## REQUEST ACTION COVERAGE CONTRACT',
+    `Mode: ${contract.mode}; requested actions=${contract.actionCount}; capped=${contract.capped ? 'yes' : 'no'}.`,
+    ...contract.actions.map((action) => (
+      `${action.id}. ${action.text} [verb=${action.verb}; connective=${action.connective}; depends=${action.dependsOnActionIds.join(',') || 'none'}]`
+    )),
+    contract.requiresDecompositionBeforeMutation
+      ? 'Decomposition gate: the bounded detector folded an overflow tail. Decompose the intact original request into a new bounded continuation before any mutation; do not execute a truncated action list.'
+      : 'Execution gate: account for every A-id before acting, preserve explicit dependencies, and do not silently merge or omit an action.',
+    `Completion gate: ${contract.completionRule}`,
+    `Incomplete gate: ${contract.incompleteRule}`,
+  ].join('\n');
+}
+
 export function parseAppOverrideChoice(
   message: string,
   previous: Pick<ChatComputerAppResolution, 'category' | 'best'> | null | undefined,
@@ -358,6 +482,12 @@ export interface ChatComputerRequestRoute {
   designExecutionPipeline: DesignAppExecutionPipelinePlan | null;
   fallbackPipelineIds: UserTaskPipelineId[];
   recommendedTools: string[];
+  /**
+   * Original planner-owned proof seed, before evidence-contract/A-id proof is
+   * merged into `completionProof`. Evidence re-derivation reads this inert
+   * seed so a saved route cannot recursively ingest its own derived proof.
+   */
+  requestCompletionProof?: string[];
   completionProof: string[];
   aiNeed?: DesktopTaskAiNeedClassification;
   /**
@@ -378,6 +508,8 @@ export interface ChatComputerRequestRoute {
    * so routes persisted before this field keep parsing.
    */
   actionItems?: ChatComputerRequestActionItem[];
+  /** Request clauses that must all be independently accounted for. */
+  requestedActionContract?: ChatComputerRequestedActionContract | null;
   evidenceContract?: ComputerTaskEvidenceContract | null;
   userConstraints: ChatComputerUserConstraints | null;
   /**
@@ -422,7 +554,7 @@ export interface ChatComputerModelOrchestration {
 export interface ChatComputerDeterministicLifecycleReadStep {
   tool: 'desktop.observe_app' | 'desktop.launch_app' | 'desktop.wait_for_app' | 'desktop.focus_app';
   args: Record<string, unknown>;
-  when: 'always' | 'if_not_running' | 'if_launched' | 'if_not_frontmost';
+  when: 'always' | 'if_not_running' | 'if_launched' | 'if_not_frontmost' | 'if_initially_running_not_frontmost';
   note: string;
 }
 
@@ -539,8 +671,9 @@ function buildChatComputerModelOrchestration(input: {
       activationPath: [
         `compile strict ${program.operation === 'focus' ? 'focus' : 'open/launch'} program for ${program.targetAppName}`,
         'dispatch through the paired local desktop bridge',
-        program.operation === 'open_or_launch' ? 'launch only when not running' : 'require the app to already be running',
-        'focus when not frontmost',
+        program.operation === 'open_or_launch'
+          ? 'use one activation: launch when initially stopped, otherwise focus when initially in the background'
+          : 'require the app to already be running, then focus only when needed',
         'verify fresh exact process and foreground proof',
       ],
       modelSelectionHint: 'Do not call the selected-model or SwanBot AI relay; return only verified lifecycle proof, cancellation, or the exact local blocker.',
@@ -1112,7 +1245,7 @@ const GENERIC_NON_APP_TARGETS = new Set([
 ]);
 
 const BROWSER_APP_IDS = new Set(['chrome', 'safari']);
-const LOCAL_FILE_APP_IDS = new Set(['finder', 'preview', 'textedit']);
+const LOCAL_FILE_APP_IDS = new Set(['finder', 'google-drive', 'preview', 'textedit']);
 const LOCAL_FILE_APP_NAMES = new Set(['finder', 'preview', 'apple preview', 'textedit', 'text edit']);
 const BROWSER_APP_NAMES = new Set([
   'arc', 'arc browser', 'brave', 'brave browser', 'chrome', 'chromium', 'comet browser',
@@ -1127,6 +1260,7 @@ const SHORT_NATIVE_APP_NAMES = new Set(['mpv', 'obs', 'r', 'vlc', 'zed']);
 const EXPLICIT_WEB_TARGET_RE = /\b(?:https?:\/\/|www\.)\S+|(?<!@)\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)*\.(?:com|org|net|io|app|dev|ai|co|us|gov|edu)(?:\/\S*)?/i;
 const BROWSERBASE_DATA_SIDE_EFFECT_RE = /\b(?:authenticate|authorize|buy|checkout|delete|download|edit|export|fill|grant|log\s*in|login|order|pay|post|publish|purchase|remove|save|send|sign\s*in|submit|update|upload)\b/i;
 const NAMED_APP_MUTATION_RE = /\b(?:accept|add|adjust|animate|apply|authenticate|authorize|build|cancel|change|charge|choose|click|close|color|colour|complete|configure|confirm|connect|continue|copy|create|crop|delete|design|disconnect|dismiss|download|draw|edit|email|encode|enter|erase|export|fill|generate|grant|import|insert|invite|link|log\s*in|login|make|maximize|minimize|model|move|mute|overwrite|package|paint|paste|pause|play|post|press|print|publish|put|record|remove|rename|render|replace|resize|resume|retouch|run|save|select|send|set|sign\s*in|split|stop|submit|sync|toggle|trim|turn|type|unmute|update|upload|wipe|write)\b/i;
+const NAMED_APP_FILENAME_ALIAS_RE = /\bcall\s+(?:it|this|that)\s+["'`]?[A-Za-z0-9][A-Za-z0-9._@()+-]{0,127}\.[A-Za-z0-9]{1,12}\b/i;
 
 function cleanNamedAppCandidate(value: string): string {
   return String(value || '')
@@ -1200,7 +1334,9 @@ function detectExplicitNamedAppAction(
     : text;
   const intent = strictLifecycle
     ? 'launch_or_read'
-    : NAMED_APP_MUTATION_RE.test(actionScope) ? 'mutation' : 'launch_or_read';
+    : NAMED_APP_MUTATION_RE.test(actionScope) || NAMED_APP_FILENAME_ALIAS_RE.test(actionScope)
+      ? 'mutation'
+      : 'launch_or_read';
   // A strict launch-only request names the installed native product even when
   // that product is a browser. URL/navigation/follow-up work still routes to
   // browser automation; web-only products can never enter native lifecycle.
@@ -1292,8 +1428,12 @@ export function buildDeterministicNamedAppLifecycleReadProgram(
     {
       tool: 'desktop.focus_app',
       args: { appName: dispatchAppName },
-      when: 'if_not_frontmost',
-      note: `Focus ${exactNamedPhrase} when it is running but not frontmost.`,
+      when: operation === 'open_or_launch'
+        ? 'if_initially_running_not_frontmost'
+        : 'if_not_frontmost',
+      note: operation === 'open_or_launch'
+        ? `Focus ${exactNamedPhrase} only when the initial observation reports it already running but not frontmost; never focus after a launch.`
+        : `Focus ${exactNamedPhrase} when it is running but not frontmost.`,
     },
     observeStep(`Verify ${exactNamedPhrase} is running and frontmost; otherwise return the exact local blocker.`),
   ];
@@ -2322,6 +2462,7 @@ export function buildChatComputerRequestRoute(
   const appResolutionContext = opts.appResolutionContext ?? getAppResolutionContext();
   const lifecycleObservedNames = observedLifecycleAppNames(appResolutionContext);
   const exactProgram = compileComputerSequenceProgram(normalized);
+  const requestedActionContract = buildChatComputerRequestedActionContract(normalized);
   let namedAppAction = detectExplicitNamedAppAction(normalized, lifecycleObservedNames);
   // A lifecycle-shaped phrase whose target failed the shared named-app guard
   // is not permission to invent an app identity through generic strategy
@@ -2330,8 +2471,12 @@ export function buildChatComputerRequestRoute(
 
   const bestMatch = getBestUserTaskPipeline(normalized, { includeFallback: false });
   const initialPipeline = bestMatch ? summarizeUserTaskPipelineMatch(bestMatch) : null;
-  if (!namedAppAction && isPureCreativeGeneration(normalized)) return null;
-  if (!namedAppAction && isPlainBuildDiscoveryRequest(normalized)) return null;
+  // A closed-world exact compiler result is stronger than broad creative or
+  // build-discovery wording. Polite gerund forms such as "would you mind
+  // opening Photoshop and creating..." must not be discarded after the
+  // compiler has already proven the complete bounded program.
+  if (!exactProgram && !namedAppAction && isPureCreativeGeneration(normalized)) return null;
+  if (!exactProgram && !namedAppAction && isPlainBuildDiscoveryRequest(normalized)) return null;
   if (isSimpleWordpressConversationalIntent(normalized, initialPipeline)) return null;
   if (initialPipeline?.id === 'bridge_troubleshooting') return null;
   if (initialPipeline?.id === 'workflow_recording_replay' && isWorkflowRecordingRequest(normalized)) return null;
@@ -2421,7 +2566,11 @@ export function buildChatComputerRequestRoute(
     && APP_WORKBENCH_TASK_CATEGORIES.has(appResolution!.category)
     && detectTaskAppCategory(normalized)?.confidence === 'high';
 
-  if (!resolutionCreatesRoute && !explicitComputerSurfaceRequested(normalized, preview, strategy, designPipeline, namedAppAction)) return null;
+  if (
+    !exactProgram
+    && !resolutionCreatesRoute
+    && !explicitComputerSurfaceRequested(normalized, preview, strategy, designPipeline, namedAppAction)
+  ) return null;
 
   const stagedBrowserTransferIntoDesktopApp = isStagedBrowserFileTransferIntoDesktopApp(normalized, strategy);
   let kind = directImageConversion ? 'local_file' as const : resolveKind(preview, strategy, designPipeline, normalized);
@@ -2784,11 +2933,13 @@ export function buildChatComputerRequestRoute(
     designExecutionPipeline: designPipeline,
     fallbackPipelineIds,
     recommendedTools,
+    requestCompletionProof: completionProof.slice(0, 12),
     completionProof,
     aiNeed,
     modelOrchestration,
     deterministicLifecycleReadProgram,
     actionItems: [],
+    requestedActionContract,
     evidenceContract: null,
     userConstraints,
     alwaysConfirmFloor,
@@ -2797,7 +2948,11 @@ export function buildChatComputerRequestRoute(
     notes,
   };
   route.evidenceContract = buildComputerTaskEvidenceContract(route);
+  const requestedActionProof = route.requestedActionContract
+    ? route.evidenceContract.proofAfter.filter((item) => /^A\d+\s+independently verified\b/.test(item))
+    : [];
   route.completionProof = uniqueStrings([
+    ...requestedActionProof,
     ...route.completionProof,
     ...route.evidenceContract.proofAfter,
   ]).slice(0, 12);
@@ -2829,6 +2984,7 @@ export function buildChatComputerRequestRoutePromptBlock(message: string): strin
       route.approvalRequired
         ? 'Approval model: consume the one unified Chat plan-level approval before dispatching this complete program.'
         : 'Authorization model: the current direct user command authorizes this one compiler-owned unsaved blank document. Saving, exporting, editing existing content, or external actions are outside this program.',
+      formatChatComputerRequestedActionContractPromptBlock(route.requestedActionContract),
       exactProgram.promptBlock,
       route.evidenceContract ? formatComputerTaskEvidenceContractPromptBlock(route.evidenceContract) : null,
       `Actionable desktop items: ${(route.actionItems || []).map((item, index) => `${index + 1}. ${item.label} [${item.tool}]`).join(' | ') || 'none'}`,
@@ -2846,6 +3002,7 @@ export function buildChatComputerRequestRoutePromptBlock(message: string): strin
       `Operation: ${program.operation}; approval=not required`,
       `Program: ${program.steps.map((step, index) => `${index + 1}. ${step.tool} (${step.when})`).join(' -> ')}`,
       `Completion proof: ${route.completionProof.join(' | ')}`,
+      formatChatComputerRequestedActionContractPromptBlock(route.requestedActionContract),
       'Execution rule: dispatch through the local observe-first native activation adapter. Do not call a selected-model, SwanBot, or text-only AI relay.',
     ].join('\n');
   }
@@ -2874,9 +3031,10 @@ export function buildChatComputerRequestRoutePromptBlock(message: string): strin
     ...formatChatComputerUserConstraintsPromptLines(route.userConstraints),
     formatAlwaysConfirmFloorPromptLine(route.alwaysConfirmFloor),
     route.stickyScopeApplied
-      ? `Standing grant applied: ${formatStickyScopeAppliedNotice(route.stickyScopeApplied)} The always-confirm floor (pay, delete, login, grant) still requires fresh confirmation.`
+      ? `Standing grant applied: ${formatStickyScopeAppliedNotice(route.stickyScopeApplied)} The always-confirm floor (${ALWAYS_CONFIRM_FLOOR.join(', ')}) still requires fresh confirmation.`
       : null,
     routeNeedsDataTransferPrecisionRules(route.kind) ? formatDataTransferPrecisionRulesBlock() : null,
+    formatChatComputerRequestedActionContractPromptBlock(route.requestedActionContract),
     formatChatComputerTaskAutonomyPromptBlock(route),
     route.appAutomationRouteDecision ? formatAppAutomationRouteDecisionPromptBlock(route.appAutomationRouteDecision) : null,
     route.designExecutionPipeline ? `Design pipeline phases: ${route.designExecutionPipeline.phases.map((phase) => phase.id).join(' -> ')}` : null,

@@ -174,7 +174,7 @@ export const MODE_CONFIG: Record<ChatMode, { label: string; color: string; icon:
   talk: { label: 'Talk', color: '#22c55e', icon: '..' },
   plan: { label: 'Plan', color: '#6366f1', icon: 'P' },
   execute: { label: 'Execute', color: '#f59e0b', icon: '!' },
-  review: { label: 'Review', color: '#22d3ee', icon: '?' },
+  review: { label: 'Review', color: '#6366f1', icon: '?' },
 };
 
 // Run status display

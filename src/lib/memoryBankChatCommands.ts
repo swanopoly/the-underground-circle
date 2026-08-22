@@ -38,6 +38,7 @@ import { withCheckpoint } from './chatCheckpoints';
 export interface MemoryBankCommandContext {
   circleId: string;
   userId: string;
+  threadId: string;
 }
 
 export interface MemoryBankCommandResult {
@@ -217,6 +218,7 @@ async function writeMemoryBankWithCheckpoint(
   const targetId = `${ctx.circleId}::${kind}`;
   const out = await withCheckpoint<void, any, any>({
     circleId: ctx.circleId,
+    threadId: ctx.threadId,
     toolKind: 'memory_bank.write',
     targetKind: 'circle_memory',
     targetId,

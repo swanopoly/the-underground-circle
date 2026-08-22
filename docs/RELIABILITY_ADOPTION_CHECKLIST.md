@@ -6,17 +6,19 @@
 > Author: adoption-audit subagent · Date: 2026-07-16 · Scope: **analysis only, no
 > code edited.** Every row is grounded in a verified `file:line`.
 
-## The five cores (all committed, all PURE, all currently UNADOPTED)
+## The five cores (all committed and pure; adoption status noted below)
 
-Repo-wide grep confirms **zero runtime callers** of any core export today — the
-brains exist, nothing wires them yet.
+The original 2026-07-16 audit found zero runtime callers. As of 2026-08-07,
+`entityHandleCore` is partially adopted for Chat run → Office focus; rows 16 and
+26 below supersede the original unadopted finding. This does not imply that the
+other entity kinds or reliability cores are fully adopted.
 
 | Core file | Gap | Key exports (what a call site invokes) |
 |---|---|---|
 | `src/lib/resilientSubscriptionCore.ts` | #1 silent-staleness / reconnect | `planReconnect({state,consecutiveFailures,nowMs,lastAttemptMs})`, `assessSubscriptionHealth({state,lastEventMs,nowMs,heartbeatMs})`, `describeHealth(health)`, `normalizeSubscriptionState(raw)` |
 | `src/lib/runFreshnessCore.ts` | #2 3-way live-run freshness | `classifyRunFreshness({status,updatedAtMs,nowMs})→{freshness,label,ageMs}`, `runEmptyStateModel({hasRuns,loading,error})→{kind,message}`, `freshnessRank(freshness)` |
 | `src/lib/transportFailoverBadgeCore.ts` | #3 invisible failover | `buildFailoverBadge(servedBy)→badge\|null` (render), `failoverMetadataPatch(servedBy)→{failover?}` (persist), `readFailoverBadgeFromMetadata(metadata)→badge\|null` (Feed/Office read) |
-| `src/lib/entityHandleCore.ts` | #4 nav dead-ends | `encodeEntityHandle({kind,id,surface?})→string` (dispatch), `decodeEntityHandle(str)→handle\|null` (listener), `targetSurfaceForEntity(kind)` |
+| `src/lib/entityHandleCore.ts` | #4 nav dead-ends — **PARTIAL** (run → Office current 2026-08-07) | `encodeEntityHandle({kind,id,surface?})→string` (dispatch), `decodeEntityHandle(str)→handle\|null` (listener), `targetSurfaceForEntity(kind)` |
 | `src/lib/connectionStatusCore.ts` | #5 no app-wide stale signal | `aggregateConnectionStatus(subs[])→{status,degradedChannels,summary}`, `connectionBannerModel(status)→banner\|null`, `connectionStatusLabel(status)` |
 
 ## SAFE vs HOT — the rule used here
@@ -67,7 +69,7 @@ Ranked by user-facing value within SAFE (runFreshness → resilient priority pan
 | 13 | `src/screens/circles/tabs/kanban/ActivityFeedPanel.tsx:179` | resilientSubscription | **SAFE** | Already has the 30s `pollRef` floor (the model). Migrate onto `subscribeWithReconnect` so it also actively reconnects instead of leaning on the poll alone. |
 | 14 | Feed header (new strip) — `src/screens/circles/tabs/FeedTab.tsx` | connectionStatus | **SAFE** | Add the "live / reconnecting / stale" strip: `aggregateConnectionStatus(healths)` → `connectionBannerModel(status)` / `connectionStatusLabel(status)`, fed by the per-channel `SubscriptionHealth`s from #6–#13. |
 | 15 | `src/screens/circles/tabs/OfficeTab.tsx:927,4086,5583-5588` | connectionStatus | **SAFE** | Existing presence-only `circleConnectionStatus` + `CONNECTION_STATUS_UI`. Feed presence health into `aggregateConnectionStatus` so the Office indicator reflects ALL live channels, not just circle-presence; copy already matches (`Reconnecting…`/`Offline`). |
-| 16 | `src/screens/circles/CircleDetailScreen.tsx:226-238` (`onSwitchTab`, `normalizeTabKey:229`) | entityHandle | **SAFE** | In the `uc:switch-tab` listener, read `e.detail.focus`; if `decodeEntityHandle(focus)` is non-null, `normalizeTabKey(handle.surface)` and open the matching run/thread/task drawer the surface already has (Office `open_run`, Chat thread select). |
+| 16 | `src/screens/circles/CircleDetailScreen.tsx` (`captureCrossSurfaceFocus`, web listener, native route effect) | entityHandle | **SAFE — PARTIAL 2026-08-07** | **Adopted for run → Office only:** decode the bounded focus before activating lazy Office; accept only `target === 'OFFICE'`, `kind === 'run'`, and `surface === 'office'`; forward the exact id plus a monotonic request sequence. **Remaining:** add explicit owners/consumers for thread, task, mission, agent, room, and message focus rather than treating a valid future handle as already adopted. |
 | 17 | `src/screens/circles/tabs/FeedTab.tsx:281` | entityHandle | **SAFE** | Add `focus: encodeEntityHandle({ kind:'run'\|'thread', id })` to the `uc:switch-tab` detail (today `{ tab:'CHAT' }` only) so "ask the agent" lands on the specific thread/run. |
 | 18 | `src/screens/circles/tabs/OfficeTab.tsx:4222` | entityHandle | **SAFE** | Add `focus` handle to the `{ tab:'CHAT' }` dispatch (e.g. `encodeEntityHandle({kind:'agent'\|'run', id})`). |
 | 19 | `src/screens/circles/tabs/MissionsTab.tsx:389` | entityHandle | **SAFE** | Add `focus: encodeEntityHandle({kind:'mission', id})` to the `{ tab: action.value }` dispatch. |
@@ -77,7 +79,7 @@ Ranked by user-facing value within SAFE (runFreshness → resilient priority pan
 | 23 | `src/lib/persistedChatMetadata.ts` (`formatPersistedChatBotMessage`, `PersistedChatBotMetadata` type ~113) | transportFailoverBadge | **SAFE** | Accept + emit the bounded `failover` field (namespaced object from `failoverMetadataPatch`); add a `readFailoverBadgeFromMetadata` pass-through for run-card consumers. |
 | 24 | `src/screens/circles/tabs/ChatTab.tsx:10082` (assistant-bubble `updateBotMessage` on the OpenSwan v2 success path) + message-bubble render | transportFailoverBadge | **HOT** | Render `buildFailoverBadge(servedBy)` as a compact turn chip (mirror the BlackSwan notice) when non-null. `servedBy` via `normalizeStructuredResponse(structured)`; `structured.routing.routing_fallback` is already read at :10042. |
 | 25 | `src/screens/circles/tabs/ChatTab.tsx:10133` (`persistMainChatBotMessageWithRetry` call) | transportFailoverBadge | **HOT** | Pass the failover-patched metadata through (pairs with #22 — if #22 does the derive inside the SAFE helper, this call site is untouched). |
-| 26 | `src/screens/circles/tabs/ChatTab.tsx:4232` and `:11882` | entityHandle | **HOT** | The two Chat-owned `uc:switch-tab` dispatches — add optional `focus` handle. |
+| 26 | `src/screens/circles/tabs/ChatTab.tsx` (`goTab`, follow-up/reference handlers) | entityHandle | **HOT — PARTIAL 2026-08-07** | **Adopted for run → Office:** one typed helper encodes the same optional handle into web `uc:switch-tab` and native route params; `open_run`, approval, retry fallback, and run-reference actions retain the id. Repeated native requests carry a sequence. **Remaining:** wire non-run Chat destinations only when their target surface has an exact validated consumer. |
 | 27 | Chat header (strip placement) — `src/screens/circles/tabs/ChatTab.tsx` | connectionStatus | **HOT** | Place the shared connection strip (built SAFE in #14) in the Chat header — final placement is owner-flagged per Finding 5. |
 | 28 | `src/hooks/useKanbanData.ts:738` (channel `kanban-tasks`) | resilientSubscription | **HOT** | Wrap with `subscribeWithReconnect` + catch-up refetch on `SUBSCRIBED`. Owner-flagged (task-protected `useKanbanData`). |
 | 29 | `src/components/openswan/OpenSwanConsole.tsx:939` | resilientSubscription | **HOT** | Wrap with `subscribeWithReconnect` + catch-up refetch. Owner-flagged (`openswan*`). |
@@ -169,17 +171,144 @@ not code) and doc-comment matches inside the core files.
 2. **resilientSubscription priority panels** (#6–#13) — the no-poll-fallback
    sites that show "running forever".
 3. **connectionStatus strip** (#14–#15) — falls out of #6–#13 for near-free.
-4. **entityHandle** (#16–#21) — SAFE nav; listener first (#16) then dispatchers.
+4. **entityHandle** (#16–#21 and #26) — run → Office is partially adopted in
+   #16/#26; continue with #17–#21 and other entity kinds only alongside an exact
+   target-surface consumer.
 5. **transportFailoverBadge persist** (#22–#23) — SAFE; render chip (#24) is HOT.
 6. **HOT rows** (#24–#30) — hand to the owner of each protected file.
 
 ## Validation
 
 - Per-core smoke scripts follow the house rule (dependency-light, `import type`
-  only). The four pure cores (`resilientSubscriptionCore`, `runFreshnessCore`,
-  `connectionStatusCore`, `entityHandleCore`, `transportFailoverBadgeCore`) each
-  need a `smoke:*` entry — **`package.json` registration is HOT** (owner-only).
+  only). The five pure cores (`resilientSubscriptionCore`, `runFreshnessCore`,
+  `connectionStatusCore`, `entityHandleCore`, `transportFailoverBadgeCore`) must
+  retain a `smoke:*` entry — **`package.json` registration is HOT** (owner-only).
+- The run → Office adoption is pinned by
+  `scripts/cross-surface-run-focus-wiring-smoketest.ts` across the codec, Chat
+  web/native payloads, pre-lazy-mount capture, exact Office drawer, and repeated
+  same-run request. That is source wiring coverage, not a live GUI claim.
 - Keep every realtime adoption **fail-visible**: a dropped channel must render
   `reconnecting`/`stale`, never a frozen board that still looks live.
-</content>
-</invoke>
+
+## Related Chat handoff truth boundary (outside the five-core checklist)
+
+As of 2026-08-07, selected, assigned, multi-agent, and dedicated-session Chat
+dispatches use a bounded `accepted | drafted | failed | unknown` receipt.
+Accepted, drafted, and unknown transcript rows carry `delegatedTo` plus nonterminal
+`outcomeVerdict: unknown`; direct terminal sends and managed task launches enter
+the same receipt boundary. Only `accepted` creates one canonical, queued
+`main_chat` `agent_runs` row with canonical subject metadata, bounded external
+provider/session correlation, and `completionVerified: false`. It deliberately
+does not set the runtime-heartbeat flag. `drafted`, `failed`, and `unknown`
+create no run. `unknown` preserves any exact external lineage and prevents an
+uncertain OpenSwan attempt from automatically falling through. A bridge/session
+id never substitutes for a run UUID. A
+`circle_chat_threads.id` may be stored as bounded metadata but must never enter
+the unrelated legacy `agent_runs.chat_session_id` column.
+
+The accepted receipt persists with the Chat row and carries the real run UUID
+when the ledger write succeeds. Chat no longer immediately resets an accepted
+roster agent to `idle`; provider/session polling owns presence, while Office and
+canonical run telemetry own task visibility. A ledger-write failure remains a
+truthful accepted receipt without a run link. The receipt and Chat wiring smokes
+(`scripts/connected-agent-handoff-receipt-smoketest.ts` and
+`scripts/connected-agent-chat-handoff-wiring-smoketest.ts`) cover this
+nonterminal boundary, but durable typed provider started/final results,
+terminal reconciliation, and live bridge E2E remain pending. Do not count this
+as provider-owned run-lifecycle completion or a deployment claim.
+
+The adjacent Chat target/transport checks are adopted as of 2026-08-07. Picker
+rows preserve immutable ids and duplicate names fail closed. A published
+OpenSwan Office row may touch the local runtime only for the authenticated
+owner and only through its exact private binding; non-owner rows never borrow
+the local runtime. Dedicated published-agent spawn requires the same exact
+binding. Foreign terminal-provider rows cannot launch a local bridge. Stale
+target ids become unavailable, and terminal or multi-agent name ties dispatch
+nothing; production-shaped immutable ids remain exact through multi-agent
+planning and can disambiguate duplicate display names. Published custom rows require an exact connection id or explicit exact
+gateway; custom gateway credentials require explicit owner authority and an
+enabled exact normalized-endpoint match. `isOwn`, owner id, and current user id
+must all be nonempty and agree before an alleged-own row may use a local token
+or make its dispatch attempt. Terminal/custom send and launch
+results carry `transportAccepted: true | false | null`; HTTP success, structured
+acceptance, and exact selected-session echo are required. Ambiguous POST outcomes
+stop without session replacement, endpoint/provider fan-out, or draft fallback.
+Claude, Codex, and Gemini terminal servers require one case-sensitive exact
+session id before input and reject aliases, prefixes, case folds, and duplicate
+ids. Cursor exact-session send is intentionally unsupported until GUI focus can
+be bound to one verified Composer conversation. Single-session launch
+acceptance requires one receipt-safe exact returned session id. The receipt
+retains it as external lineage, a selected DB agent keeps its DB subject, and
+missing/unsafe/multiple lineage remains unknown with no replay or accepted run.
+Office run attribution is exact-first; display names are legacy-only fallback.
+Sequential Chat chains stop before dependent agents when upstream work is not a
+usable synchronous draft. Keep `smoke:connected-agent-chat-handoff` green; it
+now includes the ownership, credential-isolation, immutable-target,
+sequential-pause, and 110-assertion no-replay suites.
+
+Office-terminal and Feed/Kanban Claude Code launches must retain the same
+distinction. A `/spawn` acknowledgement with one exact provider handle is
+`accepted`, never completed; Office keeps the response/tracking task open and
+records one queued `office_terminal` run. Timeout, transport loss, inconsistent
+success, or malformed lineage is `outcome_unknown` and must not replay. Feed
+keeps accepted task runs `running` and unknown dispatches `blocked`, with no
+`completed_at`, completion proof, memory, or XP. A collaborative parent pauses
+at the first accepted/unknown child and never dispatches the dependent agent
+with acknowledgement prose. Feed owns one task-bearing attempt and must not
+pre-send through `wakeAndAssignTask`; its Agent Tasks, Active Runs, history, and
+activity rows render accepted/unknown explicitly.
+Each accepted direct Feed attempt appends one best-effort queued `feed_task`
+run linked to the exact task and task-run attempt. Persist its local UUID on the
+task run and use only that UUID for Activity Feed or Task Detail to focus Office.
+Ledger failure must preserve acceptance without replay; unknown and failed
+attempts must create no accepted row.
+
+OpenSwan Office/Feed sends require one exact `connectionId::sessionKey`, call
+the canonical structured `sendSessionMessage` adapter, and never fall back to
+`agent:main:main` or infer completion from assistant history. Stamp
+`externalDispatchKind: sessions_send` and keep connection, session,
+provider-run, and canonical run identities separate.
+
+The published Office agent itself now has a source-wired, explicit
+owner-private binding rather than an inferred runtime identity. In the
+displayed OpenSwan session's Agent Gateway panel, the current owner can bind,
+move, or clear one of their published OpenSwan Office agents against that exact
+owner-owned `agents_bots` UUID and case-sensitive session key. Pending §36 adds
+the no-backfill `office_agent_session_bindings` table, owner-only reads,
+server-authorized set/clear RPCs, and `invoke_agent_v2`. The v2 RPC composes the
+canonical claim once and returns a versioned bound/missing snapshot; it never
+stores the provider session or gateway token on the public Office row.
+
+Before Office or Feed sends, the pure resolver requires the exact Office UUID,
+one and only one current local connection with `remoteId === agentBotId`, exact
+`provider = openswan`, enabled/connected state, a non-placeholder hydrated
+device-local token, and one and only one case-sensitive session-key match on
+that same connection. It returns the exact local `connectionId::sessionKey` and
+ephemeral config. There is no name, provider-wide, first-connection,
+first-session, or main-session fallback; missing, stale, duplicate, offline, or
+tokenless evidence maps to the fixed pre-dispatch binding error. The token
+remains device-local and the durable binding does not make it available
+cross-device. Session rows must be accompanied by the fingerprint captured in
+the same poll generation (local id, private bot UUID, normalized endpoint);
+duplicate ids, late/stale callbacks, and same-id connection replacement fail
+closed before bind or send.
+
+This binding slice has pure, source-wiring, and disposable PostgreSQL 14
+coverage only. The disposable database applied §36 twice, retained one read
+policy, produced a bound claim, denied direct writes, and cleared a stale
+binding after the published agent provider changed. §36 is pending/not applied;
+no live authenticated binding UI, external provider dispatch, production
+migration, or deployment is claimed.
+Typed provider final-result reconciliation remains pending. Apply pending §35
+before depending on an Office `streaming` handoff remaining adoptable past the
+legacy two-minute sweeper. Keep
+`scripts/office-agent-accepted-handoff-smoketest.ts` registered in
+`package.json` and green, together with
+`scripts/office-agent-session-binding-core-smoketest.ts` and
+`scripts/office-agent-session-binding-wiring-smoketest.ts`. The separate
+`scripts/office-agent-session-connection-fingerprint-smoketest.ts` pins the
+same-local-id replacement boundary: loaded session evidence is invalidated if
+the private bot UUID or normalized endpoint changes before a bind or send.
+`scripts/office-session-snapshot-fingerprint-smoketest.ts` pins the shared,
+Office, and Feed snapshot/poller provenance wiring and is included in
+`smoke:office-agent-session-binding`.

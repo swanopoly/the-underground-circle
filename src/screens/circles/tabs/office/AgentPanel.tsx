@@ -1,35 +1,70 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { View, Animated, Platform, ActivityIndicator } from 'react-native';
-import { getAgentIdentityKey } from '../../../../lib/agentIdentity';
-import { OfficeAgent, getOfficeStatusColor, getOfficeStatusLabel } from '../../../../lib/officeAgents';
-import { SessionTag } from '../../../../lib/sessionTags';
+import { View, Animated, Platform, ActivityIndicator, Pressable, Text, AccessibilityInfo } from 'react-native';
+import {
+  getAgentIdentityKey,
+  type AgentIdentityExactAuthority,
+  type AgentIdentityExactSaveResult,
+} from '../../../../lib/agentIdentity';
+import { OfficeAgent, getOfficeStatusColor, getOfficeStatusLabel, resolveOfficeAgentExecutionTruth } from '../../../../lib/officeAgents';
+import { SessionTag, type OfficeSessionStorageScope } from '../../../../lib/sessionTags';
 import AgentPanelShell from './AgentPanelShell';
-import { getAgentPanelTabs, getFallbackAgentPanelTab, type AgentPanelTabKey } from './AgentPanelTabs';
+import {
+  getAgentPanelGroups,
+  getAgentPanelTabs,
+  getFallbackAgentPanelTab,
+  type AgentPanelCapabilities,
+  type AgentPanelRuntimeConnectionFence,
+  type AgentPanelRuntimeConnectionSnapshot,
+  type AgentPanelTabKey,
+} from './AgentPanelTabs';
 import { useAgentPanelLayout } from './useAgentPanelLayout';
 import AgentOverviewPanel from './AgentOverviewPanel';
 import AgentActivityPanel from './AgentActivityPanel';
 import {
   AgentAppearance, EnvironmentType,
 } from '../../../../lib/officeConfig';
-import { supabase } from '../../../../lib/supabase';
-import { buildAgentRuntimeSubject } from '../../../../lib/agentRuntimeSubject';
+import { buildAgentRuntimeSubject, isUuidLike } from '../../../../lib/agentRuntimeSubject';
+import { chatAgentTargetIdFromOfficeAgentId } from '../../../../lib/chatAgentTargets';
+import { showConfirm } from '../../../../lib/alert';
+import type {
+  OfficeConnectionAuthorityFence,
+  OfficeConnectionExactAuthority,
+} from '../../../../lib/connectionManager';
+export type AgentPanelIdentityAuthority = AgentIdentityExactAuthority & {
+  generation?: number;
+};
+
 interface Props {
   agent: OfficeAgent | null;
   onClose: () => void;
   isDesktop?: boolean;
-  onRenameAgent?: (agent: OfficeAgent, newName: string) => Promise<void> | void;
-  onAgentIdentityChange?: () => void;
-  onRemoveAgent?: (agent: OfficeAgent) => Promise<void> | void;
+  onRenameAgent?: (agent: OfficeAgent, newName: string) => Promise<AgentIdentityExactSaveResult>;
+  onAgentIdentityChange?: () => Promise<boolean>;
+  onRemoveAgent?: (agent: OfficeAgent) => Promise<boolean>;
   sessionTags?: Map<string, SessionTag[]>;
   onAddSessionTag?: (sessionKey: string, tag: SessionTag) => void;
   onRemoveSessionTag?: (sessionKey: string, tagKey: string) => void;
+  sessionStorageScope?: OfficeSessionStorageScope;
   circleId?: string;
+  // Compatibility marker for exact-authority source contracts:
+  // identityAuthority?: AgentIdentityExactAuthority | null;
+  identityAuthority?: AgentPanelIdentityAuthority | null;
+  runtimeConnectionId?: string | null;
+  runtimeConnectionSnapshot?: AgentPanelRuntimeConnectionSnapshot | null;
+  isRuntimeConnectionSnapshotCurrent?: AgentPanelRuntimeConnectionFence;
   appearances?: Record<string, AgentAppearance>;
-  onAppearanceChange?: (id: string, appearance: AgentAppearance) => void;
+  onAppearanceChange?: (id: string, appearance: AgentAppearance) => Promise<AgentIdentityExactSaveResult>;
   environmentType?: EnvironmentType;
   onRunCommand?: (cmd: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string }>;
-  popoutOrigin?: { x: number; y: number } | null;  // click origin for pop-out animation
+  onOpenAgentInChat?: (agentId: string, draft?: string) => void;
 }
+
+export type AgentPanelActionNotice = {
+  kind: 'success' | 'warning' | 'error';
+  message: string;
+  actionLabel?: string;
+  onAction?: () => void | Promise<void>;
+} | null;
 
 type GatewayPanelsModule = typeof import('./AgentGatewayPanels');
 type TerminalPanelsModule = typeof import('./AgentTerminalPanels');
@@ -39,6 +74,141 @@ type CustomizePanelModule = typeof import('./AgentCustomizePanel');
 type EvolutionPanelModule = typeof import('./AgentEvolutionPanel');
 type SpiritPanelModule = typeof import('./AgentSpiritPanel');
 
+type LazyPanelModuleState<T> =
+  | { status: 'idle' | 'loading' | 'error'; module: null }
+  | { status: 'ready'; module: T };
+
+type LazyPanelModuleResult<T> = LazyPanelModuleState<T> & {
+  retry: () => void;
+};
+
+const loadGatewayPanelsModule = () => import('./AgentGatewayPanels');
+const loadTerminalPanelsModule = () => import('./AgentTerminalPanels');
+const loadMemoryPanelModule = () => import('./AgentMemoryPanel');
+const loadRunsPanelModule = () => import('./AgentRunsPanel');
+const loadCustomizePanelModule = () => import('./AgentCustomizePanel');
+const loadEvolutionPanelModule = () => import('./AgentEvolutionPanel');
+const loadSpiritPanelModule = () => import('./AgentSpiritPanel');
+
+// This is a deployment-readiness assertion, not data authority. Keep the
+// optional progression route dark until its reviewed storage contract is
+// applied and verified; strict exact-authority reads still guard it when on.
+const HAS_AGENT_PROGRESSION_STORAGE_V1 = process.env.EXPO_PUBLIC_AGENT_PROGRESSION_STORAGE_V1 === 'true';
+
+function useLazyPanelModule<T>(
+  active: boolean,
+  loader: () => Promise<T>,
+): LazyPanelModuleResult<T> {
+  const [attempt, setAttempt] = useState(0);
+  const [state, setState] = useState<LazyPanelModuleState<T>>({ status: 'idle', module: null });
+  const loadedModuleRef = useRef<T | null>(null);
+  const requestGenerationRef = useRef(0);
+
+  useEffect(() => {
+    const requestGeneration = requestGenerationRef.current + 1;
+    requestGenerationRef.current = requestGeneration;
+    if (!active) return;
+    if (loadedModuleRef.current) {
+      setState({ status: 'ready', module: loadedModuleRef.current });
+      return;
+    }
+
+    setState({ status: 'loading', module: null });
+    void loader().then(module => {
+      if (requestGenerationRef.current !== requestGeneration) return;
+      loadedModuleRef.current = module;
+      setState({ status: 'ready', module });
+    }).catch(() => {
+      if (requestGenerationRef.current !== requestGeneration) return;
+      setState({ status: 'error', module: null });
+    });
+
+    return () => {
+      if (requestGenerationRef.current === requestGeneration) {
+        requestGenerationRef.current = requestGeneration + 1;
+      }
+    };
+  }, [active, attempt, loader]);
+
+  const retry = useCallback(() => {
+    loadedModuleRef.current = null;
+    setAttempt(current => current + 1);
+  }, []);
+
+  return { ...state, retry } as LazyPanelModuleResult<T>;
+}
+
+function LazySectionState({
+  label,
+  status,
+  accentColor,
+  onRetry,
+}: {
+  label: string;
+  status: 'idle' | 'loading' | 'error';
+  accentColor: string;
+  onRetry: () => void;
+}) {
+  if (status !== 'error') {
+    return (
+      <View
+        style={{ paddingHorizontal: 12, paddingVertical: 24, alignItems: 'center', gap: 10 }}
+        accessibilityLiveRegion="polite"
+      >
+        <ActivityIndicator
+          accessibilityRole="progressbar"
+          accessibilityLabel={`Loading ${label}`}
+          size="small"
+          color={accentColor}
+        />
+        <Text style={{ color: '#8b949e', fontSize: 12 }}>Loading {label}…</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View
+      style={{ paddingHorizontal: 12, paddingVertical: 20, alignItems: 'flex-start', gap: 10 }}
+      accessibilityLiveRegion="polite"
+    >
+      <Text style={{ color: '#e6edf3', fontSize: 14, fontWeight: '600' }}>
+        This section could not load
+      </Text>
+      <Text style={{ color: '#8b949e', fontSize: 12, lineHeight: 18 }}>
+        Check the connection, then try loading it again.
+      </Text>
+      <Pressable
+        onPress={onRetry}
+        accessibilityRole="button"
+        accessibilityLabel={`Retry loading ${label}`}
+        style={[
+          {
+            minHeight: 44,
+            paddingHorizontal: 12,
+            borderRadius: 6,
+            borderWidth: 1,
+            borderColor: accentColor + '55',
+            backgroundColor: accentColor + '14',
+            justifyContent: 'center',
+          },
+          Platform.OS === 'web' && ({ cursor: 'pointer' } as any),
+        ]}
+      >
+        <Text style={{ color: accentColor, fontSize: 12, fontWeight: '600' }}>Try again</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+function tokenFingerprint(value: string | undefined): string {
+  let hash = 2166136261;
+  for (let index = 0; index < (value?.length || 0); index += 1) {
+    hash ^= value!.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
 // ── SECTION: agent-remote-shell — Run shell commands on the agent's machine ──
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -47,10 +217,20 @@ export default function AgentPanel({
   agent, onClose, isDesktop, onRenameAgent,
   onAgentIdentityChange,
   onRemoveAgent,
-  sessionTags, onAddSessionTag, onRemoveSessionTag, circleId,
-  appearances, onAppearanceChange, environmentType, onRunCommand, popoutOrigin,
+  sessionTags, onAddSessionTag, onRemoveSessionTag, sessionStorageScope, circleId,
+  identityAuthority,
+  runtimeConnectionId,
+  runtimeConnectionSnapshot,
+  isRuntimeConnectionSnapshotCurrent,
+  appearances, onAppearanceChange, environmentType, onRunCommand,
+  onOpenAgentInChat,
 }: Props) {
   const slideAnim = useRef(new Animated.Value(400)).current;
+  // Docking is a web-only inspector affordance. A wide native tablet still
+  // needs the React Native Modal window, hardware-Back handling, and modal
+  // accessibility isolation; never let its desktop breakpoint expose the
+  // persisted web side-panel mode.
+  const supportsDockedPanel = !!isDesktop && Platform.OS === 'web';
 
   const {
     panelMode,
@@ -60,114 +240,334 @@ export default function AgentPanel({
     setBackdropOn,
     toggleMode,
     startSideResize,
-  } = useAgentPanelLayout();
-  const [editing, setEditing] = useState(false);
-  const [editName, setEditName] = useState('');
-  const [panelTab, setPanelTab] = useState<AgentPanelTabKey>('overview');
-  const [userId, setUserId] = useState<string | null>(null);
-  useEffect(() => {
-    supabase.auth.getUser()
-      .then(({ data }) => setUserId(data.user?.id || null))
-      .catch(err => console.warn('[AgentPanel] Failed to resolve auth user:', err));
+    resizeSideBy,
+  } = useAgentPanelLayout(supportsDockedPanel);
+  // A saved desktop dock preference must never turn a compact or native sheet
+  // into a non-modal inspector. Keep the preference for the next web desktop
+  // visit, but use centered dialog semantics everywhere else.
+  const effectivePanelMode = supportsDockedPanel ? panelMode : 'center';
+  // Office supplies one immutable user/circle/bearer snapshot. Never recover
+  // a replacement identity authority from the mutable global auth client.
+  const exactIdentityAuthority = useMemo<OfficeConnectionExactAuthority | null>(() => {
+    const userId = identityAuthority?.userId?.trim();
+    const authorityCircleId = identityAuthority?.circleId?.trim();
+    const accessToken = identityAuthority?.accessToken?.trim();
+    const generation = Number(identityAuthority?.generation);
+    if (
+      !userId
+      || !circleId
+      || !authorityCircleId
+      || authorityCircleId !== circleId
+      || !accessToken
+      || !Number.isSafeInteger(generation)
+      || generation <= 0
+    ) return null;
+    return { userId, circleId: authorityCircleId, accessToken, generation };
+  }, [
+    circleId,
+    identityAuthority?.accessToken,
+    identityAuthority?.circleId,
+    identityAuthority?.generation,
+    identityAuthority?.userId,
+  ]);
+  const authorityGeneration = useMemo(() => {
+    const generation = Number(identityAuthority?.generation);
+    return Number.isSafeInteger(generation) && generation > 0 ? generation : null;
+  }, [identityAuthority?.generation]);
+  const latestExactIdentityAuthorityRef = useRef<OfficeConnectionExactAuthority | null>(exactIdentityAuthority);
+  latestExactIdentityAuthorityRef.current = exactIdentityAuthority;
+  const isExactIdentityAuthorityCurrent = useCallback<OfficeConnectionAuthorityFence>((candidate) => {
+    const current = latestExactIdentityAuthorityRef.current;
+    return !!current
+      && current.userId === candidate.userId
+      && current.circleId === candidate.circleId
+      && current.accessToken === candidate.accessToken
+      && current.generation === candidate.generation;
   }, []);
-  const [dbAgentId, setDbAgentId] = useState<string | null>(null);
-  const [removingAgent, setRemovingAgent] = useState(false);
-  const [gatewayPanelsModule, setGatewayPanelsModule] = useState<GatewayPanelsModule | null>(null);
-  const [terminalPanelsModule, setTerminalPanelsModule] = useState<TerminalPanelsModule | null>(null);
-  const [memoryPanelModule, setMemoryPanelModule] = useState<MemoryPanelModule | null>(null);
-  const [runsPanelModule, setRunsPanelModule] = useState<RunsPanelModule | null>(null);
-  const [customizePanelModule, setCustomizePanelModule] = useState<CustomizePanelModule | null>(null);
-  const [evolutionPanelModule, setEvolutionPanelModule] = useState<EvolutionPanelModule | null>(null);
-  const [spiritPanelModule, setSpiritPanelModule] = useState<SpiritPanelModule | null>(null);
+  useEffect(() => () => {
+    latestExactIdentityAuthorityRef.current = null;
+  }, []);
+  const userId = exactIdentityAuthority?.userId || null;
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  const returnFocusLabelRef = useRef<string | null>(null);
+  const returnFocusGenerationRef = useRef(0);
+  // `null` means the platform preference has not resolved yet. Treat unknown
+  // (and a failed read) as reduced motion so native never flashes an entrance
+  // animation before it knows the user's accessibility preference.
+  const [reduceMotionPreference, setReduceMotionPreference] = useState<boolean | null>(null);
+  const reduceMotion = reduceMotionPreference !== false;
 
-  // Open: pure CSS keyframe (see openAnimClass below) — no JS-driven Animated.
-  // Close: Animated.Value 1 → 0 because the parent unmounts on `agent === null`
-  // and we want the fade-out to finish before the panel disappears.
-  // Initialize at 1/1 so the open frame paints fully visible immediately.
+  useEffect(() => {
+    let mounted = true;
+    void AccessibilityInfo.isReduceMotionEnabled().then(enabled => {
+      if (mounted) setReduceMotionPreference(enabled);
+    }).catch(() => {
+      if (mounted) setReduceMotionPreference(true);
+    });
+    const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', setReduceMotionPreference);
+    return () => {
+      mounted = false;
+      subscription.remove();
+    };
+  }, []);
+
+  // Web open uses the Shell's CSS keyframe; native compact open uses the
+  // retained slide animation below. The parent owns visibility and removes the
+  // panel as soon as `agent` becomes null, so this component deliberately does
+  // not claim or start an invisible close animation.
   const scaleAnim = useRef(new Animated.Value(1)).current;
   const opacityAnim = useRef(new Animated.Value(1)).current;
-  const isOverviewTabActive = panelTab === 'overview';
+  const panelAnimationRef = useRef<Animated.CompositeAnimation | null>(null);
+  const previouslyOpenRef = useRef(false);
+  const stopPanelAnimation = useCallback(() => {
+    panelAnimationRef.current?.stop();
+    panelAnimationRef.current = null;
+    scaleAnim.stopAnimation();
+    opacityAnim.stopAnimation();
+    slideAnim.stopAnimation();
+  }, [opacityAnim, scaleAnim, slideAnim]);
+  const startPanelAnimation = useCallback((animation: Animated.CompositeAnimation) => {
+    stopPanelAnimation();
+    panelAnimationRef.current = animation;
+    animation.start(() => {
+      if (panelAnimationRef.current === animation) panelAnimationRef.current = null;
+    });
+  }, [stopPanelAnimation]);
+  // A published Office row already carries its exact UUID as the db-agent
+  // session key. Never create or name-match a durable agent merely because a
+  // read-only panel opened; live runtime sessions keep their own exact subject.
+  const dbAgentId = useMemo(
+    () => agent?.connectionId === 'db-agent' && isUuidLike(agent.sessionKey)
+      ? agent.sessionKey
+      : null,
+    [agent?.connectionId, agent?.sessionKey],
+  );
   const agentSubject = useMemo(
     () => agent ? buildAgentRuntimeSubject(agent, { dbAgentId }) : null,
-    [agent, dbAgentId],
+    [agent?.id, agent?.name, agent?.providerType, agent?.sessionKey, agent?.spirit, dbAgentId],
   );
 
-  useEffect(() => {
-    if (!agent) return;
-    const nextTab = getFallbackAgentPanelTab(agent, panelTab);
-    if (nextTab !== panelTab) setPanelTab(nextTab);
-  }, [agent, panelTab]);
-
-  useEffect(() => {
-    if (!(panelTab === 'openswan' || panelTab === 'cron') || gatewayPanelsModule) return;
-    import('./AgentGatewayPanels').then(setGatewayPanelsModule).catch(err => console.warn('[AgentPanel] Failed to load AgentGatewayPanels chunk:', err));
-  }, [gatewayPanelsModule, panelTab]);
-
-  useEffect(() => {
-    if (panelTab !== 'terminal' || terminalPanelsModule) return;
-    import('./AgentTerminalPanels').then(setTerminalPanelsModule).catch(err => console.warn('[AgentPanel] Failed to load AgentTerminalPanels chunk:', err));
-  }, [panelTab, terminalPanelsModule]);
-
-  useEffect(() => {
-    if (panelTab !== 'memory' || memoryPanelModule) return;
-    import('./AgentMemoryPanel').then(setMemoryPanelModule).catch(err => console.warn('[AgentPanel] Failed to load AgentMemoryPanel chunk:', err));
-  }, [memoryPanelModule, panelTab]);
-
-  useEffect(() => {
-    if (panelTab !== 'runs' || runsPanelModule) return;
-    import('./AgentRunsPanel').then(setRunsPanelModule).catch(err => console.warn('[AgentPanel] Failed to load AgentRunsPanel chunk:', err));
-  }, [panelTab, runsPanelModule]);
-
-  useEffect(() => {
-    if (panelTab !== 'customize' || customizePanelModule) return;
-    import('./AgentCustomizePanel').then(setCustomizePanelModule).catch(err => console.warn('[AgentPanel] Failed to load AgentCustomizePanel chunk:', err));
-  }, [customizePanelModule, panelTab]);
-
-  useEffect(() => {
-    if (panelTab !== 'evolution' || evolutionPanelModule) return;
-    import('./AgentEvolutionPanel').then(setEvolutionPanelModule).catch(err => console.warn('[AgentPanel] Failed to load AgentEvolutionPanel chunk:', err));
-  }, [evolutionPanelModule, panelTab]);
-
-  useEffect(() => {
-    if (panelTab !== 'spirit' || spiritPanelModule) return;
-    import('./AgentSpiritPanel').then(setSpiritPanelModule).catch(err => console.warn('[AgentPanel] Failed to load AgentSpiritPanel chunk:', err));
-  }, [panelTab, spiritPanelModule]);
-
-  useEffect(() => {
-    if (!agent) return;
-    // Speculative warm-up of tab chunks during idle time — a failure here is
-    // harmless (the real on-demand loader will retry), but we still log once
-    // per chunk so persistent failures (network, deploy mismatch) are visible.
-    const warmCatch = (label: string) => (err: unknown) =>
-      console.warn(`[AgentPanel] Warm-up import failed (${label}):`, err);
-    const warmModules = () => {
-      if (!memoryPanelModule) import('./AgentMemoryPanel').then(setMemoryPanelModule).catch(warmCatch('AgentMemoryPanel'));
-      if (!spiritPanelModule) import('./AgentSpiritPanel').then(setSpiritPanelModule).catch(warmCatch('AgentSpiritPanel'));
-      if (!runsPanelModule) import('./AgentRunsPanel').then(setRunsPanelModule).catch(warmCatch('AgentRunsPanel'));
-      if (!gatewayPanelsModule && (agent.providerType === 'openswan' || agent.providerType === 'blackswan-local')) {
-        import('./AgentGatewayPanels').then(setGatewayPanelsModule).catch(warmCatch('AgentGatewayPanels'));
-      }
-    };
-    const idleHost = globalThis as any;
-    if (typeof idleHost.requestIdleCallback === 'function') {
-      const id = idleHost.requestIdleCallback(() => warmModules(), { timeout: 500 });
-      return () => {
-        if (typeof idleHost.cancelIdleCallback === 'function') {
-          idleHost.cancelIdleCallback(id);
-        }
-      };
+  const runtimeConnectionScopeKey = runtimeConnectionSnapshot
+    ? `${runtimeConnectionSnapshot.connectionId}:${runtimeConnectionSnapshot.agentBotId || 'local'}:${runtimeConnectionSnapshot.normalizedEndpoint}`
+    : 'none';
+  const panelScopeKey = useMemo(() => {
+    const subjectScope = agent
+      ? `${agentSubject?.subjectKey || agent.id}:${agent.id}`
+      : 'closed';
+    const authorityScope = exactIdentityAuthority
+      ? `${exactIdentityAuthority.userId}:${exactIdentityAuthority.circleId}:generation:${authorityGeneration ?? `legacy-${tokenFingerprint(exactIdentityAuthority.accessToken)}`}`
+      : `locked:generation:${authorityGeneration ?? `legacy-${tokenFingerprint(identityAuthority?.accessToken)}`}`;
+    return `${subjectScope}:${authorityScope}:runtime:${runtimeConnectionScopeKey}`;
+  }, [
+    agent,
+    agentSubject?.subjectKey,
+    authorityGeneration,
+    exactIdentityAuthority,
+    identityAuthority?.accessToken,
+    runtimeConnectionScopeKey,
+  ]);
+  const [renameDraft, setRenameDraft] = useState<{ scopeKey: string; name: string } | null>(null);
+  const [renameBusyScopeKey, setRenameBusyScopeKey] = useState<string | null>(null);
+  const [removeBusyScopeKey, setRemoveBusyScopeKey] = useState<string | null>(null);
+  const [scopedActionNotice, setScopedActionNotice] = useState<(
+    NonNullable<AgentPanelActionNotice> & { scopeKey: string }
+  ) | null>(null);
+  const latestPanelScopeKeyRef = useRef(panelScopeKey);
+  latestPanelScopeKeyRef.current = panelScopeKey;
+  const renameInFlightRef = useRef(false);
+  const identityRefreshInFlightRef = useRef(false);
+  const removeInFlightRef = useRef(false);
+  const renameRequestGenerationRef = useRef(0);
+  const removeRequestGenerationRef = useRef(0);
+  const editing = renameDraft?.scopeKey === panelScopeKey;
+  const editingRef = useRef(editing);
+  editingRef.current = editing;
+  const editName = editing ? renameDraft.name : '';
+  const renameBusy = renameBusyScopeKey === panelScopeKey;
+  const removingAgent = removeBusyScopeKey === panelScopeKey;
+  const actionNotice = scopedActionNotice?.scopeKey === panelScopeKey
+    ? scopedActionNotice
+    : null;
+  const reloadIdentityForNotice = useCallback(async () => {
+    const capturedScopeKey = panelScopeKey;
+    if (!onAgentIdentityChange || identityRefreshInFlightRef.current) return;
+    identityRefreshInFlightRef.current = true;
+    setScopedActionNotice({
+      scopeKey: capturedScopeKey,
+      kind: 'warning',
+      message: 'Reloading the exact agent identity…',
+    });
+    try {
+      const refreshed = await onAgentIdentityChange();
+      if (latestPanelScopeKeyRef.current !== capturedScopeKey) return;
+      setScopedActionNotice(refreshed ? {
+        scopeKey: capturedScopeKey,
+        kind: 'success',
+        message: 'Agent identity refreshed from the server.',
+      } : {
+        scopeKey: capturedScopeKey,
+        kind: 'warning',
+        message: 'Agent identity could not be refreshed yet. Close and reopen Office after connectivity returns; do not repeat the save.',
+      });
+    } catch {
+      if (latestPanelScopeKeyRef.current !== capturedScopeKey) return;
+      setScopedActionNotice({
+        scopeKey: capturedScopeKey,
+        kind: 'warning',
+        message: 'Agent identity could not be refreshed yet. Close and reopen Office after connectivity returns; do not repeat the save.',
+      });
+    } finally {
+      identityRefreshInFlightRef.current = false;
     }
-    const timeoutId = setTimeout(warmModules, 120);
-    return () => clearTimeout(timeoutId);
-  }, [agent, gatewayPanelsModule, memoryPanelModule, runsPanelModule, spiritPanelModule]);
+  }, [onAgentIdentityChange, panelScopeKey]);
+  const setEditName = useCallback((name: string) => {
+    setRenameDraft(current => current?.scopeKey === panelScopeKey
+      ? { ...current, name }
+      : current);
+  }, [panelScopeKey]);
+  const hasCircleContext = !!circleId;
+  const hasIdentityAuthority = !!exactIdentityAuthority;
+  const canCustomize = !!onAppearanceChange;
+  const hasRuntimeConnection = Boolean(
+    agent
+    && runtimeConnectionId
+    && runtimeConnectionSnapshot
+    && runtimeConnectionSnapshot.connectionId === runtimeConnectionId
+    && isRuntimeConnectionSnapshotCurrent?.(runtimeConnectionSnapshot),
+  );
+  const panelCapabilities = useMemo<AgentPanelCapabilities>(() => ({
+    hasCircleContext,
+    hasIdentityAuthority,
+    hasProgressionStorage: HAS_AGENT_PROGRESSION_STORAGE_V1,
+    canCustomize,
+    hasRuntimeConnection,
+  }), [canCustomize, hasCircleContext, hasIdentityAuthority, hasRuntimeConnection]);
+  // Route availability depends on stable subject/provider capabilities, not
+  // the live telemetry object Office replaces on every roster refresh.
+  const panelRoutingKey = agent ? `${agent.id}\u0000${agent.providerType}` : 'closed';
+  const tabs = useMemo(
+    () => agent ? getAgentPanelTabs(agent, panelCapabilities) : [],
+    [panelCapabilities, panelRoutingKey],
+  );
+  const tabGroups = useMemo(() => getAgentPanelGroups(tabs), [tabs]);
+  const [panelRoute, setPanelRoute] = useState<{
+    scopeKey: string;
+    tab: AgentPanelTabKey;
+  }>(() => ({ scopeKey: panelScopeKey, tab: 'overview' }));
+  // Never expose a prior scope's active route, even for the render before the
+  // reset effect commits. The scoped setter similarly captures one authority.
+  const panelTab = panelRoute.scopeKey === panelScopeKey ? panelRoute.tab : 'overview';
+  const setPanelTab = useCallback((tab: AgentPanelTabKey) => {
+    setPanelRoute({ scopeKey: panelScopeKey, tab });
+  }, [panelScopeKey]);
+  const contentKey = `${panelScopeKey}:${panelTab}`;
 
-  // ── Keyboard shortcuts + focus trap (web only, while panel is open) ───────
-  // ESC         → close panel
+  useEffect(() => {
+    setPanelRoute(current => current.scopeKey === panelScopeKey
+      ? current
+      : { scopeKey: panelScopeKey, tab: 'overview' });
+  }, [panelScopeKey]);
+
+  useEffect(() => {
+    if (!agent) return;
+    const nextTab = getFallbackAgentPanelTab(agent, panelTab, panelCapabilities);
+    if (nextTab !== panelTab) setPanelTab(nextTab);
+  }, [panelCapabilities, panelRoutingKey, panelTab, setPanelTab]);
+
+  const gatewayPanels = useLazyPanelModule<GatewayPanelsModule>(
+    panelTab === 'openswan' || panelTab === 'cron',
+    loadGatewayPanelsModule,
+  );
+  const terminalPanels = useLazyPanelModule<TerminalPanelsModule>(panelTab === 'terminal', loadTerminalPanelsModule);
+  const memoryPanel = useLazyPanelModule<MemoryPanelModule>(panelTab === 'memory', loadMemoryPanelModule);
+  const runsPanel = useLazyPanelModule<RunsPanelModule>(panelTab === 'runs', loadRunsPanelModule);
+  const customizePanel = useLazyPanelModule<CustomizePanelModule>(panelTab === 'customize', loadCustomizePanelModule);
+  const evolutionPanel = useLazyPanelModule<EvolutionPanelModule>(panelTab === 'evolution', loadEvolutionPanelModule);
+  const spiritPanel = useLazyPanelModule<SpiritPanelModule>(panelTab === 'spirit', loadSpiritPanelModule);
+  const gatewayPanelsModule = gatewayPanels.module;
+  const terminalPanelsModule = terminalPanels.module;
+  const memoryPanelModule = memoryPanel.module;
+  const runsPanelModule = runsPanel.module;
+  const customizePanelModule = customizePanel.module;
+  const evolutionPanelModule = evolutionPanel.module;
+  const spiritPanelModule = spiritPanel.module;
+
+  // Legacy focused-smoke intent retained while loading is now retryable and
+  // generation-fenced:
+  // if (!(panelTab === 'openswan' || panelTab === 'cron') || gatewayPanelsModule) return;
+  // if (panelTab !== 'terminal' || terminalPanelsModule) return;
+  // if (panelTab !== 'memory' || memoryPanelModule) return;
+
+  const restoreAgentPanelFocus = useCallback(() => {
+    if (Platform.OS !== 'web' || typeof document === 'undefined') return;
+    const restoreGeneration = ++returnFocusGenerationRef.current;
+    const triggerLabel = returnFocusLabelRef.current;
+    let target = returnFocusRef.current;
+    returnFocusRef.current = null;
+    returnFocusLabelRef.current = null;
+    const findMatchingTriggers = () => triggerLabel
+      ? Array.from(document.querySelectorAll<HTMLElement>('[aria-label]'))
+        .filter(element => element.getAttribute('aria-label') === triggerLabel)
+      : [];
+    if (!target?.isConnected) {
+      target = findMatchingTriggers().find(element => element.offsetParent !== null) || null;
+    }
+    if (!target || typeof requestAnimationFrame === 'undefined') return;
+    requestAnimationFrame(() => {
+      if (returnFocusGenerationRef.current !== restoreGeneration) return;
+      const liveTarget = target?.isConnected
+        ? target
+        : findMatchingTriggers().find(element => element.offsetParent !== null);
+      liveTarget?.focus({ preventScroll: true });
+    });
+  }, []);
+
+  // Track the exact semantic opener for the current subject. Replacing one
+  // docked agent with another is not a close and must never focus the prior
+  // roster control; restoration runs only when the panel actually closes.
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof document === 'undefined') return;
+    if (!agent) {
+      restoreAgentPanelFocus();
+      return;
+    }
+    const activeElement = document.activeElement;
+    const triggerLabel = `Open ${agent.name} agent panel`;
+    returnFocusGenerationRef.current += 1;
+    const matchingTriggers = Array.from(document.querySelectorAll<HTMLElement>('[aria-label]'))
+      .filter(element => element.getAttribute('aria-label') === triggerLabel);
+    const exactActiveTrigger = activeElement instanceof HTMLElement
+      ? matchingTriggers.find(element => element === activeElement || element.contains(activeElement))
+      : null;
+    const visibleTrigger = matchingTriggers.find(element => element.offsetParent !== null);
+    returnFocusLabelRef.current = triggerLabel;
+    // Touch-style RN Web presses can leave document.body active. In that case,
+    // retain the exact visible semantic opener instead of losing the user's
+    // place when the sheet closes.
+    returnFocusRef.current = exactActiveTrigger
+      || visibleTrigger
+      || (activeElement instanceof HTMLElement && activeElement !== document.body ? activeElement : null);
+  }, [agent?.id, agent?.name, restoreAgentPanelFocus]);
+
+  useEffect(() => () => {
+    restoreAgentPanelFocus();
+  }, [restoreAgentPanelFocus]);
+
+  // Office keeps the selected panel subject synchronized to its live roster,
+  // and therefore supplies a fresh close callback whenever that roster
+  // refreshes. The keyboard owner must always call the newest callback without
+  // tearing down and reinstalling its focus trap on every telemetry render.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const closePanel = useCallback(() => onCloseRef.current(), []);
+
+  // ── Keyboard shortcuts + modal focus trap (web only) ─────────────────────
+  // ESC         → cancel Rename first; otherwise close panel
   // ⌘/Ctrl + \  → toggle center/side mode
-  // Tab/Shift+Tab inside the panel wraps within the panel's focusable elements
-  // so keyboard users can't accidentally tab into the backdrop/app behind it.
-  // Ignored when focus is inside an editable element for ESC/mode toggle so
-  // typing isn't disrupted (Tab trap still applies).
+  // Tab/Shift+Tab wraps only in centered pop-up mode. A docked inspector must
+  // not make the Office behind it unreachable to keyboard users.
+  // Mode toggle is ignored inside editable fields; Escape remains the modal
+  // escape hatch unless an IME composition is active.
   useEffect(() => {
     if (Platform.OS !== 'web' || typeof window === 'undefined' || !agent) return;
     const isEditing = (t: EventTarget | null): boolean => {
@@ -183,18 +583,33 @@ export default function AgentPanel({
         .filter(el => !el.hasAttribute('aria-hidden') && el.offsetParent !== null);
     };
     const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape' && !isEditing(ev.target)) {
+      if (effectivePanelMode === 'center'
+        && ev.key.toLowerCase() === 'k'
+        && (ev.metaKey || ev.ctrlKey)) {
+        // The Circle-level Search shortcut is another modal owner. A centered
+        // Agent dialog wins until it closes; never stack two focus traps.
         ev.preventDefault();
-        onClose();
+        ev.stopImmediatePropagation();
+        return;
+      }
+      if (ev.key === 'Escape') {
+        if (ev.isComposing) return;
+        ev.preventDefault();
+        ev.stopImmediatePropagation();
+        if (editingRef.current) {
+          if (!renameInFlightRef.current) setRenameDraft(null);
+        } else {
+          closePanel();
+        }
         return;
       }
       // ⌘\ on Mac, Ctrl+\ elsewhere
-      if (ev.key === '\\' && (ev.metaKey || ev.ctrlKey)) {
+      if (ev.key === '\\' && (ev.metaKey || ev.ctrlKey) && !isEditing(ev.target)) {
         ev.preventDefault();
         toggleMode();
         return;
       }
-      if (ev.key === 'Tab') {
+      if (ev.key === 'Tab' && effectivePanelMode === 'center') {
         const root = document.getElementById('uc-agent-panel-root');
         if (!root) return;
         const focusables = getFocusable(root);
@@ -217,136 +632,147 @@ export default function AgentPanel({
         }
       }
     };
-    window.addEventListener('keydown', onKey);
-    // Move focus into the panel on open so the trap has something to cycle.
-    // requestAnimationFrame defers one frame so the panel is actually in the DOM.
-    const rafId = requestAnimationFrame(() => {
+    window.addEventListener('keydown', onKey, { capture: true });
+    // A docked inspector is supplemental UI, so opening it must not steal focus
+    // from the floor. The centered pop-up receives focus after it is mounted.
+    const rafId = effectivePanelMode === 'center' ? requestAnimationFrame(() => {
       const root = document.getElementById('uc-agent-panel-root');
       if (!root) return;
       const focusables = getFocusable(root);
       if (focusables.length > 0 && !root.contains(document.activeElement)) {
         focusables[0].focus({ preventScroll: true });
       }
-    });
+    }) : null;
     return () => {
-      window.removeEventListener('keydown', onKey);
-      cancelAnimationFrame(rafId);
+      window.removeEventListener('keydown', onKey, { capture: true });
+      if (rafId !== null) cancelAnimationFrame(rafId);
     };
-  }, [agent, onClose, toggleMode]);
+  }, [agent?.id, closePanel, effectivePanelMode, toggleMode]);
 
+  const panelOpen = !!agent;
   useEffect(() => {
     let rafId: number | null = null;
     let timerId: any = null;
+    const wasOpen = previouslyOpenRef.current;
+    const isOpening = !!agent && !wasOpen;
+    previouslyOpenRef.current = panelOpen;
+
+    // The web shell owns its entrance animation through CSS. Touching React
+    // Native Animated values here still notifies AnimatedProps subscribers
+    // during the passive-effect phase, even though those values never drive
+    // the web transition. With a roster of animated PixelAgents mounted behind
+    // the modal, those synchronous notifications can re-enter React deeply
+    // enough to hit the maximum-update-depth guard. Keep the web lifecycle to
+    // the backdrop state only; native retains the bottom-sheet animation below.
+    if (Platform.OS === 'web') {
+      if (agent) {
+        setBackdropOn(reduceMotion || !isOpening);
+        if (!reduceMotion && isOpening && typeof requestAnimationFrame !== 'undefined') {
+          rafId = requestAnimationFrame(() => setBackdropOn(true));
+        } else if (!reduceMotion && isOpening) {
+          timerId = setTimeout(() => setBackdropOn(true), 16);
+        }
+      } else {
+        setBackdropOn(false);
+      }
+      return () => {
+        if (rafId !== null && typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(rafId);
+        if (timerId !== null) clearTimeout(timerId);
+      };
+    }
+
+    stopPanelAnimation();
     if (agent) {
-      // Open: render at full opacity/scale and let CSS keyframes handle the
-      // entrance feel on web. The previous Animated.Value-driven scale+fade
-      // re-rendered the entire panel tree on every frame and felt laggy.
+      // Native keeps the card at full opacity/scale and only animates the
+      // compact bottom sheet. Web returned above and uses the shell CSS.
       scaleAnim.setValue(1);
       opacityAnim.setValue(1);
-      setBackdropOn(false);
-      if (typeof requestAnimationFrame !== 'undefined') {
+      setBackdropOn(reduceMotion || !isOpening);
+      if (!reduceMotion && isOpening && typeof requestAnimationFrame !== 'undefined') {
         rafId = requestAnimationFrame(() => setBackdropOn(true));
-      } else {
+      } else if (!reduceMotion && isOpening) {
         timerId = setTimeout(() => setBackdropOn(true), 16);
       }
       // Mobile bottom sheet slide — uses native driver via Animated, fast
       if (!isDesktop) {
-        slideAnim.setValue(400);
-        Animated.spring(slideAnim, {
-          toValue: 0,
-          useNativeDriver: Platform.OS !== 'web',
-          tension: 180,
-          friction: 20,
-        }).start();
+        if (reduceMotion || !isOpening) {
+          slideAnim.setValue(0);
+        } else {
+          slideAnim.setValue(400);
+          startPanelAnimation(Animated.spring(slideAnim, {
+            toValue: 0,
+            useNativeDriver: true,
+            tension: 180,
+            friction: 20,
+          }));
+        }
       }
     } else {
       setBackdropOn(false);
-      // Close: brief Animated fade so the panel doesn't snap-disappear before
-      // the parent unmounts it. ~80ms is short enough not to feel laggy.
-      Animated.parallel([
-        Animated.timing(scaleAnim, { toValue: 0.97, duration: 80, useNativeDriver: Platform.OS !== 'web' }),
-        Animated.timing(opacityAnim, { toValue: 0, duration: 80, useNativeDriver: Platform.OS !== 'web' }),
-      ]).start();
-      if (!isDesktop) {
-        Animated.timing(slideAnim, { toValue: 400, duration: 120, useNativeDriver: Platform.OS !== 'web' }).start();
-      }
+      // There is no rendered close frame once the parent clears `agent`.
+      // Prepare stable values for the next open instead: web/desktop paints at
+      // full opacity, while a motion-enabled compact sheet begins off-screen.
+      scaleAnim.setValue(1);
+      opacityAnim.setValue(1);
+      slideAnim.setValue(reduceMotion ? 0 : 400);
     }
     return () => {
       if (rafId !== null && typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(rafId);
       if (timerId !== null) clearTimeout(timerId);
+      stopPanelAnimation();
     };
-  }, [agent, isDesktop]);
+  }, [panelOpen, isDesktop, reduceMotion, setBackdropOn, startPanelAnimation, stopPanelAnimation]);
 
   // Extract sessionKey early so hooks always run in same order
   const sessionKey = agent ? getAgentIdentityKey(agent) : undefined;
 
-  // Load or create DB agent row when panel opens
-  const ensureDbAgent = useCallback(async (): Promise<string | null> => {
-    if (dbAgentId) return dbAgentId;
-    if (!agent || !circleId) return null;
-    const { data: auth } = await supabase.auth.getUser();
-    if (!auth.user) return null;
-    // Try to find existing row
-    const { data } = await supabase
-      .from('circle_office_agents')
-      .select('id, spirit, spirit_emoji')
-      .eq('circle_id', circleId)
-      .eq('owner_id', auth.user.id)
-      .ilike('name', agent.name)
-      .maybeSingle();
-    if (data) {
-      setDbAgentId(data.id);
-      return data.id;
-    }
-    // Auto-create if missing
-    const { data: created, error } = await supabase
-      .from('circle_office_agents')
-      .upsert({
-        circle_id: circleId,
-        owner_id: auth.user.id,
-        name: agent.name,
-        provider: agent.providerType || 'claude-code',
-        status: agent.status || 'idle',
-        color: agent.color || '#6366f1',
-      }, { onConflict: 'circle_id,owner_id,name' })
-      .select('id')
-      .single();
-    if (created && !error) {
-      setDbAgentId(created.id);
-      return created.id;
-    }
-    return null;
-  }, [dbAgentId, agent, circleId]);
-
   useEffect(() => {
-    setDbAgentId(null);
-    setEditing(false);
-    setEditName('');
-  }, [agent?.id]);
+    setRenameDraft(null);
+    setRenameBusyScopeKey(null);
+    setRemoveBusyScopeKey(null);
+    setScopedActionNotice(null);
+    renameInFlightRef.current = false;
+    removeInFlightRef.current = false;
+    renameRequestGenerationRef.current += 1;
+    removeRequestGenerationRef.current += 1;
+  }, [panelScopeKey]);
 
-  useEffect(() => {
-    if (!(isOverviewTabActive || panelTab === 'memory' || panelTab === 'runs' || panelTab === 'evolution' || !!onRemoveAgent)) return;
-    ensureDbAgent();
-  }, [ensureDbAgent, isOverviewTabActive, onRemoveAgent, panelTab]);
-
-  const tabs = agent ? getAgentPanelTabs(agent) : [];
+  useEffect(() => () => {
+    latestPanelScopeKeyRef.current = 'closed';
+    renameRequestGenerationRef.current += 1;
+    removeRequestGenerationRef.current += 1;
+    renameInFlightRef.current = false;
+    removeInFlightRef.current = false;
+  }, []);
 
   if (!agent) return null;
 
-  const statusColor = getOfficeStatusColor(agent.status);
-  const statusLabel = getOfficeStatusLabel(agent.status).toUpperCase();
+  const executionTruth = resolveOfficeAgentExecutionTruth(agent);
+  const statusColor = executionTruth.state === 'warning' ? '#f59e0b' : getOfficeStatusColor(agent.status);
+  const statusLabel = executionTruth.state === 'warning' ? 'Needs refresh' : getOfficeStatusLabel(agent.status);
+  const chatAgentId = dbAgentId || agent.id;
+  const openAgentInChat = onOpenAgentInChat && chatAgentTargetIdFromOfficeAgentId(chatAgentId)
+    ? (draft?: string) => onOpenAgentInChat(chatAgentId, draft)
+    : undefined;
+  const runtimeIdentityAuthority = exactIdentityAuthority;
   const currentTags = sessionTags?.get(sessionKey!) || [];
-  const canRemoveAgent = !!onRemoveAgent && !!dbAgentId && agent.id !== 'default::blackswan';
+  const canRemoveAgent = !!onRemoveAgent
+    && !!exactIdentityAuthority
+    && !!dbAgentId
+    && agent.id !== 'default::blackswan'
+    && agent.id !== 'blackswan-default'
+    && agent.providerType !== 'blackswan-local';
 
   return (
     <AgentPanelShell
       agent={agent}
       isDesktop={!!isDesktop}
-      panelMode={panelMode}
+      panelMode={effectivePanelMode}
       panelGeometry={panelGeometry}
       scaleAnim={scaleAnim}
       opacityAnim={opacityAnim}
       slideAnim={slideAnim}
+      reduceMotion={reduceMotion}
       backdropOpacity={backdropOpacity}
       panelTransition={panelTransition}
       statusColor={statusColor}
@@ -355,61 +781,209 @@ export default function AgentPanel({
       editName={editName}
       setEditName={setEditName}
       onStartRename={() => {
-        if (!onRenameAgent) return;
-        setEditName(agent.name);
-        setEditing(true);
+        if (!onRenameAgent || !exactIdentityAuthority || renameInFlightRef.current) return;
+        setScopedActionNotice(null);
+        setRenameDraft({ scopeKey: panelScopeKey, name: agent.name });
       }}
-      onSubmitRename={() => {
-        if (editName.trim() && onRenameAgent) onRenameAgent(agent, editName.trim());
-        setEditing(false);
+      onSubmitRename={async () => {
+        const normalizedName = editName.trim();
+        const capturedAuthority = exactIdentityAuthority;
+        const capturedScopeKey = panelScopeKey;
+        if (
+          !normalizedName
+          || !onRenameAgent
+          || !capturedAuthority
+          || renameInFlightRef.current
+          || !isExactIdentityAuthorityCurrent(capturedAuthority)
+        ) return;
+        renameInFlightRef.current = true;
+        const requestGeneration = renameRequestGenerationRef.current + 1;
+        renameRequestGenerationRef.current = requestGeneration;
+        setRenameBusyScopeKey(capturedScopeKey);
+        setScopedActionNotice(null);
+        try {
+          const receipt = await onRenameAgent(agent, normalizedName);
+          if (
+            latestPanelScopeKeyRef.current !== capturedScopeKey
+            || renameRequestGenerationRef.current !== requestGeneration
+            || !isExactIdentityAuthorityCurrent(capturedAuthority)
+          ) return;
+          if (receipt.error === 'outcome_unknown' || receipt.serverSaved === null) {
+            setRenameDraft(null);
+            setScopedActionNotice({
+              scopeKey: capturedScopeKey,
+              kind: 'warning',
+              message: 'Agent-name outcome could not be verified. Reload this agent before retrying the rename.',
+              actionLabel: 'Reload identity',
+              onAction: reloadIdentityForNotice,
+            });
+            return;
+          }
+          if (receipt.serverSaved === true && !receipt.localSaved) {
+            setRenameDraft(null);
+            setScopedActionNotice({
+              scopeKey: capturedScopeKey,
+              kind: 'warning',
+              message: 'Agent name was saved on the server, but this view could not refresh. Reload the identity; do not save the name again.',
+              actionLabel: 'Reload identity',
+              onAction: reloadIdentityForNotice,
+            });
+            return;
+          }
+          if (!receipt.ok || !receipt.localSaved || receipt.serverSaved !== true) {
+            setScopedActionNotice({
+              scopeKey: capturedScopeKey,
+              kind: 'error',
+              message: 'Agent name was not saved. Try again.',
+            });
+            return;
+          }
+          setRenameDraft(null);
+          setScopedActionNotice({
+            scopeKey: capturedScopeKey,
+            kind: 'success',
+            message: 'Agent name saved.',
+          });
+        } catch (err) {
+          console.warn('[AgentPanel] Rename failed:', err);
+          if (
+            latestPanelScopeKeyRef.current === capturedScopeKey
+            && renameRequestGenerationRef.current === requestGeneration
+            && isExactIdentityAuthorityCurrent(capturedAuthority)
+          ) {
+            setScopedActionNotice({
+              scopeKey: capturedScopeKey,
+              kind: 'error',
+              message: 'Agent name was not saved. Try again.',
+            });
+          }
+        } finally {
+          if (renameRequestGenerationRef.current === requestGeneration) {
+            renameInFlightRef.current = false;
+            if (latestPanelScopeKeyRef.current === capturedScopeKey) setRenameBusyScopeKey(null);
+          }
+        }
       }}
-      onCancelRename={() => setEditing(false)}
+      onCancelRename={() => {
+        if (renameInFlightRef.current) return;
+        setRenameDraft(null);
+      }}
+      canRenameAgent={!!onRenameAgent && !!exactIdentityAuthority}
+      renameBusy={renameBusy}
+      actionNotice={actionNotice}
       onClose={onClose}
       onToggleMode={toggleMode}
       onStartSideResize={startSideResize}
+      onResizeSideBy={resizeSideBy}
       canRemoveAgent={canRemoveAgent}
       removingAgent={removingAgent}
       onRemoveAgent={async () => {
-        if (removingAgent || !onRemoveAgent) return;
-        setRemovingAgent(true);
+        const capturedAuthority = exactIdentityAuthority;
+        const capturedScopeKey = panelScopeKey;
+        if (
+          removeInFlightRef.current
+          || !onRemoveAgent
+          || !capturedAuthority
+          || !isExactIdentityAuthorityCurrent(capturedAuthority)
+        ) return;
+        removeInFlightRef.current = true;
+        const requestGeneration = removeRequestGenerationRef.current + 1;
+        removeRequestGenerationRef.current = requestGeneration;
         try {
-          await onRemoveAgent(agent);
+          const confirmed = await showConfirm({
+            title: `Remove ${agent.name} from this Office?`,
+            message: 'This removes the published Office agent. It does not stop a local runtime or delete its files.',
+            confirmLabel: 'Remove agent',
+            destructive: true,
+          });
+          if (
+            !confirmed
+            || latestPanelScopeKeyRef.current !== capturedScopeKey
+            || removeRequestGenerationRef.current !== requestGeneration
+            || !isExactIdentityAuthorityCurrent(capturedAuthority)
+          ) return;
+          setRemoveBusyScopeKey(capturedScopeKey);
+          setScopedActionNotice(null);
+          const removed = await onRemoveAgent(agent);
+          if (
+            latestPanelScopeKeyRef.current !== capturedScopeKey
+            || removeRequestGenerationRef.current !== requestGeneration
+            || !isExactIdentityAuthorityCurrent(capturedAuthority)
+          ) return;
+          if (removed !== true) {
+            setScopedActionNotice({
+              scopeKey: capturedScopeKey,
+              kind: 'error',
+              message: 'Agent could not be removed. Try again.',
+            });
+            return;
+          }
+          onClose();
+        } catch (err) {
+          console.warn('[AgentPanel] Agent removal failed:', err);
+          if (
+            latestPanelScopeKeyRef.current === capturedScopeKey
+            && removeRequestGenerationRef.current === requestGeneration
+            && isExactIdentityAuthorityCurrent(capturedAuthority)
+          ) {
+            setScopedActionNotice({
+              scopeKey: capturedScopeKey,
+              kind: 'error',
+              message: 'Agent could not be removed. Try again.',
+            });
+          }
         } finally {
-          setRemovingAgent(false);
+          if (removeRequestGenerationRef.current === requestGeneration) {
+            removeInFlightRef.current = false;
+            if (latestPanelScopeKeyRef.current === capturedScopeKey) setRemoveBusyScopeKey(null);
+          }
         }
       }}
       tabs={tabs}
+      tabGroups={tabGroups}
       panelTab={panelTab}
       setPanelTab={setPanelTab}
+      contentKey={contentKey}
     >
 
       {/* ── OVERVIEW TAB — one-stop agent command center ── */}
       {panelTab === 'overview' && (
         <AgentOverviewPanel
+          key={panelScopeKey}
           agent={agent}
           circleId={circleId}
-          userId={userId}
-          statusColor={statusColor}
-          statusLabel={statusLabel}
+          runtimeConnectionId={runtimeConnectionId}
+          identityAuthority={exactIdentityAuthority}
+          isIdentityAuthorityCurrent={isExactIdentityAuthorityCurrent}
           onClose={onClose}
-          onRenameAgent={onRenameAgent}
           onAgentIdentityChange={onAgentIdentityChange}
           onRunCommand={onRunCommand}
+          onOpenInChat={openAgentInChat}
         />
       )}
 
-      {panelTab === 'openswan' && (agent.providerType === 'openswan' || agent.providerType === 'blackswan-local') && (
+      {panelTab === 'openswan' && runtimeConnectionId && runtimeConnectionSnapshot && isRuntimeConnectionSnapshotCurrent && (agent.providerType === 'openswan' || agent.providerType === 'blackswan-local') && (
         gatewayPanelsModule?.OpenSwanFrontendPanel ? (
           <gatewayPanelsModule.OpenSwanFrontendPanel
+            key={`${runtimeConnectionScopeKey}::${agent.sessionKey}`}
             agent={agent}
             accentColor={agent.color || '#6366f1'}
             circleId={circleId}
             userId={userId || undefined}
+            runtimeConnectionId={runtimeConnectionId}
+            runtimeConnectionSnapshot={runtimeConnectionSnapshot}
+            isRuntimeConnectionSnapshotCurrent={isRuntimeConnectionSnapshotCurrent}
+            identityAuthority={runtimeIdentityAuthority}
+            isIdentityAuthorityCurrent={isExactIdentityAuthorityCurrent}
+            onOpenInChat={openAgentInChat}
           />
         ) : (
-          <View style={{ paddingHorizontal: 12, paddingVertical: 24, alignItems: 'center' }}>
-            <ActivityIndicator size="small" color={agent.color || '#6366f1'} />
-          </View>
+          <LazySectionState
+            label="OpenSwan runtime"
+            status={gatewayPanels.status === 'ready' ? 'error' : gatewayPanels.status}
+            accentColor={agent.color || '#6366f1'}
+            onRetry={gatewayPanels.retry}
+          />
         )
       )}
 
@@ -418,29 +992,35 @@ export default function AgentPanel({
         <>
           {terminalPanelsModule?.AgentTerminalProfilePanel && (
             <terminalPanelsModule.AgentTerminalProfilePanel
+              key={`${exactIdentityAuthority?.userId || 'locked'}::${exactIdentityAuthority?.circleId || circleId || 'none'}::${agent.id}`}
               agent={agent}
               circleId={circleId}
-              userId={userId}
-              onRenameAgent={onRenameAgent}
+              identityAuthority={exactIdentityAuthority}
+              isIdentityAuthorityCurrent={isExactIdentityAuthorityCurrent}
               onIdentityChange={onAgentIdentityChange}
+              onOpenInChat={openAgentInChat}
             />
           )}
-          {onRunCommand && terminalPanelsModule?.AgentRemoteShell && (
+          {agent.providerType === 'claude-code' && onRunCommand && terminalPanelsModule?.AgentRemoteShell && (
             <terminalPanelsModule.AgentRemoteShell onRunCommand={onRunCommand} />
           )}
           {circleId && terminalPanelsModule?.AgentQuickTerminal && (
             <terminalPanelsModule.AgentQuickTerminal
+              key={`${exactIdentityAuthority?.userId || 'locked'}::${exactIdentityAuthority?.circleId || circleId}::${agent.id}::${agent.sessionKey}`}
               agentName={agent.name}
-              agentId={agent.id}
               circleId={circleId}
-              providerType={agent.providerType}
-              sessionKey={agent.sessionKey}
+              identityAuthority={exactIdentityAuthority}
+              isIdentityAuthorityCurrent={isExactIdentityAuthorityCurrent}
+              onOpenInChat={openAgentInChat}
             />
           )}
           {!terminalPanelsModule && (
-            <View style={{ paddingHorizontal: 12, paddingVertical: 24, alignItems: 'center' }}>
-              <ActivityIndicator size="small" color={agent.color || '#6366f1'} />
-            </View>
+            <LazySectionState
+              label="Terminal"
+              status={terminalPanels.status}
+              accentColor={agent.color || '#6366f1'}
+              onRetry={terminalPanels.retry}
+            />
           )}
         </>
       )}
@@ -449,16 +1029,24 @@ export default function AgentPanel({
       {panelTab === 'evolution' && (
         evolutionPanelModule?.default ? (
           <evolutionPanelModule.default
+            key={panelScopeKey}
             agentId={dbAgentId || agent.id}
+            agentAliases={agentSubject?.runAgentAliases || [agent.id]}
             agentName={agent.name}
             accentColor={agent.color || '#6366f1'}
             circleId={circleId}
             userId={userId}
+            spirit={agent.spirit || undefined}
+            identityAuthority={runtimeIdentityAuthority}
+            isIdentityAuthorityCurrent={isExactIdentityAuthorityCurrent}
           />
         ) : (
-          <View style={{ paddingHorizontal: 12, paddingVertical: 24, alignItems: 'center' }}>
-            <ActivityIndicator size="small" color={agent.color || '#6366f1'} />
-          </View>
+          <LazySectionState
+            label="XP and achievements"
+            status={evolutionPanel.status === 'ready' ? 'error' : evolutionPanel.status}
+            accentColor={agent.color || '#6366f1'}
+            onRetry={evolutionPanel.retry}
+          />
         )
       )}
 
@@ -466,6 +1054,7 @@ export default function AgentPanel({
       {panelTab === 'spirit' && (
         spiritPanelModule?.default ? (
           <spiritPanelModule.default
+            key={`${exactIdentityAuthority?.userId || 'locked'}::${exactIdentityAuthority?.circleId || circleId || 'none'}::${agent.id}`}
             agent={agent}
             circleId={circleId}
             sessionKey={sessionKey}
@@ -473,61 +1062,93 @@ export default function AgentPanel({
             currentTags={currentTags}
             onAddSessionTag={onAddSessionTag}
             onRemoveSessionTag={onRemoveSessionTag}
+            sessionStorageScope={sessionStorageScope}
+            identityAuthority={exactIdentityAuthority}
+            isIdentityAuthorityCurrent={isExactIdentityAuthorityCurrent}
+            onOpenInChat={openAgentInChat}
           />
         ) : (
-          <View style={{ paddingHorizontal: 12, paddingVertical: 24, alignItems: 'center' }}>
-            <ActivityIndicator size="small" color={agent.color || '#6366f1'} />
-          </View>
+          <LazySectionState
+            label="Spirit"
+            status={spiritPanel.status === 'ready' ? 'error' : spiritPanel.status}
+            accentColor={agent.color || '#6366f1'}
+            onRetry={spiritPanel.retry}
+          />
         )
       )}
       {/* ── MEMORY TAB — view and edit agent memories ── */}
       {panelTab === 'memory' && circleId && (
-        <View nativeID="section-agent-memory" style={{ paddingHorizontal: 8, paddingBottom: 12 }}>
+        <View nativeID="section-agent-memory" style={{ paddingBottom: 12 }}>
           {memoryPanelModule?.default ? (
             <memoryPanelModule.default
+              key={panelScopeKey}
               circleId={circleId}
               userId={userId || undefined}
               agentId={agentSubject?.memoryAgentId || agent.id}
               agentAliases={agentSubject?.memoryAgentAliases || [agent.id]}
               agentName={agent.name}
               accentColor={agent.color || '#6366f1'}
+              identityAuthority={exactIdentityAuthority}
+              isIdentityAuthorityCurrent={isExactIdentityAuthorityCurrent}
+              onOpenInChat={openAgentInChat}
             />
           ) : (
-            <View style={{ paddingVertical: 24, alignItems: 'center' }}>
-              <ActivityIndicator size="small" color={agent.color || '#6366f1'} />
-            </View>
+            <LazySectionState
+              label="Memory"
+              status={memoryPanel.status === 'ready' ? 'error' : memoryPanel.status}
+              accentColor={agent.color || '#6366f1'}
+              onRetry={memoryPanel.retry}
+            />
           )}
         </View>
       )}
 
       {/* ── RUNS TAB — recent agent runs and their status ── */}
       {panelTab === 'runs' && circleId && (
-        <View nativeID="section-agent-runs" style={{ paddingHorizontal: 8, paddingBottom: 12 }}>
+        <View nativeID="section-agent-runs" style={{ paddingBottom: 12 }}>
           {runsPanelModule?.default ? (
             <runsPanelModule.default
+              key={panelScopeKey}
               circleId={circleId}
               agentId={agentSubject?.runAgentId || agent.id}
               agentAliases={agentSubject?.runAgentAliases || [agent.id]}
               agentName={agent.name}
               accentColor={agent.color || '#6366f1'}
+              identityAuthority={runtimeIdentityAuthority}
+              isIdentityAuthorityCurrent={isExactIdentityAuthorityCurrent}
             />
           ) : (
-            <View style={{ paddingVertical: 24, alignItems: 'center' }}>
-              <ActivityIndicator size="small" color={agent.color || '#6366f1'} />
-            </View>
+            <LazySectionState
+              label="Runs"
+              status={runsPanel.status === 'ready' ? 'error' : runsPanel.status}
+              accentColor={agent.color || '#6366f1'}
+              onRetry={runsPanel.retry}
+            />
           )}
         </View>
       )}
 
       {/* ── CRON JOBS TAB ── */}
-      {panelTab === 'cron' && circleId && (
-        <View nativeID="section-agent-cron" style={{ paddingHorizontal: 8, paddingBottom: 12 }}>
+      {panelTab === 'cron' && circleId && runtimeConnectionId && runtimeConnectionSnapshot && isRuntimeConnectionSnapshotCurrent && (
+        <View nativeID="section-agent-cron" style={{ paddingBottom: 12 }}>
           {gatewayPanelsModule?.CronJobsPanel ? (
-            <gatewayPanelsModule.CronJobsPanel agent={agent} circleId={circleId} accentColor={agent.color || '#6366f1'} />
+            <gatewayPanelsModule.CronJobsPanel
+              agent={agent}
+              circleId={circleId}
+              accentColor={agent.color || '#6366f1'}
+              runtimeConnectionId={runtimeConnectionId}
+              runtimeConnectionSnapshot={runtimeConnectionSnapshot}
+              isRuntimeConnectionSnapshotCurrent={isRuntimeConnectionSnapshotCurrent}
+              identityAuthority={runtimeIdentityAuthority}
+              isIdentityAuthorityCurrent={isExactIdentityAuthorityCurrent}
+            />
           ) : (
-            <View style={{ paddingVertical: 24, alignItems: 'center' }}>
-              <ActivityIndicator size="small" color={agent.color || '#6366f1'} />
-            </View>
+            <LazySectionState
+              label="Cron jobs"
+              status={gatewayPanels.status === 'ready' ? 'error' : gatewayPanels.status}
+              accentColor={agent.color || '#6366f1'}
+              onRetry={gatewayPanels.retry}
+            />
           )}
         </View>
       )}
@@ -540,15 +1161,21 @@ export default function AgentPanel({
       {panelTab === 'customize' && onAppearanceChange && (
         customizePanelModule?.default ? (
           <customizePanelModule.default
+            key={panelScopeKey}
             agent={agent}
             appearances={appearances}
             onAppearanceChange={onAppearanceChange}
+            onIdentityRefresh={onAgentIdentityChange}
             environmentType={environmentType}
+            reduceMotion={reduceMotion}
           />
         ) : (
-          <View style={{ paddingHorizontal: 12, paddingVertical: 24, alignItems: 'center' }}>
-            <ActivityIndicator size="small" color={agent.color || '#6366f1'} />
-          </View>
+          <LazySectionState
+            label="Customize"
+            status={customizePanel.status === 'ready' ? 'error' : customizePanel.status}
+            accentColor={agent.color || '#6366f1'}
+            onRetry={customizePanel.retry}
+          />
         )
       )}
 

@@ -35,6 +35,26 @@ assert(photoshopRoute.evidenceContract.proofAfter.some((item) => /Photoshop docu
 assert(photoshopRoute.evidenceContract.sourceRefs.some((ref) => ref.url.includes('/photoshop/uxp/scripting/')), 'Photoshop contract cites UXP scripting');
 assert(photoshopRoute.evidenceContract.sourceRefs.some((ref) => ref.url.includes('/executeasmodal/')), 'Photoshop contract cites executeAsModal');
 
+const multiActionIllustratorRoute = buildChatComputerRequestRoute(
+  'Open Adobe Illustrator 2026, create a new document, add a blue circle, and export it as PNG',
+);
+assert(multiActionIllustratorRoute?.requestedActionContract, 'multi-action Illustrator route carries requested-action accounting');
+assert.deepEqual(
+  multiActionIllustratorRoute.requestedActionContract.actions.map((action) => action.id),
+  ['A1', 'A2', 'A3', 'A4'],
+  'multi-action Illustrator route retains every requested action ID',
+);
+for (const action of multiActionIllustratorRoute.requestedActionContract.actions) {
+  assert(
+    multiActionIllustratorRoute.evidenceContract?.proofAfter.some((proof) => proof.startsWith(`${action.id} independently verified`)),
+    `${action.id} receives an independent proof requirement`,
+  );
+}
+assert(
+  multiActionIllustratorRoute.evidenceContract?.failClosedRules.some((rule) => /whole task non-complete/i.test(rule)),
+  'missing proof for one requested action keeps the whole task non-complete',
+);
+
 const exactBlankDocumentRoute = buildChatComputerRequestRoute('Open Photoshop and start a new project 600 x 600');
 assert(exactBlankDocumentRoute?.evidenceContract, 'exact blank-document route carries an evidence contract');
 assert.equal(exactBlankDocumentRoute.evidenceContract.taskFamily, 'from-scratch 600x600 blank-document creation');

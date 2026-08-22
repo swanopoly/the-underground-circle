@@ -8,9 +8,10 @@
 
 import React, { useEffect, useState } from "react";
 import { View, Text, Modal, Pressable, StyleSheet, Platform, Image } from "react-native";
-import { supabase } from "../lib/supabase";
+import { loadSafeCircleProfiles } from "../lib/safeProfiles";
 
 interface Props {
+  circleId: string;
   userId: string | null;
   onClose: () => void;
 }
@@ -25,7 +26,7 @@ interface ProfileRow {
   longest_streak: number | null;
 }
 
-export default function MemberCardModal({ userId, onClose }: Props) {
+export default function MemberCardModal({ circleId, userId, onClose }: Props) {
   const [profile, setProfile] = useState<ProfileRow | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -34,21 +35,17 @@ export default function MemberCardModal({ userId, onClose }: Props) {
     if (!userId) { setProfile(null); return; }
     setLoading(true);
     setProfile(null);
-    supabase
-      .from("profiles")
-      .select("id, username, display_name, avatar_url, bio, current_streak, longest_streak")
-      .eq("id", userId)
-      .single()
-      .then(({ data }) => {
+    loadSafeCircleProfiles({ circleId, userIds: [userId] })
+      .then(([data]) => {
         if (cancelled) return;
-        setProfile(data as ProfileRow);
+        setProfile((data as ProfileRow | undefined) || null);
         setLoading(false);
       }, () => {
         if (cancelled) return;
         setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [userId]);
+  }, [circleId, userId]);
 
   if (!userId) return null;
   const initials = ((profile?.display_name || profile?.username || "?")

@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const { exec, execSync } = require('child_process');
+const { exec, execSync, execFileSync } = require('child_process');
 const {
   appendOpenSwanWorktreeConfigPrompt,
   clampLaunchCount,
@@ -36,9 +36,11 @@ const {
   shellTextArg,
 } = require('./terminal-launch-utils');
 const {
+  buildBridgeCorsHeaders,
   createPairingChallengeStore,
   isBridgeRequestSourceAllowed,
   isPairingRequestSourceAllowed,
+  timingSafeTokenEqual,
 } = require('./desktop-bridge-security');
 
 const PORT = Math.max(1024, Math.min(65535, Number(process.env.UC_GEMINI_BRIDGE_PORT) || 7780));
@@ -53,13 +55,21 @@ const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 // Gemini CLI's OAuth client ID (public, embedded in the CLI)
 const GEMINI_CLI_CLIENT_ID = '681255809395-oo8ft2oprdrp9e3aqf6av3hmdib135j.apps.googleusercontent.com';
 
-const CORS = {
-  'Access-Control-Allow-Origin': '*',
+// Base headers only. `Access-Control-Allow-Origin` and the Private Network
+// Access grant are added per request by buildBridgeCorsHeaders, and ONLY for an
+// allow-listed origin — a static `*` plus a static PNA grant let any website
+// the user visits read this bridge's responses.
+const CORS_BASE = {
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, X-UC-Desktop-Token, X-UC-File-Session-Token',
-  'Access-Control-Allow-Private-Network': 'true',
   'Content-Type': 'application/json',
 };
+
+/** Per-response CORS headers, stamped on the response at handler entry.
+ *  Falls back to a header set with no ACAO, so a missed stamp fails closed. */
+function corsFor(res) {
+  return (res && res.__ucCors) || { ...CORS_BASE, Vary: 'Origin' };
+}
 
 let cachedSessions = [];
 let lastScanTime = '';
@@ -82,13 +92,13 @@ function getOrCreateBridgeToken() {
 
 function hasBridgeAuth(req) {
   const sent = req.headers['x-uc-desktop-token'];
-  return typeof sent === 'string' && sent === getOrCreateBridgeToken();
+  return timingSafeTokenEqual(sent, getOrCreateBridgeToken());
 }
 
 function requireBridgeMutationAuth(req, res) {
-  const sourceCheck = isBridgeRequestSourceAllowed(req, PORT, isAllowedPairOrigin);
+  // Same guard result computed once at handler entry (see `/health` above).
   if (!sourceCheck.ok) {
-    res.writeHead(403, CORS);
+    res.writeHead(403, corsFor(res));
     res.end(JSON.stringify({
       ok: false,
       code: sourceCheck.code,
@@ -97,7 +107,7 @@ function requireBridgeMutationAuth(req, res) {
     return false;
   }
   if (!hasBridgeAuth(req)) {
-    res.writeHead(401, CORS);
+    res.writeHead(401, corsFor(res));
     res.end(JSON.stringify({
       ok: false,
       code: 'bridge_auth_required',
@@ -324,6 +334,15 @@ function safeExec(cmd) {
   } catch { return ''; }
 }
 
+/** argv form of safeExec — no shell, so an argument can never be interpreted
+ *  as a command. Use this whenever any part of the argument list is derived
+ *  from process listings, filesystem contents, or a request. */
+function safeExecFile(binary, args) {
+  try {
+    return execFileSync(binary, args, { timeout: 10000, maxBuffer: 512 * 1024, encoding: 'utf-8' }).trim();
+  } catch { return ''; }
+}
+
 // ── Scan for Gemini CLI sessions ─────────────────────────────────────────────
 // Gemini CLI stores sessions at: .gemini/tmp/{project}/chats/session-*.json
 
@@ -371,7 +390,14 @@ function scanSessions() {
       ) {
         const parts = line.split(/\s+/);
         const pid = parts[1];
-        const cwd = safeExec(`readlink /proc/${pid}/cwd 2>/dev/null`) || '';
+        // `pid` comes from splitting a `ps aux` line. On Linux (this bridge's
+        // WSL/Linux path, where /proc exists) ps does NOT escape newlines in a
+        // process's own argv, so a hostile local process can emit a second
+        // physical line whose field 2 is attacker-controlled and land it in
+        // this shell command — with no HTTP request at all, since doScan()
+        // runs on a 5-second timer. Refuse anything that is not a plain PID.
+        if (!/^\d{1,10}$/.test(String(pid || ''))) continue;
+        const cwd = safeExecFile('readlink', [`/proc/${pid}/cwd`]) || '';
 
         // Check if we already have a session for this working directory
         const hasSession = sessions.find(s =>
@@ -624,13 +650,9 @@ async function launchGeminiCliSessions(data) {
 }
 
 function findLaunchedGeminiSession(sessionId) {
-  const key = String(sessionId || '').trim().toLowerCase();
-  if (!key) return null;
-  return cachedSessions.find((s) =>
-    String(s.sessionId || '').toLowerCase() === key
-    || String(s.displayName || '').toLowerCase() === key
-    || String(s.sessionId || '').toLowerCase().startsWith(key)
-  ) || null;
+  if (typeof sessionId !== 'string' || !sessionId) return null;
+  const matches = cachedSessions.filter((session) => session.sessionId === sessionId);
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function buildGeminiFollowupPrompt(message) {
@@ -642,8 +664,8 @@ function buildGeminiFollowupPrompt(message) {
 }
 
 async function sendToLaunchedGeminiSession(data) {
-  const session = findLaunchedGeminiSession(data.sessionId || data.target || data.displayName);
-  if (!session) return { ok: false, error: 'Gemini CLI session not found.' };
+  const session = findLaunchedGeminiSession(data.sessionId);
+  if (!session) return { ok: false, error: 'An exact Gemini CLI session id is required.' };
   if (!session.terminalTitle) {
     return {
       ok: false,
@@ -699,16 +721,34 @@ setInterval(doScan, SCAN_INTERVAL);
 // ── HTTP server ─────────────────────────────────────────────────────────────
 
 const server = http.createServer(async (req, res) => {
+  // Stamp the response with origin-scoped CORS headers before any route runs,
+  // so every writer below (including error paths) inherits them.
+  res.__ucCors = buildBridgeCorsHeaders(req, isAllowedPairOrigin, CORS_BASE);
+
   if (req.method === 'OPTIONS') {
-    res.writeHead(200, CORS);
+    res.writeHead(200, corsFor(res));
     res.end();
     return;
   }
 
   const url = req.url.split('?')[0];
 
+  // `/health` ran ahead of the source guard, so any website could read the
+  // bridge name, version, capability list, and live session count. It is
+  // unauthenticated by design (the app probes for bridge presence before
+  // pairing) but it is not public.
+  const sourceCheck = isBridgeRequestSourceAllowed(req, PORT, isAllowedPairOrigin);
   if (url === '/health') {
-    res.writeHead(200, CORS);
+    if (!sourceCheck.ok) {
+      res.writeHead(403, corsFor(res));
+      res.end(JSON.stringify({
+        ok: false,
+        code: sourceCheck.code,
+        error: 'Bridge access is available only through an allowed loopback request.',
+      }));
+      return;
+    }
+    res.writeHead(200, corsFor(res));
     res.end(JSON.stringify({
       ok: true,
       agent: 'gemini-cli',
@@ -723,7 +763,7 @@ const server = http.createServer(async (req, res) => {
   if (url === '/pair' && req.method === 'POST') {
     const sourceCheck = isPairingRequestSourceAllowed(req, PORT, isAllowedPairOrigin);
     if (!sourceCheck.ok) {
-      res.writeHead(403, CORS);
+      res.writeHead(403, corsFor(res));
       res.end(JSON.stringify({
         ok: false,
         code: sourceCheck.code,
@@ -735,7 +775,7 @@ const server = http.createServer(async (req, res) => {
     try {
       pairInput = await readJsonBody(req, 2048);
     } catch (err) {
-      res.writeHead(400, CORS);
+      res.writeHead(400, corsFor(res));
       res.end(JSON.stringify({
         ok: false,
         code: 'pairing_body_invalid',
@@ -746,7 +786,7 @@ const server = http.createServer(async (req, res) => {
     const pairingChallenge = String(pairInput?.pairingChallenge || '').trim();
     if (!pairingChallenge) {
       const issued = pairingChallenges.issue(req.socket.remoteAddress);
-      res.writeHead(428, CORS);
+      res.writeHead(428, corsFor(res));
       res.end(JSON.stringify({
         ok: false,
         code: 'pairing_challenge_required',
@@ -757,7 +797,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (!pairingChallenges.consume(pairingChallenge, req.socket.remoteAddress)) {
-      res.writeHead(403, CORS);
+      res.writeHead(403, corsFor(res));
       res.end(JSON.stringify({
         ok: false,
         code: 'pairing_challenge_invalid',
@@ -765,14 +805,14 @@ const server = http.createServer(async (req, res) => {
       }));
       return;
     }
-    res.writeHead(200, CORS);
+    res.writeHead(200, corsFor(res));
     res.end(JSON.stringify({ ok: true, token: getOrCreateBridgeToken(), bridge: 'gemini-cli' }));
     return;
   }
 
-  const sourceCheck = isBridgeRequestSourceAllowed(req, PORT, isAllowedPairOrigin);
+  // Same guard result computed once at handler entry (see `/health` above).
   if (!sourceCheck.ok) {
-    res.writeHead(403, CORS);
+    res.writeHead(403, corsFor(res));
     res.end(JSON.stringify({
       ok: false,
       code: sourceCheck.code,
@@ -783,18 +823,18 @@ const server = http.createServer(async (req, res) => {
 
   if (url === '/sessions') {
     if (!hasBridgeAuth(req)) {
-      res.writeHead(401, CORS);
+      res.writeHead(401, corsFor(res));
       res.end(JSON.stringify({ ok: false, error: 'Missing or invalid desktop bridge token' }));
       return;
     }
-    res.writeHead(200, CORS);
+    res.writeHead(200, corsFor(res));
     res.end(JSON.stringify({ sessions: cachedSessions, timestamp: lastScanTime }));
     return;
   }
 
   if (url === '/launch' && req.method === 'POST') {
     if (!hasBridgeAuth(req)) {
-      res.writeHead(401, CORS);
+      res.writeHead(401, corsFor(res));
       res.end(JSON.stringify({ ok: false, error: 'Missing or invalid desktop bridge token' }));
       return;
     }
@@ -802,10 +842,10 @@ const server = http.createServer(async (req, res) => {
       const data = await readJsonBody(req);
       const result = await launchGeminiCliSessions(data);
       doScan();
-      res.writeHead(result.ok ? 200 : 207, CORS);
+      res.writeHead(result.ok ? 200 : 207, corsFor(res));
       res.end(JSON.stringify(result));
     } catch (e) {
-      res.writeHead(400, CORS);
+      res.writeHead(400, corsFor(res));
       res.end(JSON.stringify({ ok: false, error: e.message || 'Launch failed' }));
     }
     return;
@@ -813,17 +853,17 @@ const server = http.createServer(async (req, res) => {
 
   if (url === '/terminal/send' && req.method === 'POST') {
     if (!hasBridgeAuth(req)) {
-      res.writeHead(401, CORS);
+      res.writeHead(401, corsFor(res));
       res.end(JSON.stringify({ ok: false, error: 'Missing or invalid desktop bridge token' }));
       return;
     }
     try {
       const data = await readJsonBody(req);
       const result = await sendToLaunchedGeminiSession(data);
-      res.writeHead(result.ok ? 200 : 409, CORS);
+      res.writeHead(result.ok ? 200 : 409, corsFor(res));
       res.end(JSON.stringify(result));
     } catch (e) {
-      res.writeHead(400, CORS);
+      res.writeHead(400, corsFor(res));
       res.end(JSON.stringify({ ok: false, error: e.message || 'Send failed' }));
     }
     return;
@@ -832,13 +872,13 @@ const server = http.createServer(async (req, res) => {
   // ── GET /auth — Check OAuth status ─────────────────────────────────────────
   if (url === '/auth' && req.method === 'GET') {
     if (!hasBridgeAuth(req)) {
-      res.writeHead(401, CORS);
+      res.writeHead(401, corsFor(res));
       res.end(JSON.stringify({ ok: false, error: 'Missing or invalid desktop bridge token' }));
       return;
     }
     loadOAuthCreds(); // Reload from disk
     userEmail = loadUserEmail();
-    res.writeHead(200, CORS);
+    res.writeHead(200, corsFor(res));
     res.end(JSON.stringify({
       authenticated: !!oauthCreds?.access_token,
       email: userEmail,
@@ -856,7 +896,7 @@ const server = http.createServer(async (req, res) => {
     req.on('data', chunk => {
       body += chunk;
       if (body.length > 32768) {
-        res.writeHead(413, CORS);
+        res.writeHead(413, corsFor(res));
         res.end(JSON.stringify({ ok: false, error: 'Request body too large' }));
         req.destroy();
       }
@@ -864,14 +904,14 @@ const server = http.createServer(async (req, res) => {
     req.on('end', async () => {
       let parsed;
       try { parsed = JSON.parse(body); } catch {
-        res.writeHead(400, CORS);
+        res.writeHead(400, corsFor(res));
         res.end(JSON.stringify({ ok: false, error: 'Invalid JSON body' }));
         return;
       }
 
       const { command, model } = parsed;
       if (!command || typeof command !== 'string') {
-        res.writeHead(400, CORS);
+        res.writeHead(400, corsFor(res));
         res.end(JSON.stringify({ ok: false, error: 'Missing "command" field' }));
         return;
       }
@@ -882,7 +922,7 @@ const server = http.createServer(async (req, res) => {
       try {
         const result = await callGeminiAPI(command, model || 'gemini-2.5-flash');
         doScan();
-        res.writeHead(200, CORS);
+        res.writeHead(200, corsFor(res));
         res.end(JSON.stringify({
           ok: true,
           response: result.response,
@@ -907,12 +947,12 @@ const server = http.createServer(async (req, res) => {
           const response = (stdout || '').trim() || (stderr || '').trim() || '';
 
           if (err && !response) {
-            res.writeHead(200, CORS);
+            res.writeHead(200, corsFor(res));
             res.end(JSON.stringify({ ok: false, error: err.message || 'Gemini CLI failed' }));
             return;
           }
 
-          res.writeHead(200, CORS);
+          res.writeHead(200, corsFor(res));
           res.end(JSON.stringify({
             ok: true,
             response,
@@ -924,7 +964,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  res.writeHead(404, CORS);
+  res.writeHead(404, corsFor(res));
   res.end(JSON.stringify({ error: 'Not found. Use /health, /sessions, /auth, /launch, /terminal/send, or /send' }));
 });
 

@@ -37,6 +37,9 @@ function assert(label: string, cond: boolean): void {
 interface DelegateCall {
   model?: string;
   subagentRole: string;
+  spiritId?: string;
+  skillBundleId?: string;
+  systemPrompt: string;
   message: string;
   surface: string;
   hasParentRunId: boolean;
@@ -61,6 +64,9 @@ function makeDelegateMock(opts?: {
     calls.push({
       model: o.model,
       subagentRole: o.subagent?.role,
+      spiritId: o.subagent?.spiritId,
+      skillBundleId: o.subagent?.skillBundleId,
+      systemPrompt: o.subagent?.systemPrompt || '',
       message: o.message,
       surface: o.surface,
       // The orchestrator must NOT chain mass-deploy children off a parent run
@@ -204,6 +210,7 @@ console.log('per-agent model passthrough');
     mode: 'individual',
     count: 3,
     perAgentModels: ['claude-opus-4-8', 'claude-sonnet-4-6', 'gpt-5.5'],
+    perAgentRoles: ['researcher', 'designer', 'security'],
   });
   const { delegate, calls } = makeDelegateMock();
   await deployAgents(
@@ -218,6 +225,10 @@ console.log('per-agent model passthrough');
   // The deploy fan-out is a root delegation: no parentRunId chained in.
   assert('no parentRunId chained (root fan-out)', calls.every((c) => c.hasParentRunId === false));
   assert('surface is main_chat for every agent', calls.every((c) => c.surface === 'main_chat'));
+  assert('exact specialties passed in plan order', calls.map((c) => c.subagentRole).join(',') === 'researcher,designer,security');
+  assert('specialties carry exact SOUL ids', calls.map((c) => c.spiritId).join(',') === 'researcher,designer,security');
+  assert('specialties carry exact skill bundles', calls.map((c) => c.skillBundleId).join(',') === 'researcher-cite-and-synthesize,design-ui-spec-and-critique,seceng-harden-and-threatmodel');
+  assert('delegate receives specialty knowledge, not an empty profile', calls.every((c) => c.systemPrompt.length > 100));
 }
 
 // ─── 3. Partial-failure aggregation (gateRejection on one agent) ──────────────
@@ -293,7 +304,13 @@ console.log('bridge fallback gating');
 {
   // 5a. Web all-fail + bridge AVAILABLE → falls back to bridge and deploys.
   {
-    const plan = buildAgentDeployPlan({ mode: 'uniform', count: 3, model: 'claude-sonnet-4-6' });
+    const plan = buildAgentDeployPlan({
+      mode: 'individual',
+      count: 3,
+      model: 'claude-sonnet-4-6',
+      perAgentRoles: ['researcher', 'designer', 'security'],
+      prompt: 'Complete the assigned task.',
+    });
     const { delegate } = makeDelegateMock({ rejectIndexes: new Set([0, 1, 2]) });
     const { spawn, calls: spawnCalls } = makeSpawnMock();
     let checked = false;
@@ -305,6 +322,10 @@ console.log('bridge fallback gating');
     assert('spawn called once when bridge available', spawnCalls.length === 1);
     assert('bridge spawn received all 3 tasks', spawnCalls[0].tasks.length === 3);
     assert('bridge tasks carry per-agent model', spawnCalls[0].tasks.every((t) => t.model === 'claude-sonnet-4-6'));
+    assert('bridge task 1 carries Researcher SOUL and skill', spawnCalls[0].tasks[0].task.includes('SOUL: researcher') && spawnCalls[0].tasks[0].task.includes('Skill bundle: researcher-cite-and-synthesize'));
+    assert('bridge task 2 carries Designer SOUL and skill', spawnCalls[0].tasks[1].task.includes('SOUL: designer') && spawnCalls[0].tasks[1].task.includes('Skill bundle: design-ui-spec-and-critique'));
+    assert('bridge task 3 carries Security SOUL and skill', spawnCalls[0].tasks[2].task.includes('SOUL: security') && spawnCalls[0].tasks[2].task.includes('Skill bundle: seceng-harden-and-threatmodel'));
+    assert('bridge handoff preserves the exact task', spawnCalls[0].tasks.every((t) => t.task.endsWith('TASK\nComplete the assigned task.')));
     assert('channel switches to bridge', result.channel === 'bridge');
     assert('bridge deployed 3', result.deployed === 3);
     assert('bridge counts sum to plan size', result.deployed + result.failed === 3);

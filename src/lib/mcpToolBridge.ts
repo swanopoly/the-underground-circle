@@ -321,6 +321,13 @@ export type BuildMcpAgentToolsArgs = {
    * anything: 'ask' tools then fail closed with a policy-block error.
    */
   approvalGate?: McpToolApprovalGate;
+  /**
+   * Main Chat requires a durable exact-call receipt for dynamic MCP
+   * mutations. The legacy in-memory approve/reject callback is presentation,
+   * not dispatch authority. Until a server/tool/args-bound durable adapter is
+   * injected, these calls fail closed instead of inheriting a workflow review.
+   */
+  requireDurableMutationAuthority?: boolean;
   /** Executes the actual MCP call. Injected so the core stays pure-testable. */
   callTool: (serverId: string, toolName: string, args: unknown) => Promise<unknown>;
   maxResultChars?: number;
@@ -380,6 +387,21 @@ export function buildMcpAgentTools(args: BuildMcpAgentToolsArgs): AgentToolDefin
       handler: async (input): Promise<AgentToolResult> => {
         // --- Pre-dispatch policy gate (fail closed) ---
         if (policy.approvalMode === 'ask') {
+          if (args.requireDurableMutationAuthority) {
+            return {
+              ok: false,
+              error:
+                `POLICY BLOCK: MCP tool "${tool.name}" on server "${server.name}" is dynamic or mutating and ` +
+                'Main Chat has no durable server/tool/arguments-bound MCP mutation receipt adapter yet. ' +
+                'It cannot inherit a compact semantic workflow review and was not executed.',
+              metadata: {
+                policy: { ...policy },
+                serverId: server.id,
+                gated: true,
+                blocker: 'mcp_durable_mutation_authority_unavailable',
+              },
+            };
+          }
           if (!args.approvalGate) {
             return {
               ok: false,
@@ -560,6 +582,7 @@ export function mergeMcpToolsIntoCatalog(
 
 export type GetMcpToolsForCircleOpts = {
   approvalGate?: McpToolApprovalGate;
+  requireDurableMutationAuthority?: boolean;
   maxResultChars?: number;
   /**
    * Ids of servers the circle's deliberate trust surface has marked trusted
@@ -630,6 +653,7 @@ export async function getMcpToolsForCircle(
     tools: tools as Array<McpTool & { annotations?: McpToolAnnotations }>,
     servers,
     approvalGate: opts?.approvalGate,
+    requireDurableMutationAuthority: opts?.requireDurableMutationAuthority,
     maxResultChars: opts?.maxResultChars,
     callTool,
   });

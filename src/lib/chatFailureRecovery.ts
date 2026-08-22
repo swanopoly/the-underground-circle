@@ -27,6 +27,124 @@ import {
   buildChatComputerRequestRoute,
   type ChatComputerRequestRoute,
 } from './chatComputerRequestRouter';
+import {
+  buildChatManualVerificationRecoveryAction,
+  type ChatManualVerificationTool,
+} from './chatComputerOutcomeUx';
+import type {
+  OpenSwanRuntimeToolContext,
+  OpenSwanToolExecutionArgs,
+} from './openswanToolRuntime';
+
+export interface ChatManualVerificationTaskScope {
+  circleId: string;
+  userId: string;
+  threadId: string;
+  taskStateId: string;
+  sourceMessageId: string;
+}
+
+export interface ChatManualVerificationAuthorityInput extends ChatManualVerificationTaskScope {
+  currentScope: ChatManualVerificationTaskScope;
+  /** Stable author of the original user request and the currently signed-in
+   * member. Both must equal the scope user before a capability is minted. */
+  requesterUserId: string;
+  currentUserId: string;
+  /** Expected bridge process captured when the original task started, plus a
+   * fresh value read immediately before authority issuance. */
+  bridgeInstanceId: string;
+  currentBridgeInstanceId: string;
+  activePluginIds?: string[];
+  replayPolicy?: ComputerTaskReplayPolicy | null;
+  mutationDispatched?: boolean;
+  verificationOnlyTools?: string[] | null;
+  target?: ChatManualVerificationTargetInput | null;
+}
+
+export interface ChatManualVerificationTargetInput {
+    appName?: string | null;
+    browserIdentity?: {
+      browserProcessId: string;
+      browserContextId: string;
+      pageId: string;
+      url: string;
+    } | null;
+    expectedDocumentName?: string | null;
+    expectedWidthPx?: number | null;
+    expectedHeightPx?: number | null;
+    filePath?: string | null;
+}
+
+export interface ChatManualVerificationAuthority extends ChatManualVerificationTaskScope {
+  schemaVersion: 1;
+  tools: readonly ChatManualVerificationTool[];
+}
+
+export interface ChatManualVerificationObservation {
+  tool: ChatManualVerificationTool;
+  ok: boolean;
+  summary: string;
+  matchesExpectedState: boolean | null;
+  observedAt: string;
+}
+
+export interface ChatManualVerificationResult {
+  status: 'observed' | 'partial' | 'blocked';
+  reasonCode:
+    | 'fresh_observation_collected'
+    | 'some_observations_failed'
+    | 'observation_failed'
+    | 'invalid_authority'
+    | 'authority_already_used'
+    | 'stale_task_scope'
+    | 'bridge_instance_mismatch'
+    | 'tool_policy_not_read_only';
+  userMessage: string;
+  observations: ChatManualVerificationObservation[];
+  attemptedTools: ChatManualVerificationTool[];
+  mutationReplayed: false;
+  originalPromptReplayed: false;
+  taskCompletionVerified: false;
+}
+
+type ChatManualVerificationTarget = {
+  appName: string | null;
+  browserIdentity: {
+    browserProcessId: string;
+    browserContextId: string;
+    pageId: string;
+    url: string;
+  } | null;
+  expectedDocumentName: string | null;
+  expectedWidthPx: number | null;
+  expectedHeightPx: number | null;
+  filePath: string | null;
+};
+
+type ChatManualVerificationAuthorityState = {
+  scope: ChatManualVerificationTaskScope;
+  tools: ChatManualVerificationTool[];
+  target: ChatManualVerificationTarget;
+  bridgeInstanceId: string;
+  activePluginIds: string[];
+};
+
+export type ChatManualVerificationDispatcher = (
+  tool: ChatManualVerificationTool,
+  args: Record<string, unknown>,
+  context: OpenSwanRuntimeToolContext,
+) => Promise<unknown>;
+
+export interface ExecuteChatManualVerificationInput {
+  authority: ChatManualVerificationAuthority;
+  getCurrentScope: () => ChatManualVerificationTaskScope | null;
+  getCurrentBridgeInstanceId: () => string | null | Promise<string | null>;
+  dispatch?: ChatManualVerificationDispatcher;
+  now?: () => Date;
+}
+
+const issuedChatManualVerificationAuthorities = new WeakMap<object, ChatManualVerificationAuthorityState>();
+const consumedChatManualVerificationAuthorities = new WeakSet<object>();
 
 export interface ChatFailureRecoveryInput {
   task: string;
@@ -202,6 +320,513 @@ function clean(value: unknown, max = 4_000): string {
 
 function unique(values: Array<string | null | undefined>, max = Number.POSITIVE_INFINITY): string[] {
   return Array.from(new Set(values.map((value) => clean(value, 240)).filter(Boolean))).slice(0, max);
+}
+
+function exactBoundedString(value: unknown, max: number): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  if (!normalized || normalized.length > max || /[\u0000-\u001f\u007f]/.test(normalized)) return null;
+  return normalized;
+}
+
+function normalizeChatManualVerificationScope(
+  scope: ChatManualVerificationTaskScope | null | undefined,
+): ChatManualVerificationTaskScope | null {
+  if (!scope) return null;
+  const circleId = exactBoundedString(scope.circleId, 200);
+  const userId = exactBoundedString(scope.userId, 200);
+  const threadId = exactBoundedString(scope.threadId, 200);
+  const taskStateId = exactBoundedString(scope.taskStateId, 240);
+  const sourceMessageId = exactBoundedString(scope.sourceMessageId, 240);
+  if (!circleId || !userId || !threadId || !taskStateId || !sourceMessageId) return null;
+  return { circleId, userId, threadId, taskStateId, sourceMessageId };
+}
+
+function sameChatManualVerificationScope(
+  expected: ChatManualVerificationTaskScope,
+  actual: ChatManualVerificationTaskScope | null | undefined,
+): boolean {
+  const normalized = normalizeChatManualVerificationScope(actual);
+  return Boolean(
+    normalized
+    && normalized.circleId === expected.circleId
+    && normalized.userId === expected.userId
+    && normalized.threadId === expected.threadId
+    && normalized.taskStateId === expected.taskStateId
+    && normalized.sourceMessageId === expected.sourceMessageId
+  );
+}
+
+function normalizePositiveInteger(value: unknown): number | null {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 && number <= 100_000 ? number : null;
+}
+
+function normalizeChatManualVerificationTarget(
+  target: ChatManualVerificationTargetInput | null | undefined,
+  tools: ChatManualVerificationTool[],
+): ChatManualVerificationTarget | null {
+  const raw = target || {};
+  const appName = raw.appName == null ? null : exactBoundedString(raw.appName, 160);
+  const browserProcessId = exactBoundedString(raw.browserIdentity?.browserProcessId, 160);
+  const browserContextId = exactBoundedString(raw.browserIdentity?.browserContextId, 160);
+  const pageId = exactBoundedString(raw.browserIdentity?.pageId, 160);
+  const opaqueUrl = typeof raw.browserIdentity?.url === 'string'
+    && /^uc_browser_url_[a-f0-9]{64}$/.test(raw.browserIdentity.url)
+    ? raw.browserIdentity.url
+    : null;
+  const browserIdentity = browserProcessId && browserContextId && pageId && opaqueUrl
+    ? { browserProcessId, browserContextId, pageId, url: opaqueUrl }
+    : null;
+  const expectedDocumentName = raw.expectedDocumentName == null
+    ? null
+    : exactBoundedString(raw.expectedDocumentName, 240);
+  const filePath = raw.filePath == null ? null : exactBoundedString(raw.filePath, 4_096);
+  if (raw.appName != null && !appName) return null;
+  if (raw.browserIdentity != null && !browserIdentity) return null;
+  if (raw.expectedDocumentName != null && !expectedDocumentName) return null;
+  if (raw.filePath != null && !filePath) return null;
+
+  const hasExpectedWidth = raw.expectedWidthPx != null;
+  const hasExpectedHeight = raw.expectedHeightPx != null;
+  const expectedWidthPx = hasExpectedWidth ? normalizePositiveInteger(raw.expectedWidthPx) : null;
+  const expectedHeightPx = hasExpectedHeight ? normalizePositiveInteger(raw.expectedHeightPx) : null;
+  if (hasExpectedWidth !== hasExpectedHeight || (hasExpectedWidth && (!expectedWidthPx || !expectedHeightPx))) return null;
+  if (tools.includes('browser.dom_snapshot') && !browserIdentity) return null;
+  if (tools.includes('desktop.observe_app') && !appName) return null;
+  if (tools.includes('desktop.file_stat') && !filePath) return null;
+  if (
+    tools.includes('desktop.photoshop_document_status')
+    && (
+      !appName
+      || !/photoshop/i.test(appName)
+      || (!expectedDocumentName && (!expectedWidthPx || !expectedHeightPx))
+    )
+  ) return null;
+
+  return {
+    appName,
+    browserIdentity,
+    expectedDocumentName,
+    expectedWidthPx,
+    expectedHeightPx,
+    filePath,
+  };
+}
+
+/** Pure render/click precheck. Authority issuance repeats this validation. */
+export function isChatManualVerificationTargetBound(input: {
+  target?: ChatManualVerificationTargetInput | null;
+  tools?: readonly ChatManualVerificationTool[] | null;
+}): boolean {
+  const tools = Array.isArray(input.tools) ? [...input.tools] : [];
+  return tools.length > 0 && normalizeChatManualVerificationTarget(input.target, tools) != null;
+}
+
+/**
+ * Mint an ephemeral, single-use capability for one currently selected task.
+ * The persisted handoff supplies exact target identity, but this function
+ * revalidates it and binds the executable copy to a WeakMap capability. The
+ * capability itself cannot be serialized or replayed after refresh.
+ */
+export function issueChatManualVerificationAuthority(
+  input: ChatManualVerificationAuthorityInput,
+): ChatManualVerificationAuthority | null {
+  const scope = normalizeChatManualVerificationScope(input);
+  if (!scope || !sameChatManualVerificationScope(scope, input.currentScope)) return null;
+  const requesterUserId = exactBoundedString(input.requesterUserId, 200);
+  const currentUserId = exactBoundedString(input.currentUserId, 200);
+  if (!requesterUserId || requesterUserId !== currentUserId || requesterUserId !== scope.userId) return null;
+  const bridgeInstanceId = exactBoundedString(input.bridgeInstanceId, 128);
+  const currentBridgeInstanceId = exactBoundedString(input.currentBridgeInstanceId, 128);
+  if (!bridgeInstanceId || bridgeInstanceId !== currentBridgeInstanceId) return null;
+  const action = buildChatManualVerificationRecoveryAction(input);
+  if (!action) return null;
+  const target = normalizeChatManualVerificationTarget(input.target, action.tools);
+  if (!target) return null;
+  const activePluginIds = unique(input.activePluginIds || [], 20);
+  const authority: ChatManualVerificationAuthority = Object.freeze({
+    schemaVersion: 1 as const,
+    ...scope,
+    tools: Object.freeze([...action.tools]),
+  });
+  issuedChatManualVerificationAuthorities.set(authority, {
+    scope,
+    tools: [...action.tools],
+    target,
+    bridgeInstanceId,
+    activePluginIds,
+  });
+  return authority;
+}
+
+type ChatManualVerificationToolArgs = {
+  [T in ChatManualVerificationTool]: OpenSwanToolExecutionArgs[T];
+};
+
+function buildChatManualVerificationToolArgs<T extends ChatManualVerificationTool>(
+  tool: T,
+  target: ChatManualVerificationTarget,
+): ChatManualVerificationToolArgs[T] {
+  switch (tool) {
+    case 'browser.dom_snapshot':
+      return {
+        maxNodes: 120,
+        interestingOnly: true,
+        response_format: 'concise',
+        expectedBrowserProcessId: target.browserIdentity?.browserProcessId,
+        expectedBrowserContextId: target.browserIdentity?.browserContextId,
+        expectedPageId: target.browserIdentity?.pageId,
+        expectedUrl: target.browserIdentity?.url,
+      } as unknown as ChatManualVerificationToolArgs[T];
+    case 'desktop.observe_app':
+      return {
+        appName: target.appName || undefined,
+        maxDepth: 4,
+        maxNodes: 120,
+      } as ChatManualVerificationToolArgs[T];
+    case 'desktop.photoshop_document_status':
+      return {
+        appName: 'Photoshop',
+        expectedDocumentName: target.expectedDocumentName || undefined,
+        sourceDocumentPath: target.filePath || undefined,
+      } as ChatManualVerificationToolArgs[T];
+    case 'desktop.file_stat':
+      return { path: target.filePath || '' } as ChatManualVerificationToolArgs[T];
+  }
+}
+
+class UnsafeChatManualVerificationPolicyError extends Error {}
+
+async function dispatchChatManualVerificationTool(
+  tool: ChatManualVerificationTool,
+  args: Record<string, unknown>,
+  context: OpenSwanRuntimeToolContext,
+  bindingStillCurrent: () => Promise<boolean>,
+): Promise<unknown> {
+  const runtime = await import('./openswanToolRuntime');
+  if (!await bindingStillCurrent()) return { ok: false, errorCode: 'stale_task_scope' };
+  const policy = runtime.getOpenSwanToolPolicy(tool, context.activePluginIds);
+  if (policy.mutatesState || policy.externalSideEffect || policy.approvalMode !== 'auto') {
+    throw new UnsafeChatManualVerificationPolicyError('Manual verification tool policy is no longer strictly read-only.');
+  }
+  if (tool === 'browser.dom_snapshot') {
+    const { domSnapshot, getBrowserHealth } = await import('./browserBridge');
+    if (!await bindingStillCurrent()) return { ok: false, errorCode: 'stale_task_scope' };
+    const health = await getBrowserHealth();
+    if (!await bindingStillCurrent()) return { ok: false, errorCode: 'stale_task_scope' };
+    const matches = health
+      && health.browserProcessId === args.expectedBrowserProcessId
+      && health.browserContextId === args.expectedBrowserContextId
+      && health.pageId === args.expectedPageId
+      && health.url === args.expectedUrl;
+    if (!matches) return { ok: false, errorCode: 'browser_identity_mismatch' };
+    const snapshot = await domSnapshot({
+      maxNodes: Number(args.maxNodes) || 120,
+      interestingOnly: args.interestingOnly !== false,
+    });
+    if (!await bindingStillCurrent()) return { ok: false, errorCode: 'stale_task_scope' };
+    if (!snapshot.ok || !snapshot.data) return { ok: false, errorCode: snapshot.errorCode || 'stale_bridge' };
+    if (
+      snapshot.data.browserProcessId !== args.expectedBrowserProcessId
+      || snapshot.data.browserContextId !== args.expectedBrowserContextId
+      || snapshot.data.pageId !== args.expectedPageId
+      || snapshot.data.url !== args.expectedUrl
+    ) return { ok: false, errorCode: 'browser_identity_mismatch' };
+    return { ok: true, ...snapshot.data };
+  }
+  if (tool === 'desktop.photoshop_document_status') {
+    const { photoshopDocumentStatus } = await import('./desktopBridge');
+    if (!await bindingStillCurrent()) return { ok: false, errorCode: 'stale_task_scope' };
+    const status = await photoshopDocumentStatus({
+      appName: typeof args.appName === 'string' ? args.appName : 'Photoshop',
+      expectedDocumentName: typeof args.expectedDocumentName === 'string' ? args.expectedDocumentName : undefined,
+      sourceDocumentPath: typeof args.sourceDocumentPath === 'string' ? args.sourceDocumentPath : undefined,
+    });
+    if (!await bindingStillCurrent()) return { ok: false, errorCode: 'stale_task_scope' };
+    return status.ok && status.data
+      ? { ok: true, ...status.data }
+      : { ok: false, errorCode: status.errorCode || 'stale_bridge' };
+  }
+  return runtime.executeOpenSwanRuntimeTool(tool, args as never, context);
+}
+
+function resultRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function safeInteger(value: unknown): number | null {
+  const number = Number(value);
+  return Number.isInteger(number) && number >= 0 && number <= Number.MAX_SAFE_INTEGER ? number : null;
+}
+
+function summarizeChatManualVerificationObservation(
+  tool: ChatManualVerificationTool,
+  value: unknown,
+  target: ChatManualVerificationTarget,
+  observedAt: string,
+): ChatManualVerificationObservation {
+  const record = resultRecord(value);
+  const ok = record.ok === true;
+  if (!ok) {
+    const labels: Record<ChatManualVerificationTool, string> = {
+      'browser.dom_snapshot': 'browser page',
+      'desktop.observe_app': 'desktop app',
+      'desktop.photoshop_document_status': 'Photoshop document',
+      'desktop.file_stat': 'local file',
+    };
+    return {
+      tool,
+      ok: false,
+      summary: `Could not collect a fresh read-only observation for the ${labels[tool]}.`,
+      matchesExpectedState: null,
+      observedAt,
+    };
+  }
+
+  if (tool === 'browser.dom_snapshot') {
+    const expected = target.browserIdentity;
+    const matchesExpectedState = expected
+      ? record.browserProcessId === expected.browserProcessId
+        && record.browserContextId === expected.browserContextId
+        && record.pageId === expected.pageId
+        && record.url === expected.url
+      : false;
+    return {
+      tool,
+      ok: true,
+      summary: matchesExpectedState
+        ? 'Captured a fresh read-only DOM snapshot for the exact bound browser page.'
+        : 'The current browser page no longer matches the page bound to this task.',
+      matchesExpectedState,
+      observedAt,
+    };
+  }
+  if (tool === 'desktop.observe_app') {
+    return {
+      tool,
+      ok: true,
+      summary: 'Captured a fresh read-only desktop app observation.',
+      matchesExpectedState: null,
+      observedAt,
+    };
+  }
+  if (tool === 'desktop.file_stat') {
+    const exists = typeof record.exists === 'boolean' ? record.exists : null;
+    const size = safeInteger(record.size);
+    const kind = ['file', 'directory', 'symlink', 'other'].includes(String(record.kind || '').toLowerCase())
+      ? String(record.kind).toLowerCase()
+      : null;
+    const summary = exists === false
+      ? 'The bound local path does not currently exist.'
+      : exists === true
+        ? `The bound local path exists${kind ? ` as a ${kind}` : ''}${size != null ? ` (${size} bytes)` : ''}.`
+        : 'Captured fresh read-only metadata for the bound local path.';
+    return { tool, ok: true, summary, matchesExpectedState: exists, observedAt };
+  }
+
+  const widthPx = safeInteger(record.widthPx);
+  const heightPx = safeInteger(record.heightPx);
+  const resultText = typeof record.resultsText === 'string' ? record.resultsText.slice(0, 300) : '';
+  const expectedDimensionsPresent = target.expectedWidthPx != null && target.expectedHeightPx != null;
+  const actualDocumentName = typeof record.activeDocumentName === 'string'
+    ? record.activeDocumentName.trim()
+    : '';
+  const normalizeDocumentName = (value: string) => value.toLowerCase().replace(/\.[^.]+$/, '').trim();
+  const expectedChecks: boolean[] = [];
+  if (expectedDimensionsPresent) {
+    expectedChecks.push(
+      widthPx != null
+      && heightPx != null
+      && widthPx === target.expectedWidthPx
+      && heightPx === target.expectedHeightPx,
+    );
+  }
+  if (target.expectedDocumentName) {
+    expectedChecks.push(
+      Boolean(actualDocumentName)
+      && normalizeDocumentName(actualDocumentName) === normalizeDocumentName(target.expectedDocumentName),
+    );
+  }
+  const matchesExpectedState = expectedChecks.length > 0 ? expectedChecks.every(Boolean) : null;
+  const summary = widthPx != null && heightPx != null
+    ? `Fresh Photoshop status shows an active ${widthPx}x${heightPx} document${matchesExpectedState === true ? ' matching the expected dimensions' : matchesExpectedState === false ? ' that does not match the expected dimensions' : ''}.`
+    : /not running/i.test(resultText)
+      ? 'Fresh Photoshop status shows that Photoshop is not running.'
+      : /no active document/i.test(resultText)
+        ? 'Fresh Photoshop status shows no active document.'
+        : 'Captured fresh read-only Photoshop document status.';
+  return { tool, ok: true, summary, matchesExpectedState, observedAt };
+}
+
+function blockedChatManualVerificationResult(
+  reasonCode: Extract<
+    ChatManualVerificationResult['reasonCode'],
+    'invalid_authority' | 'authority_already_used' | 'stale_task_scope' | 'bridge_instance_mismatch'
+  >,
+  userMessage: string,
+): ChatManualVerificationResult {
+  return {
+    status: 'blocked',
+    reasonCode,
+    userMessage,
+    observations: [],
+    attemptedTools: [],
+    mutationReplayed: false,
+    originalPromptReplayed: false,
+    taskCompletionVerified: false,
+  };
+}
+
+/**
+ * Execute only the authority's fixed observation program. It never accepts a
+ * prompt or a caller-provided tool/argument pair, and it rechecks the selected
+ * circle/thread/task before every read so a stale card cannot inspect another
+ * task's state.
+ */
+export async function executeChatManualVerification(
+  input: ExecuteChatManualVerificationInput,
+): Promise<ChatManualVerificationResult> {
+  const state = issuedChatManualVerificationAuthorities.get(input.authority as object);
+  if (!state) {
+    return blockedChatManualVerificationResult(
+      'invalid_authority',
+      'This verification action is no longer valid. Reopen the current task before checking its state.',
+    );
+  }
+  if (consumedChatManualVerificationAuthorities.has(input.authority as object)) {
+    return blockedChatManualVerificationResult(
+      'authority_already_used',
+      'This verification action was already used. Refresh the current task to collect another observation.',
+    );
+  }
+  if (!sameChatManualVerificationScope(state.scope, input.getCurrentScope())) {
+    return blockedChatManualVerificationResult(
+      'stale_task_scope',
+      'The selected task changed before verification, so no observation was run.',
+    );
+  }
+
+  consumedChatManualVerificationAuthorities.add(input.authority as object);
+  const observations: ChatManualVerificationObservation[] = [];
+  const attemptedTools: ChatManualVerificationTool[] = [];
+  const now = input.now || (() => new Date());
+
+  const interruptedResult = (
+    reasonCode: 'stale_task_scope' | 'bridge_instance_mismatch',
+  ): ChatManualVerificationResult => ({
+    status: observations.length > 0 ? 'partial' : 'blocked',
+    reasonCode,
+    userMessage: reasonCode === 'bridge_instance_mismatch'
+      ? observations.length > 0
+        ? 'The local desktop bridge changed after a read-only observation. I stopped without using that observation or replaying the original action.'
+        : 'The local desktop bridge changed since this task ran, so no observation was performed.'
+      : observations.length > 0
+        ? 'The task selection changed after a read-only observation. I stopped without replaying the original action.'
+        : 'The selected task changed before verification, so no observation was run.',
+    observations,
+    attemptedTools,
+    mutationReplayed: false,
+    originalPromptReplayed: false,
+    taskCompletionVerified: false,
+  });
+  const bridgeStillMatches = async (): Promise<boolean> => {
+    const current = exactBoundedString(await input.getCurrentBridgeInstanceId(), 128);
+    // Scope may change while the health read is in flight, so its result is
+    // usable only after a second exact scope check.
+    return sameChatManualVerificationScope(state.scope, input.getCurrentScope())
+      && current === state.bridgeInstanceId;
+  };
+
+  if (!await bridgeStillMatches()) {
+    return sameChatManualVerificationScope(state.scope, input.getCurrentScope())
+      ? interruptedResult('bridge_instance_mismatch')
+      : interruptedResult('stale_task_scope');
+  }
+
+  for (const tool of state.tools) {
+    if (!sameChatManualVerificationScope(state.scope, input.getCurrentScope())) {
+      return interruptedResult('stale_task_scope');
+    }
+    if (!await bridgeStillMatches()) {
+      return sameChatManualVerificationScope(state.scope, input.getCurrentScope())
+        ? interruptedResult('bridge_instance_mismatch')
+        : interruptedResult('stale_task_scope');
+    }
+    const args = buildChatManualVerificationToolArgs(tool, state.target) as Record<string, unknown>;
+    attemptedTools.push(tool);
+    try {
+      const runtimeContext: OpenSwanRuntimeToolContext = {
+        circleId: state.scope.circleId,
+        userId: state.scope.userId,
+        threadId: state.scope.threadId,
+        surface: 'main_chat',
+        activePluginIds: state.activePluginIds,
+      };
+      const value = input.dispatch
+        ? await input.dispatch(tool, args, runtimeContext)
+        : await dispatchChatManualVerificationTool(tool, args, runtimeContext, bridgeStillMatches);
+      if (!sameChatManualVerificationScope(state.scope, input.getCurrentScope())) {
+        return interruptedResult('stale_task_scope');
+      }
+      if (!await bridgeStillMatches()) {
+        return sameChatManualVerificationScope(state.scope, input.getCurrentScope())
+          ? interruptedResult('bridge_instance_mismatch')
+          : interruptedResult('stale_task_scope');
+      }
+      const observedAt = now().toISOString();
+      observations.push(summarizeChatManualVerificationObservation(tool, value, state.target, observedAt));
+    } catch (error) {
+      if (!sameChatManualVerificationScope(state.scope, input.getCurrentScope())) {
+        return interruptedResult('stale_task_scope');
+      }
+      if (!await bridgeStillMatches()) {
+        return sameChatManualVerificationScope(state.scope, input.getCurrentScope())
+          ? interruptedResult('bridge_instance_mismatch')
+          : interruptedResult('stale_task_scope');
+      }
+      if (error instanceof UnsafeChatManualVerificationPolicyError) {
+        return {
+          status: observations.length > 0 ? 'partial' : 'blocked',
+          reasonCode: 'tool_policy_not_read_only',
+          userMessage: 'Verification stopped because an allowed observation tool is no longer classified as strictly read-only.',
+          observations,
+          attemptedTools,
+          mutationReplayed: false,
+          originalPromptReplayed: false,
+          taskCompletionVerified: false,
+        };
+      }
+      observations.push(summarizeChatManualVerificationObservation(tool, { ok: false }, state.target, now().toISOString()));
+    }
+  }
+
+  const successful = observations.filter((observation) => observation.ok).length;
+  const mismatched = observations.some((observation) => observation.matchesExpectedState === false);
+  const status = successful === observations.length ? 'observed' : successful > 0 ? 'partial' : 'blocked';
+  const reasonCode = successful === observations.length
+    ? 'fresh_observation_collected'
+    : successful > 0
+      ? 'some_observations_failed'
+      : 'observation_failed';
+  const observationText = observations.map((observation) => observation.summary).join(' ');
+  const userMessage = successful === 0
+    ? 'I could not collect the requested current-state observation. I did not repeat the original action.'
+    : `${observationText} ${mismatched
+      ? 'The observed state does not match the expected task state.'
+      : 'The original action was not replayed.'} This observation does not by itself mark the original task complete.`;
+  return {
+    status,
+    reasonCode,
+    userMessage,
+    observations,
+    attemptedTools,
+    mutationReplayed: false,
+    originalPromptReplayed: false,
+    taskCompletionVerified: false,
+  };
 }
 
 function parseOptionActor(value: unknown): ChatFailureRecoveryOptionActor {

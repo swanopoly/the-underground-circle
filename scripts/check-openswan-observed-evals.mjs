@@ -207,6 +207,13 @@ console.log('OpenSwan observed eval checks passed.');
       esModuleInterop: true,
       strict: true,
       skipLibCheck: true,
+      // agentRunSystem's import graph now reaches .tsx modules
+      // (chatMessageTypes imports chat cards as of 6b05b8a), and a tsconfig
+      // without jsx makes tsc REFUSE .tsx resolution (TS6142) — which broke
+      // this gate at clean HEAD, unrelated to whatever change was under
+      // test. Match the app tsconfig so the gate compiles what the app
+      // compiles.
+      jsx: 'react-native',
       rootDir: projectRoot,
       outDir,
     },

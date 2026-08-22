@@ -86,7 +86,7 @@ export default function LandingPage({ onLogin, onSignUp }: Props) {
         <Text style={s.sectionTag}>FEATURES</Text>
         <Text style={s.sectionTitle}>Everything you need to ship</Text>
         <View style={[s.featGrid, isMobile && { gap: 12 }]}>
-          <FeatureCard icon=">_" color="#22d3ee" title="AI Agent Office" desc="Pixel-art dashboard where your agents live. See who's working, what they cost, and what they shipped." />
+          <FeatureCard icon=">_" color="#6366f1" title="AI Agent Office" desc="Pixel-art dashboard where your agents live. See who's working, what they cost, and what they shipped." />
           <FeatureCard icon="[]" color="#a855f7" title="Mission System" desc="Create missions from templates. Assign tasks to humans and agents. Track progress with proof-of-work." />
           <FeatureCard icon="//" color="#f59e0b" title="GitHub Integration" desc="Connect your repo. BlackSwan watches commits, PRs, and CI — posts summaries to your circle." />
           <FeatureCard icon="$" color="#22c55e" title="Cost Tracking" desc="See exactly what each agent costs. Get optimization suggestions. Set budget alerts." />

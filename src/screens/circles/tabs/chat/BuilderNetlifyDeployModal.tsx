@@ -15,7 +15,7 @@ import {
 
 const hoverTr = Platform.OS === 'web' ? { transition: 'all 0.15s ease' } as any : {};
 const hoverGhostIn = { borderColor: '#94a3b8', backgroundColor: '#152032', transform: [{ translateY: -1 }] };
-const hoverPrimaryIn = { borderColor: '#22d3ee', backgroundColor: '#22d3ee30', transform: [{ translateY: -1 }] };
+const hoverPrimaryIn = { borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#6366f130', transform: [{ translateY: -1 }] };
 const pressScale = { transform: [{ scale: 0.96 }] };
 import {
   type DeployResult, type NetlifySite, type NetlifyUser,
@@ -242,7 +242,7 @@ export default function BuilderNetlifyDeployModal({ circleId, title, html, visib
                   onPress={() => setSelectedSiteId(null)}
                   style={[styles.siteRow, selectedSiteId === null && styles.siteRowActive]}
                 >
-                  <Text style={[styles.siteName, selectedSiteId === null && { color: '#22d3ee' }]}>+ CREATE NEW SITE</Text>
+                  <Text style={[styles.siteName, selectedSiteId === null && { color: '#6366f1' }]}>+ CREATE NEW SITE</Text>
                   <Text style={styles.siteMeta}>Netlify picks a random name; you can rename it later.</Text>
                 </Pressable>
 
@@ -260,7 +260,7 @@ export default function BuilderNetlifyDeployModal({ circleId, title, html, visib
                         onPress={() => setSelectedSiteId(s.id)}
                         style={[styles.siteRow, active && styles.siteRowActive]}
                       >
-                        <Text style={[styles.siteName, active && { color: '#22d3ee' }]}>{s.name}</Text>
+                        <Text style={[styles.siteName, active && { color: '#6366f1' }]}>{s.name}</Text>
                         <Text style={styles.siteMeta} numberOfLines={1}>{s.ssl_url || s.url}</Text>
                       </Pressable>
                     );
@@ -293,7 +293,7 @@ export default function BuilderNetlifyDeployModal({ circleId, title, html, visib
 
           {mode === 'deploying' && (
             <View style={styles.loadingRow}>
-              <ActivityIndicator color="#22d3ee" />
+              <ActivityIndicator color="#6366f1" />
               <Text style={styles.loadingText}>
                 {selectedSiteId ? 'Publishing new deploy…' : 'Creating site + publishing…'}
               </Text>
@@ -345,7 +345,7 @@ const styles = StyleSheet.create({
   loadingText: { color: '#94a3b8', fontSize: 12, fontFamily: 'monospace' },
   list: { gap: 4, paddingVertical: 4 },
   siteRow: { padding: 10, borderRadius: 6, borderWidth: 1, borderColor: '#152032', backgroundColor: '#0a0f17', gap: 2 },
-  siteRowActive: { borderColor: '#22d3ee', backgroundColor: '#22d3ee14' },
+  siteRowActive: { borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#6366f114' },
   siteName: { color: '#d8e1ef', fontSize: 12, fontWeight: '800', fontFamily: 'monospace' },
   siteMeta: { color: '#7f8ea3', fontSize: 10, fontFamily: 'monospace', marginTop: 2 },
   errorBox: { padding: 10, borderRadius: 6, borderWidth: 1, borderColor: '#ef4444', backgroundColor: '#2a0a0a' },
@@ -356,6 +356,6 @@ const styles = StyleSheet.create({
   footer: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   ghostBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 6, borderWidth: 1, borderColor: '#243246', backgroundColor: '#0a0f17' },
   ghostBtnText: { color: '#94a3b8', fontSize: 10, fontWeight: '900', letterSpacing: 0.6, fontFamily: 'monospace' },
-  primaryBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 6, borderWidth: 1, borderColor: '#22d3ee', backgroundColor: '#22d3ee18', alignItems: 'center' },
-  primaryBtnText: { color: '#22d3ee', fontSize: 10, fontWeight: '900', letterSpacing: 0.6, fontFamily: 'monospace' },
+  primaryBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 6, borderWidth: 1, borderColor: 'rgba(99, 102, 241, 0.67)', backgroundColor: '#6366f118', alignItems: 'center' },
+  primaryBtnText: { color: '#6366f1', fontSize: 10, fontWeight: '900', letterSpacing: 0.6, fontFamily: 'monospace' },
 });

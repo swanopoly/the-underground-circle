@@ -4,6 +4,7 @@ import { looksLikeLocalComputerAwarenessRequest } from './localComputerAwareness
 export type ChatTerminalTransportPath =
   | 'specialized_agent_run'
   | 'stream_plain_chat'
+  | 'batch_plain_chat'
   // Phase 2 seam (DEFAULT ON since 2026-07-01): stream the turn plainly AND
   // carry a tiny pinned core + `tools.search` so the model can signal mid-turn
   // that it needs a capability. On that signal the caller upgrades THIS turn
@@ -22,6 +23,7 @@ export type ChatTerminalTransportReason =
   | 'coding_generation'
   | 'tool_catalog_required'
   | 'stream_unavailable'
+  | 'conversation_only_plain_chat'
   | 'simple_streamable_plain_chat'
   | 'stream_escalate_on_tool_use';
 
@@ -39,7 +41,15 @@ export type ChatTerminalTransportPolicyInput = {
   isFigmaBuildRequest?: boolean;
   isCodingGenerationRequest?: boolean;
   looksLikeActionRequest?: boolean;
+  /** A typed completion contract (for example the bounded A1-A3 ledger)
+   * cannot be enforced by the streaming preflight lane. */
+  requiresAuthoritativeCompletion?: boolean;
   canStreamAnthropic?: boolean;
+  /**
+   * A greeting/thanks/check-in with no substantive request. These turns must
+   * stay on the selected text model and never advertise or enter tool lanes.
+   */
+  conversationOnly?: boolean;
   /**
    * Phase 2 seam override (the seam itself is DEFAULT ON). When omitted, the
    * live `STREAM_ESCALATE_ON_TOOL_USE_FLAG` flag decides. Pass an explicit boolean
@@ -109,7 +119,22 @@ export function isStreamEscalateOnToolUseEnabled(): boolean {
 export function chooseChatTerminalTransport(
   input: ChatTerminalTransportPolicyInput,
 ): ChatTerminalTransportDecision {
+  // A conversational acknowledgement is not a task. Keep it away from the
+  // OpenSwan escalation palette even while stream->tool escalation is enabled
+  // globally. This veto deliberately outranks saved modes, parallel delegation,
+  // recovery state, and planner residue from an earlier task. Non-streamable
+  // selected models use the plain batch model path, not the batch OpenSwan task
+  // runtime.
+  if (input.conversationOnly) {
+    return input.canStreamAnthropic
+      ? { path: 'stream_plain_chat', reason: 'conversation_only_plain_chat', canStream: true }
+      : { path: 'batch_plain_chat', reason: 'conversation_only_plain_chat', canStream: false };
+  }
+
   const chatMode = input.chatMode || 'none';
+  if (input.requiresAuthoritativeCompletion) {
+    return { path: 'batch_openswan', reason: 'planner_forced_openswan', canStream: false };
+  }
   if (chatMode !== 'none' && chatMode !== 'talk') {
     return { path: 'specialized_agent_run', reason: 'selected_mode', canStream: false };
   }
@@ -139,7 +164,11 @@ export function chooseChatTerminalTransport(
   }
 
   if (!input.canStreamAnthropic) {
-    return { path: 'batch_openswan', reason: 'stream_unavailable', canStream: false };
+    // Transport capability must never expand execution authority. A turn the
+    // canonical planner classified as plain Chat stays plain Chat when SSE is
+    // unavailable; it simply uses the selected provider's batch endpoint.
+    // Only the earlier explicit `run_openswan` branch may enter OpenSwan.
+    return { path: 'batch_plain_chat', reason: 'stream_unavailable', canStream: false };
   }
 
   // Simple, streamable, non-action chat. With the Phase 2 seam ON (the default

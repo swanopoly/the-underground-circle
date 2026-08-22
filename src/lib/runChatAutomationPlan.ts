@@ -30,6 +30,17 @@ import {
   buildChatAgentContextPack,
   type ChatAgentContextPack,
 } from './chatAgentContextPack';
+import { buildComputerAppToolArgsFingerprintAsync } from './computerAppGrounding';
+import {
+  buildComputerSequenceProgramManifest,
+  compileComputerSequenceProgram,
+} from './computerSequenceProgramCore';
+import type { AutoApproveCategory } from './chatAutoApproveSettings';
+import {
+  issueChatPlanApprovalAuthorityObject,
+  isIssuedChatPlanApprovalAuthorityObject,
+  type ChatPlanApprovalAuthorityCore,
+} from './chatPlanApprovalAuthorityCore';
 
 /**
  * Outcome each transport reports back. Normalised so the caller can log
@@ -57,6 +68,182 @@ export type ChatAutomationOutcome = {
   /** `agent_approvals.id` if the plan was gated behind HITL. */
   approvalId?: string | null;
 };
+
+export type ChatPlanApprovalAuthority = ChatPlanApprovalAuthorityCore<
+  ChatAutomationExecutionKind,
+  AutoApproveCategory
+>;
+
+export type ApprovalGatePassAuthority = Readonly<
+  | {
+      schemaVersion: 1;
+      kind: 'claimed_approval_row';
+      approvalId: string;
+      approvalIntentFingerprint: string;
+    }
+  | {
+      schemaVersion: 1;
+      kind: 'policy_auto_waiver';
+      approvalIntentFingerprint: string;
+      policyCategory: AutoApproveCategory;
+    }
+>;
+
+const CHAT_REQUEST_IDENTITY_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$/;
+const CHAT_APPROVAL_FINGERPRINT_RE = /^args-v2:sha256:[0-9a-f]{64}$/;
+const CHAT_AUTO_APPROVE_CATEGORIES = new Set<AutoApproveCategory>([
+  'memory_read',
+  'memory_write',
+  'skill_run',
+  'skill_write',
+  'automation_create',
+  'automation_run',
+  'browser_click',
+  'external_publish',
+  'desktop_action',
+]);
+
+export function normalizeChatRequestIdentity(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 240) return null;
+  return value.trim() === value && CHAT_REQUEST_IDENTITY_RE.test(value) ? value : null;
+}
+
+/**
+ * Privacy-safe stable identity for one submitted Chat request. The raw local
+ * or database message id remains in memory; only this scope-bound digest may
+ * enter approval/run/action metadata.
+ */
+export async function buildChatRequestIdentityFingerprint(input: {
+  circleId: string;
+  userId: string;
+  threadId?: string | null;
+  requestIdentity: unknown;
+}): Promise<string> {
+  const requestIdentity = normalizeChatRequestIdentity(input.requestIdentity);
+  if (!requestIdentity) return '';
+  return buildComputerAppToolArgsFingerprintAsync({
+    schemaVersion: 1,
+    scope: 'chat_request',
+    circleId: input.circleId,
+    userId: input.userId,
+    threadId: input.threadId ?? null,
+    requestIdentity,
+  });
+}
+
+/** Complete normalized plan + exact compiler manifest binding used by both
+ * the durable approval row and the in-memory dispatch capability. */
+export async function buildChatPlanApprovalIntentFingerprint(
+  plan: ChatAutomationPlan,
+  ctx: ChatTransportContext,
+): Promise<string> {
+  const exactProgram = compileComputerSequenceProgram(plan.execution.commandText || '');
+  const requestIdentityFingerprint = ctx.requestIdentity
+    ? await buildChatRequestIdentityFingerprint({
+        circleId: ctx.circleId,
+        userId: ctx.userId,
+        threadId: ctx.threadId,
+        requestIdentity: ctx.requestIdentity,
+      })
+    : null;
+  return buildComputerAppToolArgsFingerprintAsync({
+    schemaVersion: 3,
+    circleId: ctx.circleId,
+    userId: ctx.userId,
+    threadId: ctx.threadId ?? null,
+    roomId: ctx.roomId ?? null,
+    requestIdentityFingerprint,
+    source: plan.source,
+    intent: plan.intent,
+    execution: plan.execution,
+    approval: plan.approval,
+    risk: plan.risk,
+    confidence: plan.confidence,
+    notes: plan.notes,
+    exactProgramManifest: exactProgram
+      ? buildComputerSequenceProgramManifest(exactProgram)
+      : null,
+  });
+}
+
+async function issueChatPlanApprovalAuthority(
+  plan: ChatAutomationPlan,
+  ctx: ChatTransportContext,
+  gateAuthority: ApprovalGatePassAuthority,
+): Promise<ChatPlanApprovalAuthority | null> {
+  if (
+    !gateAuthority
+    || gateAuthority.schemaVersion !== 1
+    || !['claimed_approval_row', 'policy_auto_waiver'].includes(gateAuthority.kind)
+    || !CHAT_APPROVAL_FINGERPRINT_RE.test(gateAuthority.approvalIntentFingerprint)
+    || (gateAuthority.kind === 'claimed_approval_row'
+      && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(gateAuthority.approvalId))
+    || (gateAuthority.kind === 'policy_auto_waiver'
+      && !CHAT_AUTO_APPROVE_CATEGORIES.has(gateAuthority.policyCategory))
+  ) return null;
+  const approvalIntentFingerprint = await buildChatPlanApprovalIntentFingerprint(plan, ctx);
+  if (
+    !CHAT_APPROVAL_FINGERPRINT_RE.test(approvalIntentFingerprint)
+    || gateAuthority.approvalIntentFingerprint !== approvalIntentFingerprint
+  ) return null;
+  const requestIdentityFingerprint = await buildChatRequestIdentityFingerprint({
+    circleId: ctx.circleId,
+    userId: ctx.userId,
+    threadId: ctx.threadId,
+    requestIdentity: ctx.requestIdentity,
+  });
+  const program = compileComputerSequenceProgram(plan.execution.commandText || '');
+  if (
+    !CHAT_APPROVAL_FINGERPRINT_RE.test(requestIdentityFingerprint)
+    || !program
+    || program.authorization.mode !== 'chat_plan_approval'
+  ) return null;
+  const programFingerprint = await buildComputerAppToolArgsFingerprintAsync(
+    buildComputerSequenceProgramManifest(program),
+  );
+  if (!CHAT_APPROVAL_FINGERPRINT_RE.test(programFingerprint)) return null;
+  return issueChatPlanApprovalAuthorityObject<ChatAutomationExecutionKind, AutoApproveCategory>({
+    schemaVersion: 2,
+    kind: 'chat_plan_approval',
+    authorizationSource: gateAuthority.kind,
+    approvalId: gateAuthority.kind === 'claimed_approval_row'
+      ? gateAuthority.approvalId
+      : null,
+    approvalIntentFingerprint,
+    requestIdentityFingerprint,
+    programId: program.id,
+    programFingerprint,
+    circleId: ctx.circleId,
+    userId: ctx.userId,
+    threadId: ctx.threadId || null,
+    executionKind: plan.execution.kind,
+    routeId: plan.execution.routeId || null,
+    policyCategory: gateAuthority.kind === 'policy_auto_waiver'
+      ? gateAuthority.policyCategory
+      : null,
+  });
+}
+
+/** Runtime-only object-capability check. Plain objects and stale serialized
+ * metadata cannot be upgraded into dispatch authority. */
+export function isIssuedChatPlanApprovalAuthority(
+  value: unknown,
+  expected: {
+    circleId: string;
+    userId: string;
+    threadId?: string | null;
+    executionKind: ChatAutomationExecutionKind;
+    approvalIntentFingerprint: string;
+    requestIdentityFingerprint: string;
+    programId: string;
+    programFingerprint: string;
+  },
+): value is ChatPlanApprovalAuthority {
+  return isIssuedChatPlanApprovalAuthorityObject<ChatAutomationExecutionKind, AutoApproveCategory>(
+    value,
+    expected,
+  );
+}
 
 /**
  * Transport handler signature. One per `ChatAutomationExecutionKind`. All
@@ -105,6 +292,9 @@ export type ChatClarificationResumeStore = {
 export type ChatTransportContext = {
   circleId: string;
   userId: string;
+  /** Stable identity of the submitted user message. Exact mutation programs
+   * fail closed without it; callers must preserve it across approval resume. */
+  requestIdentity?: string;
   /** Chat thread id if relevant. */
   threadId?: string;
   /** Room id when dispatching from RoomsTab. */
@@ -113,6 +303,13 @@ export type ChatTransportContext = {
   model?: string | null;
   /** Cancellation signal; transports should respect it. */
   signal?: AbortSignal;
+  /**
+   * Exact plan-level authority returned by the approval gate before handler
+   * dispatch. This is intentionally distinct from generic per-tool approval:
+   * only compiler-owned programs whose complete calls are already sealed may
+   * consume it.
+   */
+  planApprovalAuthority?: ChatPlanApprovalAuthority;
   /** Active chat mode — Plan refuses destructive dispatches, Act runs
    *  everything subject to the HITL gate. Defaults to `'act'` when the
    *  caller does not specify. */
@@ -193,6 +390,9 @@ export type ApprovalGate = (
       notice?: string;
       /** The pre-existing approval row that covered this pass, when any. */
       approvalId?: string;
+      /** Explicit exact authority source. Ordinary no-approval passes omit it
+       * and therefore cannot authorize compiler-owned approval programs. */
+      authority?: ApprovalGatePassAuthority;
     }
   | {
       pass: false;
@@ -290,6 +490,7 @@ export async function dispatchChatAutomationPlan(
   // and no transport runs.
   let gateNotice: string | undefined;
   let gateApprovalId: string | undefined;
+  let gatePassAuthority: ApprovalGatePassAuthority | undefined;
   if (opts.approvalGate) {
     const gate = await opts.approvalGate(plan, ctx);
     if (!gate.pass) {
@@ -319,6 +520,15 @@ export async function dispatchChatAutomationPlan(
     }
     gateNotice = gate.notice;
     gateApprovalId = gate.approvalId;
+    gatePassAuthority = gate.authority
+      && (
+        (gate.authority.kind === 'claimed_approval_row'
+          && gate.approvalId === gate.authority.approvalId)
+        || (gate.authority.kind === 'policy_auto_waiver'
+          && gate.approvalId === undefined)
+      )
+      ? gate.authority
+      : undefined;
   }
 
   // Carry the gate's pass-through transparency onto whatever outcome the
@@ -348,9 +558,23 @@ export async function dispatchChatAutomationPlan(
     return finalOutcome;
   }
 
+  // Authority is output-only. Never trust or preserve an object supplied by a
+  // caller in `ctx`; only this dispatch invocation may mint one after the gate
+  // wins its exact one-shot claim.
+  const {
+    planApprovalAuthority: _untrustedInboundPlanApprovalAuthority,
+    ...callerContext
+  } = ctx;
+  const planApprovalAuthority = gatePassAuthority
+    ? await issueChatPlanApprovalAuthority(plan, callerContext, gatePassAuthority)
+    : null;
+  const handlerContext: ChatTransportContext = planApprovalAuthority
+    ? { ...callerContext, planApprovalAuthority }
+    : callerContext;
+
   let outcome: ChatAutomationOutcome;
   try {
-    outcome = await handler(plan, ctx);
+    outcome = await handler(plan, handlerContext);
     if (outcome.durationMs === undefined) outcome.durationMs = Date.now() - started;
   } catch (err) {
     // Transports SHOULD NOT throw — but catch anyway so the dispatcher

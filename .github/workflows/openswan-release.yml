@@ -1,0 +1,146 @@
+name: OpenSwan release integrity
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/openswan-release.yml'
+      - 'src/**'
+      - 'scripts/**'
+      - 'supabase/functions/**'
+      - 'supabase/migrations/**'
+      - 'docs/**'
+      - 'AGENTS.md'
+      - 'AGENT.md'
+      - 'CLAUDE.md'
+      - 'Gemini.md'
+      - 'netlify.toml'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig*.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openswan-release-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integrity:
+    name: Scope, release suite, and web build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      EXPO_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+      EXPO_PUBLIC_SUPABASE_ANON_KEY: public-ci-placeholder-not-a-secret
+    steps:
+      - name: Check out complete history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Set up Deno
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.x
+          cache: true
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Resolve exact committed change boundary
+        id: boundary
+        shell: bash
+        env:
+          OPENSWAN_EVENT_NAME: ${{ github.event_name }}
+          OPENSWAN_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          OPENSWAN_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          case "$OPENSWAN_EVENT_NAME" in
+            pull_request)
+              if ! [[ "$OPENSWAN_PR_BASE_SHA" =~ ^[0-9a-fA-F]{40,64}$ ]]; then
+                echo 'The pull-request base SHA is missing or malformed.' >&2
+                exit 1
+              fi
+              base_candidate="$OPENSWAN_PR_BASE_SHA"
+              ;;
+            workflow_dispatch)
+              if ! [[ "$OPENSWAN_DEFAULT_BRANCH" =~ ^[0-9A-Za-z][0-9A-Za-z._/-]*$ ]]; then
+                echo 'The repository default branch is missing or malformed.' >&2
+                exit 1
+              fi
+              base_candidate="refs/remotes/origin/$OPENSWAN_DEFAULT_BRANCH"
+              if ! git check-ref-format "$base_candidate"; then
+                echo 'The repository default branch does not form a valid Git ref.' >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "Unsupported OpenSwan release event: $OPENSWAN_EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+
+          if ! resolved_base="$(git rev-parse --verify --end-of-options "${base_candidate}^{commit}")"; then
+            echo 'Could not resolve the event-specific OpenSwan base commit.' >&2
+            exit 1
+          fi
+          if ! head_commit="$(git rev-parse --verify --end-of-options 'HEAD^{commit}')"; then
+            echo 'Could not resolve the checked-out OpenSwan head commit.' >&2
+            exit 1
+          fi
+          if ! merge_base="$(git merge-base "$resolved_base" "$head_commit")"; then
+            echo 'Could not resolve an exact OpenSwan merge base.' >&2
+            exit 1
+          fi
+          for commit in "$resolved_base" "$head_commit" "$merge_base"; do
+            if ! [[ "$commit" =~ ^[0-9a-fA-F]{40,64}$ ]]; then
+              echo 'The resolved OpenSwan change boundary was malformed.' >&2
+              exit 1
+            fi
+          done
+          if ! git merge-base --is-ancestor "$merge_base" "$head_commit"; then
+            echo 'The resolved OpenSwan merge base is not an ancestor of HEAD.' >&2
+            exit 1
+          fi
+          if [[ "$OPENSWAN_EVENT_NAME" == 'pull_request' ]] \
+            && git diff --quiet "$merge_base" "$head_commit" --; then
+            echo 'The pull request contains no committed changes relative to its merge base.' >&2
+            exit 1
+          fi
+
+          echo "merge_base=$merge_base" >> "$GITHUB_OUTPUT"
+          echo "head_commit=$head_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Enforce reviewable committed OpenSwan scope
+        env:
+          OPENSWAN_MERGE_BASE: ${{ steps.boundary.outputs.merge_base }}
+          OPENSWAN_TASK_LABEL: OpenSwan change ${{ github.event.pull_request.number || github.ref_name }}
+        run: |
+          npx tsx scripts/openswan-lane-report.ts \
+            --base-ref "$OPENSWAN_MERGE_BASE" \
+            --task "$OPENSWAN_TASK_LABEL" \
+            --fail-on-broad
+
+      - name: Run the complete Chat and OpenSwan release suite
+        run: npm run check:swanbot-chat:release
+
+      - name: Export the production web artifact
+        run: npm run build
+
+      - name: Reject whitespace errors
+        env:
+          OPENSWAN_MERGE_BASE: ${{ steps.boundary.outputs.merge_base }}
+          OPENSWAN_HEAD_COMMIT: ${{ steps.boundary.outputs.head_commit }}
+        run: git diff --check "$OPENSWAN_MERGE_BASE" "$OPENSWAN_HEAD_COMMIT" --

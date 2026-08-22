@@ -23,7 +23,13 @@ const APP_URL = "https://app.chrisswanson.xyz";
 function jsonResponse(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
+    headers: {
+      ...corsHeaders,
+      "Content-Type": "application/json",
+      // Repository/status responses can describe a private connected account.
+      "Cache-Control": "no-store",
+      "Pragma": "no-cache",
+    },
   });
 }
 
@@ -155,7 +161,11 @@ async function handleCallback(url: URL): Promise<Response> {
   const tokenData = await tokenRes.json();
 
   if (tokenData.error || !tokenData.access_token) {
-    console.error("GitHub token exchange failed:", tokenData);
+    // Never log the complete OAuth response. A malformed/upstream response
+    // could contain token-shaped fields alongside an error.
+    console.error("[github-oauth] Token exchange failed", {
+      code: typeof tokenData.error === "string" ? tokenData.error.slice(0, 80) : "missing_access_token",
+    });
     return new Response(
       `GitHub OAuth error: ${tokenData.error_description || tokenData.error || "Unknown error"}`,
       { status: 400 },

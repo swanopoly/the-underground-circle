@@ -23,7 +23,6 @@ import { awardXP, getXPForAction } from '../../lib/gamification';
 // as defaults the user can edit from circle settings.
 const ACCENT_OPTIONS: Array<{ value: string; label: string }> = [
   { value: '#6366f1', label: 'INDIGO' },
-  { value: '#22d3ee', label: 'CYAN' },
   { value: '#22c55e', label: 'EMERALD' },
   { value: '#fbbf24', label: 'AMBER' },
   { value: '#f43f5e', label: 'ROSE' },
@@ -69,7 +68,7 @@ export default function CreateCircleScreen({ route, navigation }: any) {
         tags: [],
         ...(orgId ? { org_id: orgId } : {}),
       })
-      .select()
+      .select('id, name, invite_code')
       .single();
 
     if (createError) {
@@ -77,12 +76,6 @@ export default function CreateCircleScreen({ route, navigation }: any) {
       setLoading(false);
       return;
     }
-
-    await supabase.from('circle_members').insert({
-      circle_id: circle.id,
-      user_id: user.id,
-      role: 'creator',
-    });
 
     awardXP(user.id, getXPForAction('circle_create'), 'circle_create', { circle_id: circle.id }).catch(
       console.error,

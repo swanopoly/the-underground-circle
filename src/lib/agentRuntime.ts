@@ -9,7 +9,7 @@
  */
 
 import { supabase } from './supabase';
-import { getSwanBotResponse, SwanBotContext } from './swanbot';
+import { SealedModelDispatchError, getSwanBotTurnResult, type SwanBotContext } from './swanbot';
 import {
   TASK_CAPABILITY_PROFILES,
   inferTaskCapabilityProfile,
@@ -36,10 +36,20 @@ import {
 import { resolveMemoryLookupIds } from './memoryLookupKeyCore';
 import {
   deriveAgentTaskTerminalOutcome,
+  structuredAgentTaskStatusFromTurnEvidence,
   type AgentTaskCompletionExpectation,
   type AgentTaskTerminalOutcome,
+  type ComputerTaskTurnEvidenceSummary,
 } from './computerTaskOutcome';
 import type { ChatAgentContextPack } from './chatAgentContextPack';
+
+let protectedTurnInvocationSequence = 0;
+
+function buildProtectedTurnDedupeScope(runId: string | null): string {
+  if (runId) return `agent-run:${runId}`;
+  protectedTurnInvocationSequence = (protectedTurnInvocationSequence + 1) % Number.MAX_SAFE_INTEGER;
+  return `agent-invocation:${Date.now().toString(36)}:${protectedTurnInvocationSequence.toString(36)}`;
+}
 
 // ─── Unified Types ──────────────────────────────────────────────────────────
 
@@ -90,6 +100,8 @@ export interface AgentRunRequest {
   agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
   targetAgentSubjects?: AgentRuntimeSubjectMetadata[] | null;
   model?: string;
+  /** Exact pre-dispatch model authority supplied by Chat. */
+  modelDispatchSealed?: boolean;
   connectedProviders?: ConnectedProviderSet | string[];
   /**
    * Volatile typed-loop context. Callers should supply only values owned by
@@ -143,6 +155,8 @@ function normalizeConnectedProviders(value?: ConnectedProviderSet | string[]): C
 export interface AgentRunResult {
   /** Transport compatibility flag: true means a model response was returned. */
   success: boolean;
+  /** The exact generation-sealed model failed before producing a response. */
+  modelDispatchFailed?: boolean;
   /** Authoritative task-level terminal outcome. */
   terminalOutcome: AgentTaskTerminalOutcome;
   response: string;
@@ -156,6 +170,8 @@ export interface AgentRunResult {
     blockers: string[];
   } | null;
   observedEval?: OpenSwanObservedEvalSummary | null;
+  /** Bounded runtime-only receipt aggregate; contains no tool args or values. */
+  taskTurnEvidence?: ComputerTaskTurnEvidenceSummary | null;
 }
 
 export interface HandoffSuggestion {
@@ -526,17 +542,19 @@ export async function executeAgentRun(
   const profileResolution = resolveOpenSwanProfileForMode(mode || 'talk', prompt, routingSurface);
   const { resolveModelForProfile } = await import('./serviceProfileSouls');
   const connectedProviders = normalizeConnectedProviders(request.connectedProviders);
-  const resolvedModel = resolveModelForProfile(
-    profileResolution.resolvedProfile,
-    model,
-    routeAnalysis.route.intent,
-    connectedProviders,
-    routeAnalysis.route.complexity,
-    undefined,
-    // P27: raw message activates the BlackSwan reliability guard on the
-    // EXECUTION model — the hard subset of the grounded lane escalates to frontier.
-    prompt,
-  );
+  const resolvedModel = request.modelDispatchSealed && model
+    ? model
+    : resolveModelForProfile(
+        profileResolution.resolvedProfile,
+        model,
+        routeAnalysis.route.intent,
+        connectedProviders,
+        routeAnalysis.route.complexity,
+        undefined,
+        // P27: raw message activates the BlackSwan reliability guard on the
+        // EXECUTION model — the hard subset of the grounded lane escalates to frontier.
+        prompt,
+      );
   const activeTaskKind =
     modePolicy.key === 'build' || modePolicy.key === 'execute'
       ? 'build'
@@ -734,12 +752,17 @@ export async function executeAgentRun(
     });
 
     // 2. Build SwanBot context
+    const executionSurfaceGuard = resolveTaskExecutionSurfaceGuard(inferredProfileKey);
+    const receiptBearingTurn = request.forceClientToolLoop === true
+      || request.completionExpectation === 'verified_task'
+      || executionSurfaceGuard !== undefined;
     const swanContext: SwanBotContext = {
       userId,
       circleId,
       userName,
       ...subjectPayload.swanContextPatch,
       model: resolvedModel || undefined,
+      modelDispatchSealed: request.modelDispatchSealed === true,
       chatHistory: context?.chatHistory,
       sessionArchiveContext: context?.sessionArchiveContext,
       modeKey: modePolicy.key,
@@ -754,7 +777,11 @@ export async function executeAgentRun(
       userConstraints: request.userConstraints,
       alwaysConfirmFloor: request.alwaysConfirmFloor,
       forceClientToolLoop: request.forceClientToolLoop,
-      executionSurfaceGuard: resolveTaskExecutionSurfaceGuard(inferredProfileKey),
+      completionExpectation: request.completionExpectation,
+      executionSurfaceGuard,
+      ...(receiptBearingTurn
+        ? { turnDedupeScope: buildProtectedTurnDedupeScope(runId) }
+        : {}),
     };
 
     // Mark run as running
@@ -763,10 +790,14 @@ export async function executeAgentRun(
     }
 
     // 3. Call SwanBot
-    const response = await getSwanBotResponse(fullPrompt, swanContext);
+    const swanTurn = await getSwanBotTurnResult(fullPrompt, swanContext);
+    const response = swanTurn.text;
     const terminalOutcome = deriveAgentTaskTerminalOutcome({
       transportSuccess: true,
       expectation: request.completionExpectation,
+      structuredStatus: structuredAgentTaskStatusFromTurnEvidence(
+        swanTurn.executionSummary,
+      ),
     });
 
     // 4. Extract artifacts from the response
@@ -788,6 +819,7 @@ export async function executeAgentRun(
           routingIntent: routeAnalysis.route.intent,
           modeOutcomeSummary,
           taskTerminalOutcome: terminalOutcome,
+          taskTurnEvidence: swanTurn.executionSummary || null,
         },
       },
       artifacts: persistedArtifacts.map((artifact) => ({
@@ -908,6 +940,7 @@ export async function executeAgentRun(
           modeOutcomeSummary,
           observedEval,
           taskTerminalOutcome: terminalOutcome,
+          taskTurnEvidence: swanTurn.executionSummary || null,
         });
         await updateRunStatus(runId, 'completed');
       } catch {}
@@ -923,6 +956,7 @@ export async function executeAgentRun(
       handoffSuggestion,
       modeOutcomeSummary,
       observedEval,
+      taskTurnEvidence: swanTurn.executionSummary || null,
     };
   } catch (err: any) {
     console.error('[AgentRuntime] executeAgentRun failed:', err);
@@ -964,6 +998,7 @@ export async function executeAgentRun(
 
     return {
       success: false,
+      modelDispatchFailed: err instanceof SealedModelDispatchError,
       terminalOutcome: failureOutcome,
       runId,
       response: `Something went wrong: ${err?.message || 'Unknown error'}`,

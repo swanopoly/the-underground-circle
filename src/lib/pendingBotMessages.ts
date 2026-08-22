@@ -1,6 +1,10 @@
 import { storage } from './storage';
 import { readPersistedChatBotMetadata } from './persistedChatMetadata';
 import type { ComputerTaskOutcomeStatus } from './computerTaskOutcome';
+import {
+  chatPersonalThreadStorageKey,
+  type ChatPersonalStorageScope,
+} from './chatSessionStatePersistence';
 
 export type PendingBotMessageRecord = {
   localMessageId: string;
@@ -17,9 +21,11 @@ export type PendingBotMessageRecord = {
   runId?: string | null;
   requestId?: string | null;
   requestAuthorId?: string | null;
+  requestSourceMessageId?: string | null;
   persistedMetadataSnapshot?: unknown;
   delegatedTo?: string;
   delegatedSubagents?: string[];
+  connectedAgentHandoff?: unknown;
   artifacts?: unknown[];
   wikiRefs?: unknown[];
   researchRefs?: unknown[];
@@ -77,14 +83,28 @@ function looksLikePersistedUserMessage(entry: PendingBotMessageRecord, persisted
   return Math.abs(entryTime - persistedTime) < 120000;
 }
 
-function pendingBotMessagesKey(threadId: string): string {
+function legacyPendingBotMessagesKey(threadId: string): string {
   return `uc_pending_bot_messages_${threadId}`;
 }
 
-export async function loadPendingBotMessages(threadId: string | null | undefined): Promise<PendingBotMessageRecord[]> {
-  if (!threadId) return [];
+export type PendingBotMessageScope = ChatPersonalStorageScope & Readonly<{
+  threadId?: unknown;
+}>;
+
+function pendingBotMessagesKey(scope: PendingBotMessageScope): string | null {
+  return chatPersonalThreadStorageKey('pending_bot_messages', scope, scope.threadId);
+}
+
+export async function loadPendingBotMessages(scope: PendingBotMessageScope): Promise<PendingBotMessageRecord[]> {
+  const key = pendingBotMessagesKey(scope);
+  if (!key) return [];
   try {
-    const raw = await storage.getItem(pendingBotMessagesKey(threadId));
+    if (typeof scope.threadId === 'string' && scope.threadId) {
+      // Full prompts/results in the ownerless legacy lane cannot be assigned to
+      // this account. Delete that lane, but never import it.
+      await storage.removeItem(legacyPendingBotMessagesKey(scope.threadId)).catch(() => {});
+    }
+    const raw = await storage.getItem(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed as PendingBotMessageRecord[] : [];
@@ -94,59 +114,61 @@ export async function loadPendingBotMessages(threadId: string | null | undefined
 }
 
 export async function savePendingBotMessage(
-  threadId: string | null | undefined,
+  scope: PendingBotMessageScope,
   record: PendingBotMessageRecord,
 ): Promise<void> {
-  if (!threadId) return;
-  const existing = await loadPendingBotMessages(threadId);
+  const key = pendingBotMessagesKey(scope);
+  if (!key) return;
+  const existing = await loadPendingBotMessages(scope);
   const next = [
     ...existing.filter((entry) => entry.localMessageId !== record.localMessageId),
     record,
   ].slice(-30);
-  await storage.setItem(pendingBotMessagesKey(threadId), JSON.stringify(next));
+  await storage.setItem(key, JSON.stringify(next));
 }
 
 export async function removePendingBotMessage(
-  threadId: string | null | undefined,
+  scope: PendingBotMessageScope,
   localMessageId: string | null | undefined,
 ): Promise<void> {
-  if (!threadId || !localMessageId) return;
-  const existing = await loadPendingBotMessages(threadId);
+  const key = pendingBotMessagesKey(scope);
+  if (!key || !localMessageId) return;
+  const existing = await loadPendingBotMessages(scope);
   const next = existing.filter((entry) => entry.localMessageId !== localMessageId);
   if (next.length === 0) {
-    await storage.removeItem(pendingBotMessagesKey(threadId));
+    await storage.removeItem(key);
     return;
   }
-  await storage.setItem(pendingBotMessagesKey(threadId), JSON.stringify(next));
+  await storage.setItem(key, JSON.stringify(next));
 }
 
 export async function reconcilePendingBotMessages(
-  threadId: string | null | undefined,
+  scope: PendingBotMessageScope,
   persistedContents: Array<string | null | undefined | { content?: string | null; created_at?: string | null; createdAt?: string | null; is_bot?: boolean | null; isBot?: boolean | null }>,
 ): Promise<void> {
-  if (!threadId) return;
+  const key = pendingBotMessagesKey(scope);
+  if (!key) return;
   const persisted = persistedContents.map(normalizePersistedMessageSnapshot);
   const seenIds = new Set(
     persisted
       .map((message) => readPersistedChatBotMetadata(message.content)?.localMessageId || null)
       .filter((value): value is string => typeof value === 'string' && value.length > 0),
   );
-  const existing = await loadPendingBotMessages(threadId);
+  const existing = await loadPendingBotMessages(scope);
   const next = existing.filter((entry) => (
     !seenIds.has(entry.localMessageId)
     && !persisted.some((message) => looksLikePersistedUserMessage(entry, message))
   ));
   if (next.length === existing.length) return;
   if (next.length === 0) {
-    await storage.removeItem(pendingBotMessagesKey(threadId));
+    await storage.removeItem(key);
     return;
   }
-  await storage.setItem(pendingBotMessagesKey(threadId), JSON.stringify(next));
+  await storage.setItem(key, JSON.stringify(next));
 }
 
-export async function clearPendingBotMessages(threadId: string | null | undefined): Promise<void> {
-  if (!threadId) return;
-  try {
-    await storage.removeItem(pendingBotMessagesKey(threadId));
-  } catch {}
+export async function clearPendingBotMessages(scope: PendingBotMessageScope): Promise<void> {
+  const key = pendingBotMessagesKey(scope);
+  if (!key) return;
+  try { await storage.removeItem(key); } catch {}
 }
